@@ -68,6 +68,13 @@ export class WebGL2RenderingContext extends WebGLRenderingContext {
     if (token !== CONTEXT_TOKEN) return; // super already threw
     this._version = 2;
     this._state = createDefaultState(2);
+    // WebGL1 constructor normalized antialias to false (single-sampled buffer);
+    // WebGL2 must report the REQUESTED value exactly (CTS conformance2
+    // context-attributes-depth-stencil-antialias-obeyed.html).
+    if (attrs && typeof attrs.antialias === 'boolean') this._attrs.antialias = attrs.antialias;
+    // Drawing-buffer resources are initialized by lifecycle.createContext via
+    // initContextResources() AFTER this constructor returns, so the version-2
+    // state (DEPTH_COMPONENT24 depth format, viewport sizing) is used.
   }
 
   // ---- Queries ----
