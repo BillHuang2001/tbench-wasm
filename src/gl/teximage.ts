@@ -334,14 +334,14 @@ reg(buildSpec({ format: C.R8_SNORM, components: 1, bytesPerPixel: 1, storage: 'i
 reg(buildSpec({ format: C.RG8_SNORM, components: 2, bytesPerPixel: 2, storage: 'i8', ctor: I8, isColor: true, isSigned: true, normalized: true, mode: 'rg' }));
 reg(buildSpec({ format: C.RGB8_SNORM, components: 3, bytesPerPixel: 3, storage: 'i8', ctor: I8, isColor: true, isSigned: true, normalized: true, mode: 'rgb' }));
 reg(buildSpec({ format: C.RGBA8_SNORM, components: 4, bytesPerPixel: 4, storage: 'i8', ctor: I8, isColor: true, isSigned: true, normalized: true, mode: 'rgba' }));
-reg(buildSpec({ format: C.R16, components: 1, bytesPerPixel: 2, storage: 'u16', ctor: U16, isColor: true, normalized: true, mode: 'red' }));
-reg(buildSpec({ format: C.RG16, components: 2, bytesPerPixel: 4, storage: 'u16', ctor: U16, isColor: true, normalized: true, mode: 'rg' }));
-reg(buildSpec({ format: C.RGB16, components: 3, bytesPerPixel: 6, storage: 'u16', ctor: U16, isColor: true, normalized: true, mode: 'rgb' }));
-reg(buildSpec({ format: C.RGBA16, components: 4, bytesPerPixel: 8, storage: 'u16', ctor: U16, isColor: true, normalized: true, mode: 'rgba' }));
-reg(buildSpec({ format: C.R16_SNORM, components: 1, bytesPerPixel: 2, storage: 'i16', ctor: I16, isColor: true, isSigned: true, normalized: true, mode: 'red' }));
-reg(buildSpec({ format: C.RG16_SNORM, components: 2, bytesPerPixel: 4, storage: 'i16', ctor: I16, isColor: true, isSigned: true, normalized: true, mode: 'rg' }));
-reg(buildSpec({ format: C.RGB16_SNORM, components: 3, bytesPerPixel: 6, storage: 'i16', ctor: I16, isColor: true, isSigned: true, normalized: true, mode: 'rgb' }));
-reg(buildSpec({ format: C.RGBA16_SNORM, components: 4, bytesPerPixel: 8, storage: 'i16', ctor: I16, isColor: true, isSigned: true, normalized: true, mode: 'rgba' }));
+reg(buildSpec({ format: CExt.R16_EXT, components: 1, bytesPerPixel: 2, storage: 'u16', ctor: U16, isColor: true, normalized: true, mode: 'red' }));
+reg(buildSpec({ format: CExt.RG16_EXT, components: 2, bytesPerPixel: 4, storage: 'u16', ctor: U16, isColor: true, normalized: true, mode: 'rg' }));
+reg(buildSpec({ format: CExt.RGB16_EXT, components: 3, bytesPerPixel: 6, storage: 'u16', ctor: U16, isColor: true, normalized: true, mode: 'rgb' }));
+reg(buildSpec({ format: CExt.RGBA16_EXT, components: 4, bytesPerPixel: 8, storage: 'u16', ctor: U16, isColor: true, normalized: true, mode: 'rgba' }));
+reg(buildSpec({ format: CExt.R16_SNORM_EXT, components: 1, bytesPerPixel: 2, storage: 'i16', ctor: I16, isColor: true, isSigned: true, normalized: true, mode: 'red' }));
+reg(buildSpec({ format: CExt.RG16_SNORM_EXT, components: 2, bytesPerPixel: 4, storage: 'i16', ctor: I16, isColor: true, isSigned: true, normalized: true, mode: 'rg' }));
+reg(buildSpec({ format: CExt.RGB16_SNORM_EXT, components: 3, bytesPerPixel: 6, storage: 'i16', ctor: I16, isColor: true, isSigned: true, normalized: true, mode: 'rgb' }));
+reg(buildSpec({ format: CExt.RGBA16_SNORM_EXT, components: 4, bytesPerPixel: 8, storage: 'i16', ctor: I16, isColor: true, isSigned: true, normalized: true, mode: 'rgba' }));
 
 // Unsized WebGL1 formats (own storage entries)
 reg(buildSpec({ format: C.LUMINANCE, components: 1, bytesPerPixel: 1, storage: 'u8', ctor: U8, isColor: true, normalized: true, mode: 'luminance' }));
@@ -730,13 +730,19 @@ function ensureImage(texture: WebGLTexture, target: GLenum): NonNullable<WebGLTe
 const isPow2 = (v: number): boolean => v > 0 && (v & (v - 1)) === 0;
 
 /** Recompute _image completeness + base/max level after any mutation. */
-function updateCompleteness(texture: WebGLTexture): void {
+function updateCompleteness(texture: WebGLTexture, version: 1 | 2): void {
   const img = texture._image;
   if (!img) return;
   const base = Math.max(0, texture._params[0x813c] | 0);
   const maxParam = Math.max(0, texture._params[0x813d] | 0);
-  img.baseLevel = base;
   img.maxLevel = Math.min(maxParam, img.levels.length - 1);
+  if (base > img.maxLevel) {
+    // BASE_LEVEL beyond the clamped MAX_LEVEL → incomplete per spec.
+    img.baseLevel = base;
+    img.complete = false;
+    return;
+  }
+  img.baseLevel = base;
   const baseLevel = img.levels[base];
   if (!baseLevel || baseLevel.width < 1 || baseLevel.height < 1) {
     img.complete = false;
@@ -836,7 +842,6 @@ function copyPixelsIntoLevel(
   if (pixels === null || pixels === undefined) return; // zero-filled allocation
   if (typeof pixels !== 'number' && !ArrayBuffer.isView(pixels) && source !== undefined) {
     try {
-      const { decodeImageSource } = require('../present');
       const res = decodeImageSource(source as never) as { ok: boolean; image?: { width: number; height: number; data: Uint8ClampedArray } };
       if (res && res.ok && res.image) {
         const im = res.image;
@@ -848,18 +853,18 @@ function copyPixelsIntoLevel(
           srcBpp: 4,
           srcFormat: C.RGBA,
           srcType: C.UNSIGNED_BYTE,
-          domain: spec.isInteger ? 2 : spec.isFloat ? 1 : 0,
+          domain: spec.isInteger ? 2 : spec.isFloat && !spec.isDepth ? 1 : 0,
           flipY: ctx._state.pixelStore.unpack.flipY,
           premultiply: ctx._state.pixelStore.unpack.premultiplyAlpha,
           write: spec.pack,
           dstBpp,
           dstStencil: levelData.stencilData,
         };
-        const srcImageHeight = ctx._state.pixelStore.unpack.imageHeight || height;
-        for (let z = 0; z < depth; z++) {
-          copyRows(p, views[z >= views.length ? views.length - 1 : z], levelData.width, xoffset, yoffset, width, height, z * srcImageHeight);
-        }
-        updateCompleteness(texture);
+        // DOM sources ignore ROW_LENGTH/SKIP_* (WebGL2 spec §3.7); the decoded
+        // image is tightly packed RGBA8. depth is always 1 here (the API layer
+        // rejects DOM sources for 3D/2D_ARRAY targets).
+        copyRows(p, views[0], levelData.width, xoffset, yoffset, width, height, 0, 0);
+        updateCompleteness(texture, ctx._version);
         return;
       }
     } catch {
@@ -879,11 +884,12 @@ function copyPixelsIntoLevel(
   } else {
     srcView = pixels as ArrayBufferView;
   }
+  if (baseOffset > srcView.byteLength) return; // defensive (API validates first)
   const s = ctx._state.pixelStore.unpack;
   const srcBpp = srcBytesPerTexel(format, type);
   const srcRowLength = s.rowLength > 0 ? s.rowLength : width;
   const srcRowBytes = align4(srcRowLength * srcBpp);
-  const domain: 0 | 1 | 2 = spec.isInteger ? 2 : spec.isFloat ? 1 : 0;
+  const domain: 0 | 1 | 2 = spec.isInteger ? 2 : spec.isFloat && !spec.isDepth ? 1 : 0;
   const dv = new DataView(srcView.buffer, srcView.byteOffset + baseOffset, srcView.byteLength - baseOffset);
   const p: CopyParams = {
     src: dv,
@@ -1120,11 +1126,11 @@ export function copyTexSubImage(
   if (spec.isStencil && levelData.stencilData && tmp.stencilData) {
     for (let dy = 0; dy < height; dy++) {
       for (let dx = 0; dx < width; dx++) {
-        levelData.stencilData[(yoffset + dy) * levelData.width + xoffset + dx] = tmp.stencilData[dy * width + dx];
+        levelData.stencilData[(zoffset * levelData.height + yoffset + dy) * levelData.width + xoffset + dx] = tmp.stencilData[dy * width + dx];
       }
     }
   }
-  updateCompleteness(texture);
+  updateCompleteness(texture, ctx._version);
 }
 
 /** compressedTexImage2D/3D + compressedTexSubImage2D/3D — no compressed
@@ -1198,5 +1204,5 @@ export function generateMipmap(ctx: WebGLRenderingContext, texture: WebGLTexture
     d = nd;
   }
   void ctx;
-  updateCompleteness(texture);
+  updateCompleteness(texture, ctx._version);
 }
