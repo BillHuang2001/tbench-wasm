@@ -224,9 +224,9 @@ function emitTriangle(
   ia: number, ib: number, ic: number,
 ): void {
   const src = dc.vertices;
-  copyRecord(src, ia, primBuf, 0, stride);
-  copyRecord(src, ib, primBuf, stride, stride);
-  copyRecord(src, ic, primBuf, 2 * stride, stride);
+  copyRecord(src, ia * stride, primBuf, 0, stride);
+  copyRecord(src, ib * stride, primBuf, stride, stride);
+  copyRecord(src, ic * stride, primBuf, 2 * stride, stride);
 
   applyFlatFixup(primBuf, 0, 3, stride, dc.varyingsOffset, flatRanges);
 
@@ -248,7 +248,7 @@ function emitTriangle(
   // Clip results are fan-able convex polygons (up to 7 vertices) — rasterize
   // as a fan from vertex 0 (reduces to (0,1,2) for unclipped triangles).
   for (let k = 1; k + 1 < nv; k++) {
-    rasterizeTriangle(clipB, 0, k, k + 1, stride, rs);
+    rasterizeTriangle(clipB, 0, k * stride, (k + 1) * stride, stride, rs);
   }
 }
 
@@ -260,8 +260,8 @@ function emitLine(
   ia: number, ib: number,
 ): void {
   const src = dc.vertices;
-  copyRecord(src, ia, primBuf, 0, stride);
-  copyRecord(src, ib, primBuf, stride, stride);
+  copyRecord(src, ia * stride, primBuf, 0, stride);
+  copyRecord(src, ib * stride, primBuf, stride, stride);
 
   applyFlatFixup(primBuf, 0, 2, stride, dc.varyingsOffset, flatRanges);
 
@@ -270,7 +270,7 @@ function emitLine(
   applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange);
 
   rs.frontFacing = false; // undefined for lines
-  rasterizeLine(clipB, 0, 1, stride, rs);
+  rasterizeLine(clipB, 0, stride, stride, rs);
 }
 
 /** Visibility-checks, transforms and rasterizes one point. */
