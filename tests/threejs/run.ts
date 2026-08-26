@@ -121,12 +121,12 @@ async function main(): Promise<void> {
   await writeReport(report, opts.reportDir);
 
   const wallSec = (Date.now() - startedAt) / 1000;
-  const passed = report.results.filter((r) => r.status === 'pass').length;
-  const failed = report.results.filter(
+  const passed = report.pages.filter((r) => r.status === 'pass').length;
+  const failed = report.pages.filter(
     (r) => r.status === 'fail' || r.status === 'timeout' || r.status === 'error'
   ).length;
-  const skipped = report.results.filter((r) => r.status === 'skipped').length;
-  console.log(`Passed ${passed}/${report.results.length} (failed ${failed}, skipped ${skipped}) in ${wallSec.toFixed(1)} s`);
+  const skipped = report.pages.filter((r) => r.status === 'skipped').length;
+  console.log(`Passed ${passed}/${report.pages.length} (failed ${failed}, skipped ${skipped}) in ${wallSec.toFixed(1)} s`);
 
   process.exit(failed);
 }
