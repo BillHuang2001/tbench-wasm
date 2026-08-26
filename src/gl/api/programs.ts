@@ -83,13 +83,15 @@ import type { GLboolean, GLenum, GLint, GLuint } from '../types';
 /** Full glsl compile result per WebGLShader (link input). */
 const shaderResults = new WeakMap<WebGLShader, GlslShader>();
 /** glsl Program per linked WebGLProgram (stores, uniformMap, TF varyings). */
-const programModels = new WeakMap<WebGLProgram, GlslProgram>();
+export const programModels = new WeakMap<WebGLProgram, GlslProgram>();
 /** Attach refcount per WebGLShader (deferred deletion while attached). */
 const shaderAttachCounts = new WeakMap<WebGLShader, number>();
 /** Link generation counter per WebGLProgram (relink invalidation). */
-const linkGen = new WeakMap<WebGLProgram, number>();
+export const linkGen = new WeakMap<WebGLProgram, number>();
 /** Link generation captured at getUniformLocation (per WebGLUniformLocation). */
 export const locGen = new WeakMap<WebGLUniformLocation, number>();
+/** Array-element + whole-array info per WebGLUniformLocation (getUniform). */
+const uniformLocInfo = new WeakMap<WebGLUniformLocation, { elem: number; whole: boolean }>();
 /** validateProgram result per WebGLProgram (VALIDATE_STATUS). */
 const validateStatus = new WeakMap<WebGLProgram, boolean>();
 /** uniformBlockBinding: blockIndex → binding point (default 0), per program. */
@@ -255,6 +257,7 @@ function doCompileShader(ctx: WebGLRenderingContext, shader: WebGLShader): void 
   shader._compileStatus = false;
   shader._infoLog = '';
   shader._compiled = null;
+  shader._translatedSource = null;
   shaderResults.delete(shader);
   let result: ReturnType<typeof compileShader>;
   try {
@@ -273,10 +276,12 @@ function doCompileShader(ctx: WebGLRenderingContext, shader: WebGLShader): void 
   if (result.ok) {
     shader._compileStatus = true;
     shader._compiled = { ok: true };
+    shader._translatedSource = shader._source; // WEBGL_debug_shaders (no real translation)
     shaderResults.set(shader, result.shader);
   } else {
     shader._infoLog = result.errors.map((e) => `ERROR: 0:${e.line}: ${e.message}`).join('\n');
     shader._compiled = { ok: false, errors: result.errors };
+    shader._translatedSource = '';
   }
 }
 
@@ -428,25 +433,18 @@ function isSamplerType(type: number): boolean {
 }
 
 /** getUniform result for one uniform at (possibly) an array element. */
-function readUniform(pm: GlslProgram, uniform: GlslProgram['uniforms'][number], isBase: boolean): any {
-  const count = isBase ? uniform.size : 1; // base location → whole array
-  const baseIdx = isBase ? 0 : 0; // element offset handled via location delta below
-  const elementOffset = isBase ? 0 : 0;
-  void baseIdx;
-  void elementOffset;
+function readUniform(pm: GlslProgram, uniform: GlslProgram['uniforms'][number], elem: number, whole: boolean): any {
+  const count = whole ? uniform.size : 1; // base location → whole array; element location → single value
   const slots = elementSlots(uniform);
-  const startElem = isBase ? 0 : 0;
-  void startElem;
-  // element index = (location - uniform.location) / slots (integer, validated by caller)
-  const read = (elem: number, comp: number): number => readStoreValue(pm, uniform, elem, comp, isUintType(uniform.type));
+  const read = (e: number, comp: number): number => readStoreValue(pm, uniform, e, comp, isUintType(uniform.type));
   const components = uniform.components;
   if (uniform.type === C1.FLOAT || uniform.type === C1.INT || uniform.type === C2.UNSIGNED_INT) {
     if (count === 1) {
-      const v = read(0, 0);
+      const v = read(elem, 0);
       return uniform.type === C1.INT ? v : uniform.type === C2.UNSIGNED_INT ? v >>> 0 : v;
     }
     const out = uniform.type === C1.FLOAT ? new Float32Array(count) : uniform.type === C1.INT ? new Int32Array(count) : new Uint32Array(count);
-    for (let e = 0; e < count; e++) out[e] = read(e, 0);
+    for (let e = 0; e < count; e++) out[e] = read(elem + e, 0);
     return out;
   }
   if (isMatrixType(uniform.type)) {
@@ -455,38 +453,38 @@ function readUniform(pm: GlslProgram, uniform: GlslProgram['uniforms'][number], 
     const out = new Float32Array(count * c * r);
     for (let e = 0; e < count; e++)
       for (let col = 0; col < c; col++)
-        for (let row = 0; row < r; row++) out[e * c * r + col * r + row] = pm.floatStore[(uniform.location + (elementIdx + e) * slots + col) * 4 + row];
+        for (let row = 0; row < r; row++) out[e * c * r + col * r + row] = pm.floatStore[(uniform.location + (elem + e) * slots + col) * 4 + row];
     return out;
   }
   if (isFloatType(uniform.type) || uniform.type === C1.BOOL_VEC2) {
     // FLOAT_VEC* (and BOOL_VEC2 per gl-uniform-arrays.html → Float32Array)
     const n = components;
     const out = new Float32Array(count * n);
-    for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(e, i);
+    for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(elem + e, i);
     return out;
   }
   if (isIntType(uniform.type) || uniform.type === C1.BOOL_VEC3) {
     const n = components;
     const out = new Int32Array(count * n);
-    for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(e, i);
+    for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(elem + e, i);
     return out;
   }
   if (isUintType(uniform.type) || uniform.type === C1.BOOL_VEC4) {
     const n = components;
     const out = new Uint32Array(count * n);
-    for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(e, i);
+    for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(elem + e, i);
     return out;
   }
   if (uniform.type === C1.BOOL) {
-    if (count === 1) return read(0, 0) !== 0;
+    if (count === 1) return read(elem, 0) !== 0;
     const out = new Uint32Array(count);
-    for (let e = 0; e < count; e++) out[e] = read(e, 0) !== 0 ? 1 : 0;
+    for (let e = 0; e < count; e++) out[e] = read(elem + e, 0) !== 0 ? 1 : 0;
     return out;
   }
   if (isSamplerType(uniform.type)) {
-    if (count === 1) return pm.intStore[uniform.location * 4];
+    if (count === 1) return pm.intStore[(uniform.location + elem) * 4];
     const out = new Int32Array(count);
-    for (let e = 0; e < count; e++) out[e] = pm.intStore[(uniform.location + elementIdx + e) * 4];
+    for (let e = 0; e < count; e++) out[e] = pm.intStore[(uniform.location + elem + e) * 4];
     return out;
   }
   return null; // unreachable for active uniforms
@@ -674,4 +672,492 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     }
     const p = validateProgram(ctx, program);
     if (p === null) return;
-    if (!p._linkStatus || p._program === nul
+    if (!p._linkStatus || p._program === null) {
+      // Spec: useProgram on a program that has not been successfully linked
+      // generates INVALID_OPERATION (ES 2.0 §2.10.3 / WebGL spec).
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    const prev = ctx._state.currentProgram;
+    if (prev !== null) {
+      prev._inUse = false;
+      if (prev._deleted) ctx._resources.untrack(prev);
+    }
+    p._inUse = true;
+    ctx._state.currentProgram = p;
+  };
+
+  proto.attachShader = function (this: WebGLRenderingContext, program: WebGLProgram, shader: WebGLShader): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const p = validateProgram(ctx, program);
+    if (p === null) return;
+    const s = validateShader(ctx, shader);
+    if (s === null) return;
+    if (p._attachedShaders.has(s)) {
+      ctx._errors.push(C1.INVALID_OPERATION); // already attached (CTS program-test)
+      return;
+    }
+    for (const a of p._attachedShaders) {
+      if (a._type === s._type) {
+        ctx._errors.push(C1.INVALID_OPERATION); // same shader type (CTS program-test)
+        return;
+      }
+    }
+    p._attachedShaders.add(s);
+    shaderAttachCounts.set(s, (shaderAttachCounts.get(s) ?? 0) + 1);
+  };
+
+  proto.detachShader = function (this: WebGLRenderingContext, program: WebGLProgram, shader: WebGLShader): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const p = validateProgram(ctx, program);
+    if (p === null) return;
+    const s = validateShader(ctx, shader);
+    if (s === null) return;
+    if (!p._attachedShaders.has(s)) {
+      ctx._errors.push(C1.INVALID_OPERATION); // not attached (CTS program-test)
+      return;
+    }
+    p._attachedShaders.delete(s);
+    const n = (shaderAttachCounts.get(s) ?? 1) - 1;
+    if (n <= 0) shaderAttachCounts.delete(s);
+    else shaderAttachCounts.set(s, n);
+    // A delete-marked shader becomes fully deleted once its last attachment is
+    // removed (deleteShader already untracked it; the object is now invalid).
+  };
+
+  proto.linkProgram = function (this: WebGLRenderingContext, program: WebGLProgram): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const p = validateProgram(ctx, program);
+    if (p === null) return;
+    doLinkProgram(ctx, p);
+  };
+
+  proto.validateProgram = function (this: WebGLRenderingContext, program: WebGLProgram): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const p = validateProgram(ctx, program);
+    if (p === null) return;
+    // Software renderer: VALIDATE_STATUS reflects the same link preconditions
+    // the draw path enforces (linked program with both stages attached).
+    const ok = p._linkStatus && p._program !== null && p._attachedShaders.size > 0;
+    validateStatus.set(p, ok);
+  };
+
+  proto.getProgramParameter = function (this: WebGLRenderingContext, program: WebGLProgram, pname: GLenum): any {
+    const ctx = this;
+    if (isLost(ctx)) return null;
+    const p = validateProgramQuery(ctx, program);
+    if (p === null) return null;
+    switch (pname) {
+      case C1.DELETE_STATUS:
+        return p._deleted;
+      case C1.LINK_STATUS:
+        return p._linkStatus;
+      case C1.VALIDATE_STATUS:
+        return validateStatus.get(p) ?? false;
+      case C1.ATTACHED_SHADERS:
+        return p._attachedShaders.size;
+      case C1.ACTIVE_ATTRIBUTES: {
+        const pm = programModels.get(p);
+        return pm === undefined ? 0 : pm.attributes.length;
+      }
+      case C1.ACTIVE_UNIFORMS: {
+        const pm = programModels.get(p);
+        return pm === undefined ? 0 : pm.uniforms.length;
+      }
+      case C2.ACTIVE_UNIFORM_BLOCKS: {
+        const pm = programModels.get(p);
+        return pm === undefined ? 0 : pm.uniformBlocks.length;
+      }
+      case C2.TRANSFORM_FEEDBACK_VARYINGS: {
+        const pm = programModels.get(p);
+        return pm === undefined ? 0 : pm.transformFeedbackVaryings.length;
+      }
+      case C2.TRANSFORM_FEEDBACK_BUFFER_MODE:
+        return p._tfBufferMode;
+      case CExt.COMPLETION_STATUS_KHR:
+        if (ctx.getExtension('KHR_parallel_shader_compile') !== null) return true;
+        ctx._errors.push(C1.INVALID_ENUM);
+        return null;
+      default:
+        // INFO_LOG_LENGTH / ACTIVE_*_MAX_LENGTH removed from WebGL (CTS
+        // program-test expects INVALID_ENUM + null for these).
+        ctx._errors.push(C1.INVALID_ENUM);
+        return null;
+    }
+  };
+
+  proto.getProgramInfoLog = function (this: WebGLRenderingContext, program: WebGLProgram): string | null {
+    const ctx = this;
+    if (isLost(ctx)) return null;
+    const p = validateProgramQuery(ctx, program);
+    if (p === null) return null;
+    return p._infoLog;
+  };
+
+  proto.getAttribLocation = function (this: WebGLRenderingContext, program: WebGLProgram, name: string): GLint {
+    const ctx = this;
+    if (isLost(ctx)) return -1;
+    const p = validateProgramQuery(ctx, program);
+    if (p === null) return -1;
+    if (!p._linkStatus || p._program === null) {
+      ctx._errors.push(C1.INVALID_OPERATION); // not linked (spec §5.14.10)
+      return -1;
+    }
+    const nm = requireString(name, 'name');
+    if (nameTooLong(ctx, nm) || badNameChars(ctx, nm)) return -1;
+    if (isReservedPrefix(nm)) return -1; // no error (spec)
+    const pm = programModels.get(p);
+    if (pm === undefined) return -1;
+    // Arrays: bare name, or 'a[0]' (location of the first element).
+    const target = nm.endsWith('[0]') ? nm.slice(0, -3) : nm;
+    const a = pm.attributes.find((at) => at.name === target);
+    return a === undefined ? -1 : a.location;
+  };
+
+  proto.getUniformLocation = function (this: WebGLRenderingContext, program: WebGLProgram, name: string): WebGLUniformLocation | null {
+    const ctx = this;
+    if (isLost(ctx)) return null;
+    const p = validateProgramQuery(ctx, program);
+    if (p === null) return null;
+    if (!p._linkStatus || p._program === null) {
+      ctx._errors.push(C1.INVALID_OPERATION); // not linked (spec §5.14.10)
+      return null;
+    }
+    const nm = requireString(name, 'name');
+    if (nameTooLong(ctx, nm) || badNameChars(ctx, nm)) return null;
+    if (isReservedPrefix(nm)) return null; // no error (spec)
+    const pm = programModels.get(p);
+    if (pm === undefined) return null;
+    // glsl Program.uniformMap is keyed by canonical lookup paths ('u', 'u[2]',
+    // 'u.m', 'u[0].m', ...); uniform-block members are absent → null per spec.
+    const u = pm.uniformMap.get(nm);
+    if (u === undefined) return null;
+    let elem = 0;
+    let whole = false;
+    if (u.size > 1) {
+      const m = /\[(\d+)\]$/.exec(nm);
+      if (m !== null) elem = parseInt(m[1], 10);
+      else whole = true; // bare array name → location of the first element
+      if (elem >= u.size) return null; // out-of-range index → null, no error
+    }
+    const idx = pm.uniforms.indexOf(u);
+    const loc = new WebGLUniformLocation(p, idx, u.name);
+    locGen.set(loc, linkGen.get(p) ?? 0);
+    uniformLocInfo.set(loc, { elem, whole });
+    return loc;
+  };
+
+  proto.bindAttribLocation = function (this: WebGLRenderingContext, program: WebGLProgram, index: GLuint, name: string): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const p = validateProgram(ctx, program);
+    if (p === null) return;
+    const nm = requireString(name, 'name');
+    if (isReservedPrefix(nm)) {
+      ctx._errors.push(C1.INVALID_OPERATION); // reserved prefix (spec §5.14.10)
+      return;
+    }
+    if (nameTooLong(ctx, nm) || badNameChars(ctx, nm)) return;
+    if (index >= ctx._state.limits.MAX_VERTEX_ATTRIBS) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    p._bindAttribLocations.set(nm, index); // applied at the next link
+  };
+
+  proto.getActiveAttrib = function (this: WebGLRenderingContext, program: WebGLProgram, index: GLuint): WebGLActiveInfo | null {
+    const ctx = this;
+    if (isLost(ctx)) return null;
+    const p = validateProgramQuery(ctx, program);
+    if (p === null) return null;
+    const pm = programModels.get(p);
+    if (pm === undefined || index >= pm.attributes.length) {
+      ctx._errors.push(C1.INVALID_VALUE); // out of range (spec §5.14.10)
+      return null;
+    }
+    const a = pm.attributes[index];
+    const name = a.size > 1 ? `${a.name}[0]` : a.name; // arrays: 'a[0]' (spec)
+    return new WebGLActiveInfo(a.size, a.type, name);
+  };
+
+  proto.getActiveUniform = function (this: WebGLRenderingContext, program: WebGLProgram, index: GLuint): WebGLActiveInfo | null {
+    const ctx = this;
+    if (isLost(ctx)) return null;
+    const p = validateProgramQuery(ctx, program);
+    if (p === null) return null;
+    const pm = programModels.get(p);
+    if (pm === undefined || index >= pm.uniforms.length) {
+      ctx._errors.push(C1.INVALID_VALUE); // out of range (spec §5.14.10)
+      return null;
+    }
+    const u = pm.uniforms[index];
+    // glsl flattens leaf uniforms: name already formatted ('u[0]', 'u.m').
+    return new WebGLActiveInfo(u.size, u.type, u.name);
+  };
+
+  proto.getUniform = function (this: WebGLRenderingContext, program: WebGLProgram, location: WebGLUniformLocation): any {
+    const ctx = this;
+    if (isLost(ctx)) return null;
+    const p = validateProgramQuery(ctx, program);
+    if (p === null) return null;
+    if (!(location instanceof WebGLUniformLocation)) throw new TypeError(`Argument is not of type 'WebGLUniformLocation'`);
+    if (location._program !== p) {
+      ctx._errors.push(C1.INVALID_OPERATION); // location from a different program
+      return null;
+    }
+    if (!p._linkStatus || p._program === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    if ((locGen.get(location) ?? -1) !== (linkGen.get(p) ?? 0)) {
+      ctx._errors.push(C1.INVALID_OPERATION); // location from a previous link
+      return null;
+    }
+    const pm = programModels.get(p);
+    if (pm === undefined) return null;
+    const uniform = pm.uniforms[location._index];
+    if (uniform === undefined || uniform.blockIndex >= 0) {
+      ctx._errors.push(C1.INVALID_OPERATION); // block members have no getUniform value
+      return null;
+    }
+    const info = uniformLocInfo.get(location) ?? { elem: 0, whole: true };
+    return readUniform(pm, uniform, info.elem, info.whole);
+  };
+
+  // ---- WebGL2 additions (gated: only present on the WebGL2 prototype) ----
+  if ('uniformBlockBinding' in proto) {
+    const p2 = proto as unknown as WebGL2RenderingContext;
+
+    p2.transformFeedbackVaryings = function (this: WebGL2RenderingContext, program: WebGLProgram, varyings: string[], bufferMode: GLenum): void {
+      const ctx = this;
+      if (isLost(ctx)) return;
+      const p = validateProgram(ctx, program);
+      if (p === null) return;
+      const vs = Array.from(varyings ?? []).map((v) => requireString(v, 'varyings'));
+      if (bufferMode !== C2.INTERLEAVED_ATTRIBS && bufferMode !== C2.SEPARATE_ATTRIBS) {
+        ctx._errors.push(C1.INVALID_VALUE); // GLES 3.0 §2.12.8
+        return;
+      }
+      if (bufferMode === C2.SEPARATE_ATTRIBS && vs.length > ctx._state.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS) {
+        ctx._errors.push(C1.INVALID_VALUE); // GLES 3.0 §2.12.8
+        return;
+      }
+      p._transformFeedbackVaryings = vs; // applied at the next link
+      p._tfBufferMode = bufferMode;
+    };
+
+    p2.getTransformFeedbackVarying = function (this: WebGL2RenderingContext, program: WebGLProgram, index: GLuint): WebGLActiveInfo | null {
+      const ctx = this;
+      if (isLost(ctx)) return null;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return null;
+      const pm = programModels.get(p);
+      if (pm === undefined || index >= pm.transformFeedbackVaryings.length) {
+        ctx._errors.push(C1.INVALID_VALUE); // out of range (GLES 3.0 §2.12.8)
+        return null;
+      }
+      const v = pm.transformFeedbackVaryings[index];
+      return new WebGLActiveInfo(v.size, v.type, v.name);
+    };
+
+    p2.getUniformBlockIndex = function (this: WebGL2RenderingContext, program: WebGLProgram, uniformBlockName: string): GLuint {
+      const ctx = this;
+      if (isLost(ctx)) return C2.INVALID_INDEX;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return C2.INVALID_INDEX;
+      const nm = requireString(uniformBlockName, 'uniformBlockName');
+      if (nameTooLong(ctx, nm) || badNameChars(ctx, nm)) return C2.INVALID_INDEX;
+      const pm = programModels.get(p);
+      if (pm === undefined) return C2.INVALID_INDEX;
+      // Array blocks are indexed per element: 'UBOData[0]' (CTS uniform-buffers.html).
+      const b = pm.uniformBlocks.find((blk) => blk.name === nm);
+      return b === undefined ? C2.INVALID_INDEX : b.index;
+    };
+
+    p2.getActiveUniformBlockParameter = function (this: WebGL2RenderingContext, program: WebGLProgram, uniformBlockIndex: GLuint, pname: GLenum): any {
+      const ctx = this;
+      if (isLost(ctx)) return null;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return null;
+      const pm = programModels.get(p);
+      if (pm === undefined || uniformBlockIndex >= pm.uniformBlocks.length) {
+        ctx._errors.push(C1.INVALID_VALUE); // not an active block (spec §5.14.10)
+        return null;
+      }
+      const block = pm.uniformBlocks[uniformBlockIndex];
+      const refs = blockReferenced.get(p) ?? new Uint32Array(0);
+      switch (pname) {
+        case C2.UNIFORM_BLOCK_BINDING: {
+          const bindings = uniformBlockBindings.get(p);
+          return bindings !== undefined ? bindings[uniformBlockIndex] : 0;
+        }
+        case C2.UNIFORM_BLOCK_DATA_SIZE:
+          return block.size;
+        case C2.UNIFORM_BLOCK_ACTIVE_UNIFORMS:
+          return block.activeUniforms.length;
+        case C2.UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES: {
+          const idxs: number[] = [];
+          for (const m of block.activeUniforms) {
+            const i = pm.uniforms.findIndex((u) => u.blockIndex === uniformBlockIndex && u.name === m.name);
+            if (i >= 0) idxs.push(i);
+          }
+          return new Uint32Array(idxs);
+        }
+        case C2.UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:
+          return ((refs[uniformBlockIndex] ?? 0) & 1) !== 0;
+        case C2.UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:
+          return ((refs[uniformBlockIndex] ?? 0) & 2) !== 0;
+        default:
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+      }
+    };
+
+    p2.getActiveUniformBlockName = function (this: WebGL2RenderingContext, program: WebGLProgram, uniformBlockIndex: GLuint): string | null {
+      const ctx = this;
+      if (isLost(ctx)) return null;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return null;
+      const pm = programModels.get(p);
+      if (pm === undefined || uniformBlockIndex >= pm.uniformBlocks.length) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return null;
+      }
+      return pm.uniformBlocks[uniformBlockIndex].name;
+    };
+
+    p2.uniformBlockBinding = function (this: WebGL2RenderingContext, program: WebGLProgram, uniformBlockIndex: GLuint, uniformBlockBinding: GLuint): void {
+      const ctx = this;
+      if (isLost(ctx)) return;
+      const p = validateProgram(ctx, program);
+      if (p === null) return;
+      const pm = programModels.get(p);
+      if (pm === undefined || uniformBlockIndex >= pm.uniformBlocks.length) {
+        ctx._errors.push(C1.INVALID_VALUE); // GLES 3.0 §2.12.6.5
+        return;
+      }
+      if (uniformBlockBinding >= ctx._state.limits.MAX_UNIFORM_BUFFER_BINDINGS) {
+        ctx._errors.push(C1.INVALID_VALUE); // GLES 3.0 §2.12.6.5
+        return;
+      }
+      const bindings = uniformBlockBindings.get(p);
+      if (bindings !== undefined) bindings[uniformBlockIndex] = uniformBlockBinding;
+    };
+
+    p2.getUniformIndices = function (this: WebGL2RenderingContext, program: WebGLProgram, uniformNames: string[]): GLuint[] | null {
+      const ctx = this;
+      if (isLost(ctx)) return null;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return null;
+      const pm = programModels.get(p);
+      if (pm === undefined) return null;
+      const names = Array.from(uniformNames ?? []).map((n) => requireString(n, 'uniformNames'));
+      for (const n of names) {
+        if (nameTooLong(ctx, n) || badNameChars(ctx, n)) return null;
+      }
+      // GLES 3.0 glGetUniformIndices: not-found names yield GL_INVALID_INDEX
+      // (0xFFFFFFFF), no error (CTS uniform-buffers.html checks INVALID_INDEX).
+      const out: number[] = [];
+      for (const n of names) {
+        const u = pm.uniformMap.get(n) ?? pm.uniforms.find((un) => un.name === n);
+        out.push(u === undefined ? C2.INVALID_INDEX : pm.uniforms.indexOf(u));
+      }
+      return out;
+    };
+
+    // Spec name (webgl2.idl §5.14: getActiveUniforms). The class stub declares
+    // the GLES3-ish alias getActiveUniformsiv — expose the implementation under
+    // both so CTS (uniform-buffers.html) and the declared stub name work.
+    const activeUniformsImpl = function (this: WebGL2RenderingContext, program: WebGLProgram, uniformIndices: GLuint[], pname: GLenum): GLint[] | null {
+      const ctx = this;
+      if (isLost(ctx)) return null;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return null;
+      const pm = programModels.get(p);
+      if (pm === undefined) return null;
+      switch (pname) {
+        case C2.UNIFORM_TYPE:
+        case C2.UNIFORM_SIZE:
+        case C2.UNIFORM_BLOCK_INDEX:
+        case C2.UNIFORM_OFFSET:
+        case C2.UNIFORM_ARRAY_STRIDE:
+        case C2.UNIFORM_MATRIX_STRIDE:
+        case C2.UNIFORM_IS_ROW_MAJOR:
+          break;
+        default:
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+      }
+      const indices = Array.from(uniformIndices ?? []).map((i) => i >>> 0); // WebIDL GLuint
+      const out: number[] = [];
+      for (const i of indices) {
+        const u = pm.uniforms[i];
+        if (u === undefined) {
+          ctx._errors.push(C1.INVALID_VALUE); // index >= ACTIVE_UNIFORMS
+          return null;
+        }
+        switch (pname) {
+          case C2.UNIFORM_TYPE:
+            out.push(u.type);
+            break;
+          case C2.UNIFORM_SIZE:
+            out.push(u.size);
+            break;
+          case C2.UNIFORM_BLOCK_INDEX:
+            out.push(u.blockIndex);
+            break;
+          default: {
+            // UNIFORM_OFFSET/ARRAY_STRIDE/MATRIX_STRIDE/IS_ROW_MAJOR: -1 for
+            // default-block uniforms (GLES 3.0 §2.12.6), std140 member data
+            // for block members (glsl bakes these at link time).
+            if (u.blockIndex < 0 || u.blockIndex >= pm.uniformBlocks.length) {
+              out.push(-1);
+              break;
+            }
+            const m = pm.uniformBlocks[u.blockIndex].activeUniforms.find((mm) => mm.name === u.name);
+            if (m === undefined) {
+              out.push(-1);
+              break;
+            }
+            switch (pname) {
+              case C2.UNIFORM_OFFSET:
+                out.push(m.offset);
+                break;
+              case C2.UNIFORM_ARRAY_STRIDE:
+                out.push(m.arrayStride);
+                break;
+              case C2.UNIFORM_MATRIX_STRIDE:
+                out.push(m.matrixStride);
+                break;
+              default:
+                out.push(m.rowMajor ? 1 : 0);
+                break;
+            }
+            break;
+          }
+        }
+      }
+      return out;
+    };
+    (p2 as unknown as { getActiveUniforms: typeof activeUniformsImpl }).getActiveUniforms = activeUniformsImpl;
+    (p2 as unknown as { getActiveUniformsiv: typeof activeUniformsImpl }).getActiveUniformsiv = activeUniformsImpl;
+
+    p2.getFragDataLocation = function (this: WebGL2RenderingContext, program: WebGLProgram, name: string): GLint {
+      const ctx = this;
+      if (isLost(ctx)) return -1;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return -1;
+      const nm = requireString(name, 'name');
+      if (nameTooLong(ctx, nm) || badNameChars(ctx, nm)) return -1;
+      const pm = programModels.get(p);
+      if (pm === undefined) return -1;
+      const fmap = fragDataMaps.get(p);
+      if (fmap === undefined) return -1;
+      return fmap.get(nm) ?? -1;
+    };
+  }
+}
