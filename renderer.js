@@ -747,6 +747,7 @@
       clearStencil: 0,
       colorMask: [true, true, true, true],
       colorMaskPerDrawBuffer: /* @__PURE__ */ new Map(),
+      blendPerDrawBuffer: /* @__PURE__ */ new Map(),
       viewport: { x: 0, y: 0, w: 0, h: 0 },
       // sized at context creation
       scissor: { x: 0, y: 0, w: 0, h: 0 },
@@ -850,6 +851,12 @@
       __publicField(this, "_resources");
       /** Extension singleton cache (canonical name → object). */
       __publicField(this, "_extensions", /* @__PURE__ */ new Map());
+      /** Present adapter (present/ contract §4) — set at construction; null before/after loss. */
+      __publicField(this, "_presentSurface", null);
+      /** The default framebuffer (drawing buffer) surfaces — owned by lifecycle.ts. */
+      __publicField(this, "_defaultFB", null);
+      /** The persistent default VAO contents (WebGL2/OES_vertex_array_object rebind target). */
+      __publicField(this, "_defaultVAO", null);
       /** Default framebuffer surface (present/ CanvasSurface-compatible). */
       __publicField(this, "_drawingBuffer", null);
       __publicField(this, "_drawingBufferWidth", 0);
@@ -1583,9 +1590,737 @@
   };
   installConstants(WebGL2RenderingContext.prototype, C2);
 
+  // src/gl/extensions/index.ts
+  var EXTENSION_SPECS = [
+    // ---- WebGL1 classic (implement — mandated by objective; three.js/Babylon need them) ----
+    { name: "ANGLE_instanced_arrays", versions: [1], status: "implement" },
+    { name: "EXT_blend_minmax", versions: [1], status: "implement" },
+    { name: "EXT_frag_depth", versions: [1], status: "implement" },
+    { name: "EXT_shader_texture_lod", versions: [1], status: "implement" },
+    { name: "EXT_sRGB", versions: [1, 2], status: "implement" },
+    { name: "OES_element_index_uint", versions: [1], status: "implement" },
+    { name: "OES_fbo_render_mipmap", versions: [1, 2], status: "implement" },
+    { name: "OES_standard_derivatives", versions: [1], status: "implement" },
+    { name: "OES_texture_float", versions: [1], status: "implement" },
+    { name: "OES_texture_float_linear", versions: [1, 2], status: "implement" },
+    { name: "OES_texture_half_float", versions: [1], status: "implement" },
+    { name: "OES_texture_half_float_linear", versions: [1, 2], status: "implement" },
+    { name: "OES_vertex_array_object", versions: [1], status: "implement" },
+    {
+      name: "WEBGL_depth_texture",
+      versions: [1],
+      status: "implement"
+    },
+    { name: "WEBGL_draw_buffers", versions: [1], status: "implement" },
+    { name: "WEBGL_blend_func_extended", versions: [1, 2], status: "implement" },
+    { name: "WEBGL_lose_context", versions: [1, 2], status: "implement" },
+    { name: "WEBGL_debug_renderer_info", versions: [1, 2], status: "implement" },
+    { name: "WEBGL_debug_shaders", versions: [1, 2], status: "implement" },
+    { name: "EXT_texture_filter_anisotropic", aliases: ["WEBKIT_EXT_texture_filter_anisotropic", "MOZ_EXT_texture_filter_anisotropic"], versions: [1, 2], status: "implement" },
+    // ---- WebGL2-side (implement — mandated by objective) ----
+    { name: "EXT_clip_control", versions: [1, 2], status: "implement" },
+    { name: "EXT_color_buffer_float", versions: [2], status: "implement" },
+    { name: "EXT_color_buffer_half_float", versions: [1, 2], status: "implement" },
+    { name: "EXT_float_blend", versions: [1, 2], status: "implement" },
+    { name: "EXT_texture_norm16", versions: [2], status: "implement" },
+    { name: "KHR_parallel_shader_compile", versions: [1, 2], status: "implement" },
+    { name: "OES_draw_buffers_indexed", versions: [2], status: "implement" },
+    { name: "WEBGL_clip_cull_distance", versions: [2], status: "implement" },
+    { name: "WEBGL_multi_draw", versions: [1, 2], status: "implement" },
+    { name: "WEBGL_multisampled_render_to_texture", versions: [2], status: "implement" },
+    { name: "WEBGL_render_shared_exponent", versions: [2], status: "implement" },
+    // ---- 'null' status (CTS tests skip; three.js/Babylon degrade gracefully) ----
+    { name: "EXT_conservative_depth", versions: [2], status: "null" },
+    { name: "EXT_depth_clamp", versions: [1, 2], status: "null" },
+    { name: "EXT_disjoint_timer_query", versions: [1], status: "null" },
+    { name: "EXT_disjoint_timer_query_webgl2", versions: [2], status: "null" },
+    { name: "EXT_polygon_offset_clamp", versions: [1, 2], status: "null" },
+    { name: "EXT_render_snorm", versions: [2], status: "null" },
+    { name: "EXT_texture_compression_bptc", versions: [1, 2], status: "null" },
+    { name: "EXT_texture_compression_rgtc", versions: [1, 2], status: "null" },
+    { name: "EXT_texture_mirror_clamp_to_edge", versions: [1, 2], status: "null" },
+    { name: "NV_shader_noperspective_interpolation", versions: [2], status: "null" },
+    { name: "OES_sample_variables", versions: [2], status: "null" },
+    { name: "OES_shader_multisample_interpolation", versions: [2], status: "null" },
+    { name: "OVR_multiview2", versions: [2], status: "null" },
+    { name: "WEBGL_compressed_texture_astc", versions: [1, 2], status: "null" },
+    { name: "WEBGL_compressed_texture_etc", versions: [1, 2], status: "null" },
+    { name: "WEBGL_compressed_texture_etc1", versions: [1, 2], status: "null" },
+    { name: "WEBGL_compressed_texture_pvrtc", versions: [1, 2], status: "null" },
+    { name: "WEBGL_compressed_texture_s3tc", versions: [1, 2], status: "null" },
+    { name: "WEBGL_compressed_texture_s3tc_srgb", versions: [1, 2], status: "null" },
+    { name: "WEBGL_polygon_mode", versions: [1, 2], status: "null" },
+    { name: "WEBGL_provoking_vertex", versions: [2], status: "null" },
+    { name: "WEBGL_shader_pixel_local_storage", versions: [2], status: "null" },
+    { name: "WEBGL_stencil_texturing", versions: [2], status: "null" },
+    { name: "WEBGL_webcodecs_video_frame", versions: [1, 2], status: "null" }
+  ];
+  var SPEC_BY_NAME = /* @__PURE__ */ new Map();
+  var _a;
+  for (const spec of EXTENSION_SPECS) {
+    SPEC_BY_NAME.set(spec.name, spec);
+    for (const alias of (_a = spec.aliases) != null ? _a : []) SPEC_BY_NAME.set(alias, spec);
+  }
+  function getSupportedExtensionNames(version) {
+    const out = [];
+    for (const spec of EXTENSION_SPECS) {
+      if (spec.status !== "implement") continue;
+      if (!spec.versions.includes(version)) continue;
+      out.push(spec.name);
+    }
+    return out;
+  }
+  function getExtensionObject(ctx, name) {
+    const spec = SPEC_BY_NAME.get(name);
+    if (!spec) return null;
+    const version = ctx._version;
+    if (!spec.versions.includes(version)) return null;
+    if (spec.status !== "implement") return null;
+    if (spec.available && !spec.available(ctx)) return null;
+    const cache = ctx._extensions;
+    const existing = cache.get(spec.name);
+    if (existing !== void 0) return existing;
+    const ext = createExtension(ctx, spec);
+    cache.set(spec.name, ext);
+    return ext;
+  }
+  function createExtension(ctx, spec) {
+    throw new Error(
+      `GL extension factory not implemented yet: ${spec.name} (Phase 2 \u2014 see src/gl/CONTEXT.md)`
+    );
+  }
+
+  // src/gl/framebuffer-util.ts
+  function resolveFramebufferTarget(ctx) {
+    void ctx;
+    throw new Error("GL stub: framebuffer-util resolveFramebufferTarget (framebuffers agent)");
+  }
+
+  // src/raster/types.ts
+  var ALIASED_POINT_SIZE_RANGE = [1, 1024];
+  var ALIASED_LINE_WIDTH_RANGE = [1, 1];
+
+  // src/raster/formats.ts
+  var _f32 = new Float32Array(1);
+  var _u32 = new Uint32Array(_f32.buffer);
+  var _halfScratch = new DataView(new ArrayBuffer(4));
+
+  // src/gl/getters.ts
+  var CURRENT_PROGRAM = 35725;
+  var SAMPLE_MASK = 36433;
+  var DRAW_BUFFER0 = 34853;
+  var DRAW_BUFFER15 = 34868;
+  var BACK = 1029;
+  var NONE = 0;
+  var INTERLEAVED_ATTRIBS = 35980;
+  function getParameter(ctx, pname) {
+    var _a2, _b, _c;
+    if (ctx._isLost) return null;
+    const s = ctx._state;
+    const lim = s.limits;
+    const v2 = ctx._version === 2;
+    if (pname >= DRAW_BUFFER0 && pname <= DRAW_BUFFER15) {
+      if (!v2) {
+        ctx._errors.push(C.INVALID_ENUM);
+        return null;
+      }
+      const i = pname - DRAW_BUFFER0;
+      return s.drawFramebuffer === null ? i === 0 ? BACK : NONE : (_a2 = s.drawBuffers[i]) != null ? _a2 : NONE;
+    }
+    switch (pname) {
+      // ---- Capabilities (isEnabled/getParameter parity) ----
+      case C.BLEND:
+        return s.caps.BLEND;
+      case C.CULL_FACE:
+        return s.caps.CULL_FACE;
+      case C.DEPTH_TEST:
+        return s.caps.DEPTH_TEST;
+      case C.DITHER:
+        return s.caps.DITHER;
+      case C.POLYGON_OFFSET_FILL:
+        return s.caps.POLYGON_OFFSET_FILL;
+      case C.SAMPLE_ALPHA_TO_COVERAGE:
+        return s.caps.SAMPLE_ALPHA_TO_COVERAGE;
+      case C.SAMPLE_COVERAGE:
+        return s.caps.SAMPLE_COVERAGE;
+      case C.SCISSOR_TEST:
+        return s.caps.SCISSOR_TEST;
+      case C.STENCIL_TEST:
+        return s.caps.STENCIL_TEST;
+      case C.RASTERIZER_DISCARD:
+        if (!v2) break;
+        return s.caps.RASTERIZER_DISCARD;
+      case SAMPLE_MASK:
+        if (!v2) break;
+        return false;
+      // single-sampled software renderer — mask never applied
+      // ---- Simple numbers ----
+      case C.ACTIVE_TEXTURE:
+        return C.TEXTURE0 + s.activeTexture;
+      case C.BLEND_SRC_RGB:
+        return s.blend.srcRGB;
+      case C.BLEND_SRC_ALPHA:
+        return s.blend.srcAlpha;
+      case C.BLEND_DST_RGB:
+        return s.blend.dstRGB;
+      case C.BLEND_DST_ALPHA:
+        return s.blend.dstAlpha;
+      case C.BLEND_EQUATION_RGB:
+        return s.blend.eqRGB;
+      case C.BLEND_EQUATION_ALPHA:
+        return s.blend.eqAlpha;
+      case C.DEPTH_CLEAR_VALUE:
+        return s.clearDepth;
+      case C.STENCIL_CLEAR_VALUE:
+        return s.clearStencil;
+      case C.LINE_WIDTH:
+        return s.lineWidth;
+      case C.POLYGON_OFFSET_FACTOR:
+        return s.polygonOffset.factor;
+      case C.POLYGON_OFFSET_UNITS:
+        return s.polygonOffset.units;
+      case C.SAMPLE_COVERAGE_VALUE:
+        return s.sampleCoverage.value;
+      case C.SAMPLE_COVERAGE_INVERT:
+        return s.sampleCoverage.invert;
+      case C.CULL_FACE_MODE:
+        return s.cullFace;
+      case C.FRONT_FACE:
+        return s.frontFace;
+      case C.GENERATE_MIPMAP_HINT:
+        return s.hints.generateMipmap;
+      case C.FRAGMENT_SHADER_DERIVATIVE_HINT:
+        if (!v2 && !ctx._extensions.has("OES_standard_derivatives")) break;
+        return s.hints.fragmentShaderDerivative;
+      case C.DEPTH_FUNC:
+        return s.depth.func;
+      case C.DEPTH_WRITEMASK:
+        return s.depth.mask;
+      // ---- Stencil state (front + back) ----
+      case C.STENCIL_FUNC:
+        return s.stencil.front.func;
+      case C.STENCIL_REF:
+        return s.stencil.front.ref;
+      case C.STENCIL_VALUE_MASK:
+        return s.stencil.front.valueMask;
+      case C.STENCIL_FAIL:
+        return s.stencil.front.fail;
+      case C.STENCIL_PASS_DEPTH_FAIL:
+        return s.stencil.front.depthFail;
+      case C.STENCIL_PASS_DEPTH_PASS:
+        return s.stencil.front.depthPass;
+      case C.STENCIL_WRITEMASK:
+        return s.stencil.front.writeMask;
+      case C.STENCIL_BACK_FUNC:
+        return s.stencil.back.func;
+      case C.STENCIL_BACK_REF:
+        return s.stencil.back.ref;
+      case C.STENCIL_BACK_VALUE_MASK:
+        return s.stencil.back.valueMask;
+      case C.STENCIL_BACK_FAIL:
+        return s.stencil.back.fail;
+      case C.STENCIL_BACK_PASS_DEPTH_FAIL:
+        return s.stencil.back.depthFail;
+      case C.STENCIL_BACK_PASS_DEPTH_PASS:
+        return s.stencil.back.depthPass;
+      case C.STENCIL_BACK_WRITEMASK:
+        return s.stencil.back.writeMask;
+      // ---- Object bindings ----
+      case CURRENT_PROGRAM:
+        return s.currentProgram;
+      case C.ARRAY_BUFFER_BINDING:
+        return s.arrayBuffer;
+      case C.ELEMENT_ARRAY_BUFFER_BINDING:
+        return s.vao.elementArrayBuffer;
+      case C.FRAMEBUFFER_BINDING:
+        return s.drawFramebuffer;
+      case C.RENDERBUFFER_BINDING:
+        return s.renderbuffer;
+      case C.TEXTURE_BINDING_2D:
+        return s.textureUnits[s.activeTexture].texture2D;
+      case C.TEXTURE_BINDING_CUBE_MAP:
+        return s.textureUnits[s.activeTexture].textureCube;
+      case C.DRAW_FRAMEBUFFER_BINDING:
+        if (!v2) break;
+        return s.drawFramebuffer;
+      case C.READ_FRAMEBUFFER_BINDING:
+        if (!v2) break;
+        return s.readFramebuffer;
+      case C.VERTEX_ARRAY_BINDING:
+        if (!v2) break;
+        return s.vaoBinding;
+      case C.SAMPLER_BINDING:
+        if (!v2) break;
+        return s.textureUnits[s.activeTexture].sampler;
+      case C.TEXTURE_BINDING_3D:
+        if (!v2) break;
+        return s.textureUnits[s.activeTexture].texture3D;
+      case C.TEXTURE_BINDING_2D_ARRAY:
+        if (!v2) break;
+        return s.textureUnits[s.activeTexture].texture2DArray;
+      case C.PIXEL_PACK_BUFFER_BINDING:
+        if (!v2) break;
+        return s.pixelPackBuffer;
+      case C.PIXEL_UNPACK_BUFFER_BINDING:
+        if (!v2) break;
+        return s.pixelUnpackBuffer;
+      case C.UNIFORM_BUFFER_BINDING:
+        if (!v2) break;
+        return (_b = s.uniformBuffers[0]) != null ? _b : null;
+      case C.COPY_READ_BUFFER_BINDING:
+        if (!v2) break;
+        return s.copyReadBuffer;
+      case C.COPY_WRITE_BUFFER_BINDING:
+        if (!v2) break;
+        return s.copyWriteBuffer;
+      case C.TRANSFORM_FEEDBACK_BINDING:
+        if (!v2) break;
+        return s.transformFeedback;
+      case C.TRANSFORM_FEEDBACK_BUFFER_BINDING:
+        if (!v2) break;
+        return (_c = s.transformFeedback && s.transformFeedback._buffers[0]) != null ? _c : null;
+      // ---- WebGL2 booleans / misc ----
+      case C.TRANSFORM_FEEDBACK_ACTIVE:
+        if (!v2) break;
+        return s.transformFeedback ? s.transformFeedback._active : false;
+      case C.TRANSFORM_FEEDBACK_PAUSED:
+        if (!v2) break;
+        return s.transformFeedback ? s.transformFeedback._paused : false;
+      case C.TRANSFORM_FEEDBACK_BUFFER_MODE:
+        if (!v2) break;
+        return s.currentProgram && s.currentProgram._tfBufferMode !== 0 ? s.currentProgram._tfBufferMode : INTERLEAVED_ATTRIBS;
+      case C.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+        if (!v2) break;
+        return s.transformFeedback ? s.transformFeedback._primitivesWritten : 0;
+      case C.READ_BUFFER:
+        if (!v2) break;
+        return s.readFramebuffer === null ? BACK : s.readBuffer;
+      // ---- Vectors (fresh arrays every call) ----
+      case C.COLOR_CLEAR_VALUE:
+        return new Float32Array(s.clearColor);
+      case C.BLEND_COLOR:
+        return new Float32Array(s.blend.color);
+      case C.DEPTH_RANGE:
+        return new Float32Array(s.depth.range);
+      case C.SCISSOR_BOX:
+        return new Int32Array([s.scissor.x, s.scissor.y, s.scissor.w, s.scissor.h]);
+      case C.VIEWPORT:
+        return new Int32Array([s.viewport.x, s.viewport.y, s.viewport.w, s.viewport.h]);
+      case C.COLOR_WRITEMASK:
+        return [s.colorMask[0], s.colorMask[1], s.colorMask[2], s.colorMask[3]];
+      case C.ALIASED_POINT_SIZE_RANGE:
+        return new Float32Array([ALIASED_POINT_SIZE_RANGE[0], ALIASED_POINT_SIZE_RANGE[1]]);
+      case C.ALIASED_LINE_WIDTH_RANGE:
+        return new Float32Array([ALIASED_LINE_WIDTH_RANGE[0], ALIASED_LINE_WIDTH_RANGE[1]]);
+      case C.MAX_VIEWPORT_DIMS:
+        return new Int32Array([lim.MAX_VIEWPORT_DIMS[0], lim.MAX_VIEWPORT_DIMS[1]]);
+      // ---- Pixel storage (getParameter mirrors pixelStorei) ----
+      case C.UNPACK_ALIGNMENT:
+        return s.pixelStore.unpack.alignment;
+      case C.PACK_ALIGNMENT:
+        return s.pixelStore.pack.alignment;
+      case C.UNPACK_FLIP_Y_WEBGL:
+        return s.pixelStore.unpack.flipY;
+      case C.UNPACK_PREMULTIPLY_ALPHA_WEBGL:
+        return s.pixelStore.unpack.premultiplyAlpha;
+      case C.UNPACK_COLORSPACE_CONVERSION_WEBGL:
+        return s.pixelStore.unpack.colorspaceConversion;
+      case C.PACK_ROW_LENGTH:
+        if (!v2) break;
+        return s.pixelStore.pack.rowLength;
+      case C.PACK_SKIP_PIXELS:
+        if (!v2) break;
+        return s.pixelStore.pack.skipPixels;
+      case C.PACK_SKIP_ROWS:
+        if (!v2) break;
+        return s.pixelStore.pack.skipRows;
+      case C.UNPACK_ROW_LENGTH:
+        if (!v2) break;
+        return s.pixelStore.unpack.rowLength;
+      case C.UNPACK_IMAGE_HEIGHT:
+        if (!v2) break;
+        return s.pixelStore.unpack.imageHeight;
+      case C.UNPACK_SKIP_PIXELS:
+        if (!v2) break;
+        return s.pixelStore.unpack.skipPixels;
+      case C.UNPACK_SKIP_ROWS:
+        if (!v2) break;
+        return s.pixelStore.unpack.skipRows;
+      case C.UNPACK_SKIP_IMAGES:
+        if (!v2) break;
+        return s.pixelStore.unpack.skipImages;
+      // ---- Limits (WebGL1 + WebGL2-shared) ----
+      case C.MAX_VERTEX_ATTRIBS:
+        return lim.MAX_VERTEX_ATTRIBS;
+      case C.MAX_VERTEX_UNIFORM_VECTORS:
+        return lim.MAX_VERTEX_UNIFORM_VECTORS;
+      case C.MAX_FRAGMENT_UNIFORM_VECTORS:
+        return lim.MAX_FRAGMENT_UNIFORM_VECTORS;
+      case C.MAX_VARYING_VECTORS:
+        return lim.MAX_VARYING_VECTORS;
+      case C.MAX_COMBINED_TEXTURE_IMAGE_UNITS:
+        return lim.MAX_COMBINED_TEXTURE_IMAGE_UNITS;
+      case C.MAX_VERTEX_TEXTURE_IMAGE_UNITS:
+        return lim.MAX_VERTEX_TEXTURE_IMAGE_UNITS;
+      case C.MAX_TEXTURE_IMAGE_UNITS:
+        return lim.MAX_TEXTURE_IMAGE_UNITS;
+      case C.MAX_TEXTURE_SIZE:
+        return lim.MAX_TEXTURE_SIZE;
+      case C.MAX_CUBE_MAP_TEXTURE_SIZE:
+        return lim.MAX_CUBE_MAP_TEXTURE_SIZE;
+      case C.MAX_RENDERBUFFER_SIZE:
+        return lim.MAX_RENDERBUFFER_SIZE;
+      // ---- Limits (WebGL2-only) ----
+      case C.MAX_3D_TEXTURE_SIZE:
+        if (!v2) break;
+        return lim.MAX_3D_TEXTURE_SIZE;
+      case C.MAX_ARRAY_TEXTURE_LAYERS:
+        if (!v2) break;
+        return lim.MAX_ARRAY_TEXTURE_LAYERS;
+      case C.MAX_SAMPLES:
+        if (!v2) break;
+        return lim.MAX_SAMPLES;
+      case C.MAX_DRAW_BUFFERS:
+        if (!v2) {
+          if (!ctx._extensions.has("WEBGL_draw_buffers")) break;
+        }
+        return lim.MAX_DRAW_BUFFERS;
+      case C.MAX_COLOR_ATTACHMENTS:
+        if (!v2) {
+          if (!ctx._extensions.has("WEBGL_draw_buffers")) break;
+        }
+        return lim.MAX_COLOR_ATTACHMENTS;
+      case C.MAX_ELEMENT_INDEX:
+        if (!v2) break;
+        return lim.MAX_ELEMENT_INDEX;
+      case C.MAX_UNIFORM_BUFFER_BINDINGS:
+        if (!v2) break;
+        return lim.MAX_UNIFORM_BUFFER_BINDINGS;
+      case C.MAX_UNIFORM_BLOCK_SIZE:
+        if (!v2) break;
+        return lim.MAX_UNIFORM_BLOCK_SIZE;
+      case C.MAX_VERTEX_UNIFORM_BLOCKS:
+        if (!v2) break;
+        return lim.MAX_VERTEX_UNIFORM_BLOCKS;
+      case C.MAX_FRAGMENT_UNIFORM_BLOCKS:
+        if (!v2) break;
+        return lim.MAX_FRAGMENT_UNIFORM_BLOCKS;
+      case C.MAX_COMBINED_UNIFORM_BLOCKS:
+        if (!v2) break;
+        return lim.MAX_COMBINED_UNIFORM_BLOCKS;
+      case C.MAX_VERTEX_OUTPUT_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_VERTEX_OUTPUT_COMPONENTS;
+      case C.MAX_FRAGMENT_INPUT_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_FRAGMENT_INPUT_COMPONENTS;
+      case C.MAX_VERTEX_ATTRIB_STRIDE:
+        if (!v2) break;
+        return lim.MAX_VERTEX_ATTRIB_STRIDE;
+      case C.MAX_VERTEX_ATTRIB_RELATIVE_OFFSET:
+        if (!v2) break;
+        return lim.MAX_VERTEX_ATTRIB_RELATIVE_OFFSET;
+      case C.MAX_TEXTURE_LOD_BIAS:
+        if (!v2) break;
+        return lim.MAX_TEXTURE_LOD_BIAS;
+      case C.MIN_PROGRAM_TEXEL_OFFSET:
+        if (!v2) break;
+        return lim.MIN_PROGRAM_TEXEL_OFFSET;
+      case C.MAX_PROGRAM_TEXEL_OFFSET:
+        if (!v2) break;
+        return lim.MAX_PROGRAM_TEXEL_OFFSET;
+      case C.MAX_SERVER_WAIT_TIMEOUT:
+        if (!v2) break;
+        return lim.MAX_SERVER_WAIT_TIMEOUT;
+      case C.MAX_CLIENT_WAIT_TIMEOUT_WEBGL:
+        if (!v2) break;
+        return lim.MAX_CLIENT_WAIT_TIMEOUT_WEBGL;
+      case C.MAX_ELEMENTS_VERTICES:
+        if (!v2) break;
+        return lim.MAX_ELEMENTS_VERTICES;
+      case C.MAX_ELEMENTS_INDICES:
+        if (!v2) break;
+        return lim.MAX_ELEMENTS_INDICES;
+      case C.UNIFORM_BUFFER_OFFSET_ALIGNMENT:
+        if (!v2) break;
+        return lim.UNIFORM_BUFFER_OFFSET_ALIGNMENT;
+      case C.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS;
+      case C.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS;
+      case C.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS:
+        if (!v2) break;
+        return lim.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
+      case C.MAX_VARYING_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_VARYING_VECTORS * 4;
+      case C.MAX_VERTEX_UNIFORM_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_VERTEX_UNIFORM_VECTORS * 4;
+      case C.MAX_FRAGMENT_UNIFORM_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_FRAGMENT_UNIFORM_VECTORS * 4;
+      case C.MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS:
+        if (!v2) break;
+        return Math.max(
+          lim.MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS,
+          lim.MAX_VERTEX_UNIFORM_BLOCKS * (lim.MAX_UNIFORM_BLOCK_SIZE / 4) + lim.MAX_VERTEX_UNIFORM_VECTORS * 4
+        );
+      case C.MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS:
+        if (!v2) break;
+        return Math.max(
+          lim.MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS,
+          lim.MAX_FRAGMENT_UNIFORM_BLOCKS * (lim.MAX_UNIFORM_BLOCK_SIZE / 4) + lim.MAX_FRAGMENT_UNIFORM_VECTORS * 4
+        );
+      // ---- Misc state ----
+      case C.SHADER_COMPILER:
+        return true;
+      // software compiler always available
+      case C.NUM_SHADER_BINARY_FORMATS:
+        return 0;
+      // no binary shader formats
+      case C.COMPRESSED_TEXTURE_FORMATS:
+        return new Uint32Array(0);
+      // no compressed formats
+      case C.SUBPIXEL_BITS:
+        return 8;
+      case C.IMPLEMENTATION_COLOR_READ_FORMAT:
+      case C.IMPLEMENTATION_COLOR_READ_TYPE:
+        if (drawFramebufferIncomplete(ctx)) {
+          ctx._errors.push(C.INVALID_OPERATION);
+          return null;
+        }
+        return pname === C.IMPLEMENTATION_COLOR_READ_FORMAT ? C.RGBA : C.UNSIGNED_BYTE;
+      // ---- FBO-dependent bits (draw framebuffer) ----
+      case C.SAMPLE_BUFFERS:
+        return 0;
+      // single-sampled drawing buffer, always
+      case C.SAMPLES:
+        return 0;
+      case C.RED_BITS:
+      case C.GREEN_BITS:
+      case C.BLUE_BITS:
+      case C.ALPHA_BITS:
+      case C.DEPTH_BITS:
+      case C.STENCIL_BITS: {
+        const b = drawFramebufferBits(ctx);
+        switch (pname) {
+          case C.RED_BITS:
+            return b.r;
+          case C.GREEN_BITS:
+            return b.g;
+          case C.BLUE_BITS:
+            return b.b;
+          case C.ALPHA_BITS:
+            return b.a;
+          case C.DEPTH_BITS:
+            return b.depth;
+          default:
+            return b.stencil;
+        }
+      }
+      // ---- Extension-gated pnames ----
+      case 34047:
+        if (!ctx._extensions.has("EXT_texture_filter_anisotropic")) break;
+        return lim.MAX_TEXTURE_MAX_ANISOTROPY_EXT;
+      case 37445:
+        if (!ctx._extensions.has("WEBGL_debug_renderer_info")) break;
+        return "Software Renderer";
+      case 37446:
+        if (!ctx._extensions.has("WEBGL_debug_renderer_info")) break;
+        return "Software Renderer (JS)";
+      case 35068:
+        if (!ctx._extensions.has("WEBGL_blend_func_extended")) break;
+        return lim.MAX_DUAL_SOURCE_DRAW_BUFFERS_WEBGL;
+      case 3378:
+        if (!v2 || !ctx._extensions.has("WEBGL_clip_cull_distance")) break;
+        return lim.MAX_CLIP_DISTANCES_WEBGL;
+      case 33529:
+        if (!v2 || !ctx._extensions.has("WEBGL_clip_cull_distance")) break;
+        return lim.MAX_CULL_DISTANCES_WEBGL;
+      case 33530:
+        if (!v2 || !ctx._extensions.has("WEBGL_clip_cull_distance")) break;
+        return lim.MAX_COMBINED_CLIP_AND_CULL_DISTANCES_WEBGL;
+      default:
+        break;
+    }
+    ctx._errors.push(C.INVALID_ENUM);
+    return null;
+  }
+  function drawFramebufferIncomplete(ctx) {
+    if (ctx._state.drawFramebuffer === null) return false;
+    try {
+      return resolveFramebufferTarget(ctx) === null;
+    } catch {
+      return true;
+    }
+  }
+  function drawFramebufferBits(ctx) {
+    const s = ctx._state;
+    if (s.drawFramebuffer === null) {
+      return {
+        r: 8,
+        g: 8,
+        b: 8,
+        a: ctx._attrs.alpha ? 8 : 0,
+        depth: ctx._attrs.depth ? ctx._version === 2 ? 24 : 16 : 0,
+        stencil: ctx._attrs.stencil ? 8 : 0
+      };
+    }
+    let fb = null;
+    try {
+      fb = resolveFramebufferTarget(ctx);
+    } catch {
+      fb = null;
+    }
+    if (!fb) return { r: 0, g: 0, b: 0, a: 0, depth: 0, stencil: 0 };
+    const color = fb.color[0];
+    const cb = color ? colorChannelBits(color.format, color.info) : [0, 0, 0, 0];
+    return {
+      r: cb[0],
+      g: cb[1],
+      b: cb[2],
+      a: cb[3],
+      depth: fb.depth ? depthBits(fb.depth.format) : 0,
+      stencil: fb.stencil ? stencilBits(fb.stencil.format) : 0
+    };
+  }
+  function colorChannelBits(format, info) {
+    switch (format) {
+      case 6406:
+        return [0, 0, 0, 8];
+      case 6409:
+        return [8, 8, 8, 0];
+      case 6410:
+        return [8, 8, 8, 8];
+      case 36194:
+        return [5, 6, 5, 0];
+      case 32854:
+        return [4, 4, 4, 4];
+      case 32855:
+        return [5, 5, 5, 1];
+      case 32857:
+      case 36975:
+        return [10, 10, 10, 2];
+      case 35898:
+        return [11, 11, 10, 0];
+      default: {
+        if (info.isFloat || info.isInteger) {
+          const bits = info.bytesPerPixel * 8 / info.components;
+          return [bits, bits, bits, bits];
+        }
+        switch (info.components) {
+          case 1:
+            return [8, 0, 0, 0];
+          case 2:
+            return [8, 8, 0, 0];
+          case 3:
+            return [8, 8, 8, 0];
+          case 4:
+            return [8, 8, 8, 8];
+          default:
+            return [0, 0, 0, 0];
+        }
+      }
+    }
+  }
+  function depthBits(format) {
+    switch (format) {
+      case 33189:
+        return 16;
+      case 33190:
+        return 24;
+      case 36012:
+        return 32;
+      case 35056:
+        return 24;
+      case 36013:
+        return 32;
+      default:
+        return 16;
+    }
+  }
+  function stencilBits(format) {
+    switch (format) {
+      case 36168:
+        return 8;
+      case 35056:
+        return 8;
+      case 36013:
+        return 8;
+      default:
+        return 8;
+    }
+  }
+
   // src/gl/api/context.ts
+  var INVALID_ENUM = 1280;
+  var INVALID_OPERATION = 1282;
+  var NO_ERROR = 0;
+  var CONTEXT_LOST_WEBGL = 37442;
+  var lostErrorState = /* @__PURE__ */ new WeakMap();
   function installContextApi(proto) {
-    void proto;
+    proto.getContextAttributes = function() {
+      return { ...this._attrs };
+    };
+    proto.isContextLost = function() {
+      return this._isLost;
+    };
+    proto.getSupportedExtensions = function() {
+      return getSupportedExtensionNames(this._version);
+    };
+    proto.getExtension = function(name) {
+      const n = String(name);
+      try {
+        return getExtensionObject(this, n);
+      } catch {
+        return null;
+      }
+    };
+    proto.getError = function() {
+      if (this._isLost) {
+        let st = lostErrorState.get(this);
+        if (!st || !st.lostEpoch) {
+          st = { lostEpoch: true, consumed: false };
+          lostErrorState.set(this, st);
+        }
+        if (!st.consumed) {
+          st.consumed = true;
+          return CONTEXT_LOST_WEBGL;
+        }
+        return NO_ERROR;
+      }
+      lostErrorState.delete(this);
+      return this._errors.get();
+    };
+    proto.getString = function(name) {
+      if (this._isLost) return null;
+      switch (name) {
+        case 7938:
+          return this._version === 2 ? "WebGL 2.0 (Software Renderer)" : "WebGL 1.0 (Software Renderer)";
+        case 35724:
+          return this._version === 2 ? "WebGL GLSL ES 3.00 (Software)" : "WebGL GLSL ES 1.00 (Software)";
+        case 7936:
+          return "Software Renderer";
+        case 7937:
+          return "Software Renderer (JS)";
+        case 7939:
+          return getSupportedExtensionNames(this._version).join(" ");
+        default:
+          this._errors.push(INVALID_ENUM);
+          return null;
+      }
+    };
+    proto.getParameter = function(pname) {
+      try {
+        return getParameter(this, pname);
+      } catch {
+        this._errors.push(INVALID_OPERATION);
+        return null;
+      }
+    };
   }
 
   // src/gl/api/state.ts
