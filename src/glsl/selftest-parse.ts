@@ -709,12 +709,11 @@ void main() { gl_Position = vec4(0.0); }
 }
 
 {
-  // inout params are accepted in 3.00; StorageClass (types.ts, FROZEN) has no
-  // 'inout', so the AST records the qualifier as storage 'in' (documented
-  // decision — semantics/codegen must extend the contract for write-back).
+  // inout params are accepted in 3.00 and recorded with storage 'inout'
+  // (semantics uses the qualifier for by-reference marshaling).
   const ast = parseOk('#version 300 es\nfloat f(inout float x);\n', 300);
   const f = fproto(ast.declarations[0]);
-  check(f.params[0].type.qualifiers.storage === 'in', 'inout recorded as in');
+  check(f.params[0].type.qualifiers.storage === 'inout', 'inout recorded as inout');
   check(f.params[0].name === 'x', 'inout param name');
 }
 

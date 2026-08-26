@@ -377,6 +377,7 @@ const STORAGE_MAP: Readonly<Record<string, StorageClass>> = {
   varying: 'varying',
   in: 'in',
   out: 'out',
+  inout: 'inout',
 };
 
 /** Parse qualifiers + base type into a TypeSpec. */
@@ -421,12 +422,9 @@ export function parseTypeSpec(p: Parser, ctx: TypeSpecCtx): TypeSpec {
           continue;
         }
         if (name === 'inout') {
-          // NOTE: StorageClass (types.ts, FROZEN) has no 'inout', so the AST
-          // cannot carry write-back semantics; we accept the qualifier
-          // (legal GLSL, CTS-tested) and record it as 'in'. Phase 2
-          // (semantics/codegen) must extend the contract to distinguish
-          // inout params for by-reference marshaling.
-          setStorage(p, t, qualifiers, 'in');
+          // 'inout' is a real storage class in types.ts (ES 3.00 params only —
+          // enforced above); it flows through setStorage like 'in'/'out'.
+          setStorage(p, t, qualifiers, 'inout');
           p.next();
           continue;
         }
