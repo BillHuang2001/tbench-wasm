@@ -90,6 +90,7 @@ gl.bindAttribLocation(prog, 0, 'gl_bad');
 expectError(gl, gl.INVALID_OPERATION, 'gl_ prefix → INVALID_OPERATION');
 check('getAttribLocation -1', gl.getAttribLocation(prog, 'a_pos') === -1);
 check('getUniformLocation null on unlinked... INVALID_OPERATION first', (() => { gl.getUniformLocation(prog, 'u'); return gl.getError() === gl.INVALID_OPERATION; })());
+gl.getError(); // drain: getAttribLocation + getUniformLocation each pushed one on the unlinked program
 gl.uniform1f(null, 1.0);
 expectError(gl, gl.NO_ERROR, 'uniform1f(null) silent no-op');
 gl.deleteShader(vs);
@@ -116,19 +117,18 @@ gl.generateMipmap(gl.TEXTURE_2D);
 expectError(gl, gl.NO_ERROR, 'generateMipmap ok');
 check('mipmap levels allocated', (tex as any)._image && (tex as any)._image.levels.length === 4); // 8x8 → 4 levels
 check('NPOT upload legal', (() => { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 100, 3, 0, gl.RGBA, gl.UNSIGNED_BYTE, null); return gl.getError() === gl.NO_ERROR; })());
-gl.texStorage2D(gl.TEXTURE_2D, 4, gl.RGBA8, 16, 16);
 check('W1 has no texStorage2D (W2-only method)', typeof (gl as any).texStorage2D === 'undefined');
 
 // --- Clear / draw (raster stubbed → local fallbacks) ---
 gl.clearColor(0.2, 0.4, 0.6, 1.0);
 gl.clear(gl.COLOR_BUFFER_BIT);
 expectError(gl, gl.NO_ERROR, 'clear COLOR ok');
-gl.clear(0x4000);
+gl.clear(gl.COLOR_BUFFER_BIT | 0x8000); // 0x8000 is not a valid clear bit
 expectError(gl, gl.INVALID_VALUE, 'clear bad mask → INVALID_VALUE');
 gl.drawArrays(gl.TRIANGLES, 0, 3);
 expectError(gl, gl.INVALID_OPERATION, 'drawArrays no program → INVALID_OPERATION');
 gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
-expectError(gl, gl.INVALID_OPERATION, 'readPixels no program? (should be read-FB error or ok)'); // default FB present → either ok or INVALID_OPERATION w/o crash
+expectError(gl, gl.NO_ERROR, 'readPixels default-FB RGBA/UNSIGNED_BYTE ok (no program needed)');
 gl.readPixels(0, 0, 1, 1, 0x1901 /*RGB*/, gl.UNSIGNED_BYTE, new Uint8Array(3));
 check('readPixels default-FB RGB → error', gl.getError() !== gl.NO_ERROR);
 
@@ -166,11 +166,16 @@ gl2.bindVertexArray(null);
 const sync = gl2.fenceSync(gl2.SYNC_GPU_COMMANDS_COMPLETE, 0);
 check('fenceSync', !!sync);
 check('clientWaitSync ALREADY_SIGNALED', gl2.clientWaitSync(sync, 0, 0) === gl2.ALREADY_SIGNALED);
-check('clientWaitSync timeout>0 → INVALID_OPERATION', gl2.clientWaitSync(sync, 0, 1) === gl2.INVALID_OPERATION);
+check('clientWaitSync timeout>0 → WAIT_FAILED + INVALID_OPERATION', (() => {
+  const r = gl2.clientWaitSync(sync, 0, 1);
+  return r === gl2.WAIT_FAILED && gl2.getError() === gl2.INVALID_OPERATION; // spec: WAIT_FAILED returned, error pushed
+})());
 const q = gl2.createQuery();
 gl2.beginQuery(gl2.ANY_SAMPLES_PASSED, q);
 gl2.endQuery(gl2.ANY_SAMPLES_PASSED);
 check('query result available', gl2.getQueryParameter(q, gl2.QUERY_RESULT_AVAILABLE) === true);
+const tex2 = gl2.createTexture();
+gl2.bindTexture(gl2.TEXTURE_2D, tex2);
 gl2.texStorage2D(gl2.TEXTURE_2D, 4, gl2.RGBA8, 16, 16);
 expectError(gl2, gl2.NO_ERROR, 'W2 texStorage2D ok');
 gl2.texStorage2D(gl2.TEXTURE_2D, 4, gl2.RGBA8, 16, 16);
