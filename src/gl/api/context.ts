@@ -19,8 +19,8 @@
  *    → space-separated getSupportedExtensions() names. Returns null while lost.
  *  - isContextLost: true only after loseContext() (lifecycle.ts).
  *  - getExtension/getSupportedExtensions delegate to extensions/index.ts
- *    (version-aware registry; singleton cache on ctx._extensions). Extension
- *    factory stubs (parallel wave) may throw — degraded to null until they land.
+ *    (version-aware registry; singleton cache on ctx._extensions; factories in
+ *    extensions/*.ts build the per-extension objects).
  *  - getParameter delegates to getters.ts (the full pname table).
  *  - Internal exceptions NEVER escape: getParameter is wrapped; unexpected
  *    engine failures report INVALID_OPERATION.
@@ -57,14 +57,7 @@ export function installContextApi(proto: WebGLRenderingContext): void {
   proto.getExtension = function (this: WebGLRenderingContext, name: string) {
     // WebIDL DOMString conversion.
     const n = String(name);
-    try {
-      return getExtensionObject(this, n);
-    } catch {
-      // Extension factories are stubs in the parallel implementation wave;
-      // degrade to null instead of throwing to the page. Remove once the
-      // extensions factories land (extensions/*.ts).
-      return null;
-    }
+    return getExtensionObject(this, n);
   } as WebGLRenderingContext['getExtension'];
 
   proto.getError = function (this: WebGLRenderingContext) {

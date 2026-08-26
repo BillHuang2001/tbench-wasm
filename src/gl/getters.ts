@@ -32,6 +32,7 @@ import type { WebGLRenderingContext } from './webgl1';
 import type { GLenum } from './types';
 import { C } from './constants';
 import { resolveFramebufferTarget } from './framebuffer-util';
+import { getClipControl, isClipDistanceEnabled } from './extensions/clip-state';
 import {
   ALIASED_LINE_WIDTH_RANGE,
   ALIASED_POINT_SIZE_RANGE,
@@ -56,13 +57,21 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
   const lim = s.limits;
   const v2 = ctx._version === 2;
 
-  // DRAW_BUFFER0..DRAW_BUFFER15 (WebGL2): per-drawbuffer output. The default
-  // framebuffer's DRAW_BUFFER0 is BACK (NONE for the rest); an FBO reports the
-  // drawBuffers() values (COLOR_ATTACHMENTn / NONE).
+  // DRAW_BUFFER0..DRAW_BUFFER15: per-drawbuffer output. On WebGL2 always legal;
+  // on WebGL1 legal once WEBGL_draw_buffers is enabled (same pname values
+  // 0x8825..0x8834). The default framebuffer reports BACK (drawBuffers([BACK]))
+  // or NONE (drawBuffers([NONE])); an FBO reports the drawBuffers() values.
   if (pname >= DRAW_BUFFER0 && pname <= DRAW_BUFFER15) {
-    if (!v2) { ctx._errors.push(C.INVALID_ENUM); return null; }
+    if (!v2 && !ctx._extensions.has('WEBGL_draw_buffers')) {
+      ctx._errors.push(C.INVALID_ENUM);
+      return null;
+    }
     const i = pname - DRAW_BUFFER0;
-    return s.drawFramebuffer === null ? (i === 0 ? BACK : NONE) : (s.drawBuffers[i] ?? NONE);
+    if (s.drawFramebuffer === null) {
+      const db0 = s.drawBuffers[0];
+      return db0 === NONE ? NONE : BACK;
+    }
+    return s.drawBuffers[i] ?? NONE;
   }
 
   switch (pname) {
@@ -413,6 +422,22 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
     case 0x82fa /* MAX_COMBINED_CLIP_AND_CULL_DISTANCES_WEBGL */:
       if (!v2 || !ctx._extensions.has('WEBGL_clip_cull_distance')) break;
       return lim.MAX_COMBINED_CLIP_AND_CULL_DISTANCES_WEBGL;
+    case 0x935c /* CLIP_ORIGIN_EXT (EXT_clip_control) */:
+      if (!ctx._extensions.has('EXT_clip_control')) break;
+      return getClipControl(ctx).origin;
+    case 0x935d /* CLIP_DEPTH_MODE_EXT (EXT_clip_control) */:
+      if (!ctx._extensions.has('EXT_clip_control')) break;
+      return getClipControl(ctx).depth;
+    case 0x3000 /* CLIP_DISTANCE0_WEBGL .. CLIP_DISTANCE7_WEBGL (WEBGL_clip_cull_distance) */:
+    case 0x3001:
+    case 0x3002:
+    case 0x3003:
+    case 0x3004:
+    case 0x3005:
+    case 0x3006:
+    case 0x3007:
+      if (!ctx._extensions.has('WEBGL_clip_cull_distance')) break;
+      return isClipDistanceEnabled(ctx, pname - 0x3000);
 
     default:
       break;

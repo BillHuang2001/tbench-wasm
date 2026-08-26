@@ -44,8 +44,9 @@
  */
 
 import type { WebGLRenderingContext } from '../webgl1';
-import { C1, C2 } from '../constants';
+import { C1, C2, CExt } from '../constants';
 import type { State } from '../state';
+import { isClipDistanceEnabled, setClipDistanceEnabled } from '../extensions/clip-state';
 import type { GLboolean, GLclampf, GLenum, GLfloat, GLint } from '../types';
 
 type CapKey = keyof State['caps'];
@@ -101,6 +102,35 @@ const DST_BLEND_FACTORS: number[] = SRC_BLEND_FACTORS.filter((f) => f !== C1.SRC
 const BLEND_EQUATIONS: number[] = [C1.FUNC_ADD, C1.FUNC_SUBTRACT, C1.FUNC_REVERSE_SUBTRACT];
 const BLEND_EQUATIONS_V2: number[] = [...BLEND_EQUATIONS, C2.MIN, C2.MAX];
 
+// WEBGL_blend_func_extended (versions [1,2]): dual-source factors.
+const SRC1_BLEND_FACTORS: number[] = [
+  0x88f9, // SRC1_COLOR_WEBGL
+  0x8589, // SRC1_ALPHA_WEBGL
+  0x88fa, // ONE_MINUS_SRC1_COLOR_WEBGL
+  0x88fb, // ONE_MINUS_SRC1_ALPHA_WEBGL
+];
+
+/** Factor sets per context (extensions widen the WebGL1 sets when enabled). */
+function blendFactorSets(ctx: WebGLRenderingContext): { src: number[]; dst: number[] } {
+  let src = SRC_BLEND_FACTORS;
+  let dst = DST_BLEND_FACTORS;
+  if (ctx._extensions.has('WEBGL_blend_func_extended')) {
+    // Spec (WEBGL_blend_func_extended): SRC1_* legal for src AND dst; the
+    // extension also promotes SRC_ALPHA_SATURATE to the dst side (srcAlpha/
+    // dstRGB/dstAlpha positions).
+    src = [...src, ...SRC1_BLEND_FACTORS];
+    dst = [...dst, C1.SRC_ALPHA_SATURATE, ...SRC1_BLEND_FACTORS];
+  }
+  return { src, dst };
+}
+
+/** Blend equation set per context (EXT_blend_minmax widens WebGL1). */
+function blendEquations(ctx: WebGLRenderingContext): number[] {
+  if (ctx._version === 2) return BLEND_EQUATIONS_V2;
+  if (ctx._extensions.has('EXT_blend_minmax')) return [...BLEND_EQUATIONS, CExt.MIN_EXT, CExt.MAX_EXT];
+  return BLEND_EQUATIONS;
+}
+
 const DEPTH_FUNCS: number[] = [
   C1.NEVER,
   C1.LESS,
@@ -148,7 +178,7 @@ export function installStateApi(proto: WebGLRenderingContext): void {
   proto.blendEquation = function (this: WebGLRenderingContext, mode: GLenum): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    const eqs = ctx._version === 2 ? BLEND_EQUATIONS_V2 : BLEND_EQUATIONS;
+    const eqs = blendEquations(ctx);
     if (!eqs.includes(mode)) {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
@@ -160,7 +190,7 @@ export function installStateApi(proto: WebGLRenderingContext): void {
   proto.blendEquationSeparate = function (this: WebGLRenderingContext, modeRGB: GLenum, modeAlpha: GLenum): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    const eqs = ctx._version === 2 ? BLEND_EQUATIONS_V2 : BLEND_EQUATIONS;
+    const eqs = blendEquations(ctx);
     if (!eqs.includes(modeRGB) || !eqs.includes(modeAlpha)) {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
@@ -172,7 +202,8 @@ export function installStateApi(proto: WebGLRenderingContext): void {
   proto.blendFunc = function (this: WebGLRenderingContext, sfactor: GLenum, dfactor: GLenum): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    if (!SRC_BLEND_FACTORS.includes(sfactor) || !DST_BLEND_FACTORS.includes(dfactor)) {
+    const { src, dst } = blendFactorSets(ctx);
+    if (!src.includes(sfactor) || !dst.includes(dfactor)) {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
     }
@@ -185,11 +216,12 @@ export function installStateApi(proto: WebGLRenderingContext): void {
   proto.blendFuncSeparate = function (this: WebGLRenderingContext, srcRGB: GLenum, dstRGB: GLenum, srcAlpha: GLenum, dstAlpha: GLenum): void {
     const ctx = this;
     if (isLost(ctx)) return;
+    const { src, dst } = blendFactorSets(ctx);
     if (
-      !SRC_BLEND_FACTORS.includes(srcRGB) ||
-      !DST_BLEND_FACTORS.includes(dstRGB) ||
-      !SRC_BLEND_FACTORS.includes(srcAlpha) ||
-      !DST_BLEND_FACTORS.includes(dstAlpha)
+      !src.includes(srcRGB) ||
+      !dst.includes(dstRGB) ||
+      !src.includes(srcAlpha) ||
+      !dst.includes(dstAlpha)
     ) {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
@@ -268,6 +300,11 @@ export function installStateApi(proto: WebGLRenderingContext): void {
     const table = ctx._version === 2 ? CAP_KEYS_V2 : CAP_KEYS;
     const key = table[cap];
     if (key === undefined) {
+      // WEBGL_clip_cull_distance: CLIP_DISTANCE0..7 become legal caps.
+      if (ctx._extensions.has('WEBGL_clip_cull_distance') && cap >= 0x3000 && cap <= 0x3007) {
+        setClipDistanceEnabled(ctx, cap - 0x3000, false);
+        return;
+      }
       ctx._errors.push(C1.INVALID_ENUM);
       return;
     }
@@ -280,6 +317,11 @@ export function installStateApi(proto: WebGLRenderingContext): void {
     const table = ctx._version === 2 ? CAP_KEYS_V2 : CAP_KEYS;
     const key = table[cap];
     if (key === undefined) {
+      // WEBGL_clip_cull_distance: CLIP_DISTANCE0..7 become legal caps.
+      if (ctx._extensions.has('WEBGL_clip_cull_distance') && cap >= 0x3000 && cap <= 0x3007) {
+        setClipDistanceEnabled(ctx, cap - 0x3000, true);
+        return;
+      }
       ctx._errors.push(C1.INVALID_ENUM);
       return;
     }
@@ -305,7 +347,10 @@ export function installStateApi(proto: WebGLRenderingContext): void {
     }
     if (target === C1.GENERATE_MIPMAP_HINT) {
       ctx._state.hints.generateMipmap = mode;
-    } else if (target === C2.FRAGMENT_SHADER_DERIVATIVE_HINT && ctx._version === 2) {
+    } else if (
+      target === C2.FRAGMENT_SHADER_DERIVATIVE_HINT &&
+      (ctx._version === 2 || ctx._extensions.has('OES_standard_derivatives'))
+    ) {
       ctx._state.hints.fragmentShaderDerivative = mode;
     } else {
       ctx._errors.push(C1.INVALID_ENUM);
@@ -318,6 +363,10 @@ export function installStateApi(proto: WebGLRenderingContext): void {
     const table = ctx._version === 2 ? CAP_KEYS_V2 : CAP_KEYS;
     const key = table[cap];
     if (key === undefined) {
+      // WEBGL_clip_cull_distance: CLIP_DISTANCE0..7 become legal caps.
+      if (ctx._extensions.has('WEBGL_clip_cull_distance') && cap >= 0x3000 && cap <= 0x3007) {
+        return isClipDistanceEnabled(ctx, cap - 0x3000);
+      }
       ctx._errors.push(C1.INVALID_ENUM);
       return false;
     }
