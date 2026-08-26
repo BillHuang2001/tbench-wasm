@@ -19,6 +19,7 @@
     "@types/node": "^22.15.3",
     "@types/sharp": "^0.32.0",
     "esbuild": "^0.25.6",
+    "pixelmatch": "^7.2.0",
     "playwright": "^1.52.0",
     "sharp": "^0.33.5",
     "tsx": "^4.21.0",
