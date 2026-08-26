@@ -1,0 +1,51 @@
+# tests/conformance/ — Khronos CTS Runner
+
+## Intent
+Headless-Chromium (Playwright) harness that executes the Khronos WebGL Conformance Test Suite against the software renderer bundle (`./renderer.js`, injected via `src/context-intercept.ts` — see `src/CONTEXT.md`). It is the PRIMARY verification gate: parse the official test lists with the official semantics, run every test page in parallel pages, collect per-test results in-process, and produce a JSON report. Fully functional independent of renderer progress (a missing/broken renderer makes every test fail fast with a clear `renderer not found` message).
+
+## API Surface — CLI
+`npx tsx tests/conformance/run.ts` (also `npm run test:conformance`):
+- `--suite webgl1|webgl2|all|deqp` — default `all` (= conformance + conformance2). `webgl1` passes `?webglVersion=1`; `webgl2`/`deqp` pass `?webglVersion=2`.
+- `--deqp` — append the optional deqp suite to the selected suites.
+- `--include-more` — append `conformance/more/` (53 tests) to webgl1/all (part of the official top-level manifest, not in the 2,071 gate).
+- `--filter <regex>` — run only tests whose path matches (no match → hard error).
+- `--workers <n>` (default 4), `--timeout <ms>` (default 60000, idle-based), `--smoke` (first 10 tests), `--report <path>` (default `tests/reports/conformance.json`), `--renderer <path>` (overrides `WEBGL_SOFTWARE_RENDERER`), `--cts <path>` (default `/testsuites/WebGL`, also `CTS_DIR`), `--host` (default `127.0.0.1`), `--port` (default 0 = auto).
+- Exit: 0 all pass; 1 any fail/timeout/error; 2 runner error. Count-assertion mismatch also exits 1/2 with a loud message.
+
+## Files
+- `list.ts` — faithful port of the official parser (`getFileList`/`getFileListImpl` from `sdk/tests/js/webgl-test-harness.js`) + `EXPECTED_COUNTS` + `assertSuiteCount`. Semantics: full-line comments only (`#`, `;`, `//` at col 0, lines ≤ 4 chars skipped); tokens split on `/\s+/`; `--slow` flag, `--min-version`/`--max-version` consume next token, unknown options throw; non-option tokens joined with a space = URL relative to the containing .txt; directives inherit into `.txt` subtrees as defaults (root default version "1.0"); leaves filtered by `compareVersion` (numeric dotted, "2.0.1 (beta)" → "2.0.1"); gated subtrees are recursed and leaves filtered individually. Filter version constant `DEFAULT_SUITE_VERSION = "2.0.1 (beta)"` (nothing is version-filtered at 2.0.1 in any graded list).
+- `server.ts` — no-cache static server (`Cache-Control: no-cache, no-store, must-revalidate` + `Pragma` + `Expires` on every response; MIME map incl. wasm), serving the CTS repo root so URLs are `/sdk/tests/<path>`. Binds BOTH `127.0.0.1` and `::1` on the same port (see cross-origin note).
+- `harness.ts` — `HARNESS_SHIM_SCRIPT` (in-page `window.webglTestHarness` with the only two methods tests use: `reportResults(url, success, msg[, skipped])`, `notifyFinished(url)`; aggregates counts in-page — required because deqp pages emit tens of millions of subtests) + `runTestPage()` driver (goto, 250ms poll of a serializable snapshot, activity-based timeout, `#description` "TEST COMPLETE: N PASS, M FAIL" DOM fallback, RENDERER_NOT_FOUND fast-fail, pageerror/console capture). **Gotcha:** pass a real function to `page.evaluate`, never a string — a string expression yielding a function serializes as `undefined`.
+- `runner.ts` — orchestration: parse+assert counts → queue (filter/smoke) → server → one browser, one context per worker, one page per test → results → JSON report + human summary. Worker pool via shared `nextIndex`; browser crash marks remaining tests `error`.
+- `run.ts` — CLI parsing and suite resolution.
+
+## Verified CTS facts (do not re-investigate; foreign repo is read-only)
+- **Counts at suite version 2.0.1 in the current tree (verified with a verbatim port of the official parser): conformance = 835, more = 53, conformance2 = 1184, deqp = 793.** The widely-quoted official "2,071 (887+1184)" figure is STALE for conformance — the tree yields 835+1184 = 2,019 (888 with more/). The runner asserts 835/53/1184/793 and fails loudly on drift; override via `CTS_EXPECTED_CONFORMANCE`/`CTS_EXPECTED_MORE`/`CTS_EXPECTED_CONFORMANCE2`/`CTS_EXPECTED_DEQP`. deqp has 885 .html on disk; the manifest excludes 92 (33 gles2-shader pages gated `--max-version 1.9.9`, 55 commented-out builtinprecision pages, 4 unlisted leftovers).
+- **Result reporting:** `js/js-test-pre.js` captures `window.parent.webglTestHarness` at load → shim must be injected via `addInitScript` BEFORE page scripts. Pages call only `reportResults(url, success, msg[, skipped])` (url = `location.pathname`; success may be undefined = timeout marker; 4th arg true = skipped, which does NOT fail a test) and `notifyFinished(url)`. `finishTest()` locates `js-test-post.js` relative to the js-test-pre.js script src; epilogue writes `TEST COMPLETE: N PASS, M FAIL` into `#description` (no skip count in that line) and calls notifyFinished.
+- **Version selection:** `?webglVersion=1|2` URL param is authoritative (`getUrlOptions().webglVersion`); path inference is only a fallback.
+- **Cross-origin (origin-clean tests):** the six origin-clean tests load the logo via `getLocalCrossOrigin()` = SAME port, loopback hostname flipped (`127.0.0.1` ↔ `localhost`), resolved relative to the page dir (e.g. `../../../resources/opengl_logo.jpg` → `/sdk/tests/resources/opengl_logo.jpg`). The `imgUrl` query override is only consulted when NOT running on localhost — dead for us. Hence the dual-loopback server binding; no second port is needed. Tests never close/navigate the window.
+- **Context creation:** `wtu.create3DContext` wraps `getContext` in try/catch and returns null on failure — a stub renderer makes tests complete quickly with failures (never hangs). The RENDERER_NOT_FOUND stub (missing renderer.js) also sets `document.title = 'RENDERER_NOT_FOUND'` → harness fast-fails with a clear message.
+- **Serving:** plain static HTTP suffices; the harness XHRs .txt with `overrideMimeType('text/plain')`.
+
+## Constraints
+- `/testsuites/WebGL` is strictly read-only — all lookups go through subagent_investigator.
+- Files ≤ ~1000 lines; results under `tests/reports/` (gitignored).
+- In-process result collection only (never DOM scraping at volume); no per-subtest page→Node shipping.
+- One browser instance; `--no-sandbox --disable-gpu --disable-dev-shm-usage` launch args (container-safe).
+
+## Test Strategy
+- `--smoke` (first 10 tests) validates plumbing end-to-end; works with the stub renderer (all fail fast with `renderer not found`/context-creation failures — expected).
+- Parse-count assertions are the parser regression gate.
+- Unit tests for parser/shim live in `../unit/` (see sibling note below).
+- Full runs: `npm run test:conformance` (all), `--suite webgl1|webgl2`, `--suite deqp` (long: 793 pages), `--include-more`.
+
+## Known Issues
+- 887-vs-835 count discrepancy (see above) — documented, do not "fix" the assertion to 887; the tree is the truth. If the parent's grading target stays 2,071, the runner's webgl1 suite yields 835 — reconcile via `CTS_EXPECTED_*` if the grader's tree differs.
+- Idle timeout is 60s; a legitimately slow single subtest that reports nothing for 60s will time out (same semantics as the official 20s watchdog, just more generous). Raise `--timeout` for deqp full runs if needed.
+- `success === undefined` (timeout marker) counts as a failure, mirroring js-test-pre.js truthiness semantics.
+
+## Routing Table
+- `../unit/` → vitest unit tests for src modules (sibling — read-only; escalations to `./tests`)
+- `../threejs/` → three.js visual regression driver (sibling — read-only)
+- `../babylon/` → Babylon.js visual regression driver (sibling — read-only)
+- Foreign (read-only): `/testsuites/WebGL/sdk/tests` → CTS source (parser `js/webgl-test-harness.js`, shim API `js/js-test-pre.js`, cross-origin `js/webgl-test-utils.js`)
