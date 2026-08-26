@@ -158,7 +158,7 @@ function typeIsIntFamily(type: number, k: number): boolean {
 /** uint setters accept uint scalars/vectors only. */
 function typeIsUintFamily(type: number, k: number): boolean {
   switch (type) {
-    case C2.UNSIGNED_INT:
+    case C1.UNSIGNED_INT:
       return k === 1;
     case C2.UNSIGNED_INT_VEC2:
       return k === 2;

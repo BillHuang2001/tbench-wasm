@@ -404,7 +404,7 @@ function isIntType(type: number): boolean {
   return type === C1.INT || type === C1.INT_VEC2 || type === C1.INT_VEC3 || type === C1.INT_VEC4;
 }
 function isUintType(type: number): boolean {
-  return type === C2.UNSIGNED_INT || type === C2.UNSIGNED_INT_VEC2 || type === C2.UNSIGNED_INT_VEC3 || type === C2.UNSIGNED_INT_VEC4;
+  return type === C1.UNSIGNED_INT || type === C2.UNSIGNED_INT_VEC2 || type === C2.UNSIGNED_INT_VEC3 || type === C2.UNSIGNED_INT_VEC4;
 }
 function isBoolType(type: number): boolean {
   return type === C1.BOOL || type === C1.BOOL_VEC2 || type === C1.BOOL_VEC3 || type === C1.BOOL_VEC4;
@@ -438,10 +438,10 @@ function readUniform(pm: GlslProgram, uniform: GlslProgram['uniforms'][number], 
   const slots = elementSlots(uniform);
   const read = (e: number, comp: number): number => readStoreValue(pm, uniform, e, comp, isUintType(uniform.type));
   const components = uniform.components;
-  if (uniform.type === C1.FLOAT || uniform.type === C1.INT || uniform.type === C2.UNSIGNED_INT) {
+  if (uniform.type === C1.FLOAT || uniform.type === C1.INT || uniform.type === C1.UNSIGNED_INT) {
     if (count === 1) {
       const v = read(elem, 0);
-      return uniform.type === C1.INT ? v : uniform.type === C2.UNSIGNED_INT ? v >>> 0 : v;
+      return uniform.type === C1.INT ? v : uniform.type === C1.UNSIGNED_INT ? v >>> 0 : v;
     }
     const out = uniform.type === C1.FLOAT ? new Float32Array(count) : uniform.type === C1.INT ? new Int32Array(count) : new Uint32Array(count);
     for (let e = 0; e < count; e++) out[e] = read(elem + e, 0);

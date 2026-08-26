@@ -759,7 +759,7 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_OPERATION);
         return null;
       }
-      if (attachment !== BACK && attachment !== C1.DEPTH && attachment !== C1.STENCIL) {
+      if (attachment !== BACK && attachment !== C2.DEPTH && attachment !== C2.STENCIL) {
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
       }
@@ -809,10 +809,10 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
         if (rec === null) return null;
         return rec.type === 'renderbuffer' ? rec.renderbuffer : rec.texture;
-      case C2.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+      case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
         if (rec === null) return 0;
         return rec.type === 'renderbuffer' ? 0 : rec.level;
-      case C2.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+      case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
         if (rec === null) return 0;
         return rec.type === 'renderbuffer' ? 0 : rec.face;
       case C2.FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
@@ -1286,8 +1286,8 @@ function defaultFbAttachmentParameter(ctx: WebGLRenderingContext, pname: GLenum)
       return FRAMEBUFFER_DEFAULT;
     case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
       return null;
-    case C2.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
-    case C2.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+    case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+    case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
     case C2.FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
       return 0;
     case C2.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
