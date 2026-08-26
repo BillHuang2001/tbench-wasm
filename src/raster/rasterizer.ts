@@ -24,11 +24,107 @@
  * addressing are documented on DrawCall in types.ts.
  */
 
-import type { DrawCall, RasterState } from './types';
+import type { DrawCall, FragmentExecCtx, RasterState, VaryingInterpolant } from './types';
+import {
+  POINTS, LINES, LINE_LOOP, LINE_STRIP, TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN,
+  FRONT, BACK, FRONT_AND_BACK, CW, CCW,
+} from './gl-enums';
+import { clipPrimitive, pointIsVisible, applyViewportTransform, MAX_CLIPPED_VERTICES } from './clip';
+import { rasterizeTriangle, signedArea2 } from './triangles';
+import { rasterizeLine } from './lines';
+import { rasterizePoint } from './points';
+import { createFragmentOps } from './fragment-ops';
+import { createTextureEnv } from './sampler';
+
+/**
+ * Additive DrawCall fields from the raster contract (fragment uniform store,
+ * uniform block stores, occlusion query counter) that are not (yet) declared
+ * on the DrawCall interface in types.ts. Raster only passes them through —
+ * intersect locally so this module compiles against the current types.
+ */
+type DrawCallExt = DrawCall & {
+  uniforms: Float32Array;
+  uniformBlocks?: Record<string, ArrayBufferView>;
+  sampleCountRef?: { value: number };
+};
 
 /** Rasterizes one draw call (contract §2 `rasterizer.draw`). */
 export function draw(dc: DrawCall): void {
-  throw new Error('not implemented: draw');
+  if (dc.rasterizerDiscard) return; // step 1: no fragments, no shader runs, nothing counted
+
+  const rs = createRasterState(dc);
+  const stride = dc.vertexStride;
+  const { first, count, instanceCount, mode } = dc;
+
+  // Per-draw scratch: one primitive buffer (3 records) + two clip buffers of
+  // MAX_CLIPPED_VERTICES records each (see clip.ts). Allocated once per draw.
+  const primBuf = new Float32Array(3 * stride);
+  const clipA = new Float32Array(MAX_CLIPPED_VERTICES * stride);
+  const clipB = new Float32Array(MAX_CLIPPED_VERTICES * stride);
+
+  // Flat-varying component ranges as [startFloat, componentCount] pairs, with
+  // startFloat an ABSOLUTE float index within the record.
+  const flatRanges: [number, number][] = [];
+  {
+    let off = dc.varyingsOffset;
+    for (const v of dc.program.varyings) {
+      if (v.flat) flatRanges.push([off, v.components]);
+      off += v.components;
+    }
+  }
+
+  // Instance i, vertex j (0-based within the draw) → record first + i*count + j.
+  for (let i = 0; i < instanceCount; i++) {
+    const runBase = first + i * count;
+    switch (mode) {
+      case POINTS:
+        for (let j = 0; j < count; j++) {
+          emitPoint(dc, rs, primBuf, stride, runBase + j);
+        }
+        break;
+      case LINES:
+        for (let j = 0; j + 1 < count; j += 2) {
+          emitLine(dc, rs, primBuf, clipA, clipB, stride, flatRanges, runBase + j, runBase + j + 1);
+        }
+        break;
+      case LINE_STRIP:
+        for (let j = 0; j + 1 < count; j++) {
+          emitLine(dc, rs, primBuf, clipA, clipB, stride, flatRanges, runBase + j, runBase + j + 1);
+        }
+        break;
+      case LINE_LOOP:
+        for (let j = 0; j + 1 < count; j++) {
+          emitLine(dc, rs, primBuf, clipA, clipB, stride, flatRanges, runBase + j, runBase + j + 1);
+        }
+        if (count >= 2) {
+          emitLine(dc, rs, primBuf, clipA, clipB, stride, flatRanges, runBase + count - 1, runBase);
+        }
+        break;
+      case TRIANGLES:
+        for (let j = 0; j + 2 < count; j += 3) {
+          emitTriangle(dc, rs, primBuf, clipA, clipB, stride, flatRanges,
+            runBase + j, runBase + j + 1, runBase + j + 2);
+        }
+        break;
+      case TRIANGLE_STRIP:
+        // The window-space signed area flips sign on odd triangles, so facing
+        // and culling work off the computed area — no parity bookkeeping.
+        for (let j = 0; j + 2 < count; j++) {
+          emitTriangle(dc, rs, primBuf, clipA, clipB, stride, flatRanges,
+            runBase + j, runBase + j + 1, runBase + j + 2);
+        }
+        break;
+      case TRIANGLE_FAN:
+        for (let j = 1; j + 1 < count; j++) {
+          emitTriangle(dc, rs, primBuf, clipA, clipB, stride, flatRanges,
+            runBase, runBase + j, runBase + j + 1);
+        }
+        break;
+      default:
+        // Unknown mode: nothing to draw (gl/ validates modes before drawing).
+        break;
+    }
+  }
 }
 
 /**
@@ -37,7 +133,56 @@ export function draw(dc: DrawCall): void {
  * Allocates once per draw call.
  */
 export function createRasterState(dc: DrawCall): RasterState {
-  throw new Error('not implemented: createRasterState');
+  const dcx = dc as DrawCallExt;
+
+  // Per-varying interpolant arrays (one Float32Array per varying; ddx/ddy only
+  // when the fragment shader uses derivatives).
+  const varyings = dc.program.varyings;
+  let totalVaryComponents = 0;
+  const fragVaryings: VaryingInterpolant[] = [];
+  for (let i = 0; i < varyings.length; i++) {
+    const c = varyings[i].components;
+    totalVaryComponents += c;
+    const interp: VaryingInterpolant = { v: new Float32Array(c) };
+    if (dc.program.fragment.usesDerivatives) {
+      interp.ddx = new Float32Array(c);
+      interp.ddy = new Float32Array(c);
+    }
+    fragVaryings.push(interp);
+  }
+
+  // One color scratch per output location (0..maxOutputLocation); codegen may
+  // index any location, so always allocate at least one.
+  let maxLocation = 0;
+  for (const out of dc.program.fragment.outputs) {
+    if (out.location > maxLocation) maxLocation = out.location;
+  }
+  const colorOuts: Float32Array[] = [];
+  for (let i = 0; i <= maxLocation; i++) colorOuts.push(new Float32Array(4));
+
+  const fragCtx: FragmentExecCtx = {
+    varyings: fragVaryings,
+    fragCoord: new Float32Array(4),
+    frontFacing: true, // driver sets it per primitive
+    pointCoord: new Float32Array(2),
+    uniforms: dcx.uniforms,
+    uniformBlocks: dcx.uniformBlocks,
+    tex: createTextureEnv(dc.textures),
+    out: { color: colorOuts, fragDepth: 0 },
+    discarded: false,
+  };
+
+  return {
+    dc,
+    fragCtx,
+    ops: createFragmentOps(dc),
+    totalVaryComponents,
+    frontFacing: true, // driver sets it per primitive
+    quadV: new Float32Array(4 * totalVaryComponents),
+    quadDepth: new Float32Array(4),
+    quadW: new Float32Array(4),
+    quadPointCoord: new Float32Array(8),
+  };
 }
 
 /** Copies the provoking vertex's flat-varying values into all vertices of a
@@ -46,5 +191,99 @@ export function applyFlatFixup(
   buf: Float32Array, base: number, count: number, stride: number,
   varyingsOffset: number, flatRanges: readonly (readonly [number, number])[],
 ): void {
-  throw new Error('not implemented: applyFlatFixup');
+  if (count <= 1) return; // single-vertex primitives have no other vertices
+  const last = base + (count - 1) * stride;
+  for (let r = 0; r < flatRanges.length; r++) {
+    const start = flatRanges[r][0];
+    const n = flatRanges[r][1];
+    for (let k = 0; k < count - 1; k++) {
+      const dst = base + k * stride + start;
+      const src = last + start;
+      for (let c = 0; c < n; c++) buf[dst + c] = buf[src + c];
+    }
+  }
+}
+
+/* ================================================================== */
+/* Internal per-primitive dispatch helpers                             */
+/* ================================================================== */
+
+/** Copies one vertex record (stride floats) between buffers, no allocation. */
+function copyRecord(
+  src: Float32Array, srcBase: number,
+  dst: Float32Array, dstBase: number, stride: number,
+): void {
+  for (let i = 0; i < stride; i++) dst[dstBase + i] = src[srcBase + i];
+}
+
+/** Assembles, flat-fixes, clips, transforms, culls and rasterizes one triangle. */
+function emitTriangle(
+  dc: DrawCall, rs: RasterState, primBuf: Float32Array,
+  clipA: Float32Array, clipB: Float32Array, stride: number,
+  flatRanges: readonly (readonly [number, number])[],
+  ia: number, ib: number, ic: number,
+): void {
+  const src = dc.vertices;
+  copyRecord(src, ia, primBuf, 0, stride);
+  copyRecord(src, ib, primBuf, stride, stride);
+  copyRecord(src, ic, primBuf, 2 * stride, stride);
+
+  applyFlatFixup(primBuf, 0, 3, stride, dc.varyingsOffset, flatRanges);
+
+  const nv = clipPrimitive(primBuf, 0, stride, 3, clipA, clipB, 0);
+  if (nv === 0) return;
+  applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange);
+
+  // Facing + culling in window space (after clipping AND viewport transform).
+  const area = signedArea2(clipB, 0, 1, 2, stride);
+  const frontFacing = (dc.cull.frontFace === CCW) ? area > 0 : area < 0;
+  if (dc.cull.enabled) {
+    const face = dc.cull.face;
+    if (face === FRONT_AND_BACK || (face === FRONT && frontFacing) || (face === BACK && !frontFacing)) {
+      return;
+    }
+  }
+  rs.frontFacing = frontFacing;
+
+  // Clip results are fan-able convex polygons (up to 7 vertices) — rasterize
+  // as a fan from vertex 0 (reduces to (0,1,2) for unclipped triangles).
+  for (let k = 1; k + 1 < nv; k++) {
+    rasterizeTriangle(clipB, 0, k, k + 1, stride, rs);
+  }
+}
+
+/** Assembles, flat-fixes, clips, transforms and rasterizes one line segment. */
+function emitLine(
+  dc: DrawCall, rs: RasterState, primBuf: Float32Array,
+  clipA: Float32Array, clipB: Float32Array, stride: number,
+  flatRanges: readonly (readonly [number, number])[],
+  ia: number, ib: number,
+): void {
+  const src = dc.vertices;
+  copyRecord(src, ia, primBuf, 0, stride);
+  copyRecord(src, ib, primBuf, stride, stride);
+
+  applyFlatFixup(primBuf, 0, 2, stride, dc.varyingsOffset, flatRanges);
+
+  const nv = clipPrimitive(primBuf, 0, stride, 2, clipA, clipB, 0);
+  if (nv === 0) return;
+  applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange);
+
+  rs.frontFacing = false; // undefined for lines
+  rasterizeLine(clipB, 0, 1, stride, rs);
+}
+
+/** Visibility-checks, transforms and rasterizes one point. */
+function emitPoint(
+  dc: DrawCall, rs: RasterState, primBuf: Float32Array,
+  stride: number, ia: number,
+): void {
+  copyRecord(dc.vertices, ia, primBuf, 0, stride);
+
+  // Points are not polygon-clipped; only the 6-plane visibility test applies.
+  if (!pointIsVisible(primBuf, 0, stride)) return;
+  applyViewportTransform(primBuf, 0, stride, 1, dc.viewport, dc.depthRange);
+
+  rs.frontFacing = false; // undefined for points
+  rasterizePoint(primBuf, 0, stride, rs);
 }
