@@ -22,6 +22,10 @@
  *    pnames) are INVALID_ENUM until the extension is enabled (retrieved via
  *    getExtension — matches the CTS "extension disabled" checks).
  *  - getParameter(EXTENSIONS) is illegal in WebGL (use getSupportedExtensions).
+ *  - String pnames (VENDOR/RENDERER/VERSION/SHADING_LANGUAGE_VERSION) return the
+ *    same strings as getString (api/context.ts) via the shared
+ *    `stringValueForPname` helper — CTS functions-returning-strings.html requires
+ *    non-null strings from getParameter for these.
  *  - Context lost → return null, no error pushed (spec: getters return null
  *    while the context is lost).
  *  - WebGL2 indexed pnames (UNIFORM_BUFFER_BINDING per index, TRANSFORM_FEEDBACK_BUFFER_*)
@@ -58,6 +62,12 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
   const lim = s.limits;
   const v2 = ctx._version === 2;
 
+  // String pnames (VENDOR/RENDERER/VERSION/SHADING_LANGUAGE_VERSION): same
+  // strings as getString. EXTENSIONS (0x1f03) is NOT legal via getParameter.
+  {
+    const str = stringValueForPname(ctx, pname);
+    if (str !== null) return str;
+  }
   // DRAW_BUFFER0..DRAW_BUFFER15: per-drawbuffer output. On WebGL2 always legal;
   // on WebGL1 legal once WEBGL_draw_buffers is enabled (same pname values
   // 0x8825..0x8834). The default framebuffer reports BACK (drawBuffers([BACK]))
@@ -566,5 +576,30 @@ function stencilBits(format: GLenum): number {
     case 0x88f0 /* DEPTH24_STENCIL8 */: return 8;
     case 0x8cad /* DEPTH32F_STENCIL8 */: return 8;
     default: return 8;
+  }
+}
+
+/**
+ * Single source of truth for the string-valued pnames shared by getString
+ * (api/context.ts) and getParameter. Returns null for every other pname —
+ * notably EXTENSIONS (0x1f03), which is only legal via getString (the WebGL
+ * spec does not allow getParameter(EXTENSIONS)).
+ */
+export function stringValueForPname(ctx: WebGLRenderingContext, pname: number): string | null {
+  switch (pname) {
+    case 0x1f02 /* VERSION */:
+      return ctx._version === 2
+        ? 'WebGL 2.0 (Software Renderer)'
+        : 'WebGL 1.0 (Software Renderer)';
+    case 0x8b8c /* SHADING_LANGUAGE_VERSION */:
+      return ctx._version === 2
+        ? 'WebGL GLSL ES 3.00 (Software)'
+        : 'WebGL GLSL ES 1.00 (Software)';
+    case 0x1f00 /* VENDOR */:
+      return 'Software Renderer';
+    case 0x1f01 /* RENDERER */:
+      return 'Software Renderer (JS)';
+    default:
+      return null;
   }
 }

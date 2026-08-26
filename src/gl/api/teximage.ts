@@ -196,16 +196,16 @@ function w1InternalformatValid(ctx: WebGLRenderingContext, fmt: GLenum): boolean
   switch (fmt) {
     case C1.DEPTH_COMPONENT:
     case C1.DEPTH_STENCIL:
-      return ctx.getExtension('WEBGL_depth_texture') !== null;
+      return ctx._extensions.has('WEBGL_depth_texture');
     case 0x881b:
     case 0x881a:
-      return ctx.getExtension('OES_texture_half_float') !== null;
+      return ctx._extensions.has('OES_texture_half_float');
     case 0x8815:
     case 0x8814:
-      return ctx.getExtension('OES_texture_float') !== null;
+      return ctx._extensions.has('OES_texture_float');
     case SRGB_EXT:
     case SRGB_ALPHA_EXT:
-      return ctx.getExtension('EXT_sRGB') !== null;
+      return ctx._extensions.has('EXT_sRGB');
     default:
       return false;
   }
@@ -214,22 +214,32 @@ function w1InternalformatValid(ctx: WebGLRenderingContext, fmt: GLenum): boolean
 function w1FormatValid(ctx: WebGLRenderingContext, fmt: GLenum): boolean {
   if (W1_FORMATS.includes(fmt)) return true;
   if (fmt === C1.DEPTH_COMPONENT || fmt === C1.DEPTH_STENCIL) {
-    return ctx.getExtension('WEBGL_depth_texture') !== null;
+    return ctx._extensions.has('WEBGL_depth_texture');
   }
   return false;
 }
 
+/**
+ * WebGL1 type legality. Extension-provided types (FLOAT, HALF_FLOAT_OES,
+ * depth-texture types) require the extension to be ENABLED — i.e.
+ * `getExtension(name)` must have been called — per WebGL 1.0 spec §4.2.1
+ * ("An attempt to use any features of an extension without first calling
+ * getExtension to enable it must generate an appropriate GL error").
+ * `ctx._extensions` is the enabled-extensions cache (populated by
+ * getExtensionObject); checking it here avoids the enabling side effect of
+ * calling getExtension() from validation code.
+ */
 function w1TypeValid(ctx: WebGLRenderingContext, type: GLenum): boolean {
   if (W1_TYPES.includes(type)) return true;
   switch (type) {
     case C1.FLOAT:
-      return ctx.getExtension('OES_texture_float') !== null;
+      return ctx._extensions.has('OES_texture_float');
     case HALF_FLOAT_OES:
-      return ctx.getExtension('OES_texture_half_float') !== null;
+      return ctx._extensions.has('OES_texture_half_float');
     case C1.UNSIGNED_INT:
     case C1.UNSIGNED_SHORT:
     case UNSIGNED_INT_24_8_WEBGL:
-      return ctx.getExtension('WEBGL_depth_texture') !== null;
+      return ctx._extensions.has('WEBGL_depth_texture');
     default:
       return false;
   }
@@ -291,7 +301,7 @@ function w1ValidateFormatType(
     ctx._errors.push(C1.INVALID_OPERATION);
     return false;
   }
-  if (!combo.types.includes(type)) {
+  if (!w1ComboAllowsType(ctx, internalformat, combo, type)) {
     ctx._errors.push(C1.INVALID_OPERATION);
     return false;
   }
@@ -309,6 +319,25 @@ function w1ValidateFormatType(
     }
   }
   return true;
+}
+
+/**
+ * WebGL1 (internalformat, type) combo legality: the static W1_COMBOS table
+ * plus the extension-gated additions — OES_texture_float adds FLOAT to
+ * RGBA/RGB (RGBA32F/RGB32F), OES_texture_half_float adds HALF_FLOAT_OES to
+ * RGBA/RGB (RGBA16F/RGB16F) — legal only while the extension is ENABLED.
+ */
+function w1ComboAllowsType(
+  ctx: WebGLRenderingContext,
+  internalformat: GLenum,
+  combo: { format: number; types: number[] },
+  type: GLenum,
+): boolean {
+  if (combo.types.includes(type)) return true;
+  if (internalformat !== C1.RGBA && internalformat !== C1.RGB) return false;
+  if (type === C1.FLOAT) return ctx._extensions.has('OES_texture_float');
+  if (type === HALF_FLOAT_OES) return ctx._extensions.has('OES_texture_half_float');
+  return false;
 }
 
 // ---------------------------------------------------------------------------

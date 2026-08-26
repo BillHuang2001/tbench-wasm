@@ -15,6 +15,9 @@
  * Texture parameter defaults follow the GL spec (MIN_FILTER=NEAREST_MIPMAP_LINEAR,
  * MAG_FILTER=LINEAR, WRAP_S/T/R=REPEAT, BASE_LEVEL=0, MAX_LEVEL=1000,
  * MIN/MAX_LOD=-1000/1000, COMPARE_MODE=NONE, COMPARE_FUNC=LEQUAL).
+ * NOTE: NEAREST_MIPMAP_LINEAR is 0x2702 in this codebase — the Khronos WebGL
+ * spec/CTS convention (constants.ts + raster/gl-enums.ts), which swaps the two
+ * 0x2701/0x2702 values relative to OpenGL ES.
  */
 
 import { WebGLObject } from './webgl-object';
@@ -55,7 +58,7 @@ export class WebGLTexture extends WebGLObject {
   _image: GLTextureImage | null = null;
   /** glTexParameter state (per-texture; overridden by WebGLSampler when bound). */
   _params: Record<string, number> = {
-    [0x2801]: 0x2700, // MIN_FILTER = NEAREST_MIPMAP_LINEAR
+    [0x2801]: 0x2702, // MIN_FILTER = NEAREST_MIPMAP_LINEAR (WebGL convention, see header)
     [0x2800]: 0x2601, // MAG_FILTER = LINEAR
     [0x2802]: 0x2901, // WRAP_S = REPEAT
     [0x2803]: 0x2901, // WRAP_T = REPEAT

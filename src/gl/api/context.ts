@@ -28,7 +28,7 @@
 
 import type { WebGLRenderingContext } from '../webgl1';
 import { getExtensionObject, getSupportedExtensionNames } from '../extensions';
-import { getParameter } from '../getters';
+import { getParameter, stringValueForPname } from '../getters';
 
 /** 0x0500 INVALID_ENUM / 0x0502 INVALID_OPERATION (constants.ts values). */
 const INVALID_ENUM = 0x0500;
@@ -84,19 +84,11 @@ export function installContextApi(proto: WebGLRenderingContext): void {
 
   proto.getString = function (this: WebGLRenderingContext, name: number) {
     if (this._isLost) return null; // spec: getters return null while lost
+    // VERSION / SHADING_LANGUAGE_VERSION / VENDOR / RENDERER share the strings
+    // with getParameter (single source of truth in getters.ts).
+    const str = stringValueForPname(this, name);
+    if (str !== null) return str;
     switch (name) {
-      case 0x1f02 /* VERSION */:
-        return this._version === 2
-          ? 'WebGL 2.0 (Software Renderer)'
-          : 'WebGL 1.0 (Software Renderer)';
-      case 0x8b8c /* SHADING_LANGUAGE_VERSION */:
-        return this._version === 2
-          ? 'WebGL GLSL ES 3.00 (Software)'
-          : 'WebGL GLSL ES 1.00 (Software)';
-      case 0x1f00 /* VENDOR */:
-        return 'Software Renderer';
-      case 0x1f01 /* RENDERER */:
-        return 'Software Renderer (JS)';
       case 0x1f03 /* EXTENSIONS */:
         return getSupportedExtensionNames(this._version).join(' ');
       default:
