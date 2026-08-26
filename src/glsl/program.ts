@@ -18,7 +18,7 @@
  * (raster/texture-sampler.ts, contract §3) — the import is type-only, erased
  * at compile time, so there is no runtime dependency cycle.
  */
-import type { TextureImage, SamplerState } from '../raster/texture-sampler';
+import type { TextureImage, SamplerState } from '../raster';
 
 /* ------------------------------------------------------------------ */
 /* Info types (linker output — introspection for the gl/ API surface)  */
