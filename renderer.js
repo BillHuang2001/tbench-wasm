@@ -3526,8 +3526,8 @@
       __publicField(this, "_image", null);
       /** glTexParameter state (per-texture; overridden by WebGLSampler when bound). */
       __publicField(this, "_params", {
-        [10241]: 9984,
-        // MIN_FILTER = NEAREST_MIPMAP_LINEAR
+        [10241]: 9986,
+        // MIN_FILTER = NEAREST_MIPMAP_LINEAR (WebGL convention, see header)
         [10240]: 9729,
         // MAG_FILTER = LINEAR
         [10242]: 10497,
@@ -4537,6 +4537,10 @@
     const s = ctx._state;
     const lim = s.limits;
     const v2 = ctx._version === 2;
+    {
+      const str = stringValueForPname(ctx, pname);
+      if (str !== null) return str;
+    }
     if (pname >= DRAW_BUFFER0 && pname <= DRAW_BUFFER15) {
       if (!v2 && !ctx._extensions.has("WEBGL_draw_buffers")) {
         ctx._errors.push(C.INVALID_ENUM);
@@ -5099,6 +5103,20 @@
         return 8;
     }
   }
+  function stringValueForPname(ctx, pname) {
+    switch (pname) {
+      case 7938:
+        return ctx._version === 2 ? "WebGL 2.0 (Software Renderer)" : "WebGL 1.0 (Software Renderer)";
+      case 35724:
+        return ctx._version === 2 ? "WebGL GLSL ES 3.00 (Software)" : "WebGL GLSL ES 1.00 (Software)";
+      case 7936:
+        return "Software Renderer";
+      case 7937:
+        return "Software Renderer (JS)";
+      default:
+        return null;
+    }
+  }
 
   // src/gl/api/context.ts
   var INVALID_ENUM = 1280;
@@ -5139,15 +5157,9 @@
     };
     proto.getString = function(name) {
       if (this._isLost) return null;
+      const str = stringValueForPname(this, name);
+      if (str !== null) return str;
       switch (name) {
-        case 7938:
-          return this._version === 2 ? "WebGL 2.0 (Software Renderer)" : "WebGL 1.0 (Software Renderer)";
-        case 35724:
-          return this._version === 2 ? "WebGL GLSL ES 3.00 (Software)" : "WebGL GLSL ES 1.00 (Software)";
-        case 7936:
-          return "Software Renderer";
-        case 7937:
-          return "Software Renderer (JS)";
         case 7939:
           return getSupportedExtensionNames(this._version).join(" ");
         default:
@@ -8026,16 +8038,16 @@
     switch (fmt) {
       case C1.DEPTH_COMPONENT:
       case C1.DEPTH_STENCIL:
-        return ctx.getExtension("WEBGL_depth_texture") !== null;
+        return ctx._extensions.has("WEBGL_depth_texture");
       case 34843:
       case 34842:
-        return ctx.getExtension("OES_texture_half_float") !== null;
+        return ctx._extensions.has("OES_texture_half_float");
       case 34837:
       case 34836:
-        return ctx.getExtension("OES_texture_float") !== null;
+        return ctx._extensions.has("OES_texture_float");
       case SRGB_EXT:
       case SRGB_ALPHA_EXT:
-        return ctx.getExtension("EXT_sRGB") !== null;
+        return ctx._extensions.has("EXT_sRGB");
       default:
         return false;
     }
@@ -8043,7 +8055,7 @@
   function w1FormatValid(ctx, fmt) {
     if (W1_FORMATS.includes(fmt)) return true;
     if (fmt === C1.DEPTH_COMPONENT || fmt === C1.DEPTH_STENCIL) {
-      return ctx.getExtension("WEBGL_depth_texture") !== null;
+      return ctx._extensions.has("WEBGL_depth_texture");
     }
     return false;
   }
@@ -8051,13 +8063,13 @@
     if (W1_TYPES.includes(type)) return true;
     switch (type) {
       case C1.FLOAT:
-        return ctx.getExtension("OES_texture_float") !== null;
+        return ctx._extensions.has("OES_texture_float");
       case HALF_FLOAT_OES:
-        return ctx.getExtension("OES_texture_half_float") !== null;
+        return ctx._extensions.has("OES_texture_half_float");
       case C1.UNSIGNED_INT:
       case C1.UNSIGNED_SHORT:
       case UNSIGNED_INT_24_8_WEBGL:
-        return ctx.getExtension("WEBGL_depth_texture") !== null;
+        return ctx._extensions.has("WEBGL_depth_texture");
       default:
         return false;
     }
@@ -8104,7 +8116,7 @@
       ctx._errors.push(C1.INVALID_OPERATION);
       return false;
     }
-    if (!combo.types.includes(type)) {
+    if (!w1ComboAllowsType(ctx, internalformat, combo, type)) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return false;
     }
@@ -8122,6 +8134,13 @@
       }
     }
     return true;
+  }
+  function w1ComboAllowsType(ctx, internalformat, combo, type) {
+    if (combo.types.includes(type)) return true;
+    if (internalformat !== C1.RGBA && internalformat !== C1.RGB) return false;
+    if (type === C1.FLOAT) return ctx._extensions.has("OES_texture_float");
+    if (type === HALF_FLOAT_OES) return ctx._extensions.has("OES_texture_half_float");
+    return false;
   }
   var W2_FORMATS = [
     C2.RED,
