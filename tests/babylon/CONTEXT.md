@@ -53,8 +53,6 @@ Curated default (16): file — Sponza, Windows cafe, Espilit, The car (`errorRat
 - `compare.ts` → screenshot comparison + reference-name sanitization
 - `pixelmatch.cjs` → vendored pixelmatch (playwright-core 1.59.1 copy, ISC) — do not edit; keep byte-identical to playwright-core
 - `pixelmatch.d.ts` → type declaration for the vendored pixelmatch copy
-- `pixelmatch.cjs` → vendored pixelmatch (playwright-core 1.59.1 copy, ISC) — do not edit; keep byte-identical to playwright-core
-- `pixelmatch.d.ts` → type declaration for the vendored pixelmatch copy
 - `server.ts` → static serving + `/cdn` proxy + disk cache
 - `empty.html` → page template (canvas + vendor UMD script order)
 - Foreign (read-only): `/testsuites/Babylon.js` → config.json, ReferenceImages, upstream harness reference
