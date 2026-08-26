@@ -26,6 +26,11 @@
  *    glsl/ codegen or raster/.
  */
 
+// Canonical IEEE 754 binary16 (half-float) conversions live in './misc'
+// (round-to-nearest-even, subnormals, ±Inf, NaN) — single source of truth for
+// packHalf2x16/unpackHalf2x16.
+import { toHalfFloat, fromHalfFloat } from './misc';
+
 // ---------------------------------------------------------------------------
 // Types & constructors
 // ---------------------------------------------------------------------------
@@ -980,52 +985,4 @@ function smoothstepNum(e0: number, e1: number, x: number): number {
 /** Sign-extends a 16-bit two's-complement value to a JS number. */
 function s16(v: number): number {
   return (v << 16) >> 16;
-}
-
-// Private IEEE 754 binary16 (half-float) conversion — mirrors of the './misc'
-// toHalfFloat/fromHalfFloat contracts (round-to-nearest-even, subnormals,
-// ±Inf, NaN), kept local so packHalf2x16/unpackHalf2x16 work independently.
-
-/** Converts a float32 value to its binary16 bit pattern (uint16). */
-function toHalfFloat(f: number): number {
-  const dv = new DataView(new ArrayBuffer(4));
-  dv.setFloat32(0, f);
-  const bits = dv.getUint32(0);
-  const sign = (bits >>> 16) & 0x8000;
-  const exp = (bits >>> 23) & 0xff;
-  const mant = bits & 0x7fffff;
-  if (exp === 0xff) return sign | 0x7c00 | (mant ? 0x200 | (mant >>> 13) : 0); // ±Inf / NaN
-  if (exp === 0) return sign; // ±0 or float32 subnormal (< 2^-126) → ±0
-  const halfExp = exp - 112; // exp - 127 + 15
-  if (halfExp >= 31) return sign | 0x7c00; // overflow → ±Inf (max finite 65504)
-  if (halfExp <= 0) {
-    // Half subnormal: value = m10 * 2^-24. q = f * 2^24 is exact (float32 is
-    // exact in double; power-of-two scaling); round q to nearest even.
-    const m10 = roundEvenNum(f * 16777216);
-    if (m10 >= 1024) return sign | 0x0400; // rounded up to min normal 2^-14
-    return m10 <= 0 ? sign : sign | m10;
-  }
-  // Normal half: 10 stored mantissa bits + 13 dropped, round-to-nearest-even.
-  const m10 = mant >> 13;
-  const dropped = mant & 0x1fff;
-  const hm = dropped > 0x1000 || (dropped === 0x1000 && (m10 & 1) === 1) ? m10 + 1 : m10;
-  return hm > 1023 ? sign | ((halfExp + 1) << 10) : sign | (halfExp << 10) | hm;
-}
-
-/** Converts a binary16 bit pattern (uint16) to a float32 value. Exact for finite values. */
-function fromHalfFloat(h: number): number {
-  const neg = (h & 0x8000) !== 0;
-  const exp = (h >>> 10) & 0x1f;
-  const mant = h & 0x3ff;
-  if (exp === 0) {
-    if (mant === 0) return neg ? -0 : 0; // ±0
-    const v = mant * 2 ** -24; // subnormal
-    return neg ? -v : v;
-  }
-  if (exp === 0x1f) {
-    if (mant === 0) return neg ? -Infinity : Infinity;
-    return NaN;
-  }
-  const v = (1 + mant / 1024) * 2 ** (exp - 15); // normal
-  return neg ? -v : v;
 }
