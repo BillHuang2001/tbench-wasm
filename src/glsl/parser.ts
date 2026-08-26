@@ -257,6 +257,9 @@ function parseInvariantDecl(p: Parser): ExternalDecl {
     return { kind: 'invariant-decl', name: nameT ? nameT.name : '', loc: locOf(start) };
   }
   const type = parseTypeSpec(p, { param: false, member: false });
+  // The leading 'invariant' was consumed above — re-attach it to the type
+  // spec (the qualifier form `invariant varying vec4 v;` must record it).
+  type.qualifiers.invariant = true;
   // `invariant <type> <name>(...)` — invariant on a function is invalid;
   // parse it anyway (semantics rejects) so recovery stays clean.
   const nameT = p.peek();
