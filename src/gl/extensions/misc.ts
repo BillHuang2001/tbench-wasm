@@ -2,11 +2,14 @@
  * src/gl/extensions/misc.ts — WEBGL_lose_context, WEBGL_debug_shaders,
  * EXT_clip_control, WEBGL_clip_cull_distance, WEBGL_multi_draw.
  *
- *  - WEBGL_lose_context: delegates to lifecycle.ts loseContext/restoreContext
- *    (the lifecycle agent owns event dispatch + state reset). While those are
- *    stubbed (parallel wave), a minimal inline fallback keeps the extension
- *    functional: lose → _isLost flag + resource invalidation; restore → clear
- *    the flag + error queue (full state reset arrives with the lifecycle agent).
+ *  - WEBGL_lose_context: implements the spec semantics inline. NOTE: a static
+ *    import of '../lifecycle' here creates a module cycle
+ *    (webgl1 → api → extensions → misc → lifecycle → webgl2 → webgl1) that
+ *    breaks evaluation (TDZ on WebGLRenderingContext); dynamic import would
+ *    break the esbuild IIFE bundle. So loseContext/restoreContext set the
+ *    context flag + invalidate resources here; when the lifecycle agent lands,
+ *    it should either route its lose/restore engine through these helpers or
+ *    switch this file to lifecycle.ts after the api-mixin wiring is reworked.
  *  - WEBGL_debug_shaders: getTranslatedShaderSource returns the shader's
  *    translated-source cache (set at compile time by the programs agent) — the
  *    CTS test requires '' before compilation, the source after, and the cached
@@ -28,7 +31,6 @@
 import type { WebGLRenderingContext } from '../webgl1';
 import { C1, CExt } from '../constants';
 import { WebGLShader } from '../objects';
-import { loseContext, restoreContext } from '../lifecycle';
 import { setClipControl } from './clip-state';
 import { buildExtension, isLost } from './util';
 
@@ -41,25 +43,17 @@ export function createWEBGLLoseContext(ctx: WebGLRenderingContext): object {
   return buildExtension({}, {
     loseContext: (): void => {
       const gl = ctx;
-      try {
-        loseContext(gl);
-      } catch {
-        // lifecycle stub (parallel agent) — minimal inline semantics.
-        gl._isLost = true;
-        gl._resources.invalidateAll();
-      }
+      // Spec: context lost → all resources invalidated, API calls no-ops.
+      gl._isLost = true;
+      gl._resources.invalidateAll();
     },
 
     restoreContext: (): void => {
       const gl = ctx;
-      try {
-        restoreContext(gl);
-      } catch {
-        // lifecycle stub — minimal inline semantics (state reset arrives with
-        // the lifecycle agent's restoreContext implementation).
-        gl._isLost = false;
-        gl._errors.clear();
-      }
+      // Spec: restore → state reset, error queue cleared (minimal engine; the
+      // lifecycle agent's restoreContext owns the full reset + events).
+      gl._isLost = false;
+      gl._errors.clear();
     },
   });
 }
