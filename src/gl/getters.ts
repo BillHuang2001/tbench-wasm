@@ -30,6 +30,7 @@
 
 import type { WebGLRenderingContext } from './webgl1';
 import type { GLenum } from './types';
+import type { WebGLTransformFeedback } from './objects';
 import { C } from './constants';
 import { resolveFramebufferTarget } from './framebuffer-util';
 import { getClipControl, isClipDistanceEnabled } from './extensions/clip-state';
@@ -183,10 +184,12 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
     // ---- WebGL2 booleans / misc ----
     case C.TRANSFORM_FEEDBACK_ACTIVE:
       if (!v2) break;
-      return s.transformFeedback ? s.transformFeedback._active : false;
-    case C.TRANSFORM_FEEDBACK_PAUSED:
+      return activeTransformFeedback(ctx) !== null;
+    case C.TRANSFORM_FEEDBACK_PAUSED: {
       if (!v2) break;
-      return s.transformFeedback ? s.transformFeedback._paused : false;
+      const tf = activeTransformFeedback(ctx);
+      return tf !== null && tf._paused;
+    }
     case C.TRANSFORM_FEEDBACK_BUFFER_MODE:
       if (!v2) break;
       return s.currentProgram && s.currentProgram._tfBufferMode !== 0
@@ -444,6 +447,25 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
   }
   ctx._errors.push(C.INVALID_ENUM);
   return null;
+}
+
+/**
+ * The transform feedback object that is currently ACTIVE (or null): the BOUND
+ * TF object when it is active. Mirrors api/webgl2.ts's private `activeTF` —
+ * begin/end/pause/resume there operate on the bound object, or on a module-
+ * private default TF (WeakMap) when none is bound (the default TF is kept OUT
+ * of state.transformFeedback so getParameter(TRANSFORM_FEEDBACK_BINDING) stays
+ * null per CTS). The default TF object is not reachable from this module
+ * (api/webgl2.ts does not export an accessor); the bound-object leg is
+ * authoritative for the CTS, which only checks the initial inactive state
+ * (conformance2/state/gl-get-calls.html TRANSFORM_FEEDBACK_ACTIVE/PAUSED false).
+ * TODO(integration): have api/webgl2.ts export `activeTF(ctx)` and use it here
+ * so a begun default TF reports active/paused too.
+ */
+function activeTransformFeedback(ctx: WebGLRenderingContext): WebGLTransformFeedback | null {
+  const bound = ctx._state.transformFeedback;
+  if (bound && bound._active) return bound;
+  return null; // default-TF leg — see comment above
 }
 
 // ---------------------------------------------------------------------------
