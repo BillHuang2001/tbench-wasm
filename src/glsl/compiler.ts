@@ -15,13 +15,18 @@
  * ("ERROR: 0:<line>: <message>"); `linkProgram` failures return a single
  * formatted log string (getProgramInfoLog).
  *
- * PHASE 1 STATUS: full type signatures + JSDoc are the contract; bodies are
- * stubs. The pipeline modules (preprocessor/lexer/parser/semantics/linker/
- * codegen) implement them in Phase 2.
+ * PHASE 2 STATUS: `compileShader` is implemented (preprocess → lexer → parse
+ * → semantics). `linkProgram` remains a stub: the linker + codegen pipeline
+ * (varying matching, attribute/uniform/block layout, std140, limits,
+ * transform feedback, JS codegen) is the next executor's work.
  */
 import type { TranslationUnit } from './ast.js';
 import type { GLSLType, Precision } from './types.js';
 import type { Program } from './program.js';
+import { preprocess } from './preprocessor.js';
+import { tokenize } from './lexer.js';
+import { parse } from './parser.js';
+import { analyze } from './semantics.js';
 
 /** Shader stage. */
 export type ShaderStage = 'VERTEX' | 'FRAGMENT';
@@ -61,6 +66,10 @@ export interface CompileError {
 export type CompileResult =
   | { ok: true; shader: Shader }
   | { ok: false; errors: CompileError[] };
+
+/** Maximum number of compile errors returned per stage (parser/semantics cap
+ * their internal collection at the same count). */
+const MAX_COMPILE_ERRORS = 20;
 
 /**
  * A compiled shader — the opaque handle gl/ stores (getShaderSource,
@@ -231,7 +240,26 @@ export type LinkResult = { ok: true; program: Program } | { ok: false; log: stri
  * Returns the annotated Shader on success or 1-based compile errors.
  */
 export function compileShader(source: string, opts: CompileOptions): CompileResult {
-  throw new Error('not implemented');
+  const pp = preprocess(source, { version: opts.version, defines: opts.defines, extensions: opts.extensions });
+  if (!pp.ok) return { ok: false, errors: pp.errors.slice(0, MAX_COMPILE_ERRORS) };
+  const lex = tokenize(pp.tokens, pp.version);
+  if (!lex.ok) return { ok: false, errors: lex.errors.slice(0, MAX_COMPILE_ERRORS) };
+  const parsed = parse(lex.tokens, { version: pp.version, extensionDirectives: pp.extensionDirectives });
+  if (!parsed.ok) return { ok: false, errors: parsed.errors.slice(0, MAX_COMPILE_ERRORS) };
+  const analyzed = analyze(parsed.ast, { type: opts.type, extensions: new Set(pp.extensions) });
+  if (!analyzed.ok) return { ok: false, errors: analyzed.errors };
+  return {
+    ok: true,
+    shader: {
+      type: opts.type,
+      version: parsed.ast.version,
+      source,
+      infoLog: '',
+      extensions: new Set(pp.extensions),
+      ast: parsed.ast,
+      info: analyzed.info,
+    },
+  };
 }
 
 /**
