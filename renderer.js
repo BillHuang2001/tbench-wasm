@@ -28,7 +28,21 @@
     NOTEQUAL: 517,
     GEQUAL: 518,
     ALWAYS: 519,
+    // ---- Stencil ops (stencilOp/stencilOpSeparate) ----
+    KEEP: 7680,
+    REPLACE: 7681,
+    INCR: 7682,
+    DECR: 7683,
+    INVERT: 5386,
+    INCR_WRAP: 34055,
+    DECR_WRAP: 34056,
     // ---- Blending factors / equations ----
+    ZERO: 0,
+    ONE: 1,
+    CONSTANT_COLOR: 32769,
+    ONE_MINUS_CONSTANT_COLOR: 32770,
+    CONSTANT_ALPHA: 32771,
+    ONE_MINUS_CONSTANT_ALPHA: 32772,
     SRC_COLOR: 768,
     ONE_MINUS_SRC_COLOR: 769,
     SRC_ALPHA: 770,
@@ -147,13 +161,14 @@
     INVALID_FRAMEBUFFER_OPERATION: 1286,
     CONTEXT_LOST_WEBGL: 37442,
     // ---- State values (getParameter pnames) ----
+    CURRENT_PROGRAM: 35725,
     COLOR_CLEAR_VALUE: 3106,
     DEPTH_CLEAR_VALUE: 2931,
     STENCIL_CLEAR_VALUE: 2961,
     COLOR_WRITEMASK: 3107,
     DEPTH_WRITEMASK: 2930,
     STENCIL_WRITEMASK: 2968,
-    STENCIL_BACK_WRITEMASK: 4064,
+    STENCIL_BACK_WRITEMASK: 36005,
     VIEWPORT: 2978,
     SCISSOR_BOX: 3088,
     LINE_WIDTH: 2849,
@@ -235,6 +250,16 @@
     ALPHA: 6406,
     RGB: 6407,
     RGBA: 6408,
+    // ---- Internal / renderbuffer formats ----
+    RGB8: 32849,
+    RGBA8: 32856,
+    RGBA4: 32854,
+    RGB5_A1: 32855,
+    RGB565: 36194,
+    DEPTH_COMPONENT16: 33189,
+    STENCIL_INDEX8: 36168,
+    DEPTH_STENCIL: 34041,
+    DEPTH_STENCIL_ATTACHMENT: 33306,
     // ---- Uniform types (getActiveAttrib/Uniform .type, getUniform) ----
     FLOAT_VEC2: 35664,
     FLOAT_VEC3: 35665,
@@ -251,6 +276,13 @@
     FLOAT_MAT4: 35676,
     SAMPLER_2D: 35678,
     SAMPLER_CUBE: 35680,
+    // ---- Shader precision formats (getShaderPrecisionFormat) ----
+    LOW_FLOAT: 36336,
+    MEDIUM_FLOAT: 36337,
+    HIGH_FLOAT: 36338,
+    LOW_INT: 36339,
+    MEDIUM_INT: 36340,
+    HIGH_INT: 36341,
     // ---- Shaders / programs ----
     VERTEX_SHADER: 35633,
     FRAGMENT_SHADER: 35632,
@@ -350,6 +382,7 @@
     DEPTH_STENCIL: 34041,
     UNSIGNED_INT_24_8: 34042,
     UNSIGNED_NORMALIZED: 35863,
+    SIGNED_NORMALIZED: 36764,
     DRAW_FRAMEBUFFER_BINDING: 36006,
     READ_FRAMEBUFFER: 36008,
     DRAW_FRAMEBUFFER: 36009,
@@ -393,6 +426,7 @@
     HALF_FLOAT: 5131,
     RG: 33319,
     RG_INTEGER: 33320,
+    RED_INTEGER: 36244,
     R8: 33321,
     RG8: 33323,
     R16F: 33325,
@@ -411,7 +445,7 @@
     RG16UI: 33338,
     RG32I: 33339,
     RG32UI: 33340,
-    RGBA_INTEGER: 36247,
+    RGBA_INTEGER: 36249,
     RGB_INTEGER: 36248,
     RGBA32I: 36226,
     RGB32I: 36227,
@@ -424,6 +458,7 @@
     RGB8_SNORM: 36758,
     RGBA8_SNORM: 36759,
     RGB10_A2UI: 36975,
+    SRGB: 35904,
     SRGB8: 35905,
     SRGB8_ALPHA8: 35907,
     COMPARE_REF_TO_TEXTURE: 34894,
@@ -444,6 +479,7 @@
     SAMPLER_2D_ARRAY: 36289,
     SAMPLER_2D_ARRAY_SHADOW: 36292,
     SAMPLER_CUBE_SHADOW: 36293,
+    SAMPLER_2D_SHADOW: 35682,
     SAMPLER_3D: 35679,
     INT_SAMPLER_2D: 36298,
     INT_SAMPLER_3D: 36299,
@@ -453,6 +489,10 @@
     UNSIGNED_INT_SAMPLER_3D: 36307,
     UNSIGNED_INT_SAMPLER_CUBE: 36308,
     UNSIGNED_INT_SAMPLER_2D_ARRAY: 36311,
+    // ---- Uniform types (WebGL2) ----
+    UNSIGNED_INT_VEC2: 36294,
+    UNSIGNED_INT_VEC3: 36295,
+    UNSIGNED_INT_VEC4: 36296,
     MAX_SERVER_WAIT_TIMEOUT: 37137,
     OBJECT_TYPE: 37138,
     SYNC_CONDITION: 37139,
@@ -468,6 +508,13 @@
     WAIT_FAILED: 37149,
     SYNC_FLUSH_COMMANDS_BIT: 1,
     MAX_CLIENT_WAIT_TIMEOUT_WEBGL: 37447,
+    // ---- Buffer usage (WebGL2) ----
+    STREAM_READ: 35041,
+    STREAM_COPY: 35042,
+    STATIC_READ: 35045,
+    STATIC_COPY: 35046,
+    DYNAMIC_READ: 35049,
+    DYNAMIC_COPY: 35050,
     UNIFORM_BUFFER: 35345,
     UNIFORM_BUFFER_BINDING: 35368,
     UNIFORM_BUFFER_START: 35369,
@@ -481,6 +528,7 @@
     MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS: 35379,
     UNIFORM_BUFFER_OFFSET_ALIGNMENT: 35380,
     ACTIVE_UNIFORM_BLOCKS: 35382,
+    INVALID_INDEX: 4294967295,
     UNIFORM_TYPE: 35383,
     UNIFORM_SIZE: 35384,
     UNIFORM_BLOCK_INDEX: 35386,
@@ -490,8 +538,8 @@
     UNIFORM_IS_ROW_MAJOR: 35390,
     UNIFORM_BLOCK_BINDING: 35391,
     UNIFORM_BLOCK_DATA_SIZE: 35392,
-    UNIFORM_BLOCK_ACTIVE_UNIFORMS: 35393,
-    UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES: 35394,
+    UNIFORM_BLOCK_ACTIVE_UNIFORMS: 35394,
+    UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES: 35395,
     UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER: 35396,
     UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER: 35398,
     TRANSFORM_FEEDBACK_VARYINGS: 35971,
@@ -576,6 +624,183 @@
     TEXTURE_IMMUTABLE_FORMAT: 37167,
     TEXTURE_IMMUTABLE_LEVELS: 33503
   };
+  var CExt = {
+    // OES_texture_half_float
+    HALF_FLOAT_OES: 36193,
+    // OES_standard_derivatives
+    FRAGMENT_SHADER_DERIVATIVE_HINT_OES: 35723,
+    // EXT_texture_filter_anisotropic
+    TEXTURE_MAX_ANISOTROPY_EXT: 34046,
+    MAX_TEXTURE_MAX_ANISOTROPY_EXT: 34047,
+    // EXT_blend_minmax
+    MIN_EXT: 32775,
+    MAX_EXT: 32776,
+    // EXT_sRGB
+    SRGB_EXT: 35904,
+    SRGB_ALPHA_EXT: 35906,
+    SRGB8_ALPHA8_EXT: 35907,
+    FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING_EXT: 33296,
+    // WEBGL_depth_texture
+    UNSIGNED_INT_24_8_WEBGL: 34042,
+    DEPTH_COMPONENT16: 33189,
+    DEPTH_COMPONENT24: 33190,
+    DEPTH_COMPONENT32F: 36012,
+    DEPTH24_STENCIL8: 35056,
+    DEPTH_STENCIL: 34041,
+    // WEBGL_draw_buffers
+    DRAW_BUFFER0_WEBGL: 34853,
+    DRAW_BUFFER1_WEBGL: 34854,
+    DRAW_BUFFER2_WEBGL: 34855,
+    DRAW_BUFFER3_WEBGL: 34856,
+    DRAW_BUFFER4_WEBGL: 34857,
+    DRAW_BUFFER5_WEBGL: 34858,
+    DRAW_BUFFER6_WEBGL: 34859,
+    DRAW_BUFFER7_WEBGL: 34860,
+    DRAW_BUFFER8_WEBGL: 34861,
+    DRAW_BUFFER9_WEBGL: 34862,
+    DRAW_BUFFER10_WEBGL: 34863,
+    DRAW_BUFFER11_WEBGL: 34864,
+    DRAW_BUFFER12_WEBGL: 34865,
+    DRAW_BUFFER13_WEBGL: 34866,
+    DRAW_BUFFER14_WEBGL: 34867,
+    DRAW_BUFFER15_WEBGL: 34868,
+    MAX_DRAW_BUFFERS_WEBGL: 34852,
+    MAX_COLOR_ATTACHMENTS_WEBGL: 36063,
+    COLOR_ATTACHMENT0_WEBGL: 36064,
+    COLOR_ATTACHMENT1_WEBGL: 36065,
+    COLOR_ATTACHMENT2_WEBGL: 36066,
+    COLOR_ATTACHMENT3_WEBGL: 36067,
+    COLOR_ATTACHMENT4_WEBGL: 36068,
+    COLOR_ATTACHMENT5_WEBGL: 36069,
+    COLOR_ATTACHMENT6_WEBGL: 36070,
+    COLOR_ATTACHMENT7_WEBGL: 36071,
+    COLOR_ATTACHMENT8_WEBGL: 36072,
+    COLOR_ATTACHMENT9_WEBGL: 36073,
+    COLOR_ATTACHMENT10_WEBGL: 36074,
+    COLOR_ATTACHMENT11_WEBGL: 36075,
+    COLOR_ATTACHMENT12_WEBGL: 36076,
+    COLOR_ATTACHMENT13_WEBGL: 36077,
+    COLOR_ATTACHMENT14_WEBGL: 36078,
+    COLOR_ATTACHMENT15_WEBGL: 36079,
+    // WEBGL_blend_func_extended
+    SRC1_COLOR_WEBGL: 35065,
+    SRC1_ALPHA_WEBGL: 34185,
+    ONE_MINUS_SRC1_COLOR_WEBGL: 35066,
+    ONE_MINUS_SRC1_ALPHA_WEBGL: 35067,
+    MAX_DUAL_SOURCE_DRAW_BUFFERS_WEBGL: 35068,
+    // WEBGL_debug_renderer_info
+    UNMASKED_VENDOR_WEBGL: 37445,
+    UNMASKED_RENDERER_WEBGL: 37446,
+    // ANGLE_instanced_arrays
+    VERTEX_ATTRIB_ARRAY_DIVISOR_ANGLE: 35070,
+    // OES_vertex_array_object
+    VERTEX_ARRAY_BINDING_OES: 34229,
+    // EXT_disjoint_timer_query / EXT_disjoint_timer_query_webgl2
+    QUERY_COUNTER_BITS_EXT: 34916,
+    CURRENT_QUERY_EXT: 34917,
+    QUERY_RESULT_EXT: 34918,
+    QUERY_RESULT_AVAILABLE_EXT: 34919,
+    TIME_ELAPSED_EXT: 35007,
+    TIMESTAMP_EXT: 36392,
+    GPU_DISJOINT_EXT: 36795,
+    // EXT_texture_norm16
+    R16_EXT: 33322,
+    RG16_EXT: 33324,
+    RGB16_EXT: 32852,
+    RGBA16_EXT: 32859,
+    R16_SNORM_EXT: 36760,
+    RG16_SNORM_EXT: 36761,
+    RGB16_SNORM_EXT: 36762,
+    RGBA16_SNORM_EXT: 36763,
+    // EXT_clip_control
+    CLIP_ORIGIN_EXT: 37724,
+    CLIP_DEPTH_MODE_EXT: 37725,
+    LOWER_LEFT_EXT: 36001,
+    UPPER_LEFT_EXT: 36002,
+    NEGATIVE_ONE_TO_ONE_EXT: 37726,
+    ZERO_TO_ONE_EXT: 37727,
+    // KHR_parallel_shader_compile
+    COMPLETION_STATUS_KHR: 37297,
+    // WEBGL_clip_cull_distance
+    MAX_CLIP_DISTANCES_WEBGL: 3378,
+    MAX_CULL_DISTANCES_WEBGL: 33529,
+    MAX_COMBINED_CLIP_AND_CULL_DISTANCES_WEBGL: 33530,
+    CLIP_DISTANCE0_WEBGL: 12288,
+    CLIP_DISTANCE1_WEBGL: 12289,
+    CLIP_DISTANCE2_WEBGL: 12290,
+    CLIP_DISTANCE3_WEBGL: 12291,
+    CLIP_DISTANCE4_WEBGL: 12292,
+    CLIP_DISTANCE5_WEBGL: 12293,
+    CLIP_DISTANCE6_WEBGL: 12294,
+    CLIP_DISTANCE7_WEBGL: 12295,
+    // WEBGL_compressed_texture_s3tc
+    COMPRESSED_RGB_S3TC_DXT1_EXT: 33776,
+    COMPRESSED_RGBA_S3TC_DXT1_EXT: 33777,
+    COMPRESSED_RGBA_S3TC_DXT3_EXT: 33778,
+    COMPRESSED_RGBA_S3TC_DXT5_EXT: 33779,
+    // WEBGL_compressed_texture_s3tc_srgb
+    COMPRESSED_SRGB_S3TC_DXT1_EXT: 35916,
+    COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT: 35917,
+    COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT: 35918,
+    COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT: 35919,
+    // WEBGL_compressed_texture_pvrtc
+    COMPRESSED_RGB_PVRTC_4BPPV1_IMG: 35840,
+    COMPRESSED_RGB_PVRTC_2BPPV1_IMG: 35841,
+    COMPRESSED_RGBA_PVRTC_4BPPV1_IMG: 35842,
+    COMPRESSED_RGBA_PVRTC_2BPPV1_IMG: 35843,
+    // WEBGL_compressed_texture_etc1
+    COMPRESSED_RGB_ETC1_WEBGL: 36196,
+    // WEBGL_compressed_texture_etc
+    COMPRESSED_R11_EAC: 37488,
+    COMPRESSED_SIGNED_R11_EAC: 37489,
+    COMPRESSED_RG11_EAC: 37490,
+    COMPRESSED_SIGNED_RG11_EAC: 37491,
+    COMPRESSED_RGB8_ETC2: 37492,
+    COMPRESSED_SRGB8_ETC2: 37493,
+    COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2: 37494,
+    COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2: 37495,
+    COMPRESSED_RGBA8_ETC2_EAC: 37496,
+    COMPRESSED_SRGB8_ALPHA8_ETC2_EAC: 37497,
+    // WEBGL_compressed_texture_astc (RGBA block sizes 4x4..12x12)
+    COMPRESSED_RGBA_ASTC_4x4_KHR: 37808,
+    COMPRESSED_RGBA_ASTC_5x4_KHR: 37809,
+    COMPRESSED_RGBA_ASTC_5x5_KHR: 37810,
+    COMPRESSED_RGBA_ASTC_6x5_KHR: 37811,
+    COMPRESSED_RGBA_ASTC_6x6_KHR: 37812,
+    COMPRESSED_RGBA_ASTC_8x5_KHR: 37813,
+    COMPRESSED_RGBA_ASTC_8x6_KHR: 37814,
+    COMPRESSED_RGBA_ASTC_8x8_KHR: 37815,
+    COMPRESSED_RGBA_ASTC_10x5_KHR: 37816,
+    COMPRESSED_RGBA_ASTC_10x6_KHR: 37817,
+    COMPRESSED_RGBA_ASTC_10x8_KHR: 37818,
+    COMPRESSED_RGBA_ASTC_10x10_KHR: 37819,
+    COMPRESSED_RGBA_ASTC_12x10_KHR: 37820,
+    COMPRESSED_RGBA_ASTC_12x12_KHR: 37821,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR: 37840,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_5x4_KHR: 37841,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_5x5_KHR: 37842,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_6x5_KHR: 37843,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_6x6_KHR: 37844,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_8x5_KHR: 37845,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_8x6_KHR: 37846,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_8x8_KHR: 37847,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_10x5_KHR: 37848,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_10x6_KHR: 37849,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR: 37850,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR: 37851,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR: 37852,
+    COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR: 37853,
+    // EXT_texture_compression_bptc
+    COMPRESSED_RGBA_BPTC_UNORM_EXT: 36492,
+    COMPRESSED_SRGB_ALPHA_BPTC_UNORM_EXT: 36493,
+    COMPRESSED_RGB_BPTC_SIGNED_FLOAT_EXT: 36494,
+    COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT_EXT: 36495,
+    // EXT_texture_compression_rgtc
+    COMPRESSED_RED_RGTC1_EXT: 36283,
+    COMPRESSED_SIGNED_RED_RGTC1_EXT: 36284,
+    COMPRESSED_RED_GREEN_RGTC2_EXT: 36285,
+    COMPRESSED_SIGNED_RED_GREEN_RGTC2_EXT: 36286
+  };
   var C = {
     ...C1,
     ...C2
@@ -647,8 +872,8 @@
       MAX_VERTEX_UNIFORM_BLOCKS: 12,
       MAX_FRAGMENT_UNIFORM_BLOCKS: 12,
       MAX_COMBINED_UNIFORM_BLOCKS: 36,
-      MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS: 65536,
-      MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS: 65536,
+      MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS: 262144,
+      MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS: 262144,
       UNIFORM_BUFFER_OFFSET_ALIGNMENT: 256,
       MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS: 4,
       MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS: 4,
@@ -797,6 +1022,2748 @@
     };
   }
 
+  // src/gl/extensions/util.ts
+  function isLost(ctx) {
+    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
+    return ctx._isLost;
+  }
+  function ctorOf(cls) {
+    return cls;
+  }
+  function buildExtension(constants, methods) {
+    const obj = {};
+    installConstants(obj, constants);
+    if (methods) {
+      for (const key of Object.keys(methods)) obj[key] = methods[key];
+    }
+    return obj;
+  }
+
+  // src/gl/extensions/core-webgl1.ts
+  function createOESTextureFloat(ctx) {
+    void ctx;
+    return buildExtension({});
+  }
+  function createOESTextureHalfFloat(ctx) {
+    void ctx;
+    return buildExtension({ HALF_FLOAT_OES: CExt.HALF_FLOAT_OES });
+  }
+  function createOESTextureFloatLinear(ctx) {
+    void ctx;
+    return buildExtension({});
+  }
+  function createOESTextureHalfFloatLinear(ctx) {
+    void ctx;
+    return buildExtension({});
+  }
+  function createOESElementIndexUint(ctx) {
+    void ctx;
+    return buildExtension({});
+  }
+  function createOESStandardDerivatives(ctx) {
+    void ctx;
+    return buildExtension({ FRAGMENT_SHADER_DERIVATIVE_HINT_OES: CExt.FRAGMENT_SHADER_DERIVATIVE_HINT_OES });
+  }
+  function createOESFboRenderMipmap(ctx) {
+    void ctx;
+    return buildExtension({});
+  }
+  function createEXTFragDepth(ctx) {
+    void ctx;
+    return buildExtension({});
+  }
+  function createEXTShaderTextureLod(ctx) {
+    void ctx;
+    return buildExtension({});
+  }
+  function createEXTSRGB(ctx) {
+    void ctx;
+    return buildExtension({
+      SRGB_EXT: CExt.SRGB_EXT,
+      SRGB_ALPHA_EXT: CExt.SRGB_ALPHA_EXT,
+      SRGB8_ALPHA8_EXT: CExt.SRGB8_ALPHA8_EXT,
+      FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING_EXT: CExt.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING_EXT
+    });
+  }
+  function createEXTBlendMinmax(ctx) {
+    void ctx;
+    return buildExtension({ MIN_EXT: CExt.MIN_EXT, MAX_EXT: CExt.MAX_EXT });
+  }
+  function createEXTTextureFilterAnisotropic(ctx) {
+    void ctx;
+    return buildExtension({
+      TEXTURE_MAX_ANISOTROPY_EXT: CExt.TEXTURE_MAX_ANISOTROPY_EXT,
+      MAX_TEXTURE_MAX_ANISOTROPY_EXT: CExt.MAX_TEXTURE_MAX_ANISOTROPY_EXT
+    });
+  }
+  function createWEBGLDepthTexture(ctx) {
+    void ctx;
+    return buildExtension({
+      UNSIGNED_INT_24_8_WEBGL: CExt.UNSIGNED_INT_24_8_WEBGL,
+      DEPTH_COMPONENT16: CExt.DEPTH_COMPONENT16,
+      DEPTH_COMPONENT24: CExt.DEPTH_COMPONENT24,
+      DEPTH_COMPONENT32F: CExt.DEPTH_COMPONENT32F,
+      DEPTH24_STENCIL8: CExt.DEPTH24_STENCIL8,
+      DEPTH_STENCIL: CExt.DEPTH_STENCIL
+    });
+  }
+  function createWEBGLBlendFuncExtended(ctx) {
+    void ctx;
+    return buildExtension({
+      SRC1_COLOR_WEBGL: CExt.SRC1_COLOR_WEBGL,
+      SRC1_ALPHA_WEBGL: CExt.SRC1_ALPHA_WEBGL,
+      ONE_MINUS_SRC1_COLOR_WEBGL: CExt.ONE_MINUS_SRC1_COLOR_WEBGL,
+      ONE_MINUS_SRC1_ALPHA_WEBGL: CExt.ONE_MINUS_SRC1_ALPHA_WEBGL,
+      MAX_DUAL_SOURCE_DRAW_BUFFERS_WEBGL: CExt.MAX_DUAL_SOURCE_DRAW_BUFFERS_WEBGL
+    });
+  }
+  function createWEBGLDebugRendererInfo(ctx) {
+    void ctx;
+    return buildExtension({
+      UNMASKED_VENDOR_WEBGL: CExt.UNMASKED_VENDOR_WEBGL,
+      UNMASKED_RENDERER_WEBGL: CExt.UNMASKED_RENDERER_WEBGL
+    });
+  }
+
+  // src/raster/rasterizer.ts
+  function draw(dc) {
+    throw new Error("not implemented: draw");
+  }
+
+  // src/raster/types.ts
+  var RECORD_HEADER_FLOATS = 5;
+  function computeVertexStride(varyings) {
+    let n = RECORD_HEADER_FLOATS;
+    for (let i = 0; i < varyings.length; i++) n += varyings[i].components;
+    return n;
+  }
+  var ALIASED_POINT_SIZE_RANGE = [1, 1024];
+  var ALIASED_LINE_WIDTH_RANGE = [1, 1];
+
+  // src/raster/gl-enums.ts
+  var RGBA8 = 32856;
+  var DEPTH_COMPONENT16 = 33189;
+  var DEPTH_COMPONENT24 = 33190;
+  var STENCIL_INDEX8 = 36168;
+
+  // src/raster/formats.ts
+  var FORMATS = /* @__PURE__ */ new Map();
+  function getFormat(format) {
+    var _a2;
+    return (_a2 = FORMATS.get(format)) != null ? _a2 : null;
+  }
+  function getPackConverter(internalFormat, packFormat, packType) {
+    throw new Error("not implemented: getPackConverter");
+  }
+  var _f32 = new Float32Array(1);
+  var _u32 = new Uint32Array(_f32.buffer);
+  var _halfScratch = new DataView(new ArrayBuffer(4));
+  function halfToFloat(h) {
+    const s = h & 32768 ? -1 : 1;
+    const e = h >> 10 & 31;
+    const m = h & 1023;
+    if (e === 0) return m === 0 ? s * 0 : s * (m / 1024) * 2 ** -14;
+    if (e === 31) return m === 0 ? s * Infinity : NaN;
+    return s * (1 + m / 1024) * 2 ** (e - 15);
+  }
+
+  // src/raster/surface.ts
+  function createSurface(format, width, height) {
+    throw new Error("not implemented: createSurface");
+  }
+
+  // src/raster/fragment-ops.ts
+  function clearColorSurface(s, r, g2, b, a, scissor, mask) {
+    throw new Error("not implemented: clearColorSurface");
+  }
+  function clearDepthSurface(s, depth, scissor, depthMask) {
+    throw new Error("not implemented: clearDepthSurface");
+  }
+  function clearStencilSurface(s, value, scissor, writeMask) {
+    throw new Error("not implemented: clearStencilSurface");
+  }
+  function blitColorSurface(src, dst, srcX, srcY, srcW, srcH, dstX, dstY, dstW, dstH, filter) {
+    throw new Error("not implemented: blitColorSurface");
+  }
+  function blitDepthStencilSurface(src, dst, srcX, srcY, srcW, srcH, dstX, dstY, dstW, dstH) {
+    throw new Error("not implemented: blitDepthStencilSurface");
+  }
+
+  // src/gl/framebuffer-util.ts
+  var FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER = 36059;
+  var COLOR_ATTACHMENT0 = 36064;
+  var DEPTH_ATTACHMENT = 36096;
+  var STENCIL_ATTACHMENT = 36128;
+  var DEPTH_STENCIL_ATTACHMENT = 33306;
+  var NONE = 0;
+  var CUBE_POSITIVE_X = 34069;
+  var CUBE_NEGATIVE_Z = 34074;
+  var W1_COLOR_RENDERABLE = /* @__PURE__ */ new Set([
+    32854,
+    36194,
+    32855,
+    32856,
+    32849,
+    6408,
+    6407,
+    6409,
+    6410,
+    6406,
+    35907,
+    34842
+  ]);
+  var W2_COLOR_RENDERABLE_CORE = /* @__PURE__ */ new Set([
+    32854,
+    36194,
+    32855,
+    32856,
+    32857,
+    36975,
+    35907,
+    33321,
+    33329,
+    33330,
+    33331,
+    33332,
+    33333,
+    33334,
+    33323,
+    33335,
+    33336,
+    33337,
+    33338,
+    33339,
+    33340,
+    36234,
+    36220,
+    36232,
+    36214,
+    36226,
+    36208,
+    // GLES3 RGB integer formats (WebGL2 only removes RGB8 among unorm formats)
+    36235,
+    36221,
+    36233,
+    36215,
+    36227,
+    36209
+  ]);
+  var W2_COLOR_RENDERABLE_EXT_FLOAT = /* @__PURE__ */ new Set([
+    33325,
+    33327,
+    34842,
+    33326,
+    33328,
+    34836,
+    35898
+  ]);
+  var W2_COLOR_RENDERABLE_EXT_NORM16 = /* @__PURE__ */ new Set([
+    33322,
+    33324,
+    32859
+  ]);
+  var W1_DEPTH_RENDERABLE = /* @__PURE__ */ new Set([
+    33189,
+    6402
+  ]);
+  var W1_STENCIL_RENDERABLE = /* @__PURE__ */ new Set([
+    36168
+    /* STENCIL_INDEX8 */
+  ]);
+  var W1_DS_RENDERABLE = /* @__PURE__ */ new Set([
+    34041,
+    35056
+  ]);
+  var W2_DEPTH_RENDERABLE = /* @__PURE__ */ new Set([
+    33189,
+    33190,
+    36012,
+    35056,
+    36013,
+    34041
+  ]);
+  var W2_STENCIL_RENDERABLE = /* @__PURE__ */ new Set([
+    36168,
+    35056,
+    36013,
+    34041
+  ]);
+  function hasExtension(ctx, name) {
+    return getExtensionObject(ctx, name) !== null;
+  }
+  function cubeFaceIndex(face) {
+    return face - CUBE_POSITIVE_X;
+  }
+  function isCubeFace(face) {
+    return face >= CUBE_POSITIVE_X && face <= CUBE_NEGATIVE_Z;
+  }
+  function sameImage(a, b) {
+    if (a.type === "renderbuffer" && b.type === "renderbuffer") {
+      return a.renderbuffer === b.renderbuffer;
+    }
+    if (a.type === "texture" && b.type === "texture") {
+      return a.texture === b.texture && a.level === b.level && a.face === b.face && a.layer === b.layer;
+    }
+    return false;
+  }
+  function attachmentSamples(ctx, entry) {
+    if (entry.type === "renderbuffer") return entry.renderbuffer._samples;
+    return ctx._version === 2 && hasExtension(ctx, "WEBGL_multisampled_render_to_texture") ? entry.texture._msaaSamples : 0;
+  }
+  function attachmentDims(entry) {
+    if (entry.type === "renderbuffer") {
+      const surf = entry.renderbuffer._surface;
+      return surf ? { width: surf.width, height: surf.height } : null;
+    }
+    const image = entry.texture._image;
+    if (!image) return null;
+    const lvl = image.levels[entry.level];
+    return lvl ? { width: lvl.width, height: lvl.height } : null;
+  }
+  function isLayeredAttachment(_entry) {
+    return false;
+  }
+  function isColorRenderable(ctx, format) {
+    if (ctx._version === 2) {
+      if (W2_COLOR_RENDERABLE_CORE.has(format)) return true;
+      if (W2_COLOR_RENDERABLE_EXT_FLOAT.has(format)) {
+        return hasExtension(ctx, "EXT_color_buffer_float") || format === 34842 && hasExtension(ctx, "EXT_color_buffer_half_float");
+      }
+      if (W2_COLOR_RENDERABLE_EXT_NORM16.has(format)) return hasExtension(ctx, "EXT_texture_norm16");
+      if (format === 35901) return hasExtension(ctx, "WEBGL_render_shared_exponent");
+      return false;
+    }
+    if (!W1_COLOR_RENDERABLE.has(format)) return false;
+    switch (format) {
+      case 35907:
+        return hasExtension(ctx, "EXT_sRGB");
+      case 34842:
+        return hasExtension(ctx, "EXT_color_buffer_half_float");
+      default:
+        return true;
+    }
+  }
+  function isDepthRenderable(ctx, format) {
+    return ctx._version === 2 ? W2_DEPTH_RENDERABLE.has(format) : W1_DEPTH_RENDERABLE.has(format);
+  }
+  function isStencilRenderable(ctx, format) {
+    return ctx._version === 2 ? W2_STENCIL_RENDERABLE.has(format) : W1_STENCIL_RENDERABLE.has(format);
+  }
+  function isDepthStencilRenderable(ctx, format) {
+    return ctx._version === 2 ? isDepthRenderable(ctx, format) && isStencilRenderable(ctx, format) : W1_DS_RENDERABLE.has(format);
+  }
+  function resolveAttachmentSurface(entry) {
+    var _a2;
+    if (entry.type === "renderbuffer") {
+      return entry.renderbuffer._surface;
+    }
+    const tex = entry.texture;
+    const image = tex._image;
+    if (!image || entry.level < 0) return null;
+    const lvl = image.levels[entry.level];
+    if (!lvl) return null;
+    const faceIndex = isCubeFace(entry.face) ? cubeFaceIndex(entry.face) : 0;
+    const data = lvl.data[faceIndex];
+    if (!data) return null;
+    const info = (_a2 = image.info) != null ? _a2 : getFormat(image.internalFormat);
+    if (!info) return null;
+    return {
+      width: lvl.width,
+      height: lvl.height,
+      format: image.internalFormat,
+      info,
+      data,
+      stencilData: lvl.stencilData
+    };
+  }
+  function resolveFramebufferTarget(ctx) {
+    var _a2, _b;
+    const s = ctx._state;
+    const fbo = s.drawFramebuffer;
+    if (fbo === null) {
+      const dfb = ctx._defaultFB;
+      if (!dfb) return null;
+      return { color: [dfb.color], depth: dfb.depth, stencil: dfb.stencil, width: dfb.width, height: dfb.height, samples: 1 };
+    }
+    if (checkFramebufferStatus(ctx, fbo) !== C1.FRAMEBUFFER_COMPLETE) return null;
+    const maxColor = s.limits.MAX_COLOR_ATTACHMENTS;
+    const color = new Array(maxColor).fill(null);
+    let width = 0;
+    let height = 0;
+    let samples = 0;
+    let hasAttach = false;
+    const consider = (surf) => {
+      if (!surf) return;
+      if (!hasAttach) {
+        width = surf.width;
+        height = surf.height;
+        hasAttach = true;
+      }
+    };
+    for (let i = 0; i < maxColor; i++) {
+      const surf = getAttachmentSurface(fbo, COLOR_ATTACHMENT0 + i);
+      color[i] = surf;
+      consider(surf);
+    }
+    const depthEntry = (_a2 = fbo._attachments.get(DEPTH_ATTACHMENT)) != null ? _a2 : fbo._attachments.get(DEPTH_STENCIL_ATTACHMENT);
+    const stencilEntry = (_b = fbo._attachments.get(STENCIL_ATTACHMENT)) != null ? _b : fbo._attachments.get(DEPTH_STENCIL_ATTACHMENT);
+    const depth = depthEntry ? resolveAttachmentSurface(depthEntry) : null;
+    const stencil = stencilEntry ? resolveAttachmentSurface(stencilEntry) : null;
+    consider(depth);
+    consider(stencil);
+    const allEntries = [];
+    for (let i = 0; i < maxColor; i++) {
+      const e = fbo._attachments.get(COLOR_ATTACHMENT0 + i);
+      if (e) allEntries.push(e);
+    }
+    if (depthEntry) allEntries.push(depthEntry);
+    if (stencilEntry && stencilEntry !== depthEntry) allEntries.push(stencilEntry);
+    if (allEntries.length > 0) samples = attachmentSamples(ctx, allEntries[0]);
+    return { color, depth, stencil, width, height, samples };
+  }
+  function resolveReadSurface(ctx) {
+    const s = ctx._state;
+    if (s.readFramebuffer === null) {
+      return ctx._defaultFB ? ctx._defaultFB.color : null;
+    }
+    const rb = s.readBuffer;
+    if (rb === NONE) return null;
+    const idx = rb - COLOR_ATTACHMENT0;
+    if (idx < 0 || idx >= s.limits.MAX_COLOR_ATTACHMENTS) return null;
+    return getAttachmentSurface(s.readFramebuffer, rb);
+  }
+  function checkFramebufferStatus(ctx, fbo) {
+    if (fbo === null) return C1.FRAMEBUFFER_COMPLETE;
+    const version = ctx._version;
+    const maxColor = ctx._state.limits.MAX_COLOR_ATTACHMENTS;
+    const att = fbo._attachments;
+    const colorEntries = [];
+    let depthEntry;
+    let stencilEntry;
+    let dsEntry;
+    let count = 0;
+    for (const [point, entry] of att) {
+      if (!entry) continue;
+      if (point >= COLOR_ATTACHMENT0 && point < COLOR_ATTACHMENT0 + maxColor) {
+        colorEntries.push({ idx: point - COLOR_ATTACHMENT0, entry });
+        count++;
+      } else if (point === DEPTH_ATTACHMENT) {
+        depthEntry = entry;
+        count++;
+      } else if (point === STENCIL_ATTACHMENT) {
+        stencilEntry = entry;
+        count++;
+      } else if (point === DEPTH_STENCIL_ATTACHMENT) {
+        dsEntry = entry;
+        count++;
+      }
+    }
+    if (count === 0) return C1.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+    let samples = -1;
+    const sampleEntries = [];
+    for (const { entry } of colorEntries) sampleEntries.push(entry);
+    if (depthEntry) sampleEntries.push(depthEntry);
+    if (stencilEntry) sampleEntries.push(stencilEntry);
+    if (dsEntry && version === 1) sampleEntries.push(dsEntry);
+    for (const entry of sampleEntries) {
+      const s = attachmentSamples(ctx, entry);
+      if (samples === -1) samples = s;
+      else if (samples !== s) return C2.FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
+    }
+    if (version === 1) {
+      if (depthEntry && dsEntry || stencilEntry && dsEntry || depthEntry && stencilEntry) {
+        return C1.FRAMEBUFFER_UNSUPPORTED;
+      }
+    }
+    const drawBuffersAvail = version === 2 || hasExtension(ctx, "WEBGL_draw_buffers");
+    if (colorEntries.length > 1 && drawBuffersAvail) {
+      for (let i = 0; i < colorEntries.length; i++) {
+        for (let j = i + 1; j < colorEntries.length; j++) {
+          if (sameImage(colorEntries[i].entry, colorEntries[j].entry)) {
+            return C1.FRAMEBUFFER_UNSUPPORTED;
+          }
+        }
+      }
+    }
+    const depth = depthEntry != null ? depthEntry : dsEntry;
+    const stencil = stencilEntry != null ? stencilEntry : dsEntry;
+    if (depth && stencil && !sameImage(depth, stencil)) {
+      return C1.FRAMEBUFFER_UNSUPPORTED;
+    }
+    let dims = null;
+    const dimEntries = [];
+    for (const { entry } of colorEntries) dimEntries.push(entry);
+    if (depthEntry) dimEntries.push(depthEntry);
+    if (stencilEntry) dimEntries.push(stencilEntry);
+    if (dsEntry && version === 1) dimEntries.push(dsEntry);
+    for (const entry of dimEntries) {
+      const d = attachmentDims(entry);
+      if (!d) continue;
+      if (dims === null) dims = d;
+      else if (dims.width !== d.width || dims.height !== d.height) {
+        return C1.FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
+      }
+    }
+    for (const { entry } of colorEntries) {
+      const st = checkAttachment(ctx, entry, "color");
+      if (st !== null) return st;
+    }
+    if (version === 1) {
+      if (depthEntry) {
+        const st = checkAttachment(ctx, depthEntry, "depth");
+        if (st !== null) return st;
+      }
+      if (stencilEntry) {
+        const st = checkAttachment(ctx, stencilEntry, "stencil");
+        if (st !== null) return st;
+      }
+      if (dsEntry) {
+        const st = checkAttachment(ctx, dsEntry, "depthStencil");
+        if (st !== null) return st;
+      }
+    } else {
+      if (depth) {
+        const st = checkAttachment(ctx, depth, "depth");
+        if (st !== null) return st;
+      }
+      if (stencil && stencil !== depth) {
+        const st = checkAttachment(ctx, stencil, "stencil");
+        if (st !== null) return st;
+      }
+    }
+    if (colorEntries.length > 0 && drawBuffersAvail) {
+      const drawBuffers = ctx._state.drawBuffers;
+      for (let i = 0; i < drawBuffers.length; i++) {
+        const db = drawBuffers[i];
+        if (db === NONE) continue;
+        const idx = db - COLOR_ATTACHMENT0;
+        if (idx < 0 || idx >= maxColor || !att.has(COLOR_ATTACHMENT0 + idx)) {
+          return FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER;
+        }
+      }
+    }
+    if (version === 2) {
+      let layered = -1;
+      for (const entry of sampleEntries) {
+        const l = isLayeredAttachment(entry) ? 1 : 0;
+        if (layered === -1) layered = l;
+        else if (layered !== l) return C2.FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS;
+      }
+    }
+    return C1.FRAMEBUFFER_COMPLETE;
+  }
+  function checkAttachment(ctx, entry, kind) {
+    let format;
+    if (entry.type === "renderbuffer") {
+      const rb = entry.renderbuffer;
+      const surf = rb._surface;
+      if (!surf) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+      if (surf.width === 0 || surf.height === 0) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+      format = rb._internalformat;
+    } else {
+      const tex = entry.texture;
+      const image = tex._image;
+      if (!image || entry.level < 0) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+      const lvl = image.levels[entry.level];
+      if (!lvl) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+      if (isCubeFace(entry.face)) {
+        if (lvl.data.length !== 6) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        for (const face of lvl.data) {
+          if (!face) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        }
+      } else if (!lvl.data[0]) {
+        return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+      }
+      if (lvl.width === 0 || lvl.height === 0) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+      format = image.internalFormat;
+    }
+    switch (kind) {
+      case "color":
+        if (!isColorRenderable(ctx, format)) {
+          if (ctx._version === 2 && format === 32849) {
+            return C1.FRAMEBUFFER_UNSUPPORTED;
+          }
+          return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        }
+        return null;
+      case "depth":
+        return isDepthRenderable(ctx, format) ? null : C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+      case "stencil":
+        return isStencilRenderable(ctx, format) ? null : C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+      case "depthStencil":
+        return isDepthStencilRenderable(ctx, format) ? null : C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+    }
+  }
+  function getAttachmentSurface(fbo, attachment) {
+    const entry = fbo._attachments.get(attachment);
+    if (!entry) return null;
+    return resolveAttachmentSurface(entry);
+  }
+
+  // src/present/canvas.ts
+  function createCanvasSurface(canvas) {
+    throw new Error("not implemented: present/canvas.ts createCanvasSurface");
+  }
+
+  // src/present/image.ts
+  function decodeImageSource(source) {
+    throw new Error("not implemented: present/image.ts decodeImageSource");
+  }
+
+  // src/gl/lost.ts
+  var lostState = /* @__PURE__ */ new WeakMap();
+  function loseContext(ctx) {
+    if (ctx._isLost) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    ctx._isLost = true;
+    ctx._resources.invalidateAll();
+    lostState.set(ctx, { restoreAllowed: false, restorePending: false });
+    const canvas = ctx._canvas;
+    schedule(() => {
+      let prevented = false;
+      const event = {
+        type: "webglcontextlost",
+        statusMessage: "",
+        cancelable: true,
+        preventDefault() {
+          prevented = true;
+        }
+      };
+      dispatchCanvasEvent(canvas, event);
+      const st = lostState.get(ctx);
+      if (st) st.restoreAllowed = prevented;
+    });
+  }
+  function restoreContext(ctx) {
+    const st = lostState.get(ctx);
+    if (!ctx._isLost || !st) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (!st.restoreAllowed) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (st.restorePending) return;
+    st.restorePending = true;
+    schedule(() => doRestore(ctx));
+  }
+  function doRestore(ctx) {
+    ctx._state = createDefaultState(ctx._version);
+    ctx._errors.clear();
+    initContextResources(ctx);
+    ctx._isLost = false;
+    for (const key of Array.from(ctx._extensions.keys())) {
+      if (!/lose_context$/i.test(key)) ctx._extensions.delete(key);
+    }
+    lostState.delete(ctx);
+    dispatchCanvasEvent(ctx._canvas, { type: "webglcontextrestored", statusMessage: "" });
+  }
+  function initContextResources(ctx) {
+    try {
+      ctx._presentSurface = createCanvasSurface(ctx._canvas);
+    } catch {
+      ctx._presentSurface = null;
+    }
+    ctx._defaultVAO = defaultVAOState(ctx._state.limits.MAX_VERTEX_ATTRIBS);
+    const w = Math.max(1, ctx._drawingBufferWidth);
+    const h = Math.max(1, ctx._drawingBufferHeight);
+    ctx._defaultFB = allocateDefaultFramebuffer(ctx, w, h);
+    ctx._state.viewport = { x: 0, y: 0, w, h };
+    ctx._state.scissor = { x: 0, y: 0, w, h };
+  }
+  function allocateDefaultFramebuffer(ctx, w, h) {
+    const width = Math.max(1, w);
+    const height = Math.max(1, h);
+    try {
+      const color = makeColorSurface(ctx, width, height);
+      const depth = ctx._attrs.depth ? makeDepthSurface(ctx, width, height) : null;
+      const stencil = ctx._attrs.stencil ? makeStencilSurface(width, height) : null;
+      return { color, depth, stencil, width, height };
+    } catch {
+      return null;
+    }
+  }
+  function makeColorSurface(ctx, w, h) {
+    let pixels = null;
+    if (ctx._presentSurface) {
+      try {
+        pixels = ctx._presentSurface.getPixels();
+      } catch {
+        pixels = null;
+      }
+    }
+    if (!pixels || pixels.length < w * h * 4) pixels = new Uint8Array(w * h * 4);
+    return makeSurface(RGBA8, w, h, pixels);
+  }
+  function makeDepthSurface(ctx, w, h) {
+    const format = ctx._version === 2 ? DEPTH_COMPONENT24 : DEPTH_COMPONENT16;
+    try {
+      return createSurface(format, w, h);
+    } catch {
+      return makeSurface(format, w, h, new Float32Array(w * h));
+    }
+  }
+  function makeStencilSurface(w, h) {
+    try {
+      return createSurface(STENCIL_INDEX8, w, h);
+    } catch {
+      return makeSurface(STENCIL_INDEX8, w, h, new Uint8Array(w * h));
+    }
+  }
+  function makeSurface(format, w, h, data) {
+    var _a2;
+    const info = (_a2 = getFormat(format)) != null ? _a2 : fallbackFormatInfo(format);
+    return { width: w, height: h, format, info, data };
+  }
+  function fallbackFormatInfo(format) {
+    if (format === DEPTH_COMPONENT16 || format === DEPTH_COMPONENT24) {
+      return {
+        format,
+        components: 1,
+        bytesPerPixel: 4,
+        storage: "f32",
+        isColor: false,
+        isDepth: true,
+        isStencil: false,
+        isFloat: true,
+        isSigned: false,
+        isInteger: false,
+        isSRGB: false,
+        normalized: false,
+        decode(src, byteOffset, out) {
+          const d = src[byteOffset >> 2];
+          out[0] = d;
+          out[1] = d;
+          out[2] = d;
+          out[3] = 1;
+        },
+        encode(src, byteOffset, r) {
+          src[byteOffset >> 2] = r;
+        }
+      };
+    }
+    if (format === STENCIL_INDEX8) {
+      return {
+        format,
+        components: 1,
+        bytesPerPixel: 1,
+        storage: "u8",
+        isColor: false,
+        isDepth: false,
+        isStencil: true,
+        isFloat: false,
+        isSigned: false,
+        isInteger: false,
+        isSRGB: false,
+        normalized: false,
+        decode(src, byteOffset, out) {
+          const s = src[byteOffset];
+          out[0] = s;
+          out[1] = s;
+          out[2] = s;
+          out[3] = 1;
+        },
+        encode(src, byteOffset, r) {
+          src[byteOffset] = r & 255;
+        }
+      };
+    }
+    return {
+      format,
+      components: 4,
+      bytesPerPixel: 4,
+      storage: "u8",
+      isColor: true,
+      isDepth: false,
+      isStencil: false,
+      isFloat: false,
+      isSigned: false,
+      isInteger: false,
+      isSRGB: false,
+      normalized: true,
+      decode(src, byteOffset, out) {
+        const u = src;
+        out[0] = u[byteOffset] / 255;
+        out[1] = u[byteOffset + 1] / 255;
+        out[2] = u[byteOffset + 2] / 255;
+        out[3] = u[byteOffset + 3] / 255;
+      },
+      encode(src, byteOffset, r, g2, b, a) {
+        const u = src;
+        u[byteOffset] = clamp255(r);
+        u[byteOffset + 1] = clamp255(g2);
+        u[byteOffset + 2] = clamp255(b);
+        u[byteOffset + 3] = clamp255(a);
+      }
+    };
+  }
+  function clamp255(v) {
+    const x = Math.round(v * 255);
+    return x < 0 ? 0 : x > 255 ? 255 : x;
+  }
+  function clearDefaultFramebuffer(fb) {
+    fb.color.data.fill(0);
+    if (fb.depth) fb.depth.data.fill(1);
+    if (fb.stencil) fb.stencil.data.fill(0);
+  }
+  function canvasSize(ctx) {
+    const c = ctx._canvas;
+    if (typeof c.width !== "number" || typeof c.height !== "number") return null;
+    return { w: Math.max(1, c.width), h: Math.max(1, c.height) };
+  }
+  function handleCanvasResize(ctx) {
+    if (ctx._isLost) return;
+    const size = canvasSize(ctx);
+    if (!size) return;
+    const { w, h } = size;
+    const surf = ctx._presentSurface;
+    const curW = surf ? surf.width : ctx._defaultFB ? ctx._defaultFB.width : 0;
+    const curH = surf ? surf.height : ctx._defaultFB ? ctx._defaultFB.height : 0;
+    if (w === curW && h === curH) return;
+    if (surf) {
+      try {
+        surf.resize(w, h);
+      } catch {
+      }
+    }
+    const fb = allocateDefaultFramebuffer(ctx, w, h);
+    if (fb) {
+      clearDefaultFramebuffer(fb);
+      ctx._defaultFB = fb;
+      if (surf) {
+        try {
+          surf.present();
+        } catch {
+        }
+      }
+    }
+    ctx._drawingBufferWidth = w;
+    ctx._drawingBufferHeight = h;
+  }
+  function schedule(fn) {
+    const g2 = globalThis;
+    if (typeof g2.setTimeout === "function") {
+      g2.setTimeout(fn, 0);
+      return;
+    }
+    if (typeof g2.queueMicrotask === "function") {
+      g2.queueMicrotask(fn);
+      return;
+    }
+    fn();
+  }
+  function dispatchCanvasEvent(canvas, event) {
+    const c = canvas;
+    if (typeof c.dispatchEvent === "function") {
+      try {
+        c.dispatchEvent(event);
+      } catch {
+      }
+      return;
+    }
+    const listeners = mockListeners.get(canvas);
+    const fns = listeners ? listeners.get(event.type) : void 0;
+    if (fns) {
+      for (const fn of Array.from(fns)) {
+        try {
+          fn(event);
+        } catch {
+        }
+      }
+    }
+  }
+  var mockListeners = /* @__PURE__ */ new WeakMap();
+  function installMockEventShim(canvas) {
+    const c = canvas;
+    if (typeof c.dispatchEvent === "function" || typeof c.addEventListener !== "function") return;
+    if (c.__swglEventShim) return;
+    c.__swglEventShim = true;
+    const listeners = /* @__PURE__ */ new Map();
+    mockListeners.set(canvas, listeners);
+    const origAdd = c.addEventListener.bind(c);
+    const origRemove = typeof c.removeEventListener === "function" ? c.removeEventListener.bind(c) : null;
+    c.addEventListener = ((type, fn) => {
+      origAdd(type, fn);
+      let set = listeners.get(type);
+      if (!set) {
+        set = /* @__PURE__ */ new Set();
+        listeners.set(type, set);
+      }
+      set.add(fn);
+    });
+    if (origRemove) {
+      c.removeEventListener = ((type, fn) => {
+        var _a2;
+        origRemove(type, fn);
+        (_a2 = listeners.get(type)) == null ? void 0 : _a2.delete(fn);
+      });
+    }
+  }
+
+  // src/gl/draw.ts
+  var scratchMap = /* @__PURE__ */ new WeakMap();
+  function getScratch(ctx) {
+    let sc = scratchMap.get(ctx);
+    if (!sc) {
+      sc = {
+        records: new Float32Array(0),
+        floatPool: new Float32Array(0),
+        intPool: new Int32Array(0),
+        uintPool: new Uint32Array(0),
+        attribIndices: new Int32Array(0),
+        outPosition: new Float32Array(4),
+        outVaryings: new Float32Array(0),
+        scratch: new Float32Array(64),
+        intScratch: new Int32Array(64),
+        zeroStore: new Float32Array(16384),
+        // MAX_UNIFORM_BLOCK_SIZE / 4
+        zeroIntStore: new Int32Array(16384),
+        fallbackColor: null,
+        emptyFloat: new Float32Array(0),
+        emptyInt: new Int32Array(0)
+      };
+      scratchMap.set(ctx, sc);
+    }
+    return sc;
+  }
+  function pushError(ctx, err) {
+    ctx._errors.push(err);
+  }
+  function alignUp(n, align2) {
+    return (n + align2 - 1) / align2 | 0 * align2;
+  }
+  function extSupported(ctx, name) {
+    try {
+      return ctx.getExtension(name) !== null;
+    } catch {
+      return false;
+    }
+  }
+  function defaultFBSurface(ctx) {
+    const sc = getScratch(ctx);
+    if (!sc.fallbackColor) {
+      const w = Math.max(1, ctx._drawingBufferWidth | 0);
+      const h = Math.max(1, ctx._drawingBufferHeight | 0);
+      sc.fallbackColor = {
+        width: w,
+        height: h,
+        format: C1.RGBA8,
+        info: null,
+        data: new Uint8Array(w * h * 4)
+      };
+    }
+    return sc.fallbackColor;
+  }
+  function resolveDrawTarget(ctx) {
+    const s = ctx._state;
+    if (s.drawFramebuffer === null) {
+      const dfb = ctx._defaultFB;
+      if (dfb) {
+        return { color: [dfb.color], depth: dfb.depth, stencil: dfb.stencil, width: dfb.width, height: dfb.height, samples: 1 };
+      }
+      const surf = defaultFBSurface(ctx);
+      return { color: [surf], depth: null, stencil: null, width: surf.width, height: surf.height, samples: 1 };
+    }
+    try {
+      return resolveFramebufferTarget(ctx);
+    } catch {
+      return null;
+    }
+  }
+  function resolveReadColor(ctx) {
+    const s = ctx._state;
+    if (s.readFramebuffer === null) {
+      return ctx._defaultFB ? ctx._defaultFB.color : defaultFBSurface(ctx);
+    }
+    try {
+      return resolveReadSurface(ctx);
+    } catch {
+      return null;
+    }
+  }
+  function resolveReadDepthStencil(ctx, attachment) {
+    const s = ctx._state;
+    if (s.readFramebuffer === null) {
+      const dfb = ctx._defaultFB;
+      if (!dfb) return null;
+      return attachment === C1.DEPTH_ATTACHMENT ? dfb.depth : dfb.stencil;
+    }
+    try {
+      return getAttachmentSurface(s.readFramebuffer, attachment);
+    } catch {
+      return null;
+    }
+  }
+  function presentIfDefault(ctx) {
+    if (ctx._state.drawFramebuffer !== null) return;
+    if (!ctx._presentSurface) return;
+    try {
+      ctx._presentSurface.present();
+    } catch {
+    }
+  }
+  function ensureCanvasSize(ctx) {
+    const dfb = ctx._defaultFB;
+    if (!dfb) return;
+    const cw = ctx._canvas.width | 0;
+    const ch = ctx._canvas.height | 0;
+    if (cw !== dfb.width || ch !== dfb.height) {
+      try {
+        handleCanvasResize(ctx);
+      } catch {
+      }
+    }
+  }
+  function scissorState(ctx) {
+    const s = ctx._state;
+    if (!s.caps.SCISSOR_TEST) return null;
+    return { enabled: true, x: s.scissor.x, y: s.scissor.y, w: s.scissor.w, h: s.scissor.h };
+  }
+  function decodeSurfaceTexel(surf, byteOffset, out) {
+    const info = surf.info;
+    if (info && typeof info.decode === "function") {
+      info.decode(surf.data, byteOffset, out);
+      return;
+    }
+    const d = surf.data;
+    const f = surf.format;
+    const u8 = d;
+    if (d instanceof Uint8Array) {
+      switch (f) {
+        case C1.RGBA4: {
+          const v = (u8[byteOffset] | u8[byteOffset + 1] << 8) & 65535;
+          out[0] = (v >> 12 & 15) / 15;
+          out[1] = (v >> 8 & 15) / 15;
+          out[2] = (v >> 4 & 15) / 15;
+          out[3] = (v & 15) / 15;
+          return;
+        }
+        case C1.RGB5_A1: {
+          const v = (u8[byteOffset] | u8[byteOffset + 1] << 8) & 65535;
+          out[0] = (v >> 11 & 31) / 31;
+          out[1] = (v >> 6 & 31) / 31;
+          out[2] = (v >> 1 & 31) / 31;
+          out[3] = v & 1;
+          return;
+        }
+        case C1.RGB565: {
+          const v = (u8[byteOffset] | u8[byteOffset + 1] << 8) & 65535;
+          out[0] = (v >> 11 & 31) / 31;
+          out[1] = (v >> 5 & 63) / 63;
+          out[2] = (v & 31) / 31;
+          out[3] = 1;
+          return;
+        }
+        default:
+          break;
+      }
+      const bpp = surf.data.byteLength / (surf.width * surf.height);
+      if (bpp === 4) {
+        out[0] = u8[byteOffset] / 255;
+        out[1] = u8[byteOffset + 1] / 255;
+        out[2] = u8[byteOffset + 2] / 255;
+        out[3] = u8[byteOffset + 3] / 255;
+      } else if (bpp === 3) {
+        out[0] = u8[byteOffset] / 255;
+        out[1] = u8[byteOffset + 1] / 255;
+        out[2] = u8[byteOffset + 2] / 255;
+        out[3] = 1;
+      } else if (bpp === 2) {
+        out[0] = u8[byteOffset] / 255;
+        out[1] = u8[byteOffset] / 255;
+        out[2] = u8[byteOffset] / 255;
+        out[3] = u8[byteOffset + 1] / 255;
+      } else {
+        out[0] = u8[byteOffset] / 255;
+        out[1] = u8[byteOffset] / 255;
+        out[2] = u8[byteOffset] / 255;
+        out[3] = 1;
+      }
+      return;
+    }
+    if (d instanceof Float32Array) {
+      const v = d[byteOffset >> 2];
+      if (f === C1.DEPTH_COMPONENT16 || f === C2.DEPTH_COMPONENT24 || f === C2.DEPTH_COMPONENT32F || f === C1.DEPTH_COMPONENT || f === C1.DEPTH_STENCIL || f === C2.DEPTH24_STENCIL8 || f === C2.DEPTH32F_STENCIL8) {
+        out[0] = v;
+        out[1] = v;
+        out[2] = v;
+        out[3] = 1;
+      } else {
+        const comps = surfaceComponents(surf);
+        for (let c = 0; c < 4; c++) out[c] = c < comps ? d[(byteOffset >> 2) + c] : c === 3 ? 1 : 0;
+      }
+      return;
+    }
+    if (d instanceof Int8Array) {
+      const v = d[byteOffset];
+      out[0] = v / 127;
+      out[1] = v / 127;
+      out[2] = v / 127;
+      out[3] = 1;
+      return;
+    }
+    if (d instanceof Uint16Array) {
+      const v = d[byteOffset >> 1];
+      out[0] = v / 65535;
+      out[1] = v / 65535;
+      out[2] = v / 65535;
+      out[3] = 1;
+      return;
+    }
+    if (d instanceof Int16Array) {
+      const v = d[byteOffset >> 1];
+      out[0] = v / 32767;
+      out[1] = v / 32767;
+      out[2] = v / 32767;
+      out[3] = 1;
+      return;
+    }
+    if (d instanceof Int32Array) {
+      const v = d[byteOffset >> 2];
+      out[0] = v;
+      out[1] = v;
+      out[2] = v;
+      out[3] = 1;
+      return;
+    }
+    if (d instanceof Uint32Array) {
+      const v = d[byteOffset >> 2];
+      out[0] = v;
+      out[1] = v;
+      out[2] = v;
+      out[3] = 1;
+      return;
+    }
+    out[0] = 0;
+    out[1] = 0;
+    out[2] = 0;
+    out[3] = 1;
+  }
+  function encodeSurfaceTexel(surf, byteOffset, r, g2, b, a) {
+    const info = surf.info;
+    if (info && typeof info.encode === "function") {
+      info.encode(surf.data, byteOffset, r, g2, b, a);
+      return;
+    }
+    const d = surf.data;
+    const f = surf.format;
+    const clamp013 = (v) => v < 0 ? 0 : v > 1 ? 1 : v;
+    if (d instanceof Uint8Array) {
+      const u8 = d;
+      switch (f) {
+        case C1.RGB565: {
+          const v = (clamp013(r) * 31 + 0.5 | 0) << 11 | (clamp013(g2) * 63 + 0.5 | 0) << 5 | clamp013(b) * 31 + 0.5 | 0;
+          u8[byteOffset] = v & 255;
+          u8[byteOffset + 1] = v >> 8 & 255;
+          return;
+        }
+        case C1.RGBA4: {
+          const v = (clamp013(r) * 15 + 0.5 | 0) << 12 | (clamp013(g2) * 15 + 0.5 | 0) << 8 | (clamp013(b) * 15 + 0.5 | 0) << 4 | clamp013(a) * 15 + 0.5 | 0;
+          u8[byteOffset] = v & 255;
+          u8[byteOffset + 1] = v >> 8 & 255;
+          return;
+        }
+        case C1.RGB5_A1: {
+          const v = (clamp013(r) * 31 + 0.5 | 0) << 11 | (clamp013(g2) * 31 + 0.5 | 0) << 6 | (clamp013(b) * 31 + 0.5 | 0) << 1 | (clamp013(a) > 0.5 ? 1 : 0);
+          u8[byteOffset] = v & 255;
+          u8[byteOffset + 1] = v >> 8 & 255;
+          return;
+        }
+        default:
+          break;
+      }
+      const bpp = surf.data.byteLength / (surf.width * surf.height);
+      if (bpp === 4) {
+        u8[byteOffset] = clamp013(r) * 255 + 0.5 | 0;
+        u8[byteOffset + 1] = clamp013(g2) * 255 + 0.5 | 0;
+        u8[byteOffset + 2] = clamp013(b) * 255 + 0.5 | 0;
+        u8[byteOffset + 3] = clamp013(a) * 255 + 0.5 | 0;
+      } else if (bpp === 3) {
+        u8[byteOffset] = clamp013(r) * 255 + 0.5 | 0;
+        u8[byteOffset + 1] = clamp013(g2) * 255 + 0.5 | 0;
+        u8[byteOffset + 2] = clamp013(b) * 255 + 0.5 | 0;
+      } else if (bpp === 2) {
+        u8[byteOffset] = clamp013(r) * 255 + 0.5 | 0;
+        u8[byteOffset + 1] = clamp013(a) * 255 + 0.5 | 0;
+      } else {
+        u8[byteOffset] = clamp013(r) * 255 + 0.5 | 0;
+      }
+      return;
+    }
+    if (d instanceof Float32Array) {
+      const f32 = d;
+      const comps = surfaceComponents(surf);
+      for (let c = 0; c < comps; c++) f32[(byteOffset >> 2) + c] = c === 0 ? r : c === 1 ? g2 : c === 2 ? b : a;
+      return;
+    }
+    if (d instanceof Int32Array) {
+      d[byteOffset >> 2] = r | 0;
+      return;
+    }
+    if (d instanceof Uint32Array) {
+      d[byteOffset >> 2] = r >>> 0;
+      return;
+    }
+    if (d instanceof Int8Array) {
+      d[byteOffset] = r | 0;
+      return;
+    }
+    if (d instanceof Uint16Array) {
+      d[byteOffset >> 1] = r * 65535 + 0.5 | 0;
+      return;
+    }
+    if (d instanceof Int16Array) {
+      d[byteOffset >> 1] = r | 0;
+      return;
+    }
+  }
+  function surfaceComponents(surf) {
+    if (surf.info) return surf.info.components;
+    const f = surf.format;
+    if (f === C1.RGBA || f === C1.RGBA8 || f === C2.RGBA8 || f === C2.RGBA16F || f === C2.RGBA32F || f === C1.RGBA4 || f === C1.RGB5_A1 || f === C2.SRGB8_ALPHA8 || f === C2.RGBA8I || f === C2.RGBA8UI || f === C2.RGBA16I || f === C2.RGBA16UI || f === C2.RGBA32I || f === C2.RGBA32UI || f === C2.RGB10_A2) return 4;
+    if (f === C1.RGB || f === C1.RGB8 || f === C2.RGB8 || f === C2.RGB16F || f === C2.RGB32F || f === C1.RGB565 || f === C2.RGB8I || f === C2.RGB8UI || f === C2.RGB16I || f === C2.RGB16UI || f === C2.RGB32I || f === C2.RGB32UI) return 3;
+    if (f === C1.LUMINANCE_ALPHA || f === C2.RG || f === C2.RG8 || f === C2.RG16F || f === C2.RG32F || f === C2.RG8I || f === C2.RG8UI || f === C2.RG16I || f === C2.RG16UI || f === C2.RG32I || f === C2.RG32UI) return 2;
+    return 1;
+  }
+  function surfaceBytesPerPixel(surf) {
+    if (surf.info) return surf.info.bytesPerPixel;
+    return Math.max(1, Math.round(surf.data.byteLength / (surf.width * surf.height)));
+  }
+  function clearColorLocal(surf, r, g2, b, a, scissor, mask) {
+    const w = surf.width;
+    const h = surf.height;
+    const bpp = surfaceBytesPerPixel(surf);
+    const x0 = scissor ? Math.max(0, scissor.x) : 0;
+    const y0 = scissor ? Math.max(0, scissor.y) : 0;
+    const x1 = scissor ? Math.min(w, scissor.x + scissor.w) : w;
+    const y1 = scissor ? Math.min(h, scissor.y + scissor.h) : h;
+    const all = mask[0] && mask[1] && mask[2] && mask[3];
+    const tmp = new Float32Array(4);
+    const data = surf.data;
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const off = (y * w + x) * bpp;
+        if (all) {
+          encodeSurfaceTexel(surf, off, r, g2, b, a);
+        } else {
+          decodeSurfaceTexel(surf, off, tmp);
+          encodeSurfaceTexel(
+            surf,
+            off,
+            mask[0] ? r : tmp[0],
+            mask[1] ? g2 : tmp[1],
+            mask[2] ? b : tmp[2],
+            mask[3] ? a : tmp[3]
+          );
+        }
+      }
+    }
+    void data;
+  }
+  function clearDepthLocal(surf, depth, scissor) {
+    const d = surf.data;
+    if (!(d instanceof Float32Array)) return;
+    const w = surf.width;
+    const h = surf.height;
+    const x0 = scissor ? Math.max(0, scissor.x) : 0;
+    const y0 = scissor ? Math.max(0, scissor.y) : 0;
+    const x1 = scissor ? Math.min(w, scissor.x + scissor.w) : w;
+    const y1 = scissor ? Math.min(h, scissor.y + scissor.h) : h;
+    for (let y = y0; y < y1; y++) {
+      const row = y * w;
+      for (let x = x0; x < x1; x++) d[row + x] = depth;
+    }
+  }
+  function clearStencilLocal(surf, value, scissor, writeMask) {
+    var _a2;
+    const st = (_a2 = surf.stencilData) != null ? _a2 : surf.data;
+    if (!(st instanceof Uint8Array)) return;
+    const w = surf.width;
+    const h = surf.height;
+    const x0 = scissor ? Math.max(0, scissor.x) : 0;
+    const y0 = scissor ? Math.max(0, scissor.y) : 0;
+    const x1 = scissor ? Math.min(w, scissor.x + scissor.w) : w;
+    const y1 = scissor ? Math.min(h, scissor.y + scissor.h) : h;
+    const v = value & writeMask;
+    if (writeMask === 255) {
+      for (let y = y0; y < y1; y++) {
+        const row = y * w;
+        for (let x = x0; x < x1; x++) st[row + x] = v;
+      }
+    } else {
+      for (let y = y0; y < y1; y++) {
+        const row = y * w;
+        for (let x = x0; x < x1; x++) st[row + x] = v | st[row + x] & ~writeMask;
+      }
+    }
+  }
+  var MAT2 = 35674;
+  var MAT3 = 35675;
+  var MAT4 = 35676;
+  function matrixDims(type) {
+    if (type === MAT2) return { cols: 2, rows: 2 };
+    if (type === MAT3) return { cols: 3, rows: 3 };
+    if (type === MAT4) return { cols: 4, rows: 4 };
+    return null;
+  }
+  function buildAttribs(ctx, pm, req, indices) {
+    var _a2, _b;
+    const s = ctx._state;
+    const vao = s.vao;
+    const maxAttribs = s.limits.MAX_VERTEX_ATTRIBS;
+    const sc = getScratch(ctx);
+    const attribs = new Array(maxAttribs);
+    const plans = new Array(maxAttribs);
+    const attrs = (_a2 = pm.attributes) != null ? _a2 : [];
+    for (const pa of attrs) {
+      const loc = pa.location;
+      if (loc < 0 || loc >= maxAttribs) continue;
+      const dims = matrixDims(pa.type);
+      const cols = dims ? dims.cols : 1;
+      for (let col = 0; col < cols; col++) {
+        const l = loc + col;
+        if (l >= maxAttribs) break;
+        const a = vao.attribs[l];
+        plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: true };
+        if (!a.enabled || !a.buffer || !a.buffer._data) {
+          if (pa.integral) {
+            attribs[l] = (_b = a.constantI) != null ? _b : sc.emptyInt;
+          } else {
+            attribs[l] = a.constantF;
+          }
+          continue;
+        }
+        const buf = a.buffer;
+        const data = buf._data;
+        const typeSize = attribTypeSize(a.type);
+        const stride = a.stride === 0 ? a.size * typeSize : a.stride;
+        const comps = pa.components;
+        const elemCount = a.divisor > 0 ? Math.ceil(req.instanceCount / a.divisor) : req.count;
+        const colOffset = col * (dims ? dims.rows * typeSize : 0);
+        const dv = new DataView(data);
+        if (a.integer) {
+          const unsigned = a.type === C1.UNSIGNED_BYTE || a.type === C1.UNSIGNED_SHORT || a.type === C1.UNSIGNED_INT;
+          const need = elemCount * comps;
+          ensurePool(sc, unsigned ? "uintPool" : "intPool", need);
+          const dst = unsigned ? new Uint32Array(sc.uintPool.buffer, 0, need) : new Int32Array(sc.intPool.buffer, 0, need);
+          for (let e = 0; e < elemCount; e++) {
+            const element = a.divisor > 0 ? e : indices ? indices[e] : req.firstOrOffset + e;
+            const byteOff = a.offset + element * stride + colOffset;
+            for (let c = 0; c < comps; c++) {
+              let v = 0;
+              if (c < a.size && byteOff + c * typeSize + typeSize <= data.byteLength) {
+                v = readIntComponent(dv, a.type, byteOff + c * typeSize);
+              }
+              dst[e * comps + c] = c < a.size ? v : c === 3 ? 1 : 0;
+            }
+          }
+          attribs[l] = dst;
+        } else {
+          const need = elemCount * comps;
+          ensurePool(sc, "floatPool", need);
+          const dst = new Float32Array(sc.floatPool.buffer, 0, need);
+          const normalized = a.normalized;
+          for (let e = 0; e < elemCount; e++) {
+            const element = a.divisor > 0 ? e : indices ? indices[e] : req.firstOrOffset + e;
+            const byteOff = a.offset + element * stride + colOffset;
+            for (let c = 0; c < comps; c++) {
+              let v = 0;
+              if (c < a.size && byteOff + c * typeSize + typeSize <= data.byteLength) {
+                v = readFloatComponent(dv, a.type, byteOff + c * typeSize, normalized);
+              }
+              dst[e * comps + c] = c < a.size ? v : c === 3 ? 1 : 0;
+            }
+          }
+          attribs[l] = dst;
+        }
+      }
+    }
+    for (let l = 0; l < maxAttribs; l++) {
+      if (!plans[l]) {
+        const a = vao.attribs[l];
+        plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: false };
+        attribs[l] = a.constantF;
+      }
+    }
+    return { attribs, plans };
+  }
+  function ensurePool(sc, which, need) {
+    const pool = sc[which];
+    if (pool.length >= need) return;
+    const len = Math.max(need, 64);
+    if (which === "floatPool") sc.floatPool = new Float32Array(len);
+    else if (which === "intPool") sc.intPool = new Int32Array(len);
+    else sc.uintPool = new Uint32Array(len);
+  }
+  function attribTypeSize(type) {
+    switch (type) {
+      case C1.BYTE:
+      case C1.UNSIGNED_BYTE:
+        return 1;
+      case C1.SHORT:
+      case C1.UNSIGNED_SHORT:
+        return 2;
+      case C1.FLOAT:
+      case C1.INT:
+      case C1.UNSIGNED_INT:
+        return 4;
+      default:
+        return 4;
+    }
+  }
+  function readIntComponent(dv, type, byteOff) {
+    switch (type) {
+      case C1.BYTE:
+        return dv.getInt8(byteOff);
+      case C1.UNSIGNED_BYTE:
+        return dv.getUint8(byteOff);
+      case C1.SHORT:
+        return dv.getInt16(byteOff, true);
+      case C1.UNSIGNED_SHORT:
+        return dv.getUint16(byteOff, true);
+      case C1.INT:
+        return dv.getInt32(byteOff, true);
+      case C1.UNSIGNED_INT:
+        return dv.getUint32(byteOff, true);
+      default:
+        return 0;
+    }
+  }
+  function readFloatComponent(dv, type, byteOff, normalized) {
+    switch (type) {
+      case C1.FLOAT:
+        return dv.getFloat32(byteOff, true);
+      case C1.BYTE: {
+        const v = dv.getInt8(byteOff);
+        return normalized ? v / 127 : v;
+      }
+      case C1.UNSIGNED_BYTE: {
+        const v = dv.getUint8(byteOff);
+        return normalized ? v / 255 : v;
+      }
+      case C1.SHORT: {
+        const v = dv.getInt16(byteOff, true);
+        return normalized ? v / 32767 : v;
+      }
+      case C1.UNSIGNED_SHORT: {
+        const v = dv.getUint16(byteOff, true);
+        return normalized ? v / 65535 : v;
+      }
+      case C1.INT: {
+        const v = dv.getInt32(byteOff, true);
+        return normalized ? v / 2147483647 : v;
+      }
+      case C1.UNSIGNED_INT: {
+        const v = dv.getUint32(byteOff, true);
+        return normalized ? v / 4294967295 : v;
+      }
+      default:
+        return 0;
+    }
+  }
+  function samplerTargetKey(type) {
+    switch (type) {
+      case C2.SAMPLER_3D:
+      case C2.INT_SAMPLER_3D:
+      case C2.UNSIGNED_INT_SAMPLER_3D:
+        return "texture3D";
+      case C2.SAMPLER_2D_ARRAY:
+      case C2.SAMPLER_2D_ARRAY_SHADOW:
+      case C2.INT_SAMPLER_2D_ARRAY:
+      case C2.UNSIGNED_INT_SAMPLER_2D_ARRAY:
+        return "texture2DArray";
+      case C1.SAMPLER_CUBE:
+      case C2.SAMPLER_CUBE_SHADOW:
+      case C2.INT_SAMPLER_CUBE:
+      case C2.UNSIGNED_INT_SAMPLER_CUBE:
+        return "textureCube";
+      default:
+        return "texture2D";
+    }
+  }
+  function effectiveSamplerState(tex, sampler) {
+    var _a2, _b, _c, _d, _e, _f, _g, _h, _i, _j;
+    const p = sampler ? sampler._params : tex._params;
+    return {
+      minFilter: (_a2 = p[10241]) != null ? _a2 : 9984,
+      magFilter: (_b = p[10240]) != null ? _b : 9729,
+      wrapS: (_c = p[10242]) != null ? _c : 10497,
+      wrapT: (_d = p[10243]) != null ? _d : 10497,
+      wrapR: (_e = p[32882]) != null ? _e : 10497,
+      minLod: (_f = p[33082]) != null ? _f : -1e3,
+      maxLod: (_g = p[33083]) != null ? _g : 1e3,
+      compareMode: (_h = p[34892]) != null ? _h : 0,
+      compareFunc: (_i = p[34893]) != null ? _i : 515,
+      maxAnisotropy: (_j = p[34046]) != null ? _j : 1
+    };
+  }
+  function buildTextureEnv(ctx, pm) {
+    var _a2, _b;
+    const s = ctx._state;
+    const numUnits = s.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS;
+    const images = new Array(numUnits).fill(null);
+    const samplerStates = new Array(numUnits);
+    const bindings = new Array(numUnits).fill(null);
+    const defaults = effectiveSamplerState({ _params: {} }, null);
+    for (let u = 0; u < numUnits; u++) samplerStates[u] = defaults;
+    const intStore = pm.intStore;
+    const uniforms = (_a2 = pm.uniforms) != null ? _a2 : [];
+    if (intStore) {
+      for (const u of uniforms) {
+        if (!u.sampler) continue;
+        const unit = (_b = intStore[u.location]) != null ? _b : 0;
+        if (unit < 0 || unit >= numUnits) continue;
+        const key = samplerTargetKey(u.type);
+        const unitState = s.textureUnits[unit];
+        const tex = unitState[key];
+        if (!tex || !tex._image) continue;
+        const img = tex._image;
+        const st = effectiveSamplerState(tex, unitState.sampler);
+        images[unit] = img;
+        samplerStates[unit] = st;
+        bindings[unit] = { img, state: st };
+      }
+    }
+    return { images, samplerStates, bindings };
+  }
+  function buildOutputMaps(ctx, pm) {
+    var _a2, _b, _c;
+    const s = ctx._state;
+    const outputs = (_b = (_a2 = pm.fragment) == null ? void 0 : _a2.outputs) != null ? _b : [{ location: 0, type: 35666 }];
+    let maxLoc = 0;
+    for (const o of outputs) if (o.location > maxLoc) maxLoc = o.location;
+    const n = maxLoc + 1;
+    const colorMask = new Array(n);
+    const drawBuffers = new Array(n).fill(-1);
+    for (let l = 0; l < n; l++) {
+      colorMask[l] = (_c = s.colorMaskPerDrawBuffer.get(l)) != null ? _c : s.colorMask;
+      const db = l < s.drawBuffers.length ? s.drawBuffers[l] : C1.COLOR_ATTACHMENT0;
+      drawBuffers[l] = db === C1.NONE ? -1 : db - C1.COLOR_ATTACHMENT0;
+    }
+    return { colorMask, drawBuffers };
+  }
+  function buildDrawCall(ctx, pm, req, records, stride, fb, env) {
+    var _a2, _b, _c, _d, _e, _f;
+    const s = ctx._state;
+    const { colorMask, drawBuffers } = buildOutputMaps(ctx, pm);
+    const blend0 = s.blendPerDrawBuffer.get(0);
+    const blend = {
+      enabled: s.caps.BLEND,
+      srcRGB: (_a2 = blend0 == null ? void 0 : blend0.srcRGB) != null ? _a2 : s.blend.srcRGB,
+      dstRGB: (_b = blend0 == null ? void 0 : blend0.dstRGB) != null ? _b : s.blend.dstRGB,
+      srcAlpha: (_c = blend0 == null ? void 0 : blend0.srcAlpha) != null ? _c : s.blend.srcAlpha,
+      dstAlpha: (_d = blend0 == null ? void 0 : blend0.dstAlpha) != null ? _d : s.blend.dstAlpha,
+      eqRGB: (_e = blend0 == null ? void 0 : blend0.eqRGB) != null ? _e : s.blend.eqRGB,
+      eqAlpha: (_f = blend0 == null ? void 0 : blend0.eqAlpha) != null ? _f : s.blend.eqAlpha,
+      color: s.blend.color
+    };
+    return {
+      mode: req.mode,
+      count: req.count,
+      first: 0,
+      // records packed from index 0 (instanced runs at i*count + j)
+      instanceCount: req.instanceCount,
+      vertices: records,
+      vertexStride: stride,
+      varyingsOffset: RECORD_HEADER_FLOATS,
+      program: pm,
+      fb,
+      viewport: { x: s.viewport.x, y: s.viewport.y, w: s.viewport.w, h: s.viewport.h },
+      depthRange: { near: s.depth.range[0], far: s.depth.range[1] },
+      scissor: {
+        enabled: s.caps.SCISSOR_TEST,
+        x: s.scissor.x,
+        y: s.scissor.y,
+        w: s.scissor.w,
+        h: s.scissor.h
+      },
+      cull: { enabled: s.caps.CULL_FACE, face: s.cullFace, frontFace: s.frontFace },
+      polygonOffset: { enabled: s.caps.POLYGON_OFFSET_FILL, factor: s.polygonOffset.factor, units: s.polygonOffset.units },
+      dither: s.caps.DITHER,
+      colorMask,
+      blend,
+      depthTest: { enabled: s.caps.DEPTH_TEST, func: s.depth.func },
+      depthMask: s.depth.mask,
+      stencilTest: {
+        enabled: s.caps.STENCIL_TEST,
+        front: {
+          func: s.stencil.front.func,
+          ref: s.stencil.front.ref,
+          valueMask: s.stencil.front.valueMask,
+          writeMask: s.stencil.front.writeMask,
+          fail: s.stencil.front.fail,
+          zfail: s.stencil.front.depthFail,
+          zpass: s.stencil.front.depthPass
+        },
+        back: {
+          func: s.stencil.back.func,
+          ref: s.stencil.back.ref,
+          valueMask: s.stencil.back.valueMask,
+          writeMask: s.stencil.back.writeMask,
+          fail: s.stencil.back.fail,
+          zfail: s.stencil.back.depthFail,
+          zpass: s.stencil.back.depthPass
+        }
+      },
+      sampleCoverage: { enabled: s.caps.SAMPLE_COVERAGE, value: s.sampleCoverage.value, invert: s.sampleCoverage.invert },
+      rasterizerDiscard: s.caps.RASTERIZER_DISCARD,
+      lineWidth: s.lineWidth,
+      textures: env.bindings,
+      drawBuffers
+    };
+  }
+  function primitiveInfo(mode, count) {
+    switch (mode) {
+      case C1.POINTS:
+        return { primCount: count, vertsPerPrim: 1 };
+      case C1.LINES:
+        return { primCount: count / 2 | 0, vertsPerPrim: 2 };
+      case C1.LINE_STRIP:
+        return { primCount: Math.max(0, count - 1), vertsPerPrim: 2 };
+      case C1.LINE_LOOP:
+        return { primCount: count > 0 ? count : 0, vertsPerPrim: 2 };
+      case C1.TRIANGLES:
+        return { primCount: count / 3 | 0, vertsPerPrim: 3 };
+      default:
+        return { primCount: Math.max(0, count - 2), vertsPerPrim: 3 };
+    }
+  }
+  function primVertexIndex(mode, p, v) {
+    switch (mode) {
+      case C1.POINTS:
+        return p;
+      case C1.LINES:
+        return p * 2 + v;
+      case C1.LINE_STRIP:
+        return p + v;
+      case C1.LINE_LOOP:
+        return v === 0 ? p : (p + 1) % (p + 1 + 1) === 0 ? 0 : p + 1;
+      case C1.TRIANGLES:
+        return p * 3 + v;
+      case C1.TRIANGLE_STRIP:
+        return p + v;
+      default:
+        return v === 0 ? 0 : p + v;
+    }
+  }
+  function findVarying(varyings, name) {
+    for (let i = 0; i < varyings.length; i++) {
+      if (varyings[i].name === name) return i;
+      const base = name.replace(/\[0\]$/, "");
+      if (varyings[i].name === base) return i;
+    }
+    return -1;
+  }
+  function captureTransformFeedback(ctx, tf, prog, pm, records, stride, req) {
+    var _a2, _b;
+    const tfVarys = (_a2 = pm.transformFeedbackVaryings) != null ? _a2 : [];
+    if (tfVarys.length === 0) return;
+    const separate = prog._tfBufferMode === C2.SEPARATE_ATTRIBS;
+    const offsets = [];
+    const comps = [];
+    let off = RECORD_HEADER_FLOATS;
+    for (const tv of tfVarys) {
+      const vi = findVarying(pm.varyings, tv.name);
+      const c = vi >= 0 ? pm.varyings[vi].components : 0;
+      offsets.push(off);
+      comps.push(c);
+      off += c;
+    }
+    const totalComps = comps.reduce((a, c) => a + c, 0);
+    if (totalComps === 0) return;
+    const { primCount, vertsPerPrim } = primitiveInfo(req.mode, req.count);
+    const buffers = tf._buffers;
+    const ranges = tf._bufferRanges;
+    let capturedVerts = 0;
+    let overflow = false;
+    outer: for (let i = 0; i < req.instanceCount && !overflow; i++) {
+      for (let p = 0; p < primCount && !overflow; p++) {
+        for (let v = 0; v < vertsPerPrim; v++) {
+          const vIdx = primVertexIndex(req.mode, p, v);
+          const recBase = (i * req.count + vIdx) * stride;
+          for (let k = 0; k < tfVarys.length; k++) {
+            const c = comps[k];
+            if (c === 0) continue;
+            const bufIdx = separate ? k : 0;
+            const buf = buffers[bufIdx];
+            if (!buf || !buf._data) continue;
+            const range = (_b = ranges[bufIdx]) != null ? _b : { offset: 0, size: buf._size };
+            let dstByte;
+            if (separate) {
+              dstByte = range.offset + capturedVerts * c * 4;
+            } else {
+              const before = comps.slice(0, k).reduce((a, x) => a + x, 0);
+              dstByte = range.offset + capturedVerts * totalComps * 4 + before * 4;
+            }
+            if (dstByte + c * 4 > range.offset + range.size) {
+              overflow = true;
+              break outer;
+            }
+            const src = records.subarray(recBase + offsets[k], recBase + offsets[k] + c);
+            new Float32Array(buf._data, dstByte, c).set(src);
+          }
+          capturedVerts++;
+        }
+      }
+    }
+    tf._primitivesWritten += Math.floor(capturedVerts / vertsPerPrim);
+  }
+  function executeDraw(ctx, req) {
+    var _a2, _b, _c, _d, _e, _f, _g;
+    const s = ctx._state;
+    const prog = s.currentProgram;
+    if (!prog || !prog._linkStatus || !prog._program) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return;
+    }
+    const pm = prog._program;
+    const vao = s.vao;
+    const maxAttribs = s.limits.MAX_VERTEX_ATTRIBS;
+    for (let loc = 0; loc < maxAttribs; loc++) {
+      const a = vao.attribs[loc];
+      if (a.enabled && !a.buffer) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+    }
+    if (s.version === 2 && pm.attributes) {
+      for (const pa of pm.attributes) {
+        if (pa.integral && pa.location < maxAttribs) {
+          const a = vao.attribs[pa.location];
+          if (a.enabled && a.buffer && !a.integer) {
+            pushError(ctx, C1.INVALID_OPERATION);
+            return;
+          }
+        }
+      }
+    }
+    let indices = null;
+    if (req.indexed) {
+      const eb = vao.elementArrayBuffer;
+      const t = req.indexType;
+      const ts = t === C1.UNSIGNED_BYTE ? 1 : t === C1.UNSIGNED_SHORT ? 2 : 4;
+      if (!eb || !eb._data || req.firstOrOffset % ts !== 0 || req.firstOrOffset + req.count * ts > eb._size) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+      indices = t === C1.UNSIGNED_BYTE ? new Uint8Array(eb._data, req.firstOrOffset, req.count) : t === C1.UNSIGNED_SHORT ? new Uint16Array(eb._data, req.firstOrOffset, req.count) : new Uint32Array(eb._data, req.firstOrOffset, req.count);
+    }
+    const tf = s.transformFeedback;
+    const tfActive = !!tf && tf._active && !tf._paused;
+    let activeQuery = null;
+    if (!tfActive) {
+      const q1 = s.activeQueries.ANY_SAMPLES_PASSED;
+      const q2 = s.activeQueries.ANY_SAMPLES_PASSED_CONSERVATIVE;
+      if (q1 && q1._active) activeQuery = q1;
+      else if (q2 && q2._active) activeQuery = q2;
+    }
+    const fb = resolveDrawTarget(ctx);
+    if (!fb) {
+      pushError(ctx, C1.INVALID_FRAMEBUFFER_OPERATION);
+      return;
+    }
+    ensureCanvasSize(ctx);
+    if (req.count === 0 || req.instanceCount === 0) return;
+    const sc = getScratch(ctx);
+    const { attribs, plans } = buildAttribs(ctx, pm, req, indices);
+    const ai = sc.attribIndices;
+    if (ai.length < maxAttribs) {
+    }
+    const stride = computeVertexStride((_a2 = pm.varyings) != null ? _a2 : []);
+    const totalVary = stride - RECORD_HEADER_FLOATS;
+    const totalVerts = req.count * req.instanceCount;
+    const needRecords = totalVerts * stride;
+    if (sc.records.length < needRecords) {
+      sc.records = new Float32Array(Math.max(needRecords, 64));
+    }
+    if (sc.outVaryings.length !== totalVary) {
+      sc.outVaryings = new Float32Array(totalVary);
+    }
+    const scratchSize = (_b = pm.scratchSize) != null ? _b : 0;
+    const intScratchSize = (_c = pm.intScratchSize) != null ? _c : 0;
+    if (sc.scratch.length < scratchSize) sc.scratch = new Float32Array(Math.max(scratchSize, 64));
+    if (sc.intScratch.length < intScratchSize) sc.intScratch = new Int32Array(Math.max(intScratchSize, 64));
+    const blocks = (_d = pm.uniformBlocks) != null ? _d : [];
+    const blockStores = new Array(blocks.length);
+    const blockIntStores = new Array(blocks.length);
+    const bindingsMap = prog._uniformBlockBindings;
+    for (let bi = 0; bi < blocks.length; bi++) {
+      const binding = bindingsMap ? (_e = bindingsMap.get(blocks[bi].index)) != null ? _e : 0 : 0;
+      const buf = binding < s.uniformBuffers.length ? s.uniformBuffers[binding] : null;
+      const range = binding < s.uniformBufferRanges.length ? s.uniformBufferRanges[binding] : { offset: 0, size: 0 };
+      if (buf && buf._data && range.size > 0) {
+        const start = Math.min(range.offset, buf._data.byteLength);
+        const len = Math.min(range.size, buf._data.byteLength - start);
+        blockStores[bi] = new Float32Array(buf._data, start, len >>> 2);
+        blockIntStores[bi] = new Int32Array(buf._data, start, len >>> 2);
+      } else {
+        blockStores[bi] = sc.zeroStore;
+        blockIntStores[bi] = sc.zeroIntStore;
+      }
+    }
+    const env = buildTextureEnv(ctx, pm);
+    const floatStore = (_f = pm.floatStore) != null ? _f : sc.emptyFloat;
+    const intStore = (_g = pm.intStore) != null ? _g : sc.emptyInt;
+    const vctx = {
+      attribs,
+      attribIndices: ai,
+      vertexId: 0,
+      instanceId: 0,
+      uniforms: floatStore,
+      intUniforms: intStore,
+      blockStores,
+      blockIntStores,
+      textures: env.images,
+      samplerStates: env.samplerStates,
+      scratch: sc.scratch,
+      intScratch: sc.intScratch,
+      out: { position: sc.outPosition, pointSize: 0, varyings: sc.outVaryings }
+    };
+    const vertexLocs = [];
+    const instancedLocs = [];
+    for (let l = 0; l < maxAttribs; l++) {
+      const p = plans[l];
+      if (!p.present) continue;
+      if (p.instanced) instancedLocs.push({ loc: l, divisor: p.divisor });
+      else vertexLocs.push(l);
+    }
+    const records = sc.records;
+    const pos = sc.outPosition;
+    const first = req.indexed ? 0 : req.firstOrOffset;
+    const run = pm.vertex.run.bind(pm.vertex);
+    let r = 0;
+    for (let i = 0; i < req.instanceCount; i++) {
+      for (let k = 0; k < instancedLocs.length; k++) {
+        ai[instancedLocs[k].loc] = i / instancedLocs[k].divisor | 0;
+      }
+      for (let j = 0; j < req.count; j++, r++) {
+        vctx.vertexId = req.indexed ? indices[j] : first + j;
+        vctx.instanceId = i;
+        for (let k = 0; k < vertexLocs.length; k++) ai[vertexLocs[k]] = j;
+        run(vctx);
+        const base = r * stride;
+        records[base] = pos[0];
+        records[base + 1] = pos[1];
+        records[base + 2] = pos[2];
+        records[base + 3] = pos[3];
+        records[base + 4] = vctx.out.pointSize;
+        if (totalVary > 0) {
+          const vb = base + RECORD_HEADER_FLOATS;
+          for (let v = 0; v < totalVary; v++) records[vb + v] = sc.outVaryings[v];
+        }
+      }
+    }
+    if (tfActive) {
+      captureTransformFeedback(ctx, tf, prog, pm, records, stride, req);
+      return;
+    }
+    const dc = buildDrawCall(ctx, pm, req, records, stride, fb, env);
+    if (activeQuery) {
+      dc.sampleCountRef = { value: 0 };
+    }
+    try {
+      draw(dc);
+      if (activeQuery) {
+        const ref = dc.sampleCountRef;
+        if (ref) {
+          activeQuery._result += ref.value;
+          activeQuery._resultAvailable = true;
+        }
+      }
+      presentIfDefault(ctx);
+    } catch {
+    }
+  }
+  function executeClear(ctx, mask) {
+    var _a2, _b;
+    const s = ctx._state;
+    const fb = resolveDrawTarget(ctx);
+    if (!fb) {
+      pushError(ctx, C1.INVALID_FRAMEBUFFER_OPERATION);
+      return;
+    }
+    ensureCanvasSize(ctx);
+    const scissor = scissorState(ctx);
+    if (mask & C1.COLOR_BUFFER_BIT) {
+      for (let d = 0; d < s.drawBuffers.length; d++) {
+        const db = s.drawBuffers[d];
+        if (db === C1.NONE) continue;
+        const idx = db - C1.COLOR_ATTACHMENT0;
+        const surf = fb.color[idx];
+        if (!surf) continue;
+        const cm = (_a2 = s.colorMaskPerDrawBuffer.get(d)) != null ? _a2 : s.colorMask;
+        if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) continue;
+        const [r, g2, b, a] = s.clearColor;
+        try {
+          clearColorSurface(surf, r, g2, b, a, scissor, cm);
+        } catch {
+          clearColorLocal(surf, r, g2, b, a, scissor, cm);
+        }
+      }
+    }
+    if (mask & C1.DEPTH_BUFFER_BIT) {
+      if (fb.depth && s.depth.mask) {
+        try {
+          clearDepthSurface(fb.depth, s.clearDepth, scissor, true);
+        } catch {
+          clearDepthLocal(fb.depth, s.clearDepth, scissor);
+        }
+      }
+    }
+    if (mask & C1.STENCIL_BUFFER_BIT) {
+      const stencilSurf = (_b = fb.stencil) != null ? _b : fb.depth && fb.depth.stencilData ? fb.depth : null;
+      if (stencilSurf) {
+        const writeMask = s.stencil.front.writeMask & s.stencil.back.writeMask & 255;
+        if (writeMask !== 0) {
+          try {
+            clearStencilSurface(stencilSurf, s.clearStencil, scissor, writeMask);
+          } catch {
+            clearStencilLocal(stencilSurf, s.clearStencil, scissor, writeMask);
+          }
+        }
+      }
+    }
+    presentIfDefault(ctx);
+  }
+  function packBytesPerPixel(format, type) {
+    const comps = format === C1.RGBA || format === C2.RGBA_INTEGER ? 4 : format === C1.RGB || format === C2.RGB_INTEGER ? 3 : format === C1.LUMINANCE_ALPHA || format === C2.RG || format === C2.RG_INTEGER || format === C2.DEPTH_STENCIL ? 2 : 1;
+    switch (type) {
+      case C1.UNSIGNED_BYTE:
+      case C1.BYTE:
+        return comps;
+      case C1.UNSIGNED_SHORT_5_6_5:
+      case C1.UNSIGNED_SHORT_4_4_4_4:
+      case C1.UNSIGNED_SHORT_5_5_5_1:
+      case C1.UNSIGNED_SHORT:
+      case C1.SHORT:
+      case C2.HALF_FLOAT:
+        return comps * 2;
+      case C2.UNSIGNED_INT_2_10_10_10_REV:
+        return 4;
+      case C2.FLOAT_32_UNSIGNED_INT_24_8_REV:
+        return 8;
+      default:
+        return comps * 4;
+    }
+  }
+  function makeLocalPack(format, type) {
+    const tmp = new Float32Array(4);
+    const u8 = (v) => v < 0 ? 0 : v > 1 ? 1 : v;
+    switch (type) {
+      case C1.UNSIGNED_BYTE: {
+        const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
+        return (src, so, dst, d) => {
+          decodeSurfaceTexel(src, so, tmp);
+          const d8 = dst;
+          if (comps === 4) {
+            d8[d] = u8(tmp[0]) * 255 + 0.5 | 0;
+            d8[d + 1] = u8(tmp[1]) * 255 + 0.5 | 0;
+            d8[d + 2] = u8(tmp[2]) * 255 + 0.5 | 0;
+            d8[d + 3] = u8(tmp[3]) * 255 + 0.5 | 0;
+          } else if (comps === 3) {
+            d8[d] = u8(tmp[0]) * 255 + 0.5 | 0;
+            d8[d + 1] = u8(tmp[1]) * 255 + 0.5 | 0;
+            d8[d + 2] = u8(tmp[2]) * 255 + 0.5 | 0;
+          } else if (comps === 2) {
+            d8[d] = u8(tmp[0]) * 255 + 0.5 | 0;
+            d8[d + 1] = u8(tmp[3]) * 255 + 0.5 | 0;
+          } else {
+            d8[d] = u8(tmp[0]) * 255 + 0.5 | 0;
+          }
+        };
+      }
+      case C1.UNSIGNED_SHORT_5_6_5:
+        return (src, so, dst, d) => {
+          decodeSurfaceTexel(src, so, tmp);
+          const v = (u8(tmp[0]) * 31 + 0.5 | 0) << 11 | (u8(tmp[1]) * 63 + 0.5 | 0) << 5 | u8(tmp[2]) * 31 + 0.5 | 0;
+          const d8 = dst;
+          d8[d] = v & 255;
+          d8[d + 1] = v >> 8 & 255;
+        };
+      case C1.UNSIGNED_SHORT_4_4_4_4:
+        return (src, so, dst, d) => {
+          decodeSurfaceTexel(src, so, tmp);
+          const v = (u8(tmp[0]) * 15 + 0.5 | 0) << 12 | (u8(tmp[1]) * 15 + 0.5 | 0) << 8 | (u8(tmp[2]) * 15 + 0.5 | 0) << 4 | u8(tmp[3]) * 15 + 0.5 | 0;
+          const d8 = dst;
+          d8[d] = v & 255;
+          d8[d + 1] = v >> 8 & 255;
+        };
+      case C1.UNSIGNED_SHORT_5_5_5_1:
+        return (src, so, dst, d) => {
+          decodeSurfaceTexel(src, so, tmp);
+          const v = (u8(tmp[0]) * 31 + 0.5 | 0) << 11 | (u8(tmp[1]) * 31 + 0.5 | 0) << 6 | (u8(tmp[2]) * 31 + 0.5 | 0) << 1 | (u8(tmp[3]) > 0.5 ? 1 : 0);
+          const d8 = dst;
+          d8[d] = v & 255;
+          d8[d + 1] = v >> 8 & 255;
+        };
+      case C1.FLOAT: {
+        const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
+        return (src, so, dst, d) => {
+          decodeSurfaceTexel(src, so, tmp);
+          const df = dst;
+          for (let c = 0; c < comps; c++) df[(d >> 2) + c] = tmp[c];
+        };
+      }
+      case C1.UNSIGNED_INT:
+        if (format === C1.DEPTH_COMPONENT) {
+          return (src, so, dst, d) => {
+            decodeSurfaceTexel(src, so, tmp);
+            const dv = dst;
+            dv.setUint32(d, Math.min(4294967295, Math.max(0, Math.round(tmp[0] * 4294967295))), true);
+          };
+        }
+        return (src, so, dst, d) => {
+          decodeSurfaceTexel(src, so, tmp);
+          dst[d >> 2] = tmp[0] >>> 0;
+        };
+      case C1.UNSIGNED_SHORT:
+        return (src, so, dst, d) => {
+          decodeSurfaceTexel(src, so, tmp);
+          dst[d >> 1] = Math.min(65535, Math.max(0, Math.round(tmp[0] * 65535)));
+        };
+      case C2.UNSIGNED_INT_24_8:
+        return (src, so, dst, d) => {
+          const surf = src;
+          decodeSurfaceTexel(surf, so, tmp);
+          const st = surf.stencilData ? surf.stencilData[so / surfaceBytesPerPixel(surf)] : 0;
+          dst[d >> 2] = (Math.min(16777215, Math.max(0, Math.round(tmp[0] * 16777215))) << 8 | st & 255) >>> 0;
+        };
+      default:
+        return null;
+    }
+  }
+  function executeReadPixels(ctx, x, y, width, height, format, type, pixels) {
+    const s = ctx._state;
+    if (width === 0 || height === 0) return;
+    const surf = resolveReadColor(ctx);
+    if (!surf) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return;
+    }
+    let conv = null;
+    try {
+      const rc = getPackConverter(surf.format, format, type);
+      if (rc) {
+        conv = (src, so, dst, d) => rc.convert(src, so, dst, d);
+      }
+    } catch {
+      conv = null;
+    }
+    if (!conv) {
+      conv = makeLocalPack(format, type);
+      if (!conv) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+    }
+    const pack = s.pixelStore.pack;
+    const bpp = packBytesPerPixel(format, type);
+    const rowLen = pack.rowLength || width;
+    const rowStride = alignUp(rowLen * bpp, pack.alignment);
+    const sbpp = surfaceBytesPerPixel(surf);
+    let dstBase;
+    let dstView;
+    const packBuf = s.pixelPackBuffer;
+    if (packBuf && packBuf._data) {
+      dstView = new Uint8Array(packBuf._data);
+      dstBase = pixels + pack.skipRows * rowStride + pack.skipPixels * bpp;
+    } else {
+      dstView = pixels;
+      dstBase = pixels.byteOffset + pack.skipRows * rowStride + pack.skipPixels * bpp;
+    }
+    for (let row = 0; row < height; row++) {
+      const srcRow = y + row;
+      if (srcRow < 0 || srcRow >= surf.height) continue;
+      const dstRow = dstBase + row * rowStride;
+      for (let px = 0; px < width; px++) {
+        const sx = x + px;
+        if (sx < 0 || sx >= surf.width) continue;
+        conv(surf.data, (srcRow * surf.width + sx) * sbpp, dstView, dstRow + px * bpp);
+      }
+    }
+  }
+  function blitColorLocal(src, dst, srcX, srcY, srcW, srcH, dstX, dstY, dstW, dstH) {
+    const sbpp = surfaceBytesPerPixel(src);
+    const dbpp = surfaceBytesPerPixel(dst);
+    const tmp = new Float32Array(4);
+    for (let dy = 0; dy < Math.abs(dstH); dy++) {
+      const dstRow = dstY + (dstH < 0 ? -dy : dy);
+      if (dstRow < 0 || dstRow >= dst.height) continue;
+      const sy = srcY + (srcH < 0 ? -dy : dy) * (Math.abs(srcH) / Math.abs(dstH));
+      const srcRow = Math.floor(sy);
+      if (srcRow < 0 || srcRow >= src.height) continue;
+      for (let dx = 0; dx < Math.abs(dstW); dx++) {
+        const dstCol = dstX + (dstW < 0 ? -dx : dx);
+        if (dstCol < 0 || dstCol >= dst.width) continue;
+        const sx = srcX + (srcW < 0 ? -dx : dx) * (Math.abs(srcW) / Math.abs(dstW));
+        const srcCol = Math.floor(sx);
+        if (srcCol < 0 || srcCol >= src.width) continue;
+        decodeSurfaceTexel(src, (srcRow * src.width + srcCol) * sbpp, tmp);
+        encodeSurfaceTexel(dst, (dstRow * dst.width + dstCol) * dbpp, tmp[0], tmp[1], tmp[2], tmp[3]);
+      }
+    }
+  }
+  function executeBlitFramebuffer(ctx, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter) {
+    var _a2, _b;
+    const s = ctx._state;
+    const srcW = srcX1 - srcX0;
+    const srcH = srcY1 - srcY0;
+    const dstW = dstX1 - dstX0;
+    const dstH = dstY1 - dstY0;
+    if (mask & C1.COLOR_BUFFER_BIT) {
+      const src = resolveReadColor(ctx);
+      const fb = resolveDrawTarget(ctx);
+      if (src && fb) {
+        const db0 = (_a2 = s.drawBuffers[0]) != null ? _a2 : C1.COLOR_ATTACHMENT0;
+        const dst = db0 === C1.NONE ? null : fb.color[db0 - C1.COLOR_ATTACHMENT0];
+        if (dst) {
+          try {
+            blitColorSurface(
+              src,
+              dst,
+              srcX0,
+              srcY0,
+              srcW,
+              srcH,
+              dstX0,
+              dstY0,
+              dstW,
+              dstH,
+              filter === C1.LINEAR ? "linear" : "nearest"
+            );
+          } catch {
+            blitColorLocal(src, dst, srcX0, srcY0, srcW, srcH, dstX0, dstY0, dstW, dstH);
+          }
+        }
+      }
+    }
+    if (mask & (C1.DEPTH_BUFFER_BIT | C1.STENCIL_BUFFER_BIT)) {
+      const srcDepth = resolveReadDepthStencil(ctx, C1.DEPTH_ATTACHMENT);
+      const srcStencil = resolveReadDepthStencil(ctx, C1.STENCIL_ATTACHMENT);
+      const fb = resolveDrawTarget(ctx);
+      const dstDepth = fb ? fb.depth : null;
+      const dstStencil = fb ? (_b = fb.stencil) != null ? _b : fb.depth && fb.depth.stencilData ? fb.depth : null : null;
+      if (srcDepth && dstDepth) {
+        try {
+          blitDepthStencilSurface(srcDepth, dstDepth, srcX0, srcY0, srcW, srcH, dstX0, dstY0, dstW, dstH);
+        } catch {
+          blitColorLocal(srcDepth, dstDepth, srcX0, srcY0, srcW, srcH, dstX0, dstY0, dstW, dstH);
+        }
+      }
+      if (srcStencil && dstStencil) {
+        try {
+          blitDepthStencilSurface(srcStencil, dstStencil, srcX0, srcY0, srcW, srcH, dstX0, dstY0, dstW, dstH);
+        } catch {
+          blitColorLocal(srcStencil, dstStencil, srcX0, srcY0, srcW, srcH, dstX0, dstY0, dstW, dstH);
+        }
+      }
+    }
+    presentIfDefault(ctx);
+  }
+  function clearColorIntLocal(surf, values, mask, scissor) {
+    var _a2, _b, _c, _d;
+    const w = surf.width;
+    const h = surf.height;
+    const bpp = surfaceBytesPerPixel(surf);
+    const x0 = scissor ? Math.max(0, scissor.x) : 0;
+    const y0 = scissor ? Math.max(0, scissor.y) : 0;
+    const x1 = scissor ? Math.min(w, scissor.x + scissor.w) : w;
+    const y1 = scissor ? Math.min(h, scissor.y + scissor.h) : h;
+    const d = surf.data;
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const off = (y * w + x) * bpp;
+        const write = (comp, v) => {
+          const target = d;
+          if (target instanceof Int32Array) target[(off >> 2) + comp] = v;
+          else if (target instanceof Uint32Array) target[(off >> 2) + comp] = v >>> 0;
+          else if (target instanceof Int16Array) target[(off >> 1) + comp] = v;
+          else if (target instanceof Uint16Array) target[(off >> 1) + comp] = v >>> 0;
+          else if (target instanceof Int8Array) target[off + comp] = v;
+          else if (target instanceof Uint8Array) target[off + comp] = v >>> 0;
+        };
+        if (mask[0]) write(0, (_a2 = values[0]) != null ? _a2 : 0);
+        if (mask[1]) write(1, (_b = values[1]) != null ? _b : 0);
+        if (mask[2]) write(2, (_c = values[2]) != null ? _c : 0);
+        if (mask[3]) write(3, (_d = values[3]) != null ? _d : 1);
+      }
+    }
+  }
+  function executeClearBuffer(ctx, buffer, drawbuffer, values, depth, stencil) {
+    var _a2, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o;
+    const s = ctx._state;
+    const fb = resolveDrawTarget(ctx);
+    if (!fb) {
+      pushError(ctx, C1.INVALID_FRAMEBUFFER_OPERATION);
+      return;
+    }
+    ensureCanvasSize(ctx);
+    const scissor = scissorState(ctx);
+    if (buffer === C2.COLOR) {
+      if (drawbuffer < 0 || drawbuffer >= s.limits.MAX_DRAW_BUFFERS) {
+        pushError(ctx, C1.INVALID_VALUE);
+        return;
+      }
+      const db = (_a2 = s.drawBuffers[drawbuffer]) != null ? _a2 : C1.NONE;
+      if (db === C1.NONE || !values) return;
+      const idx = db - C1.COLOR_ATTACHMENT0;
+      const surf = fb.color[idx];
+      if (!surf) return;
+      const cm = (_b = s.colorMaskPerDrawBuffer.get(drawbuffer)) != null ? _b : s.colorMask;
+      if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) return;
+      if (values instanceof Int32Array || values instanceof Uint32Array) {
+        clearColorIntLocal(surf, values, cm, scissor);
+      } else {
+        const v = values;
+        try {
+          clearColorSurface(surf, (_c = v[0]) != null ? _c : 0, (_d = v[1]) != null ? _d : 0, (_e = v[2]) != null ? _e : 0, (_f = v[3]) != null ? _f : 1, scissor, cm);
+        } catch {
+          clearColorLocal(surf, (_g = v[0]) != null ? _g : 0, (_h = v[1]) != null ? _h : 0, (_i = v[2]) != null ? _i : 0, (_j = v[3]) != null ? _j : 1, scissor, cm);
+        }
+      }
+    } else if (buffer === C2.DEPTH) {
+      if (!fb.depth) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+      if (!s.depth.mask || !values) return;
+      try {
+        clearDepthSurface(fb.depth, (_k = values[0]) != null ? _k : 0, scissor, true);
+      } catch {
+        clearDepthLocal(fb.depth, (_l = values[0]) != null ? _l : 0, scissor);
+      }
+    } else if (buffer === C2.STENCIL) {
+      const stencilSurf = (_m = fb.stencil) != null ? _m : fb.depth && fb.depth.stencilData ? fb.depth : null;
+      if (!stencilSurf) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+      if (!values) return;
+      const writeMask = s.stencil.front.writeMask & s.stencil.back.writeMask & 255;
+      if (writeMask === 0) return;
+      try {
+        clearStencilSurface(stencilSurf, (_n = values[0]) != null ? _n : 0, scissor, writeMask);
+      } catch {
+        clearStencilLocal(stencilSurf, (_o = values[0]) != null ? _o : 0, scissor, writeMask);
+      }
+    } else {
+      if (!fb.depth || !fb.depth.stencilData) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+      if (s.depth.mask && depth !== void 0) {
+        try {
+          clearDepthSurface(fb.depth, depth, scissor, true);
+        } catch {
+          clearDepthLocal(fb.depth, depth, scissor);
+        }
+      }
+      const writeMask = s.stencil.front.writeMask & s.stencil.back.writeMask & 255;
+      if (writeMask !== 0 && stencil !== void 0) {
+        try {
+          clearStencilSurface(fb.depth, stencil, scissor, writeMask);
+        } catch {
+          clearStencilLocal(fb.depth, stencil, scissor, writeMask);
+        }
+      }
+    }
+    presentIfDefault(ctx);
+  }
+  var DRAW_MODES = /* @__PURE__ */ new Set([
+    C1.POINTS,
+    C1.LINE_STRIP,
+    C1.LINE_LOOP,
+    C1.LINES,
+    C1.TRIANGLE_STRIP,
+    C1.TRIANGLE_FAN,
+    C1.TRIANGLES
+  ]);
+  function indexTypeSize(type) {
+    return type === C1.UNSIGNED_BYTE ? 1 : type === C1.UNSIGNED_SHORT ? 2 : 4;
+  }
+  function validateCommonDraw(ctx, mode) {
+    const s = ctx._state;
+    const prog = s.currentProgram;
+    if (!prog || !prog._linkStatus || !prog._program) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return false;
+    }
+    const tf = s.transformFeedback;
+    if (tf && tf._active && !tf._paused && tf._primitiveMode !== mode) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return false;
+    }
+    const vao = s.vao;
+    const maxAttribs = s.limits.MAX_VERTEX_ATTRIBS;
+    for (let loc = 0; loc < maxAttribs; loc++) {
+      const a = vao.attribs[loc];
+      if (a.enabled && !a.buffer) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return false;
+      }
+    }
+    if (!resolveDrawTarget(ctx)) {
+      pushError(ctx, C1.INVALID_FRAMEBUFFER_OPERATION);
+      return false;
+    }
+    return true;
+  }
+  function validateDrawArrays(ctx, mode, first, count, instanceCount = 1) {
+    if (!DRAW_MODES.has(mode)) {
+      pushError(ctx, C1.INVALID_ENUM);
+      return null;
+    }
+    if (first < 0 || count < 0 || instanceCount < 0) {
+      pushError(ctx, C1.INVALID_VALUE);
+      return null;
+    }
+    if (!validateCommonDraw(ctx, mode)) return null;
+    return { mode, count, instanceCount, firstOrOffset: first, indexed: false };
+  }
+  function validateDrawElements(ctx, mode, count, type, offset, opts = {}) {
+    var _a2;
+    const instanceCount = (_a2 = opts.instanceCount) != null ? _a2 : 1;
+    if (!DRAW_MODES.has(mode)) {
+      pushError(ctx, C1.INVALID_ENUM);
+      return null;
+    }
+    if (count < 0 || instanceCount < 0) {
+      pushError(ctx, C1.INVALID_VALUE);
+      return null;
+    }
+    const s = ctx._state;
+    const uintOK = s.version === 2 || extSupported(ctx, "OES_element_index_uint");
+    if (type !== C1.UNSIGNED_BYTE && type !== C1.UNSIGNED_SHORT && !(type === C1.UNSIGNED_INT && uintOK)) {
+      pushError(ctx, C1.INVALID_ENUM);
+      return null;
+    }
+    if (offset < 0) {
+      pushError(ctx, C1.INVALID_VALUE);
+      return null;
+    }
+    const ts = indexTypeSize(type);
+    if (offset % ts !== 0) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return null;
+    }
+    const range = opts.range;
+    if (range) {
+      if (range[0] > range[1]) {
+        pushError(ctx, C1.INVALID_VALUE);
+        return null;
+      }
+      if (count > range[1] - range[0] + 1) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return null;
+      }
+    }
+    const eb = s.vao.elementArrayBuffer;
+    if (!eb || !eb._data || offset + count * ts > eb._size) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return null;
+    }
+    if (!validateCommonDraw(ctx, mode)) return null;
+    const req = {
+      mode,
+      count,
+      instanceCount,
+      firstOrOffset: offset,
+      indexed: true,
+      indexType: type
+    };
+    if (range) req.range = range;
+    return req;
+  }
+
+  // src/gl/extensions/instancing.ts
+  var MODES = [
+    C1.POINTS,
+    C1.LINES,
+    C1.LINE_LOOP,
+    C1.LINE_STRIP,
+    C1.TRIANGLES,
+    C1.TRIANGLE_STRIP,
+    C1.TRIANGLE_FAN
+  ];
+  function indexTypeSize2(type) {
+    switch (type) {
+      case C1.UNSIGNED_SHORT:
+        return 2;
+      case C1.UNSIGNED_INT:
+        return 4;
+      default:
+        return null;
+    }
+  }
+  function dispatchDraw(ctx, req) {
+    try {
+      executeDraw(ctx, req);
+    } catch {
+      ctx._errors.push(C1.INVALID_OPERATION);
+    }
+  }
+  function createANGLEInstancedArrays(ctx) {
+    const ext = buildExtension(
+      { VERTEX_ATTRIB_ARRAY_DIVISOR_ANGLE: 35070 },
+      {
+        drawArraysInstancedANGLE: (mode, first, count, primcount) => {
+          const gl = ctx;
+          if (isLost(gl)) return;
+          if (!MODES.includes(mode)) {
+            gl._errors.push(C1.INVALID_ENUM);
+            return;
+          }
+          const c = count | 0;
+          const pc = primcount | 0;
+          if (c < 0 || pc < 0) {
+            gl._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          dispatchDraw(gl, { mode, count: c, instanceCount: pc, firstOrOffset: first | 0, indexed: false });
+        },
+        drawElementsInstancedANGLE: (mode, count, type, offset, primcount) => {
+          const gl = ctx;
+          if (isLost(gl)) return;
+          if (!MODES.includes(mode)) {
+            gl._errors.push(C1.INVALID_ENUM);
+            return;
+          }
+          const c = count | 0;
+          const pc = primcount | 0;
+          if (c < 0 || pc < 0) {
+            gl._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          const size = indexTypeSize2(type);
+          const uintOk = type === C1.UNSIGNED_INT && gl._extensions.has("OES_element_index_uint");
+          if (size === null && !uintOk) {
+            gl._errors.push(C1.INVALID_ENUM);
+            return;
+          }
+          const off = offset | 0;
+          if (off < 0) {
+            gl._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          if (off % (size != null ? size : 4) !== 0) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          dispatchDraw(gl, { mode, count: c, instanceCount: pc, firstOrOffset: off, indexed: true, indexType: type });
+        },
+        vertexAttribDivisorANGLE: (index, divisor) => {
+          const gl = ctx;
+          if (isLost(gl)) return;
+          const i = index >>> 0;
+          if (i >= gl._state.limits.MAX_VERTEX_ATTRIBS) {
+            gl._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          gl._state.vao.attribs[i].divisor = divisor >>> 0;
+        }
+      }
+    );
+    return ext;
+  }
+
+  // src/gl/objects/webgl-object.ts
+  var WebGLObject = class {
+    constructor(context) {
+      /** True after delete*() — further use generates INVALID_OPERATION. */
+      __publicField(this, "_deleted", false);
+      Object.defineProperty(this, "_context", {
+        value: context,
+        writable: false,
+        enumerable: false,
+        configurable: false
+      });
+    }
+  };
+
+  // src/gl/objects/webgl-buffer.ts
+  var WebGLBuffer = class extends WebGLObject {
+    constructor() {
+      super(...arguments);
+      /** Target the buffer was first bound to (0 = unbound yet). */
+      __publicField(this, "_target", 0);
+      /** Uploaded data (null until bufferData). */
+      __publicField(this, "_data", null);
+      /** Data size in bytes (bufferData size arg). */
+      __publicField(this, "_size", 0);
+      /** STREAM/STATIC/DYNAMIC_DRAW usage hint. */
+      __publicField(this, "_usage", 35044);
+      // STATIC_DRAW
+      /** True when deleteBuffer() was called while still bound — real delete deferred. */
+      __publicField(this, "_deletePending", false);
+      /** Indexed binding ranges (bindBufferRange) for TRANSFORM_FEEDBACK_BUFFER. */
+      __publicField(this, "_tfRangeBindings", []);
+    }
+  };
+
+  // src/gl/objects/webgl-texture.ts
+  var WebGLTexture = class extends WebGLObject {
+    constructor() {
+      super(...arguments);
+      /** Target the texture was first bound to (0 = unbound yet). */
+      __publicField(this, "_target", 0);
+      /** texStorage* set → immutable (further storage calls are INVALID_OPERATION). */
+      __publicField(this, "_immutable", false);
+      /** True when deleteTexture() was called while still bound — real delete deferred. */
+      __publicField(this, "_deletePending", false);
+      /** True when the texture is attached to a currently-bound FBO (feedback-loop checks). */
+      __publicField(this, "_attachedToFramebuffer", false);
+      /** Sample count set by WEBGL_multisampled_render_to_texture (0 = single-sampled). */
+      __publicField(this, "_msaaSamples", 0);
+      /**
+       * The texture's storage + sampling metadata, maintained by teximage.ts:
+       * levels (raster TextureLevel[]), internalFormat, dimensions, base/max level,
+       * immutable flag, and the computed completeness (sampling + FBO rules).
+       * null until the first storage allocation.
+       */
+      __publicField(this, "_image", null);
+      /** glTexParameter state (per-texture; overridden by WebGLSampler when bound). */
+      __publicField(this, "_params", {
+        [10241]: 9984,
+        // MIN_FILTER = NEAREST_MIPMAP_LINEAR
+        [10240]: 9729,
+        // MAG_FILTER = LINEAR
+        [10242]: 10497,
+        // WRAP_S = REPEAT
+        [10243]: 10497,
+        // WRAP_T = REPEAT
+        [32882]: 10497,
+        // WRAP_R = REPEAT (WebGL2)
+        [33084]: 0,
+        // BASE_LEVEL
+        [33085]: 1e3,
+        // MAX_LEVEL
+        [33082]: -1e3,
+        // MIN_LOD
+        [33083]: 1e3,
+        // MAX_LOD
+        [34892]: 0,
+        // COMPARE_MODE = NONE
+        [34893]: 515,
+        // COMPARE_FUNC = LEQUAL
+        [34046]: 1
+        // TEXTURE_MAX_ANISOTROPY_EXT
+      });
+      /** Base internal format (GLenum) of level 0 — for completeness rules. */
+      __publicField(this, "_internalFormat", 0);
+      /** True when the base level is a compressed format. */
+      __publicField(this, "_compressed", false);
+    }
+  };
+
+  // src/gl/objects/webgl-shader.ts
+  var WebGLShader = class extends WebGLObject {
+    constructor() {
+      super(...arguments);
+      /** VERTEX_SHADER | FRAGMENT_SHADER. */
+      __publicField(this, "_type", 0);
+      /** Source string (set by shaderSource). */
+      __publicField(this, "_source", "");
+      /** COMPILE_STATUS. */
+      __publicField(this, "_compileStatus", false);
+      /** Info log ('' when ok). */
+      __publicField(this, "_infoLog", "");
+      /** Result of glsl/ compileShader — the compiled program model (contract §1). */
+      __publicField(this, "_compiled", null);
+      /** Translated source cache for WEBGL_debug_shaders. */
+      __publicField(this, "_translatedSource", null);
+    }
+  };
+
+  // src/gl/objects/webgl-program.ts
+  var WebGLProgram = class extends WebGLObject {
+    constructor() {
+      super(...arguments);
+      /** Currently attached shaders. */
+      __publicField(this, "_attachedShaders", /* @__PURE__ */ new Set());
+      /** LINK_STATUS. */
+      __publicField(this, "_linkStatus", false);
+      /** Info log. */
+      __publicField(this, "_infoLog", "");
+      /** glsl/ program model — null until link succeeds (contract §1). */
+      __publicField(this, "_program", null);
+      /** Per-program uniform storage (DataView over ArrayBuffer) — layout by glsl/. */
+      __publicField(this, "_uniformStore", null);
+      /** Uniform block stores: blockIndex → DataView (allocated at link). */
+      __publicField(this, "_blockStores", []);
+      /** Pending bindAttribLocation (applied at next link). */
+      __publicField(this, "_bindAttribLocations", /* @__PURE__ */ new Map());
+      /** transformFeedbackVaryings (applied at next link). */
+      __publicField(this, "_transformFeedbackVaryings", null);
+      /** TRANSFORM_FEEDBACK_BUFFER_MODE for TF varyings. */
+      __publicField(this, "_tfBufferMode", 0);
+      /** True while this program is in useProgram — delete is deferred. */
+      __publicField(this, "_inUse", false);
+      /** True while this program is active in transform feedback — delete deferred. */
+      __publicField(this, "_inTransformFeedback", false);
+      /** Used by getProgramParameter/COMPLETION_STATUS_KHR: true when link "done" (always, synchronous). */
+      __publicField(this, "_linkComplete", true);
+    }
+  };
+
+  // src/gl/objects/webgl-framebuffer.ts
+  var WebGLFramebuffer = class extends WebGLObject {
+    constructor() {
+      super(...arguments);
+      /** attachment point (COLOR_ATTACHMENTn | DEPTH_ATTACHMENT | STENCIL_ATTACHMENT | DEPTH_STENCIL_ATTACHMENT) → attachment. */
+      __publicField(this, "_attachments", /* @__PURE__ */ new Map());
+      /** Cached completeness (recomputed on check/draw). */
+      __publicField(this, "_status", 36053);
+      // FRAMEBUFFER_COMPLETE (default for empty? no — recomputed; kept for draw-path fast check)
+      /** True when any attachment is multisampled (sample-count consistency rule). */
+      __publicField(this, "_multisampled", false);
+      /** True while bound to the draw framebuffer — attachment mutation guard. */
+      __publicField(this, "_isBound", false);
+    }
+  };
+
+  // src/gl/objects/webgl-renderbuffer.ts
+  var WebGLRenderbuffer = class extends WebGLObject {
+    constructor() {
+      super(...arguments);
+      /** INTERNALFORMAT (0 = unallocated). */
+      __publicField(this, "_internalformat", 0);
+      __publicField(this, "_width", 0);
+      __publicField(this, "_height", 0);
+      /** Sample count (renderbufferStorageMultisample). Storage is single-sampled; blit resolves. */
+      __publicField(this, "_samples", 0);
+      /** Backing raster surface (typed-array store per raster/formats registry). */
+      __publicField(this, "_surface", null);
+    }
+  };
+
+  // src/gl/objects/webgl-vao.ts
+  var WebGLVertexArrayObject = class extends WebGLObject {
+    constructor() {
+      super(...arguments);
+      /** Assigned at creation (createObject / constructor in Phase 2). */
+      __publicField(this, "_vao");
+    }
+  };
+
+  // src/gl/objects/webgl-sampler.ts
+  var WebGLSampler = class extends WebGLObject {
+    constructor() {
+      super(...arguments);
+      __publicField(this, "_params", {
+        [10241]: 9984,
+        // MIN_FILTER = NEAREST_MIPMAP_LINEAR
+        [10240]: 9729,
+        // MAG_FILTER = LINEAR
+        [10242]: 10497,
+        // WRAP_S = REPEAT
+        [10243]: 10497,
+        // WRAP_T = REPEAT
+        [32882]: 10497,
+        // WRAP_R = REPEAT
+        [33084]: 0,
+        // BASE_LEVEL
+        [33085]: 1e3,
+        // MAX_LEVEL
+        [33082]: -1e3,
+        // MIN_LOD
+        [33083]: 1e3,
+        // MAX_LOD
+        [34892]: 0,
+        // COMPARE_MODE = NONE
+        [34893]: 515,
+        // COMPARE_FUNC = LEQUAL
+        [34046]: 1
+        // TEXTURE_MAX_ANISOTROPY_EXT
+      });
+    }
+  };
+
+  // src/gl/objects/webgl-query.ts
+  var WebGLQuery = class extends WebGLObject {
+    constructor() {
+      super(...arguments);
+      /** Target the query was created for (first beginQuery binds it). */
+      __publicField(this, "_target", 0);
+      /** True while the query is active (beginQuery … endQuery). */
+      __publicField(this, "_active", false);
+      /** Number of samples that passed (accumulated; updated at endQuery). */
+      __publicField(this, "_result", 0);
+      /** QUERY_RESULT_AVAILABLE. */
+      __publicField(this, "_resultAvailable", false);
+      /** EXT_disjoint_timer_query_webgl2: TIME_ELAPSED/TIMESTAMP result in ns. */
+      __publicField(this, "_isTimerQuery", false);
+    }
+  };
+
+  // src/gl/objects/webgl-sync.ts
+  var WebGLSync = class extends WebGLObject {
+    constructor() {
+      super(...arguments);
+      /** SYNC_FENCE. */
+      __publicField(this, "_condition", 0);
+      /** 0 or SYNC_FLUSH_COMMANDS_BIT. */
+      __publicField(this, "_flags", 0);
+      /** SYNC_STATUS — signaled immediately (synchronous renderer). */
+      __publicField(this, "_signaled", true);
+      /** Monotonic id for ordering assertions (fenceSync ordering tests). */
+      __publicField(this, "_id", 0);
+      /** Timeout bookkeeping (clientWaitSync). */
+      __publicField(this, "_waitStarted", 0);
+    }
+  };
+
+  // src/gl/objects/webgl-transform-feedback.ts
+  var WebGLTransformFeedback = class extends WebGLObject {
+    constructor() {
+      super(...arguments);
+      /** Program captured at beginTransformFeedback. */
+      __publicField(this, "_program", null);
+      /** Indexed TRANSFORM_FEEDBACK_BUFFER bindings (0..MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS-1). */
+      __publicField(this, "_buffers", []);
+      __publicField(this, "_bufferRanges", []);
+      /** TRANSFORM_FEEDBACK_ACTIVE. */
+      __publicField(this, "_active", false);
+      /** TRANSFORM_FEEDBACK_PAUSED. */
+      __publicField(this, "_paused", false);
+      /** Primitive mode passed to beginTransformFeedback. */
+      __publicField(this, "_primitiveMode", 0);
+      /** Primitives written counter (getParameter TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN). */
+      __publicField(this, "_primitivesWritten", 0);
+    }
+  };
+
+  // src/gl/objects/aux.ts
+  var WebGLUniformLocation = class {
+    constructor(program, index, name) {
+      this._program = program;
+      this._index = index;
+      this._name = name;
+    }
+  };
+  var WebGLActiveInfo = class {
+    constructor(size, type, name) {
+      __publicField(this, "size");
+      __publicField(this, "type");
+      __publicField(this, "name");
+      this.size = size;
+      this.type = type;
+      this.name = name;
+    }
+  };
+  var WebGLShaderPrecisionFormat = class {
+    constructor(rangeMin, rangeMax, precision) {
+      __publicField(this, "rangeMin");
+      __publicField(this, "rangeMax");
+      __publicField(this, "precision");
+      this.rangeMin = rangeMin;
+      this.rangeMax = rangeMax;
+      this.precision = precision;
+    }
+  };
+
   // src/gl/objects/index.ts
   var Resources = class {
     constructor(ctx) {
@@ -818,6 +3785,9243 @@
       this.all.clear();
     }
   };
+  function createObject(ctx, ctor) {
+    return ctx._resources.track(new ctor(ctx));
+  }
+
+  // src/gl/extensions/vao.ts
+  var VAOCtor = ctorOf(WebGLVertexArrayObject);
+  function defaultVAO(ctx) {
+    if (!ctx._defaultVAO) {
+      if (ctx._state.vaoBinding === null) {
+        ctx._defaultVAO = ctx._state.vao;
+      } else {
+        ctx._defaultVAO = defaultVAOState(ctx._state.limits.MAX_VERTEX_ATTRIBS);
+      }
+    }
+    return ctx._defaultVAO;
+  }
+  function bindDefault(ctx) {
+    ctx._state.vaoBinding = null;
+    ctx._state.vao = defaultVAO(ctx);
+  }
+  function createOESVertexArrayObject(ctx) {
+    return buildExtension(
+      { VERTEX_ARRAY_BINDING_OES: 34229 },
+      {
+        createVertexArrayOES: () => {
+          const gl = ctx;
+          if (isLost(gl)) return null;
+          const vao = createObject(gl, VAOCtor);
+          vao._vao = defaultVAOState(gl._state.limits.MAX_VERTEX_ATTRIBS);
+          return vao;
+        },
+        deleteVertexArrayOES: (vertexArray) => {
+          const gl = ctx;
+          if (isLost(gl)) return;
+          if (vertexArray === null || vertexArray === void 0) return;
+          if (!(vertexArray instanceof WebGLVertexArrayObject)) {
+            throw new TypeError(`Argument is not of type 'WebGLVertexArrayObject'`);
+          }
+          if (vertexArray._context !== gl) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          if (vertexArray._deleted) return;
+          if (gl._state.vaoBinding === vertexArray) bindDefault(gl);
+          vertexArray._deleted = true;
+          gl._resources.untrack(vertexArray);
+        },
+        isVertexArrayOES: (vertexArray) => {
+          const gl = ctx;
+          if (isLost(gl)) return false;
+          if (vertexArray === null || vertexArray === void 0) return false;
+          if (!(vertexArray instanceof WebGLVertexArrayObject)) {
+            throw new TypeError(`Argument is not of type 'WebGLVertexArrayObject'`);
+          }
+          if (vertexArray._context !== gl) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return false;
+          }
+          return !vertexArray._deleted;
+        },
+        bindVertexArrayOES: (vertexArray) => {
+          const gl = ctx;
+          if (isLost(gl)) return;
+          if (vertexArray === null || vertexArray === void 0) {
+            bindDefault(gl);
+            return;
+          }
+          if (!(vertexArray instanceof WebGLVertexArrayObject)) {
+            throw new TypeError(`Argument is not of type 'WebGLVertexArrayObject'`);
+          }
+          if (vertexArray._context !== gl) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          if (vertexArray._deleted) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          if (!gl._defaultVAO && gl._state.vaoBinding === null) {
+            gl._defaultVAO = gl._state.vao;
+          }
+          gl._state.vaoBinding = vertexArray;
+          gl._state.vao = vertexArray._vao;
+        }
+      }
+    );
+  }
+
+  // src/gl/extensions/draw-buffers.ts
+  var NONE2 = 0;
+  var BACK = 1029;
+  var COLOR_ATTACHMENT02 = 36064;
+  function makeConstants() {
+    const table = {
+      MAX_DRAW_BUFFERS_WEBGL: CExt.MAX_DRAW_BUFFERS_WEBGL,
+      MAX_COLOR_ATTACHMENTS_WEBGL: CExt.MAX_COLOR_ATTACHMENTS_WEBGL
+    };
+    for (let i = 0; i < 16; i++) {
+      table[`DRAW_BUFFER${i}_WEBGL`] = CExt[`DRAW_BUFFER${i}_WEBGL`];
+      table[`COLOR_ATTACHMENT${i}_WEBGL`] = CExt[`COLOR_ATTACHMENT${i}_WEBGL`];
+    }
+    return table;
+  }
+  function createWEBGLDrawBuffers(ctx) {
+    return buildExtension(makeConstants(), {
+      drawBuffersWEBGL: (buffers) => {
+        const gl = ctx;
+        if (isLost(gl)) return;
+        const s = gl._state;
+        let arr;
+        try {
+          arr = Array.from(buffers, (v) => {
+            const n = Number(v);
+            if (!Number.isFinite(n)) throw new TypeError("drawBuffersWEBGL: invalid GLenum in sequence");
+            return n >>> 0;
+          });
+        } catch {
+          throw new TypeError("drawBuffersWEBGL: buffers is not a sequence<GLenum>");
+        }
+        const maxDrawBuffers = s.limits.MAX_DRAW_BUFFERS;
+        const maxColorAttachments = s.limits.MAX_COLOR_ATTACHMENTS;
+        if (arr.length > maxDrawBuffers) {
+          gl._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (arr.length === 0) {
+          gl._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (s.drawFramebuffer === null) {
+          if (arr.length !== 1 || arr[0] !== BACK && arr[0] !== NONE2) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          s.drawBuffers = arr;
+          return;
+        }
+        let last = -1;
+        for (const b of arr) {
+          if (b === NONE2) continue;
+          if (b === BACK) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          const idx = b - COLOR_ATTACHMENT02;
+          if (idx < 0 || idx >= maxColorAttachments) {
+            gl._errors.push(C1.INVALID_ENUM);
+            return;
+          }
+          if (idx <= last) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          last = idx;
+        }
+        s.drawBuffers = arr;
+      }
+    });
+  }
+
+  // src/gl/extensions/webgl2.ts
+  function createEXTColorBufferFloat(ctx) {
+    void ctx;
+    return buildExtension({});
+  }
+  function createEXTColorBufferHalfFloat(ctx) {
+    void ctx;
+    return buildExtension({});
+  }
+  function createEXTFloatBlend(ctx) {
+    void ctx;
+    return buildExtension({});
+  }
+  function createEXTTextureNorm16(ctx) {
+    void ctx;
+    return buildExtension({
+      R16_EXT: CExt.R16_EXT,
+      RG16_EXT: CExt.RG16_EXT,
+      RGB16_EXT: CExt.RGB16_EXT,
+      RGBA16_EXT: CExt.RGBA16_EXT,
+      R16_SNORM_EXT: CExt.R16_SNORM_EXT,
+      RG16_SNORM_EXT: CExt.RG16_SNORM_EXT,
+      RGB16_SNORM_EXT: CExt.RGB16_SNORM_EXT,
+      RGBA16_SNORM_EXT: CExt.RGBA16_SNORM_EXT
+    });
+  }
+  function createKHRParallelShaderCompile(ctx) {
+    void ctx;
+    return buildExtension({ COMPLETION_STATUS_KHR: CExt.COMPLETION_STATUS_KHR });
+  }
+  function createWEBGLRenderSharedExponent(ctx) {
+    void ctx;
+    return buildExtension({});
+  }
+
+  // src/gl/extensions/clip-state.ts
+  var CLIP_DISTANCE_COUNT = 8;
+  var clipDistanceState = /* @__PURE__ */ new WeakMap();
+  function getClipDistances(ctx) {
+    let flags = clipDistanceState.get(ctx);
+    if (!flags) {
+      flags = new Uint8Array(CLIP_DISTANCE_COUNT);
+      clipDistanceState.set(ctx, flags);
+    }
+    return flags;
+  }
+  function isClipDistanceEnabled(ctx, index) {
+    var _a2;
+    if (index < 0 || index >= CLIP_DISTANCE_COUNT) return false;
+    return ((_a2 = clipDistanceState.get(ctx)) == null ? void 0 : _a2[index]) === 1;
+  }
+  function setClipDistanceEnabled(ctx, index, enabled) {
+    if (index < 0 || index >= CLIP_DISTANCE_COUNT) return;
+    getClipDistances(ctx)[index] = enabled ? 1 : 0;
+  }
+  var CLIP_ORIGIN_LOWER_LEFT = 36001;
+  var CLIP_DEPTH_NEGATIVE_ONE_TO_ONE = 37726;
+  var clipControlState = /* @__PURE__ */ new WeakMap();
+  function getClipControl(ctx) {
+    let state = clipControlState.get(ctx);
+    if (!state) {
+      state = { origin: CLIP_ORIGIN_LOWER_LEFT, depth: CLIP_DEPTH_NEGATIVE_ONE_TO_ONE };
+      clipControlState.set(ctx, state);
+    }
+    return state;
+  }
+  function setClipControl(ctx, origin, depth) {
+    clipControlState.set(ctx, { origin, depth });
+  }
+
+  // src/gl/extensions/misc.ts
+  function createWEBGLLoseContext(ctx) {
+    return buildExtension({}, {
+      loseContext: () => {
+        loseContext(ctx);
+      },
+      restoreContext: () => {
+        restoreContext(ctx);
+      }
+    });
+  }
+  function requireShader(gl, shader) {
+    if (shader === null || shader === void 0) {
+      throw new TypeError("Argument is not of type 'WebGLShader'");
+    }
+    if (!(shader instanceof WebGLShader)) {
+      throw new TypeError("Argument is not of type 'WebGLShader'");
+    }
+    if (shader._context !== gl) {
+      gl._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    if (shader._deleted) {
+      gl._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    return shader;
+  }
+  function createWEBGLDebugShaders(ctx) {
+    return buildExtension({}, {
+      getTranslatedShaderSource: (shader) => {
+        var _a2;
+        const gl = ctx;
+        const s = requireShader(gl, shader);
+        if (s === null) return null;
+        return (_a2 = s._translatedSource) != null ? _a2 : s._compileStatus ? s._source : "";
+      }
+    });
+  }
+  var LOWER_LEFT_EXT = 36001;
+  var UPPER_LEFT_EXT = 36002;
+  var NEGATIVE_ONE_TO_ONE_EXT = 37726;
+  var ZERO_TO_ONE_EXT = 37727;
+  function createEXTClipControl(ctx) {
+    return buildExtension(
+      {
+        CLIP_ORIGIN_EXT: CExt.CLIP_ORIGIN_EXT,
+        CLIP_DEPTH_MODE_EXT: CExt.CLIP_DEPTH_MODE_EXT,
+        LOWER_LEFT_EXT: CExt.LOWER_LEFT_EXT,
+        UPPER_LEFT_EXT: CExt.UPPER_LEFT_EXT,
+        NEGATIVE_ONE_TO_ONE_EXT: CExt.NEGATIVE_ONE_TO_ONE_EXT,
+        ZERO_TO_ONE_EXT: CExt.ZERO_TO_ONE_EXT
+      },
+      {
+        clipControlEXT: (origin, depth) => {
+          const gl = ctx;
+          if (isLost(gl)) return;
+          if (origin !== LOWER_LEFT_EXT && origin !== UPPER_LEFT_EXT || depth !== NEGATIVE_ONE_TO_ONE_EXT && depth !== ZERO_TO_ONE_EXT) {
+            gl._errors.push(C1.INVALID_ENUM);
+            return;
+          }
+          setClipControl(gl, origin, depth);
+        }
+      }
+    );
+  }
+  function createWEBGLClipCullDistance(ctx) {
+    void ctx;
+    return buildExtension({
+      MAX_CLIP_DISTANCES_WEBGL: CExt.MAX_CLIP_DISTANCES_WEBGL,
+      MAX_CULL_DISTANCES_WEBGL: CExt.MAX_CULL_DISTANCES_WEBGL,
+      MAX_COMBINED_CLIP_AND_CULL_DISTANCES_WEBGL: CExt.MAX_COMBINED_CLIP_AND_CULL_DISTANCES_WEBGL,
+      CLIP_DISTANCE0_WEBGL: CExt.CLIP_DISTANCE0_WEBGL,
+      CLIP_DISTANCE1_WEBGL: CExt.CLIP_DISTANCE1_WEBGL,
+      CLIP_DISTANCE2_WEBGL: CExt.CLIP_DISTANCE2_WEBGL,
+      CLIP_DISTANCE3_WEBGL: CExt.CLIP_DISTANCE3_WEBGL,
+      CLIP_DISTANCE4_WEBGL: CExt.CLIP_DISTANCE4_WEBGL,
+      CLIP_DISTANCE5_WEBGL: CExt.CLIP_DISTANCE5_WEBGL,
+      CLIP_DISTANCE6_WEBGL: CExt.CLIP_DISTANCE6_WEBGL,
+      CLIP_DISTANCE7_WEBGL: CExt.CLIP_DISTANCE7_WEBGL
+    });
+  }
+  function callInstalled(ctx, name, args) {
+    const fn = ctx[name];
+    if (typeof fn === "function") {
+      try {
+        fn.apply(ctx, args);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    } else {
+      ctx._errors.push(C1.INVALID_OPERATION);
+    }
+  }
+  function createWEBGLMultiDraw(ctx) {
+    return buildExtension({}, {
+      multiDrawArraysWEBGL: (mode, firsts, counts, drawcount) => {
+        if (isLost(ctx)) return;
+        callInstalled(ctx, "multiDrawArraysWEBGL", [mode, firsts, counts, drawcount]);
+      },
+      multiDrawElementsWEBGL: (mode, counts, type, offsets, drawcount) => {
+        if (isLost(ctx)) return;
+        callInstalled(ctx, "multiDrawElementsWEBGL", [mode, counts, type, offsets, drawcount]);
+      },
+      multiDrawArraysInstancedWEBGL: (mode, firsts, counts, instanceCounts, drawcount) => {
+        if (isLost(ctx)) return;
+        callInstalled(ctx, "multiDrawArraysInstancedWEBGL", [mode, firsts, counts, instanceCounts, drawcount]);
+      },
+      multiDrawElementsInstancedWEBGL: (mode, counts, type, offsets, instanceCounts, drawcount) => {
+        if (isLost(ctx)) return;
+        callInstalled(ctx, "multiDrawElementsInstancedWEBGL", [mode, counts, type, offsets, instanceCounts, drawcount]);
+      }
+    });
+  }
+
+  // src/gl/extensions/multisampled.ts
+  var FRAMEBUFFER = 36160;
+  var RENDERBUFFER = 36161;
+  var TEXTURE_2D = 3553;
+  var CUBE_POSITIVE_X2 = 34069;
+  var CUBE_NEGATIVE_Z2 = 34074;
+  var COLOR_ATTACHMENT03 = 36064;
+  var DEPTH_ATTACHMENT2 = 36096;
+  var STENCIL_ATTACHMENT2 = 36128;
+  var TEXTURE_SAMPLES_EXT = 37168;
+  var TEXTURE_FIXED_SAMPLE_LOCATIONS_EXT = 37169;
+  function isTextureTarget(t) {
+    return t === TEXTURE_2D || t >= CUBE_POSITIVE_X2 && t <= CUBE_NEGATIVE_Z2;
+  }
+  function createWEBGLMultisampledRenderToTexture(ctx) {
+    return buildExtension(
+      {
+        TEXTURE_SAMPLES_EXT,
+        TEXTURE_FIXED_SAMPLE_LOCATIONS_EXT
+      },
+      {
+        framebufferTexture2DMultisampleEXT: (target, attachment, textarget, texture, level, samples) => {
+          const gl = ctx;
+          if (isLost(gl)) return;
+          if (target !== FRAMEBUFFER) {
+            gl._errors.push(C1.INVALID_ENUM);
+            return;
+          }
+          const maxColor = gl._state.limits.MAX_COLOR_ATTACHMENTS;
+          const attachOk = attachment >= COLOR_ATTACHMENT03 && attachment < COLOR_ATTACHMENT03 + maxColor || attachment === DEPTH_ATTACHMENT2 || attachment === STENCIL_ATTACHMENT2;
+          if (!attachOk) {
+            gl._errors.push(C1.INVALID_ENUM);
+            return;
+          }
+          if (!isTextureTarget(textarget)) {
+            gl._errors.push(C1.INVALID_ENUM);
+            return;
+          }
+          const fbo = gl._state.drawFramebuffer;
+          if (fbo === null || !(fbo instanceof WebGLFramebuffer)) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          if (texture === null || texture === void 0) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          if (!(texture instanceof WebGLTexture)) {
+            throw new TypeError("Argument is not of type 'WebGLTexture'");
+          }
+          if (texture._context !== gl || texture._deleted) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          const lvl = level | 0;
+          if (lvl < 0) {
+            gl._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          const smp = samples | 0;
+          if (smp < 0) {
+            gl._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          if (smp > gl._state.limits.MAX_SAMPLES) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          texture._msaaSamples = smp;
+          fbo._attachments.set(attachment, { type: "texture", texture, level: lvl, face: textarget, layer: 0 });
+          fbo._multisampled = smp > 0;
+        },
+        renderbufferStorageMultisampleEXT: (target, samples, internalformat, width, height) => {
+          const gl = ctx;
+          if (isLost(gl)) return;
+          if (target !== RENDERBUFFER) {
+            gl._errors.push(C1.INVALID_ENUM);
+            return;
+          }
+          const rb = gl._state.renderbuffer;
+          if (rb === null || !(rb instanceof WebGLRenderbuffer)) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          const w = width | 0;
+          const h = height | 0;
+          if (w < 0 || h < 0) {
+            gl._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          const smp = samples | 0;
+          if (smp < 0) {
+            gl._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          if (smp > gl._state.limits.MAX_SAMPLES) {
+            gl._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          rb._samples = smp;
+          rb._internalformat = internalformat >>> 0;
+          rb._width = w;
+          rb._height = h;
+          rb._surface = null;
+        }
+      }
+    );
+  }
+
+  // src/gl/extensions/draw-buffers-indexed.ts
+  var BLEND = 3042;
+  var ZERO = 0;
+  var ONE = 1;
+  var CONSTANT_COLOR = 32769;
+  var ONE_MINUS_CONSTANT_COLOR = 32770;
+  var CONSTANT_ALPHA = 32771;
+  var ONE_MINUS_CONSTANT_ALPHA = 32772;
+  var BLEND_FACTORS = [
+    ZERO,
+    ONE,
+    C1.SRC_COLOR,
+    C1.ONE_MINUS_SRC_COLOR,
+    C1.SRC_ALPHA,
+    C1.ONE_MINUS_SRC_ALPHA,
+    C1.DST_ALPHA,
+    C1.ONE_MINUS_DST_ALPHA,
+    C1.DST_COLOR,
+    C1.ONE_MINUS_DST_COLOR,
+    C1.SRC_ALPHA_SATURATE,
+    CONSTANT_COLOR,
+    ONE_MINUS_CONSTANT_COLOR,
+    CONSTANT_ALPHA,
+    ONE_MINUS_CONSTANT_ALPHA
+  ];
+  var BLEND_EQUATIONS = [
+    C1.FUNC_ADD,
+    C1.FUNC_SUBTRACT,
+    C1.FUNC_REVERSE_SUBTRACT,
+    C2.MIN,
+    C2.MAX
+  ];
+  function blendEntry(ctx, buf) {
+    const s = ctx._state;
+    let entry = s.blendPerDrawBuffer.get(buf);
+    if (!entry) {
+      entry = {
+        srcRGB: s.blend.srcRGB,
+        dstRGB: s.blend.dstRGB,
+        srcAlpha: s.blend.srcAlpha,
+        dstAlpha: s.blend.dstAlpha,
+        eqRGB: s.blend.eqRGB,
+        eqAlpha: s.blend.eqAlpha
+      };
+      s.blendPerDrawBuffer.set(buf, entry);
+    }
+    return entry;
+  }
+  function bufIndex(ctx, buf) {
+    const b = buf >>> 0;
+    if (b >= ctx._state.limits.MAX_DRAW_BUFFERS) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return -1;
+    }
+    return b;
+  }
+  function factorOk(ctx, f) {
+    if (BLEND_FACTORS.includes(f)) return true;
+    if (ctx._extensions.has("WEBGL_blend_func_extended")) {
+      return f === 35065 || f === 34185 || f === 35066 || f === 35067;
+    }
+    return false;
+  }
+  function createOESDrawBuffersIndexed(ctx) {
+    return buildExtension({}, {
+      enableiOES: (target, index) => {
+        const gl = ctx;
+        if (isLost(gl)) return;
+        if (target !== BLEND) {
+          gl._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        if (bufIndex(gl, index) < 0) return;
+      },
+      disableiOES: (target, index) => {
+        const gl = ctx;
+        if (isLost(gl)) return;
+        if (target !== BLEND) {
+          gl._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        if (bufIndex(gl, index) < 0) return;
+      },
+      blendEquationiOES: (buf, mode) => {
+        const gl = ctx;
+        if (isLost(gl)) return;
+        const b = bufIndex(gl, buf);
+        if (b < 0) return;
+        if (!BLEND_EQUATIONS.includes(mode)) {
+          gl._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const e = blendEntry(gl, b);
+        e.eqRGB = mode;
+        e.eqAlpha = mode;
+      },
+      blendEquationSeparateiOES: (buf, modeRGB, modeAlpha) => {
+        const gl = ctx;
+        if (isLost(gl)) return;
+        const b = bufIndex(gl, buf);
+        if (b < 0) return;
+        if (!BLEND_EQUATIONS.includes(modeRGB) || !BLEND_EQUATIONS.includes(modeAlpha)) {
+          gl._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const e = blendEntry(gl, b);
+        e.eqRGB = modeRGB;
+        e.eqAlpha = modeAlpha;
+      },
+      blendFunciOES: (buf, src, dst) => {
+        const gl = ctx;
+        if (isLost(gl)) return;
+        const b = bufIndex(gl, buf);
+        if (b < 0) return;
+        if (!factorOk(gl, src) || !factorOk(gl, dst)) {
+          gl._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const e = blendEntry(gl, b);
+        e.srcRGB = src;
+        e.dstRGB = dst;
+        e.srcAlpha = src;
+        e.dstAlpha = dst;
+      },
+      blendFuncSeparateiOES: (buf, srcRGB, dstRGB, srcAlpha, dstAlpha) => {
+        const gl = ctx;
+        if (isLost(gl)) return;
+        const b = bufIndex(gl, buf);
+        if (b < 0) return;
+        if (!factorOk(gl, srcRGB) || !factorOk(gl, dstRGB) || !factorOk(gl, srcAlpha) || !factorOk(gl, dstAlpha)) {
+          gl._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const e = blendEntry(gl, b);
+        e.srcRGB = srcRGB;
+        e.dstRGB = dstRGB;
+        e.srcAlpha = srcAlpha;
+        e.dstAlpha = dstAlpha;
+      },
+      colorMaskiOES: (buf, r, g2, b, a) => {
+        const gl = ctx;
+        if (isLost(gl)) return;
+        const bi = bufIndex(gl, buf);
+        if (bi < 0) return;
+        gl._state.colorMaskPerDrawBuffer.set(bi, [!!r, !!g2, !!b, !!a]);
+      }
+    });
+  }
+
+  // src/gl/extensions/index.ts
+  var EXTENSION_SPECS = [
+    // ---- WebGL1 classic (implement — mandated by objective; three.js/Babylon need them) ----
+    { name: "ANGLE_instanced_arrays", versions: [1], status: "implement" },
+    { name: "EXT_blend_minmax", versions: [1], status: "implement" },
+    { name: "EXT_frag_depth", versions: [1], status: "implement" },
+    { name: "EXT_shader_texture_lod", versions: [1], status: "implement" },
+    { name: "EXT_sRGB", versions: [1, 2], status: "implement" },
+    { name: "OES_element_index_uint", versions: [1], status: "implement" },
+    { name: "OES_fbo_render_mipmap", versions: [1, 2], status: "implement" },
+    { name: "OES_standard_derivatives", versions: [1], status: "implement" },
+    { name: "OES_texture_float", versions: [1], status: "implement" },
+    { name: "OES_texture_float_linear", versions: [1, 2], status: "implement" },
+    { name: "OES_texture_half_float", versions: [1], status: "implement" },
+    { name: "OES_texture_half_float_linear", versions: [1, 2], status: "implement" },
+    { name: "OES_vertex_array_object", versions: [1], status: "implement" },
+    {
+      name: "WEBGL_depth_texture",
+      versions: [1],
+      status: "implement"
+    },
+    { name: "WEBGL_draw_buffers", versions: [1], status: "implement" },
+    { name: "WEBGL_blend_func_extended", versions: [1, 2], status: "implement" },
+    { name: "WEBGL_lose_context", versions: [1, 2], status: "implement" },
+    { name: "WEBGL_debug_renderer_info", versions: [1, 2], status: "implement" },
+    { name: "WEBGL_debug_shaders", versions: [1, 2], status: "implement" },
+    { name: "EXT_texture_filter_anisotropic", aliases: ["WEBKIT_EXT_texture_filter_anisotropic", "MOZ_EXT_texture_filter_anisotropic"], versions: [1, 2], status: "implement" },
+    // ---- WebGL2-side (implement — mandated by objective) ----
+    { name: "EXT_clip_control", versions: [1, 2], status: "implement" },
+    { name: "EXT_color_buffer_float", versions: [2], status: "implement" },
+    { name: "EXT_color_buffer_half_float", versions: [1, 2], status: "implement" },
+    { name: "EXT_float_blend", versions: [1, 2], status: "implement" },
+    { name: "EXT_texture_norm16", versions: [2], status: "implement" },
+    { name: "KHR_parallel_shader_compile", versions: [1, 2], status: "implement" },
+    { name: "OES_draw_buffers_indexed", versions: [2], status: "implement" },
+    { name: "WEBGL_clip_cull_distance", versions: [2], status: "implement" },
+    { name: "WEBGL_multi_draw", versions: [1, 2], status: "implement" },
+    { name: "WEBGL_multisampled_render_to_texture", versions: [2], status: "implement" },
+    { name: "WEBGL_render_shared_exponent", versions: [2], status: "implement" },
+    // ---- 'null' status (CTS tests skip; three.js/Babylon degrade gracefully) ----
+    { name: "EXT_conservative_depth", versions: [2], status: "null" },
+    { name: "EXT_depth_clamp", versions: [1, 2], status: "null" },
+    { name: "EXT_disjoint_timer_query", versions: [1], status: "null" },
+    { name: "EXT_disjoint_timer_query_webgl2", versions: [2], status: "null" },
+    { name: "EXT_polygon_offset_clamp", versions: [1, 2], status: "null" },
+    { name: "EXT_render_snorm", versions: [2], status: "null" },
+    { name: "EXT_texture_compression_bptc", versions: [1, 2], status: "null" },
+    { name: "EXT_texture_compression_rgtc", versions: [1, 2], status: "null" },
+    { name: "EXT_texture_mirror_clamp_to_edge", versions: [1, 2], status: "null" },
+    { name: "NV_shader_noperspective_interpolation", versions: [2], status: "null" },
+    { name: "OES_sample_variables", versions: [2], status: "null" },
+    { name: "OES_shader_multisample_interpolation", versions: [2], status: "null" },
+    { name: "OVR_multiview2", versions: [2], status: "null" },
+    { name: "WEBGL_compressed_texture_astc", versions: [1, 2], status: "null" },
+    { name: "WEBGL_compressed_texture_etc", versions: [1, 2], status: "null" },
+    { name: "WEBGL_compressed_texture_etc1", versions: [1, 2], status: "null" },
+    { name: "WEBGL_compressed_texture_pvrtc", versions: [1, 2], status: "null" },
+    { name: "WEBGL_compressed_texture_s3tc", versions: [1, 2], status: "null" },
+    { name: "WEBGL_compressed_texture_s3tc_srgb", versions: [1, 2], status: "null" },
+    { name: "WEBGL_polygon_mode", versions: [1, 2], status: "null" },
+    { name: "WEBGL_provoking_vertex", versions: [2], status: "null" },
+    { name: "WEBGL_shader_pixel_local_storage", versions: [2], status: "null" },
+    { name: "WEBGL_stencil_texturing", versions: [2], status: "null" },
+    { name: "WEBGL_webcodecs_video_frame", versions: [1, 2], status: "null" }
+  ];
+  var SPEC_BY_NAME = /* @__PURE__ */ new Map();
+  var _a;
+  for (const spec of EXTENSION_SPECS) {
+    SPEC_BY_NAME.set(spec.name, spec);
+    for (const alias of (_a = spec.aliases) != null ? _a : []) SPEC_BY_NAME.set(alias, spec);
+  }
+  function getSupportedExtensionNames(version) {
+    const out = [];
+    for (const spec of EXTENSION_SPECS) {
+      if (spec.status !== "implement") continue;
+      if (!spec.versions.includes(version)) continue;
+      out.push(spec.name);
+    }
+    return out;
+  }
+  function getExtensionObject(ctx, name) {
+    const spec = SPEC_BY_NAME.get(name);
+    if (!spec) return null;
+    const version = ctx._version;
+    if (!spec.versions.includes(version)) return null;
+    if (spec.status !== "implement") return null;
+    if (spec.available && !spec.available(ctx)) return null;
+    const cache = ctx._extensions;
+    const existing = cache.get(spec.name);
+    if (existing !== void 0) return existing;
+    const ext = createExtension(ctx, spec);
+    cache.set(spec.name, ext);
+    return ext;
+  }
+  var FACTORIES = {
+    // ---- WebGL1 classic ----
+    ANGLE_instanced_arrays: createANGLEInstancedArrays,
+    EXT_blend_minmax: createEXTBlendMinmax,
+    EXT_frag_depth: createEXTFragDepth,
+    EXT_shader_texture_lod: createEXTShaderTextureLod,
+    EXT_sRGB: createEXTSRGB,
+    OES_element_index_uint: createOESElementIndexUint,
+    OES_fbo_render_mipmap: createOESFboRenderMipmap,
+    OES_standard_derivatives: createOESStandardDerivatives,
+    OES_texture_float: createOESTextureFloat,
+    OES_texture_float_linear: createOESTextureFloatLinear,
+    OES_texture_half_float: createOESTextureHalfFloat,
+    OES_texture_half_float_linear: createOESTextureHalfFloatLinear,
+    OES_vertex_array_object: createOESVertexArrayObject,
+    WEBGL_depth_texture: createWEBGLDepthTexture,
+    WEBGL_draw_buffers: createWEBGLDrawBuffers,
+    WEBGL_blend_func_extended: createWEBGLBlendFuncExtended,
+    WEBGL_lose_context: createWEBGLLoseContext,
+    WEBGL_debug_renderer_info: createWEBGLDebugRendererInfo,
+    WEBGL_debug_shaders: createWEBGLDebugShaders,
+    EXT_texture_filter_anisotropic: createEXTTextureFilterAnisotropic,
+    // ---- WebGL2-side ----
+    EXT_clip_control: createEXTClipControl,
+    EXT_color_buffer_float: createEXTColorBufferFloat,
+    EXT_color_buffer_half_float: createEXTColorBufferHalfFloat,
+    EXT_float_blend: createEXTFloatBlend,
+    EXT_texture_norm16: createEXTTextureNorm16,
+    KHR_parallel_shader_compile: createKHRParallelShaderCompile,
+    OES_draw_buffers_indexed: createOESDrawBuffersIndexed,
+    WEBGL_clip_cull_distance: createWEBGLClipCullDistance,
+    WEBGL_multi_draw: createWEBGLMultiDraw,
+    WEBGL_multisampled_render_to_texture: createWEBGLMultisampledRenderToTexture,
+    WEBGL_render_shared_exponent: createWEBGLRenderSharedExponent
+  };
+  function createExtension(ctx, spec) {
+    const factory = FACTORIES[spec.name];
+    if (factory) return factory(ctx);
+    return buildExtension({});
+  }
+
+  // src/gl/getters.ts
+  var CURRENT_PROGRAM = 35725;
+  var SAMPLE_MASK = 36433;
+  var DRAW_BUFFER0 = 34853;
+  var DRAW_BUFFER15 = 34868;
+  var BACK2 = 1029;
+  var NONE3 = 0;
+  var INTERLEAVED_ATTRIBS = 35980;
+  function getParameter(ctx, pname) {
+    var _a2, _b, _c;
+    if (ctx._isLost) return null;
+    const s = ctx._state;
+    const lim = s.limits;
+    const v2 = ctx._version === 2;
+    if (pname >= DRAW_BUFFER0 && pname <= DRAW_BUFFER15) {
+      if (!v2 && !ctx._extensions.has("WEBGL_draw_buffers")) {
+        ctx._errors.push(C.INVALID_ENUM);
+        return null;
+      }
+      const i = pname - DRAW_BUFFER0;
+      if (s.drawFramebuffer === null) {
+        const db0 = s.drawBuffers[0];
+        return db0 === NONE3 ? NONE3 : BACK2;
+      }
+      return (_a2 = s.drawBuffers[i]) != null ? _a2 : NONE3;
+    }
+    switch (pname) {
+      // ---- Capabilities (isEnabled/getParameter parity) ----
+      case C.BLEND:
+        return s.caps.BLEND;
+      case C.CULL_FACE:
+        return s.caps.CULL_FACE;
+      case C.DEPTH_TEST:
+        return s.caps.DEPTH_TEST;
+      case C.DITHER:
+        return s.caps.DITHER;
+      case C.POLYGON_OFFSET_FILL:
+        return s.caps.POLYGON_OFFSET_FILL;
+      case C.SAMPLE_ALPHA_TO_COVERAGE:
+        return s.caps.SAMPLE_ALPHA_TO_COVERAGE;
+      case C.SAMPLE_COVERAGE:
+        return s.caps.SAMPLE_COVERAGE;
+      case C.SCISSOR_TEST:
+        return s.caps.SCISSOR_TEST;
+      case C.STENCIL_TEST:
+        return s.caps.STENCIL_TEST;
+      case C.RASTERIZER_DISCARD:
+        if (!v2) break;
+        return s.caps.RASTERIZER_DISCARD;
+      case SAMPLE_MASK:
+        if (!v2) break;
+        return false;
+      // single-sampled software renderer — mask never applied
+      // ---- Simple numbers ----
+      case C.ACTIVE_TEXTURE:
+        return C.TEXTURE0 + s.activeTexture;
+      case C.BLEND_SRC_RGB:
+        return s.blend.srcRGB;
+      case C.BLEND_SRC_ALPHA:
+        return s.blend.srcAlpha;
+      case C.BLEND_DST_RGB:
+        return s.blend.dstRGB;
+      case C.BLEND_DST_ALPHA:
+        return s.blend.dstAlpha;
+      case C.BLEND_EQUATION_RGB:
+        return s.blend.eqRGB;
+      case C.BLEND_EQUATION_ALPHA:
+        return s.blend.eqAlpha;
+      case C.DEPTH_CLEAR_VALUE:
+        return s.clearDepth;
+      case C.STENCIL_CLEAR_VALUE:
+        return s.clearStencil;
+      case C.LINE_WIDTH:
+        return s.lineWidth;
+      case C.POLYGON_OFFSET_FACTOR:
+        return s.polygonOffset.factor;
+      case C.POLYGON_OFFSET_UNITS:
+        return s.polygonOffset.units;
+      case C.SAMPLE_COVERAGE_VALUE:
+        return s.sampleCoverage.value;
+      case C.SAMPLE_COVERAGE_INVERT:
+        return s.sampleCoverage.invert;
+      case C.CULL_FACE_MODE:
+        return s.cullFace;
+      case C.FRONT_FACE:
+        return s.frontFace;
+      case C.GENERATE_MIPMAP_HINT:
+        return s.hints.generateMipmap;
+      case C.FRAGMENT_SHADER_DERIVATIVE_HINT:
+        if (!v2 && !ctx._extensions.has("OES_standard_derivatives")) break;
+        return s.hints.fragmentShaderDerivative;
+      case C.DEPTH_FUNC:
+        return s.depth.func;
+      case C.DEPTH_WRITEMASK:
+        return s.depth.mask;
+      // ---- Stencil state (front + back) ----
+      case C.STENCIL_FUNC:
+        return s.stencil.front.func;
+      case C.STENCIL_REF:
+        return s.stencil.front.ref;
+      case C.STENCIL_VALUE_MASK:
+        return s.stencil.front.valueMask;
+      case C.STENCIL_FAIL:
+        return s.stencil.front.fail;
+      case C.STENCIL_PASS_DEPTH_FAIL:
+        return s.stencil.front.depthFail;
+      case C.STENCIL_PASS_DEPTH_PASS:
+        return s.stencil.front.depthPass;
+      case C.STENCIL_WRITEMASK:
+        return s.stencil.front.writeMask;
+      case C.STENCIL_BACK_FUNC:
+        return s.stencil.back.func;
+      case C.STENCIL_BACK_REF:
+        return s.stencil.back.ref;
+      case C.STENCIL_BACK_VALUE_MASK:
+        return s.stencil.back.valueMask;
+      case C.STENCIL_BACK_FAIL:
+        return s.stencil.back.fail;
+      case C.STENCIL_BACK_PASS_DEPTH_FAIL:
+        return s.stencil.back.depthFail;
+      case C.STENCIL_BACK_PASS_DEPTH_PASS:
+        return s.stencil.back.depthPass;
+      case C.STENCIL_BACK_WRITEMASK:
+        return s.stencil.back.writeMask;
+      // ---- Object bindings ----
+      case CURRENT_PROGRAM:
+        return s.currentProgram;
+      case C.ARRAY_BUFFER_BINDING:
+        return s.arrayBuffer;
+      case C.ELEMENT_ARRAY_BUFFER_BINDING:
+        return s.vao.elementArrayBuffer;
+      case C.FRAMEBUFFER_BINDING:
+        return s.drawFramebuffer;
+      case C.RENDERBUFFER_BINDING:
+        return s.renderbuffer;
+      case C.TEXTURE_BINDING_2D:
+        return s.textureUnits[s.activeTexture].texture2D;
+      case C.TEXTURE_BINDING_CUBE_MAP:
+        return s.textureUnits[s.activeTexture].textureCube;
+      case C.DRAW_FRAMEBUFFER_BINDING:
+        if (!v2) break;
+        return s.drawFramebuffer;
+      case C.READ_FRAMEBUFFER_BINDING:
+        if (!v2) break;
+        return s.readFramebuffer;
+      case C.VERTEX_ARRAY_BINDING:
+        if (!v2) break;
+        return s.vaoBinding;
+      case C.SAMPLER_BINDING:
+        if (!v2) break;
+        return s.textureUnits[s.activeTexture].sampler;
+      case C.TEXTURE_BINDING_3D:
+        if (!v2) break;
+        return s.textureUnits[s.activeTexture].texture3D;
+      case C.TEXTURE_BINDING_2D_ARRAY:
+        if (!v2) break;
+        return s.textureUnits[s.activeTexture].texture2DArray;
+      case C.PIXEL_PACK_BUFFER_BINDING:
+        if (!v2) break;
+        return s.pixelPackBuffer;
+      case C.PIXEL_UNPACK_BUFFER_BINDING:
+        if (!v2) break;
+        return s.pixelUnpackBuffer;
+      case C.UNIFORM_BUFFER_BINDING:
+        if (!v2) break;
+        return (_b = s.uniformBuffers[0]) != null ? _b : null;
+      case C.COPY_READ_BUFFER_BINDING:
+        if (!v2) break;
+        return s.copyReadBuffer;
+      case C.COPY_WRITE_BUFFER_BINDING:
+        if (!v2) break;
+        return s.copyWriteBuffer;
+      case C.TRANSFORM_FEEDBACK_BINDING:
+        if (!v2) break;
+        return s.transformFeedback;
+      case C.TRANSFORM_FEEDBACK_BUFFER_BINDING:
+        if (!v2) break;
+        return (_c = s.transformFeedback && s.transformFeedback._buffers[0]) != null ? _c : null;
+      // ---- WebGL2 booleans / misc ----
+      case C.TRANSFORM_FEEDBACK_ACTIVE:
+        if (!v2) break;
+        return activeTransformFeedback(ctx) !== null;
+      case C.TRANSFORM_FEEDBACK_PAUSED: {
+        if (!v2) break;
+        const tf = activeTransformFeedback(ctx);
+        return tf !== null && tf._paused;
+      }
+      case C.TRANSFORM_FEEDBACK_BUFFER_MODE:
+        if (!v2) break;
+        return s.currentProgram && s.currentProgram._tfBufferMode !== 0 ? s.currentProgram._tfBufferMode : INTERLEAVED_ATTRIBS;
+      case C.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+        if (!v2) break;
+        return s.transformFeedback ? s.transformFeedback._primitivesWritten : 0;
+      case C.READ_BUFFER:
+        if (!v2) break;
+        return s.readFramebuffer === null ? BACK2 : s.readBuffer;
+      // ---- Vectors (fresh arrays every call) ----
+      case C.COLOR_CLEAR_VALUE:
+        return new Float32Array(s.clearColor);
+      case C.BLEND_COLOR:
+        return new Float32Array(s.blend.color);
+      case C.DEPTH_RANGE:
+        return new Float32Array(s.depth.range);
+      case C.SCISSOR_BOX:
+        return new Int32Array([s.scissor.x, s.scissor.y, s.scissor.w, s.scissor.h]);
+      case C.VIEWPORT:
+        return new Int32Array([s.viewport.x, s.viewport.y, s.viewport.w, s.viewport.h]);
+      case C.COLOR_WRITEMASK:
+        return [s.colorMask[0], s.colorMask[1], s.colorMask[2], s.colorMask[3]];
+      case C.ALIASED_POINT_SIZE_RANGE:
+        return new Float32Array([ALIASED_POINT_SIZE_RANGE[0], ALIASED_POINT_SIZE_RANGE[1]]);
+      case C.ALIASED_LINE_WIDTH_RANGE:
+        return new Float32Array([ALIASED_LINE_WIDTH_RANGE[0], ALIASED_LINE_WIDTH_RANGE[1]]);
+      case C.MAX_VIEWPORT_DIMS:
+        return new Int32Array([lim.MAX_VIEWPORT_DIMS[0], lim.MAX_VIEWPORT_DIMS[1]]);
+      // ---- Pixel storage (getParameter mirrors pixelStorei) ----
+      case C.UNPACK_ALIGNMENT:
+        return s.pixelStore.unpack.alignment;
+      case C.PACK_ALIGNMENT:
+        return s.pixelStore.pack.alignment;
+      case C.UNPACK_FLIP_Y_WEBGL:
+        return s.pixelStore.unpack.flipY;
+      case C.UNPACK_PREMULTIPLY_ALPHA_WEBGL:
+        return s.pixelStore.unpack.premultiplyAlpha;
+      case C.UNPACK_COLORSPACE_CONVERSION_WEBGL:
+        return s.pixelStore.unpack.colorspaceConversion;
+      case C.PACK_ROW_LENGTH:
+        if (!v2) break;
+        return s.pixelStore.pack.rowLength;
+      case C.PACK_SKIP_PIXELS:
+        if (!v2) break;
+        return s.pixelStore.pack.skipPixels;
+      case C.PACK_SKIP_ROWS:
+        if (!v2) break;
+        return s.pixelStore.pack.skipRows;
+      case C.UNPACK_ROW_LENGTH:
+        if (!v2) break;
+        return s.pixelStore.unpack.rowLength;
+      case C.UNPACK_IMAGE_HEIGHT:
+        if (!v2) break;
+        return s.pixelStore.unpack.imageHeight;
+      case C.UNPACK_SKIP_PIXELS:
+        if (!v2) break;
+        return s.pixelStore.unpack.skipPixels;
+      case C.UNPACK_SKIP_ROWS:
+        if (!v2) break;
+        return s.pixelStore.unpack.skipRows;
+      case C.UNPACK_SKIP_IMAGES:
+        if (!v2) break;
+        return s.pixelStore.unpack.skipImages;
+      // ---- Limits (WebGL1 + WebGL2-shared) ----
+      case C.MAX_VERTEX_ATTRIBS:
+        return lim.MAX_VERTEX_ATTRIBS;
+      case C.MAX_VERTEX_UNIFORM_VECTORS:
+        return lim.MAX_VERTEX_UNIFORM_VECTORS;
+      case C.MAX_FRAGMENT_UNIFORM_VECTORS:
+        return lim.MAX_FRAGMENT_UNIFORM_VECTORS;
+      case C.MAX_VARYING_VECTORS:
+        return lim.MAX_VARYING_VECTORS;
+      case C.MAX_COMBINED_TEXTURE_IMAGE_UNITS:
+        return lim.MAX_COMBINED_TEXTURE_IMAGE_UNITS;
+      case C.MAX_VERTEX_TEXTURE_IMAGE_UNITS:
+        return lim.MAX_VERTEX_TEXTURE_IMAGE_UNITS;
+      case C.MAX_TEXTURE_IMAGE_UNITS:
+        return lim.MAX_TEXTURE_IMAGE_UNITS;
+      case C.MAX_TEXTURE_SIZE:
+        return lim.MAX_TEXTURE_SIZE;
+      case C.MAX_CUBE_MAP_TEXTURE_SIZE:
+        return lim.MAX_CUBE_MAP_TEXTURE_SIZE;
+      case C.MAX_RENDERBUFFER_SIZE:
+        return lim.MAX_RENDERBUFFER_SIZE;
+      // ---- Limits (WebGL2-only) ----
+      case C.MAX_3D_TEXTURE_SIZE:
+        if (!v2) break;
+        return lim.MAX_3D_TEXTURE_SIZE;
+      case C.MAX_ARRAY_TEXTURE_LAYERS:
+        if (!v2) break;
+        return lim.MAX_ARRAY_TEXTURE_LAYERS;
+      case C.MAX_SAMPLES:
+        if (!v2) break;
+        return lim.MAX_SAMPLES;
+      case C.MAX_DRAW_BUFFERS:
+        if (!v2) {
+          if (!ctx._extensions.has("WEBGL_draw_buffers")) break;
+        }
+        return lim.MAX_DRAW_BUFFERS;
+      case C.MAX_COLOR_ATTACHMENTS:
+        if (!v2) {
+          if (!ctx._extensions.has("WEBGL_draw_buffers")) break;
+        }
+        return lim.MAX_COLOR_ATTACHMENTS;
+      case C.MAX_ELEMENT_INDEX:
+        if (!v2) break;
+        return lim.MAX_ELEMENT_INDEX;
+      case C.MAX_UNIFORM_BUFFER_BINDINGS:
+        if (!v2) break;
+        return lim.MAX_UNIFORM_BUFFER_BINDINGS;
+      case C.MAX_UNIFORM_BLOCK_SIZE:
+        if (!v2) break;
+        return lim.MAX_UNIFORM_BLOCK_SIZE;
+      case C.MAX_VERTEX_UNIFORM_BLOCKS:
+        if (!v2) break;
+        return lim.MAX_VERTEX_UNIFORM_BLOCKS;
+      case C.MAX_FRAGMENT_UNIFORM_BLOCKS:
+        if (!v2) break;
+        return lim.MAX_FRAGMENT_UNIFORM_BLOCKS;
+      case C.MAX_COMBINED_UNIFORM_BLOCKS:
+        if (!v2) break;
+        return lim.MAX_COMBINED_UNIFORM_BLOCKS;
+      case C.MAX_VERTEX_OUTPUT_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_VERTEX_OUTPUT_COMPONENTS;
+      case C.MAX_FRAGMENT_INPUT_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_FRAGMENT_INPUT_COMPONENTS;
+      case C.MAX_VERTEX_ATTRIB_STRIDE:
+        if (!v2) break;
+        return lim.MAX_VERTEX_ATTRIB_STRIDE;
+      case C.MAX_VERTEX_ATTRIB_RELATIVE_OFFSET:
+        if (!v2) break;
+        return lim.MAX_VERTEX_ATTRIB_RELATIVE_OFFSET;
+      case C.MAX_TEXTURE_LOD_BIAS:
+        if (!v2) break;
+        return lim.MAX_TEXTURE_LOD_BIAS;
+      case C.MIN_PROGRAM_TEXEL_OFFSET:
+        if (!v2) break;
+        return lim.MIN_PROGRAM_TEXEL_OFFSET;
+      case C.MAX_PROGRAM_TEXEL_OFFSET:
+        if (!v2) break;
+        return lim.MAX_PROGRAM_TEXEL_OFFSET;
+      case C.MAX_SERVER_WAIT_TIMEOUT:
+        if (!v2) break;
+        return lim.MAX_SERVER_WAIT_TIMEOUT;
+      case C.MAX_CLIENT_WAIT_TIMEOUT_WEBGL:
+        if (!v2) break;
+        return lim.MAX_CLIENT_WAIT_TIMEOUT_WEBGL;
+      case C.MAX_ELEMENTS_VERTICES:
+        if (!v2) break;
+        return lim.MAX_ELEMENTS_VERTICES;
+      case C.MAX_ELEMENTS_INDICES:
+        if (!v2) break;
+        return lim.MAX_ELEMENTS_INDICES;
+      case C.UNIFORM_BUFFER_OFFSET_ALIGNMENT:
+        if (!v2) break;
+        return lim.UNIFORM_BUFFER_OFFSET_ALIGNMENT;
+      case C.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS;
+      case C.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS;
+      case C.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS:
+        if (!v2) break;
+        return lim.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
+      case C.MAX_VARYING_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_VARYING_VECTORS * 4;
+      case C.MAX_VERTEX_UNIFORM_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_VERTEX_UNIFORM_VECTORS * 4;
+      case C.MAX_FRAGMENT_UNIFORM_COMPONENTS:
+        if (!v2) break;
+        return lim.MAX_FRAGMENT_UNIFORM_VECTORS * 4;
+      case C.MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS:
+        if (!v2) break;
+        return Math.max(
+          lim.MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS,
+          lim.MAX_VERTEX_UNIFORM_BLOCKS * (lim.MAX_UNIFORM_BLOCK_SIZE / 4) + lim.MAX_VERTEX_UNIFORM_VECTORS * 4
+        );
+      case C.MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS:
+        if (!v2) break;
+        return Math.max(
+          lim.MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS,
+          lim.MAX_FRAGMENT_UNIFORM_BLOCKS * (lim.MAX_UNIFORM_BLOCK_SIZE / 4) + lim.MAX_FRAGMENT_UNIFORM_VECTORS * 4
+        );
+      // ---- Misc state ----
+      case C.SHADER_COMPILER:
+        return true;
+      // software compiler always available
+      case C.NUM_SHADER_BINARY_FORMATS:
+        return 0;
+      // no binary shader formats
+      case C.COMPRESSED_TEXTURE_FORMATS:
+        return new Uint32Array(0);
+      // no compressed formats
+      case C.SUBPIXEL_BITS:
+        return 8;
+      case C.IMPLEMENTATION_COLOR_READ_FORMAT:
+      case C.IMPLEMENTATION_COLOR_READ_TYPE:
+        if (drawFramebufferIncomplete(ctx)) {
+          ctx._errors.push(C.INVALID_OPERATION);
+          return null;
+        }
+        return pname === C.IMPLEMENTATION_COLOR_READ_FORMAT ? C.RGBA : C.UNSIGNED_BYTE;
+      // ---- FBO-dependent bits (draw framebuffer) ----
+      case C.SAMPLE_BUFFERS:
+        return 0;
+      // single-sampled drawing buffer, always
+      case C.SAMPLES:
+        return 0;
+      case C.RED_BITS:
+      case C.GREEN_BITS:
+      case C.BLUE_BITS:
+      case C.ALPHA_BITS:
+      case C.DEPTH_BITS:
+      case C.STENCIL_BITS: {
+        const b = drawFramebufferBits(ctx);
+        switch (pname) {
+          case C.RED_BITS:
+            return b.r;
+          case C.GREEN_BITS:
+            return b.g;
+          case C.BLUE_BITS:
+            return b.b;
+          case C.ALPHA_BITS:
+            return b.a;
+          case C.DEPTH_BITS:
+            return b.depth;
+          default:
+            return b.stencil;
+        }
+      }
+      // ---- Extension-gated pnames ----
+      case 34047:
+        if (!ctx._extensions.has("EXT_texture_filter_anisotropic")) break;
+        return lim.MAX_TEXTURE_MAX_ANISOTROPY_EXT;
+      case 37445:
+        if (!ctx._extensions.has("WEBGL_debug_renderer_info")) break;
+        return "Software Renderer";
+      case 37446:
+        if (!ctx._extensions.has("WEBGL_debug_renderer_info")) break;
+        return "Software Renderer (JS)";
+      case 35068:
+        if (!ctx._extensions.has("WEBGL_blend_func_extended")) break;
+        return lim.MAX_DUAL_SOURCE_DRAW_BUFFERS_WEBGL;
+      case 3378:
+        if (!v2 || !ctx._extensions.has("WEBGL_clip_cull_distance")) break;
+        return lim.MAX_CLIP_DISTANCES_WEBGL;
+      case 33529:
+        if (!v2 || !ctx._extensions.has("WEBGL_clip_cull_distance")) break;
+        return lim.MAX_CULL_DISTANCES_WEBGL;
+      case 33530:
+        if (!v2 || !ctx._extensions.has("WEBGL_clip_cull_distance")) break;
+        return lim.MAX_COMBINED_CLIP_AND_CULL_DISTANCES_WEBGL;
+      case 37724:
+        if (!ctx._extensions.has("EXT_clip_control")) break;
+        return getClipControl(ctx).origin;
+      case 37725:
+        if (!ctx._extensions.has("EXT_clip_control")) break;
+        return getClipControl(ctx).depth;
+      case 12288:
+      case 12289:
+      case 12290:
+      case 12291:
+      case 12292:
+      case 12293:
+      case 12294:
+      case 12295:
+        if (!ctx._extensions.has("WEBGL_clip_cull_distance")) break;
+        return isClipDistanceEnabled(ctx, pname - 12288);
+      default:
+        break;
+    }
+    ctx._errors.push(C.INVALID_ENUM);
+    return null;
+  }
+  function activeTransformFeedback(ctx) {
+    const bound = ctx._state.transformFeedback;
+    if (bound && bound._active) return bound;
+    return null;
+  }
+  function drawFramebufferIncomplete(ctx) {
+    if (ctx._state.drawFramebuffer === null) return false;
+    try {
+      return resolveFramebufferTarget(ctx) === null;
+    } catch {
+      return true;
+    }
+  }
+  function drawFramebufferBits(ctx) {
+    const s = ctx._state;
+    if (s.drawFramebuffer === null) {
+      return {
+        r: 8,
+        g: 8,
+        b: 8,
+        a: ctx._attrs.alpha ? 8 : 0,
+        depth: ctx._attrs.depth ? ctx._version === 2 ? 24 : 16 : 0,
+        stencil: ctx._attrs.stencil ? 8 : 0
+      };
+    }
+    let fb = null;
+    try {
+      fb = resolveFramebufferTarget(ctx);
+    } catch {
+      fb = null;
+    }
+    if (!fb) return { r: 0, g: 0, b: 0, a: 0, depth: 0, stencil: 0 };
+    const color = fb.color[0];
+    const cb = color ? colorChannelBits(color.format, color.info) : [0, 0, 0, 0];
+    return {
+      r: cb[0],
+      g: cb[1],
+      b: cb[2],
+      a: cb[3],
+      depth: fb.depth ? depthBits(fb.depth.format) : 0,
+      stencil: fb.stencil ? stencilBits(fb.stencil.format) : 0
+    };
+  }
+  function colorChannelBits(format, info) {
+    switch (format) {
+      case 6406:
+        return [0, 0, 0, 8];
+      case 6409:
+        return [8, 8, 8, 0];
+      case 6410:
+        return [8, 8, 8, 8];
+      case 36194:
+        return [5, 6, 5, 0];
+      case 32854:
+        return [4, 4, 4, 4];
+      case 32855:
+        return [5, 5, 5, 1];
+      case 32857:
+      case 36975:
+        return [10, 10, 10, 2];
+      case 35898:
+        return [11, 11, 10, 0];
+      default: {
+        if (info.isFloat || info.isInteger) {
+          const bits = info.bytesPerPixel * 8 / info.components;
+          return [bits, bits, bits, bits];
+        }
+        switch (info.components) {
+          case 1:
+            return [8, 0, 0, 0];
+          case 2:
+            return [8, 8, 0, 0];
+          case 3:
+            return [8, 8, 8, 0];
+          case 4:
+            return [8, 8, 8, 8];
+          default:
+            return [0, 0, 0, 0];
+        }
+      }
+    }
+  }
+  function depthBits(format) {
+    switch (format) {
+      case 33189:
+        return 16;
+      case 33190:
+        return 24;
+      case 36012:
+        return 32;
+      case 35056:
+        return 24;
+      case 36013:
+        return 32;
+      default:
+        return 16;
+    }
+  }
+  function stencilBits(format) {
+    switch (format) {
+      case 36168:
+        return 8;
+      case 35056:
+        return 8;
+      case 36013:
+        return 8;
+      default:
+        return 8;
+    }
+  }
+
+  // src/gl/api/context.ts
+  var INVALID_ENUM = 1280;
+  var INVALID_OPERATION = 1282;
+  var NO_ERROR = 0;
+  var CONTEXT_LOST_WEBGL = 37442;
+  var lostErrorState = /* @__PURE__ */ new WeakMap();
+  function installContextApi(proto) {
+    proto.getContextAttributes = function() {
+      if (this._isLost) return null;
+      return { ...this._attrs };
+    };
+    proto.isContextLost = function() {
+      return this._isLost;
+    };
+    proto.getSupportedExtensions = function() {
+      return getSupportedExtensionNames(this._version);
+    };
+    proto.getExtension = function(name) {
+      const n = String(name);
+      return getExtensionObject(this, n);
+    };
+    proto.getError = function() {
+      if (this._isLost) {
+        let st = lostErrorState.get(this);
+        if (!st || !st.lostEpoch) {
+          st = { lostEpoch: true, consumed: false };
+          lostErrorState.set(this, st);
+        }
+        if (!st.consumed) {
+          st.consumed = true;
+          return CONTEXT_LOST_WEBGL;
+        }
+        return NO_ERROR;
+      }
+      lostErrorState.delete(this);
+      return this._errors.get();
+    };
+    proto.getString = function(name) {
+      if (this._isLost) return null;
+      switch (name) {
+        case 7938:
+          return this._version === 2 ? "WebGL 2.0 (Software Renderer)" : "WebGL 1.0 (Software Renderer)";
+        case 35724:
+          return this._version === 2 ? "WebGL GLSL ES 3.00 (Software)" : "WebGL GLSL ES 1.00 (Software)";
+        case 7936:
+          return "Software Renderer";
+        case 7937:
+          return "Software Renderer (JS)";
+        case 7939:
+          return getSupportedExtensionNames(this._version).join(" ");
+        default:
+          this._errors.push(INVALID_ENUM);
+          return null;
+      }
+    };
+    proto.getParameter = function(pname) {
+      try {
+        return getParameter(this, pname);
+      } catch {
+        this._errors.push(INVALID_OPERATION);
+        return null;
+      }
+    };
+  }
+
+  // src/gl/api/state.ts
+  var GL_ZERO = 0;
+  var GL_ONE = 1;
+  var GL_CONSTANT_COLOR = 32769;
+  var GL_ONE_MINUS_CONSTANT_COLOR = 32770;
+  var GL_CONSTANT_ALPHA = 32771;
+  var GL_ONE_MINUS_CONSTANT_ALPHA = 32772;
+  var CAP_KEYS = {
+    [C1.BLEND]: "BLEND",
+    [C1.CULL_FACE]: "CULL_FACE",
+    [C1.DEPTH_TEST]: "DEPTH_TEST",
+    [C1.DITHER]: "DITHER",
+    [C1.POLYGON_OFFSET_FILL]: "POLYGON_OFFSET_FILL",
+    [C1.SAMPLE_ALPHA_TO_COVERAGE]: "SAMPLE_ALPHA_TO_COVERAGE",
+    [C1.SAMPLE_COVERAGE]: "SAMPLE_COVERAGE",
+    [C1.SCISSOR_TEST]: "SCISSOR_TEST",
+    [C1.STENCIL_TEST]: "STENCIL_TEST"
+  };
+  var CAP_KEYS_V2 = {
+    ...CAP_KEYS,
+    [C2.RASTERIZER_DISCARD]: "RASTERIZER_DISCARD"
+  };
+  var SRC_BLEND_FACTORS = [
+    GL_ZERO,
+    GL_ONE,
+    C1.SRC_COLOR,
+    C1.ONE_MINUS_SRC_COLOR,
+    C1.SRC_ALPHA,
+    C1.ONE_MINUS_SRC_ALPHA,
+    C1.DST_ALPHA,
+    C1.ONE_MINUS_DST_ALPHA,
+    C1.DST_COLOR,
+    C1.ONE_MINUS_DST_COLOR,
+    C1.SRC_ALPHA_SATURATE,
+    GL_CONSTANT_COLOR,
+    GL_ONE_MINUS_CONSTANT_COLOR,
+    GL_CONSTANT_ALPHA,
+    GL_ONE_MINUS_CONSTANT_ALPHA
+  ];
+  var DST_BLEND_FACTORS = SRC_BLEND_FACTORS.filter((f) => f !== C1.SRC_ALPHA_SATURATE);
+  var BLEND_EQUATIONS2 = [C1.FUNC_ADD, C1.FUNC_SUBTRACT, C1.FUNC_REVERSE_SUBTRACT];
+  var BLEND_EQUATIONS_V2 = [...BLEND_EQUATIONS2, C2.MIN, C2.MAX];
+  var SRC1_BLEND_FACTORS = [
+    35065,
+    // SRC1_COLOR_WEBGL
+    34185,
+    // SRC1_ALPHA_WEBGL
+    35066,
+    // ONE_MINUS_SRC1_COLOR_WEBGL
+    35067
+    // ONE_MINUS_SRC1_ALPHA_WEBGL
+  ];
+  function blendFactorSets(ctx) {
+    let src = SRC_BLEND_FACTORS;
+    let dst = DST_BLEND_FACTORS;
+    if (ctx._extensions.has("WEBGL_blend_func_extended")) {
+      src = [...src, ...SRC1_BLEND_FACTORS];
+      dst = [...dst, C1.SRC_ALPHA_SATURATE, ...SRC1_BLEND_FACTORS];
+    }
+    return { src, dst };
+  }
+  function blendEquations(ctx) {
+    if (ctx._version === 2) return BLEND_EQUATIONS_V2;
+    if (ctx._extensions.has("EXT_blend_minmax")) return [...BLEND_EQUATIONS2, CExt.MIN_EXT, CExt.MAX_EXT];
+    return BLEND_EQUATIONS2;
+  }
+  var DEPTH_FUNCS = [
+    C1.NEVER,
+    C1.LESS,
+    C1.EQUAL,
+    C1.LEQUAL,
+    C1.GREATER,
+    C1.NOTEQUAL,
+    C1.GEQUAL,
+    C1.ALWAYS
+  ];
+  var HINT_MODES = [C1.FASTEST, C1.NICEST, C1.DONT_CARE];
+  function isLost2(ctx) {
+    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
+    return ctx._isLost;
+  }
+  function clamp01(v) {
+    if (Number.isNaN(v)) return 0;
+    return v < 0 ? 0 : v > 1 ? 1 : v;
+  }
+  function installStateApi(proto) {
+    proto.activeTexture = function(texture) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const unit = texture >>> 0;
+      const max = ctx._state.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS;
+      if (unit < C1.TEXTURE0 || unit >= C1.TEXTURE0 + max) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.activeTexture = unit - C1.TEXTURE0;
+    };
+    proto.blendColor = function(red, green, blue, alpha) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      ctx._state.blend.color = [clamp01(red), clamp01(green), clamp01(blue), clamp01(alpha)];
+    };
+    proto.blendEquation = function(mode) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const eqs = blendEquations(ctx);
+      if (!eqs.includes(mode)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.blend.eqRGB = mode;
+      ctx._state.blend.eqAlpha = mode;
+    };
+    proto.blendEquationSeparate = function(modeRGB, modeAlpha) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const eqs = blendEquations(ctx);
+      if (!eqs.includes(modeRGB) || !eqs.includes(modeAlpha)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.blend.eqRGB = modeRGB;
+      ctx._state.blend.eqAlpha = modeAlpha;
+    };
+    proto.blendFunc = function(sfactor, dfactor) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const { src, dst } = blendFactorSets(ctx);
+      if (!src.includes(sfactor) || !dst.includes(dfactor)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.blend.srcRGB = sfactor;
+      ctx._state.blend.dstRGB = dfactor;
+      ctx._state.blend.srcAlpha = sfactor;
+      ctx._state.blend.dstAlpha = dfactor;
+    };
+    proto.blendFuncSeparate = function(srcRGB, dstRGB, srcAlpha, dstAlpha) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const { src, dst } = blendFactorSets(ctx);
+      if (!src.includes(srcRGB) || !dst.includes(dstRGB) || !src.includes(srcAlpha) || !dst.includes(dstAlpha)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.blend.srcRGB = srcRGB;
+      ctx._state.blend.dstRGB = dstRGB;
+      ctx._state.blend.srcAlpha = srcAlpha;
+      ctx._state.blend.dstAlpha = dstAlpha;
+    };
+    proto.clearColor = function(red, green, blue, alpha) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      ctx._state.clearColor = [clamp01(red), clamp01(green), clamp01(blue), clamp01(alpha)];
+    };
+    proto.clearDepth = function(depth) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      ctx._state.clearDepth = clamp01(depth);
+    };
+    proto.clearStencil = function(s) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      ctx._state.clearStencil = s | 0;
+    };
+    proto.colorMask = function(red, green, blue, alpha) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      ctx._state.colorMask = [!!red, !!green, !!blue, !!alpha];
+    };
+    proto.cullFace = function(mode) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      if (mode !== C1.FRONT && mode !== C1.BACK && mode !== C1.FRONT_AND_BACK) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.cullFace = mode;
+    };
+    proto.depthFunc = function(func) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      if (!DEPTH_FUNCS.includes(func)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.depth.func = func;
+    };
+    proto.depthMask = function(flag) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      ctx._state.depth.mask = !!flag;
+    };
+    proto.depthRange = function(zNear, zFar) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const zn = clamp01(zNear);
+      const zf = clamp01(zFar);
+      if (zn > zf) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      ctx._state.depth.range = [zn, zf];
+    };
+    proto.disable = function(cap) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const table = ctx._version === 2 ? CAP_KEYS_V2 : CAP_KEYS;
+      const key = table[cap];
+      if (key === void 0) {
+        if (ctx._extensions.has("WEBGL_clip_cull_distance") && cap >= 12288 && cap <= 12295) {
+          setClipDistanceEnabled(ctx, cap - 12288, false);
+          return;
+        }
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.caps[key] = false;
+    };
+    proto.enable = function(cap) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const table = ctx._version === 2 ? CAP_KEYS_V2 : CAP_KEYS;
+      const key = table[cap];
+      if (key === void 0) {
+        if (ctx._extensions.has("WEBGL_clip_cull_distance") && cap >= 12288 && cap <= 12295) {
+          setClipDistanceEnabled(ctx, cap - 12288, true);
+          return;
+        }
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.caps[key] = true;
+    };
+    proto.frontFace = function(mode) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      if (mode !== C1.CW && mode !== C1.CCW) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.frontFace = mode;
+    };
+    proto.hint = function(target, mode) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      if (!HINT_MODES.includes(mode)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (target === C1.GENERATE_MIPMAP_HINT) {
+        ctx._state.hints.generateMipmap = mode;
+      } else if (target === C2.FRAGMENT_SHADER_DERIVATIVE_HINT && (ctx._version === 2 || ctx._extensions.has("OES_standard_derivatives"))) {
+        ctx._state.hints.fragmentShaderDerivative = mode;
+      } else {
+        ctx._errors.push(C1.INVALID_ENUM);
+      }
+    };
+    proto.isEnabled = function(cap) {
+      const ctx = this;
+      if (isLost2(ctx)) return false;
+      const table = ctx._version === 2 ? CAP_KEYS_V2 : CAP_KEYS;
+      const key = table[cap];
+      if (key === void 0) {
+        if (ctx._extensions.has("WEBGL_clip_cull_distance") && cap >= 12288 && cap <= 12295) {
+          return isClipDistanceEnabled(ctx, cap - 12288);
+        }
+        ctx._errors.push(C1.INVALID_ENUM);
+        return false;
+      }
+      return ctx._state.caps[key];
+    };
+    proto.lineWidth = function(width) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      if (width !== 1) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      ctx._state.lineWidth = 1;
+    };
+    proto.pixelStorei = function(pname, param) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const s = ctx._state;
+      const v = param | 0;
+      switch (pname) {
+        case C1.UNPACK_ALIGNMENT:
+        case C1.PACK_ALIGNMENT: {
+          if (v !== 1 && v !== 2 && v !== 4 && v !== 8) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          if (pname === C1.UNPACK_ALIGNMENT) s.pixelStore.unpack.alignment = v;
+          else s.pixelStore.pack.alignment = v;
+          return;
+        }
+        case C1.UNPACK_FLIP_Y_WEBGL: {
+          if (v !== 0 && v !== 1) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          s.pixelStore.unpack.flipY = v !== 0;
+          return;
+        }
+        case C1.UNPACK_PREMULTIPLY_ALPHA_WEBGL: {
+          if (v !== 0 && v !== 1) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          s.pixelStore.unpack.premultiplyAlpha = v !== 0;
+          return;
+        }
+        case C1.UNPACK_COLORSPACE_CONVERSION_WEBGL: {
+          if (v !== C1.BROWSER_DEFAULT_WEBGL && v !== C1.NONE) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          s.pixelStore.unpack.colorspaceConversion = v;
+          return;
+        }
+        default:
+          if (ctx._version === 2) {
+            switch (pname) {
+              case C2.UNPACK_ROW_LENGTH:
+                if (v < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.unpack.rowLength = v;
+                return;
+              case C2.UNPACK_SKIP_ROWS:
+                if (v < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.unpack.skipRows = v;
+                return;
+              case C2.UNPACK_SKIP_PIXELS:
+                if (v < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.unpack.skipPixels = v;
+                return;
+              case C2.UNPACK_IMAGE_HEIGHT:
+                if (v < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.unpack.imageHeight = v;
+                return;
+              case C2.UNPACK_SKIP_IMAGES:
+                if (v < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.unpack.skipImages = v;
+                return;
+              case C2.PACK_ROW_LENGTH:
+                if (v < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.pack.rowLength = v;
+                return;
+              case C2.PACK_SKIP_ROWS:
+                if (v < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.pack.skipRows = v;
+                return;
+              case C2.PACK_SKIP_PIXELS:
+                if (v < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.pack.skipPixels = v;
+                return;
+            }
+          }
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+      }
+    };
+    proto.polygonOffset = function(factor, units) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      if (!Number.isFinite(factor) || !Number.isFinite(units)) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      ctx._state.polygonOffset.factor = factor;
+      ctx._state.polygonOffset.units = units;
+    };
+    proto.sampleCoverage = function(value, invert) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      ctx._state.sampleCoverage.value = clamp01(value);
+      ctx._state.sampleCoverage.invert = !!invert;
+    };
+    proto.scissor = function(x, y, width, height) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const xv = x | 0;
+      const yv = y | 0;
+      const wv = width | 0;
+      const hv = height | 0;
+      if (wv < 0 || hv < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      ctx._state.scissor = { x: xv, y: yv, w: wv, h: hv };
+    };
+    proto.viewport = function(x, y, width, height) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const xv = x | 0;
+      const yv = y | 0;
+      const wv = width | 0;
+      const hv = height | 0;
+      if (wv < 0 || hv < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      ctx._state.viewport = { x: xv, y: yv, w: wv, h: hv };
+    };
+  }
+
+  // src/gl/validation.ts
+  function validateObject(ctx, obj, ctor) {
+    if (obj === null || obj === void 0) return null;
+    if (!(obj instanceof ctor)) {
+      throw new TypeError(`Argument is not of type '${ctor.name}'`);
+    }
+    const glObj = obj;
+    if (glObj._context !== ctx) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    if (glObj._deleted) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    return obj;
+  }
+  function requireBufferData(v, argName) {
+    if (v instanceof ArrayBuffer || ArrayBuffer.isView(v)) return v;
+    throw new TypeError(`${argName} is not an ArrayBufferView`);
+  }
+  function requireString(v, argName) {
+    if (typeof v === "string") return v;
+    if (v === null || v === void 0) throw new TypeError(`${argName} is not a DOMString`);
+    return String(v);
+  }
+
+  // src/gl/api/buffers.ts
+  var GL_STREAM_READ = 35041;
+  var GL_STREAM_COPY = 35042;
+  var GL_STATIC_READ = 35045;
+  var GL_STATIC_COPY = 35046;
+  var GL_DYNAMIC_READ = 35049;
+  var GL_DYNAMIC_COPY = 35050;
+  var GL_BUFFER_MAPPED = 35053;
+  function isLost3(ctx) {
+    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
+    return ctx._isLost;
+  }
+  var BufferCtor = WebGLBuffer;
+  var BufferCtorAny = BufferCtor;
+  function validateBuffer(ctx, buffer) {
+    return validateObject(ctx, buffer, BufferCtorAny);
+  }
+  function isValidBufferTarget(ctx, target) {
+    if (target === C1.ARRAY_BUFFER || target === C1.ELEMENT_ARRAY_BUFFER) return true;
+    if (ctx._version !== 2) return false;
+    return target === C2.COPY_READ_BUFFER || target === C2.COPY_WRITE_BUFFER || target === C2.PIXEL_PACK_BUFFER || target === C2.PIXEL_UNPACK_BUFFER || target === C2.TRANSFORM_FEEDBACK_BUFFER || target === C2.UNIFORM_BUFFER;
+  }
+  function isValidUsage(ctx, usage) {
+    if (usage === C1.STREAM_DRAW || usage === C1.STATIC_DRAW || usage === C1.DYNAMIC_DRAW) return true;
+    if (ctx._version !== 2) return false;
+    return usage === GL_STREAM_READ || usage === GL_STREAM_COPY || usage === GL_STATIC_READ || usage === GL_STATIC_COPY || usage === GL_DYNAMIC_READ || usage === GL_DYNAMIC_COPY;
+  }
+  function tfBindingAtIndex(ctx, index) {
+    for (const obj of ctx._resources.all) {
+      if (obj instanceof WebGLBuffer) {
+        for (const e of obj._tfRangeBindings) {
+          if (e.index === index) return { buffer: obj, offset: e.offset, size: e.size };
+        }
+      }
+    }
+    return { buffer: null, offset: 0, size: 0 };
+  }
+  function clearTfBinding(ctx, index) {
+    for (const obj of ctx._resources.all) {
+      if (obj instanceof WebGLBuffer) {
+        const i = obj._tfRangeBindings.findIndex((e) => e.index === index);
+        if (i >= 0) obj._tfRangeBindings.splice(i, 1);
+      }
+    }
+  }
+  function setTfBinding(ctx, index, buffer, offset, size) {
+    clearTfBinding(ctx, index);
+    buffer._tfRangeBindings.push({ index, offset, size });
+  }
+  function boundBufferForTarget(ctx, target) {
+    const s = ctx._state;
+    switch (target) {
+      case C1.ARRAY_BUFFER:
+        return s.arrayBuffer;
+      case C1.ELEMENT_ARRAY_BUFFER:
+        return s.vao.elementArrayBuffer;
+      case C2.UNIFORM_BUFFER:
+        return s.uniformBuffers[0];
+      case C2.TRANSFORM_FEEDBACK_BUFFER:
+        return tfBindingAtIndex(ctx, 0).buffer;
+      case C2.COPY_READ_BUFFER:
+        return s.copyReadBuffer;
+      case C2.COPY_WRITE_BUFFER:
+        return s.copyWriteBuffer;
+      case C2.PIXEL_PACK_BUFFER:
+        return s.pixelPackBuffer;
+      case C2.PIXEL_UNPACK_BUFFER:
+        return s.pixelUnpackBuffer;
+      default:
+        return null;
+    }
+  }
+  function unbindBufferEverywhere(ctx, buffer, skipTfBindings = false) {
+    let found = false;
+    const nullIf = (b) => {
+      if (b === buffer) {
+        found = true;
+        return null;
+      }
+      return b;
+    };
+    const s = ctx._state;
+    s.arrayBuffer = nullIf(s.arrayBuffer);
+    s.vao.elementArrayBuffer = nullIf(s.vao.elementArrayBuffer);
+    for (const a of s.vao.attribs) a.buffer = nullIf(a.buffer);
+    if (ctx._defaultVAO) {
+      ctx._defaultVAO.elementArrayBuffer = nullIf(ctx._defaultVAO.elementArrayBuffer);
+      for (const a of ctx._defaultVAO.attribs) a.buffer = nullIf(a.buffer);
+    }
+    if (ctx._version === 2) {
+      for (let i = 0; i < s.uniformBuffers.length; i++) {
+        if (s.uniformBuffers[i] === buffer) {
+          s.uniformBuffers[i] = null;
+          s.uniformBufferRanges[i] = { offset: 0, size: 0 };
+          found = true;
+        }
+      }
+      s.pixelPackBuffer = nullIf(s.pixelPackBuffer);
+      s.pixelUnpackBuffer = nullIf(s.pixelUnpackBuffer);
+      s.copyReadBuffer = nullIf(s.copyReadBuffer);
+      s.copyWriteBuffer = nullIf(s.copyWriteBuffer);
+    }
+    if (s.transformFeedback && !skipTfBindings) {
+      for (let i = 0; i < s.transformFeedback._buffers.length; i++) {
+        if (s.transformFeedback._buffers[i] === buffer) {
+          s.transformFeedback._buffers[i] = null;
+          found = true;
+        }
+      }
+    }
+    if (!skipTfBindings) {
+      for (const obj of ctx._resources.all) {
+        if (obj instanceof WebGLVertexArrayObject && obj._vao) {
+          obj._vao.elementArrayBuffer = nullIf(obj._vao.elementArrayBuffer);
+          for (const a of obj._vao.attribs) a.buffer = nullIf(a.buffer);
+        } else if (obj instanceof WebGLTransformFeedback) {
+          for (let i = 0; i < obj._buffers.length; i++) {
+            if (obj._buffers[i] === buffer) {
+              obj._buffers[i] = null;
+              found = true;
+            }
+          }
+        }
+      }
+      if (buffer._tfRangeBindings.length > 0) {
+        found = true;
+        buffer._tfRangeBindings.length = 0;
+      }
+    }
+    return found;
+  }
+  function bindBufferBaseImpl(ctx, target, index, buffer) {
+    const s = ctx._state;
+    const max = target === C2.UNIFORM_BUFFER ? s.limits.MAX_UNIFORM_BUFFER_BINDINGS : s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
+    if (index < 0 || index >= max) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (buffer === null || buffer === void 0) {
+      if (target === C2.UNIFORM_BUFFER) {
+        s.uniformBuffers[index] = null;
+        s.uniformBufferRanges[index] = { offset: 0, size: 0 };
+      } else {
+        clearTfBinding(ctx, index);
+        const boundTf = s.transformFeedback;
+        if (boundTf) {
+          boundTf._buffers[index] = null;
+          boundTf._bufferRanges[index] = { offset: 0, size: 0 };
+        }
+      }
+      return;
+    }
+    if (buffer instanceof WebGLBuffer && buffer._deletePending) {
+      unbindBufferEverywhere(ctx, buffer);
+      buffer._deletePending = false;
+    }
+    const buf = validateBuffer(ctx, buffer);
+    if (buf === null) return;
+    if (target === C2.UNIFORM_BUFFER) {
+      if (buf._target === 0) buf._target = target;
+      else if (buf._target !== target) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      s.uniformBuffers[index] = buf;
+      s.uniformBufferRanges[index] = { offset: 0, size: buf._size };
+    } else {
+      if (buf._target === C1.ELEMENT_ARRAY_BUFFER) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const boundTf = s.transformFeedback;
+      if (boundTf) {
+        boundTf._buffers[index] = buf;
+        boundTf._bufferRanges[index] = { offset: 0, size: buf._size };
+      }
+      setTfBinding(ctx, index, buf, 0, buf._size);
+    }
+  }
+  function installBuffersApi(proto) {
+    proto.createBuffer = function() {
+      const ctx = this;
+      if (isLost3(ctx)) return null;
+      return createObject(ctx, BufferCtor);
+    };
+    proto.deleteBuffer = function(buffer) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (buffer === null || buffer === void 0) return;
+      if (!(buffer instanceof WebGLBuffer)) {
+        throw new TypeError(`Argument is not of type 'WebGLBuffer'`);
+      }
+      if (buffer._context !== ctx) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (buffer._deleted) return;
+      const s = ctx._state;
+      const boundTf = s.transformFeedback;
+      const boundTfRefs = !!boundTf && boundTf._buffers.includes(buffer);
+      const tfRefs = buffer._tfRangeBindings.length > 0 || [...ctx._resources.all].some(
+        (o) => o instanceof WebGLTransformFeedback && o._buffers.includes(buffer)
+      );
+      const wasBound = unbindBufferEverywhere(
+        ctx,
+        buffer,
+        true
+        /* skipTfBindings */
+      );
+      if (boundTfRefs) {
+        for (let i = 0; i < boundTf._buffers.length; i++) {
+          if (boundTf._buffers[i] === buffer) {
+            boundTf._buffers[i] = null;
+            boundTf._bufferRanges[i] = { offset: 0, size: 0 };
+          }
+        }
+        buffer._tfRangeBindings.length = 0;
+      }
+      buffer._deleted = true;
+      buffer._deletePending = wasBound || tfRefs || boundTfRefs;
+      if (!tfRefs || boundTfRefs) ctx._resources.untrack(buffer);
+    };
+    proto.isBuffer = function(buffer) {
+      const ctx = this;
+      if (isLost3(ctx)) return false;
+      if (buffer === null || buffer === void 0) return false;
+      if (!(buffer instanceof WebGLBuffer)) {
+        throw new TypeError(`Argument is not of type 'WebGLBuffer'`);
+      }
+      if (buffer._context !== ctx) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return false;
+      }
+      return !buffer._deleted;
+    };
+    proto.bindBuffer = function(target, buffer) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (!isValidBufferTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (ctx._version === 2 && target === C2.TRANSFORM_FEEDBACK_BUFFER) {
+        bindBufferBaseImpl(ctx, target, 0, buffer);
+        return;
+      }
+      if (ctx._version === 2 && target === C2.UNIFORM_BUFFER) {
+        bindBufferBaseImpl(ctx, target, 0, buffer);
+        return;
+      }
+      if (buffer === null || buffer === void 0) {
+        const s2 = ctx._state;
+        if (target === C1.ARRAY_BUFFER) s2.arrayBuffer = null;
+        else if (target === C1.ELEMENT_ARRAY_BUFFER) s2.vao.elementArrayBuffer = null;
+        else if (ctx._version === 2) {
+          switch (target) {
+            case C2.COPY_READ_BUFFER:
+              s2.copyReadBuffer = null;
+              break;
+            case C2.COPY_WRITE_BUFFER:
+              s2.copyWriteBuffer = null;
+              break;
+            case C2.PIXEL_PACK_BUFFER:
+              s2.pixelPackBuffer = null;
+              break;
+            case C2.PIXEL_UNPACK_BUFFER:
+              s2.pixelUnpackBuffer = null;
+              break;
+          }
+        }
+        return;
+      }
+      if (buffer instanceof WebGLBuffer && buffer._deletePending) {
+        unbindBufferEverywhere(ctx, buffer);
+        buffer._deletePending = false;
+      }
+      const buf = validateBuffer(ctx, buffer);
+      if (buf === null) return;
+      if (buf._target === 0) buf._target = target;
+      else if (buf._target !== target) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const s = ctx._state;
+      if (target === C1.ARRAY_BUFFER) s.arrayBuffer = buf;
+      else if (target === C1.ELEMENT_ARRAY_BUFFER) s.vao.elementArrayBuffer = buf;
+      else if (ctx._version === 2) {
+        switch (target) {
+          case C2.COPY_READ_BUFFER:
+            s.copyReadBuffer = buf;
+            break;
+          case C2.COPY_WRITE_BUFFER:
+            s.copyWriteBuffer = buf;
+            break;
+          case C2.PIXEL_PACK_BUFFER:
+            s.pixelPackBuffer = buf;
+            break;
+          case C2.PIXEL_UNPACK_BUFFER:
+            s.pixelUnpackBuffer = buf;
+            break;
+        }
+      }
+    };
+    proto.bufferData = function(target, size, usage) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (!isValidBufferTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (!isValidUsage(ctx, usage)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const buf = boundBufferForTarget(ctx, target);
+      if (buf === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (typeof size === "number") {
+        if (size < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        const n = Math.trunc(size);
+        let data;
+        try {
+          data = new ArrayBuffer(n);
+        } catch {
+          ctx._errors.push(C1.OUT_OF_MEMORY);
+          return;
+        }
+        buf._data = data;
+        buf._size = n;
+      } else {
+        const data = requireBufferData(size, "size");
+        const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        let copy;
+        try {
+          copy = new ArrayBuffer(bytes.byteLength);
+        } catch {
+          ctx._errors.push(C1.OUT_OF_MEMORY);
+          return;
+        }
+        new Uint8Array(copy).set(bytes);
+        buf._data = copy;
+        buf._size = bytes.byteLength;
+      }
+      buf._usage = usage;
+    };
+    proto.bufferSubData = function(target, offset, data) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (!isValidBufferTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const buf = boundBufferForTarget(ctx, target);
+      if (buf === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (offset < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      const src = requireBufferData(data, "data");
+      const bytes = src instanceof ArrayBuffer ? new Uint8Array(src) : new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
+      if (offset + bytes.byteLength > buf._size) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (bytes.byteLength > 0 && buf._data !== null) {
+        new Uint8Array(buf._data).set(bytes, offset);
+      }
+    };
+    proto.getBufferParameter = function(target, pname) {
+      const ctx = this;
+      if (isLost3(ctx)) return null;
+      if (!isValidBufferTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return null;
+      }
+      const buf = boundBufferForTarget(ctx, target);
+      if (buf === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
+      switch (pname) {
+        case C1.BUFFER_SIZE:
+          return buf._size;
+        case C1.BUFFER_USAGE:
+          return buf._usage;
+        case GL_BUFFER_MAPPED:
+          if (ctx._version === 2) return false;
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        default:
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+      }
+    };
+    if ("bindBufferBase" in proto) {
+      const p2 = proto;
+      p2.bindBufferBase = function(target, index, buffer) {
+        const ctx = this;
+        if (isLost3(ctx)) return;
+        if (target !== C2.UNIFORM_BUFFER && target !== C2.TRANSFORM_FEEDBACK_BUFFER) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        bindBufferBaseImpl(ctx, target, index, buffer);
+      };
+      p2.bindBufferRange = function(target, index, buffer, offset, size) {
+        const ctx = this;
+        if (isLost3(ctx)) return;
+        const s = ctx._state;
+        if (target !== C2.UNIFORM_BUFFER && target !== C2.TRANSFORM_FEEDBACK_BUFFER) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const max = target === C2.UNIFORM_BUFFER ? s.limits.MAX_UNIFORM_BUFFER_BINDINGS : s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
+        if (index < 0 || index >= max) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (buffer === null || buffer === void 0) {
+          if (target === C2.UNIFORM_BUFFER) {
+            s.uniformBuffers[index] = null;
+            s.uniformBufferRanges[index] = { offset: 0, size: 0 };
+          } else {
+            clearTfBinding(ctx, index);
+            const boundTf = s.transformFeedback;
+            if (boundTf) {
+              boundTf._buffers[index] = null;
+              boundTf._bufferRanges[index] = { offset: 0, size: 0 };
+            }
+          }
+          return;
+        }
+        if (buffer instanceof WebGLBuffer && buffer._deletePending) {
+          unbindBufferEverywhere(ctx, buffer);
+          buffer._deletePending = false;
+        }
+        const buf = validateBuffer(ctx, buffer);
+        if (buf === null) return;
+        if (offset < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (size < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (target === C2.UNIFORM_BUFFER) {
+          if (offset % s.limits.UNIFORM_BUFFER_OFFSET_ALIGNMENT !== 0) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          if (offset + size > buf._size) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          if (offset + size > s.limits.MAX_UNIFORM_BLOCK_SIZE) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+        } else {
+          if (offset % 4 !== 0) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          if (offset + size > buf._size) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+        }
+        if (target === C2.UNIFORM_BUFFER) {
+          if (buf._target === 0) buf._target = target;
+          else if (buf._target !== target) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          s.uniformBuffers[index] = buf;
+          s.uniformBufferRanges[index] = { offset, size };
+        } else {
+          if (buf._target === C1.ELEMENT_ARRAY_BUFFER) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          const boundTf = s.transformFeedback;
+          if (boundTf) {
+            boundTf._buffers[index] = buf;
+            boundTf._bufferRanges[index] = { offset, size };
+          }
+          setTfBinding(ctx, index, buf, offset, size);
+        }
+      };
+      p2.getIndexedParameter = function(target, index) {
+        var _a2, _b, _c, _d, _e;
+        const ctx = this;
+        if (isLost3(ctx)) return null;
+        const s = ctx._state;
+        let max;
+        switch (target) {
+          case C2.UNIFORM_BUFFER_BINDING:
+          case C2.UNIFORM_BUFFER_START:
+          case C2.UNIFORM_BUFFER_SIZE:
+            max = s.limits.MAX_UNIFORM_BUFFER_BINDINGS;
+            break;
+          case C2.TRANSFORM_FEEDBACK_BUFFER_BINDING:
+          case C2.TRANSFORM_FEEDBACK_BUFFER_START:
+          case C2.TRANSFORM_FEEDBACK_BUFFER_SIZE:
+            max = s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
+            break;
+          default:
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+        }
+        if (index < 0 || index >= max) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return null;
+        }
+        switch (target) {
+          case C2.UNIFORM_BUFFER_BINDING:
+            return s.uniformBuffers[index];
+          case C2.UNIFORM_BUFFER_START:
+            return s.uniformBufferRanges[index].offset;
+          case C2.UNIFORM_BUFFER_SIZE:
+            return s.uniformBufferRanges[index].size;
+          case C2.TRANSFORM_FEEDBACK_BUFFER_BINDING: {
+            const tf = s.transformFeedback;
+            return tf ? (_a2 = tf._buffers[index]) != null ? _a2 : null : null;
+          }
+          case C2.TRANSFORM_FEEDBACK_BUFFER_START: {
+            const tf = s.transformFeedback;
+            return tf ? (_c = (_b = tf._bufferRanges[index]) == null ? void 0 : _b.offset) != null ? _c : 0 : 0;
+          }
+          default: {
+            const tf = s.transformFeedback;
+            return tf ? (_e = (_d = tf._bufferRanges[index]) == null ? void 0 : _d.size) != null ? _e : 0 : 0;
+          }
+        }
+      };
+      p2.getBufferSubData = function(target, srcByteOffset, dstBuffer, dstOffset, length) {
+        var _a2, _b;
+        const ctx = this;
+        if (isLost3(ctx)) return;
+        if (!isValidBufferTarget(ctx, target)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        if (target === C2.PIXEL_PACK_BUFFER) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const buf = boundBufferForTarget(ctx, target);
+        if (buf === null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (srcByteOffset < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (!ArrayBuffer.isView(dstBuffer)) {
+          throw new TypeError("dstBuffer is not an ArrayBufferView");
+        }
+        if (dstOffset !== void 0 && dstOffset < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (length !== void 0 && length < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        const view = dstBuffer;
+        const elemSize = (_a2 = view.BYTES_PER_ELEMENT) != null ? _a2 : 1;
+        const elemCount = (_b = view.length) != null ? _b : view.byteLength;
+        const dstOff = dstOffset === void 0 ? 0 : dstOffset;
+        const len = length === void 0 ? elemCount - dstOff : length;
+        if (dstOff + len > elemCount) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const byteLen = len * elemSize;
+        if (srcByteOffset + byteLen > buf._size) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (byteLen > 0 && buf._data !== null) {
+          new Uint8Array(view.buffer, view.byteOffset + dstOff * elemSize, byteLen).set(
+            new Uint8Array(buf._data, srcByteOffset, byteLen)
+          );
+        }
+      };
+    }
+  }
+
+  // src/gl/api/vertex-attrib.ts
+  function isLost4(ctx) {
+    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
+    return ctx._isLost;
+  }
+  function attribIndex(ctx, index) {
+    const i = index >>> 0;
+    if (i >= ctx._state.limits.MAX_VERTEX_ATTRIBS) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    return i;
+  }
+  function isPointerType(ctx, type) {
+    switch (type) {
+      case C1.BYTE:
+      case C1.UNSIGNED_BYTE:
+      case C1.SHORT:
+      case C1.UNSIGNED_SHORT:
+      case C1.FLOAT:
+        return true;
+      case C1.INT:
+      case C1.UNSIGNED_INT:
+      case C2.HALF_FLOAT:
+      case C2.INT_2_10_10_10_REV:
+      case C2.UNSIGNED_INT_2_10_10_10_REV:
+        return ctx._version === 2;
+      default:
+        return false;
+    }
+  }
+  function validateStrideOffset(ctx, stride, offset) {
+    const st = stride | 0;
+    if (st < 0 || st > ctx._state.limits.MAX_VERTEX_ATTRIB_STRIDE) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    if (offset < 0 || offset >= 2147483648) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    return [st, offset | 0];
+  }
+  function toFloat32List(v) {
+    if (v instanceof DataView) throw new TypeError("Argument is not a Float32List");
+    if (v instanceof Float32Array) return v;
+    if (Array.isArray(v)) return new Float32Array(v);
+    if (ArrayBuffer.isView(v)) {
+      return new Float32Array(v);
+    }
+    throw new TypeError("Argument is not a Float32List");
+  }
+  function toInt32List(v) {
+    if (v instanceof DataView) throw new TypeError("Argument is not an Int32List");
+    if (v instanceof Int32Array) return v;
+    if (Array.isArray(v)) return Int32Array.from(v);
+    if (ArrayBuffer.isView(v)) return Int32Array.from(v);
+    throw new TypeError("Argument is not an Int32List");
+  }
+  function toUint32List(v) {
+    if (v instanceof DataView) throw new TypeError("Argument is not a Uint32List");
+    if (v instanceof Uint32Array) return v;
+    if (Array.isArray(v)) return Uint32Array.from(v);
+    if (ArrayBuffer.isView(v)) return Uint32Array.from(v);
+    throw new TypeError("Argument is not a Uint32List");
+  }
+  function setConstantF(attrib, vals, needed) {
+    const c = attrib.constantF;
+    c[0] = vals[0];
+    c[1] = needed > 1 ? vals[1] : 0;
+    c[2] = needed > 2 ? vals[2] : 0;
+    c[3] = needed > 3 ? vals[3] : 1;
+  }
+  function installVertexAttribApi(proto) {
+    proto.enableVertexAttribArray = function(index) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const i = attribIndex(ctx, index);
+      if (i === null) return;
+      ctx._state.vao.attribs[i].enabled = true;
+    };
+    proto.disableVertexAttribArray = function(index) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const i = attribIndex(ctx, index);
+      if (i === null) return;
+      ctx._state.vao.attribs[i].enabled = false;
+    };
+    proto.vertexAttribPointer = function(index, size, type, normalized, stride, offset) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const i = attribIndex(ctx, index);
+      if (i === null) return;
+      const sz = size | 0;
+      if (sz < 1 || sz > 4) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (!isPointerType(ctx, type)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if ((type === C2.INT_2_10_10_10_REV || type === C2.UNSIGNED_INT_2_10_10_10_REV) && sz !== 4) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const so = validateStrideOffset(ctx, stride, offset);
+      if (so === null) return;
+      const bound = ctx._state.arrayBuffer;
+      if (bound === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const attrib = ctx._state.vao.attribs[i];
+      attrib.size = sz;
+      attrib.type = type;
+      attrib.normalized = !!normalized;
+      attrib.integer = false;
+      attrib.stride = so[0];
+      attrib.offset = so[1];
+      attrib.buffer = bound;
+    };
+    proto.vertexAttrib1f = function(index, x) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const i = attribIndex(ctx, index);
+      if (i === null) return;
+      const c = ctx._state.vao.attribs[i].constantF;
+      c[0] = x;
+      c[1] = 0;
+      c[2] = 0;
+      c[3] = 1;
+    };
+    proto.vertexAttrib1fv = function(index, values) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const i = attribIndex(ctx, index);
+      if (i === null) return;
+      const a = toFloat32List(values);
+      if (a.length < 1) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      setConstantF(ctx._state.vao.attribs[i], a, 1);
+    };
+    proto.vertexAttrib2f = function(index, x, y) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const i = attribIndex(ctx, index);
+      if (i === null) return;
+      const c = ctx._state.vao.attribs[i].constantF;
+      c[0] = x;
+      c[1] = y;
+      c[2] = 0;
+      c[3] = 1;
+    };
+    proto.vertexAttrib2fv = function(index, values) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const i = attribIndex(ctx, index);
+      if (i === null) return;
+      const a = toFloat32List(values);
+      if (a.length < 2) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      setConstantF(ctx._state.vao.attribs[i], a, 2);
+    };
+    proto.vertexAttrib3f = function(index, x, y, z) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const i = attribIndex(ctx, index);
+      if (i === null) return;
+      const c = ctx._state.vao.attribs[i].constantF;
+      c[0] = x;
+      c[1] = y;
+      c[2] = z;
+      c[3] = 1;
+    };
+    proto.vertexAttrib3fv = function(index, values) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const i = attribIndex(ctx, index);
+      if (i === null) return;
+      const a = toFloat32List(values);
+      if (a.length < 3) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      setConstantF(ctx._state.vao.attribs[i], a, 3);
+    };
+    proto.vertexAttrib4f = function(index, x, y, z, w) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const i = attribIndex(ctx, index);
+      if (i === null) return;
+      const c = ctx._state.vao.attribs[i].constantF;
+      c[0] = x;
+      c[1] = y;
+      c[2] = z;
+      c[3] = w;
+    };
+    proto.vertexAttrib4fv = function(index, values) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const i = attribIndex(ctx, index);
+      if (i === null) return;
+      const a = toFloat32List(values);
+      if (a.length < 4) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      setConstantF(ctx._state.vao.attribs[i], a, 4);
+    };
+    proto.getVertexAttrib = function(index, pname) {
+      const ctx = this;
+      if (isLost4(ctx)) return null;
+      const i = attribIndex(ctx, index);
+      if (i === null) return null;
+      const attrib = ctx._state.vao.attribs[i];
+      switch (pname) {
+        case C1.CURRENT_VERTEX_ATTRIB:
+          return new Float32Array(attrib.constantF);
+        // copy
+        case C1.VERTEX_ATTRIB_ARRAY_ENABLED:
+          return attrib.enabled;
+        case C1.VERTEX_ATTRIB_ARRAY_SIZE:
+          return attrib.size;
+        case C1.VERTEX_ATTRIB_ARRAY_STRIDE:
+          return attrib.stride;
+        case C1.VERTEX_ATTRIB_ARRAY_TYPE:
+          return attrib.type;
+        case C1.VERTEX_ATTRIB_ARRAY_NORMALIZED:
+          return attrib.normalized;
+        case C1.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING:
+          return attrib.buffer;
+        case C1.VERTEX_ATTRIB_ARRAY_POINTER:
+          return 0;
+        // WebGL has no client-side pointers
+        case C2.VERTEX_ATTRIB_ARRAY_INTEGER:
+        case C2.VERTEX_ATTRIB_ARRAY_DIVISOR:
+          if (ctx._version !== 2) {
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+          }
+          return pname === C2.VERTEX_ATTRIB_ARRAY_INTEGER ? attrib.integer : attrib.divisor;
+        default:
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+      }
+    };
+    proto.getVertexAttribOffset = function(index, pname) {
+      const ctx = this;
+      if (isLost4(ctx)) return 0;
+      const i = attribIndex(ctx, index);
+      if (i === null) return 0;
+      if (pname !== C1.VERTEX_ATTRIB_ARRAY_POINTER) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return 0;
+      }
+      return ctx._state.vao.attribs[i].offset;
+    };
+    if ("vertexAttribIPointer" in proto) {
+      const p2 = proto;
+      p2.vertexAttribIPointer = function(index, size, type, stride, offset) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        const i = attribIndex(ctx, index);
+        if (i === null) return;
+        const sz = size | 0;
+        if (sz < 1 || sz > 4) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        switch (type) {
+          case C1.BYTE:
+          case C1.UNSIGNED_BYTE:
+          case C1.SHORT:
+          case C1.UNSIGNED_SHORT:
+          case C1.INT:
+          case C1.UNSIGNED_INT:
+            break;
+          default:
+            ctx._errors.push(C1.INVALID_ENUM);
+            return;
+        }
+        const so = validateStrideOffset(ctx, stride, offset);
+        if (so === null) return;
+        const bound = ctx._state.arrayBuffer;
+        if (bound === null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const attrib = ctx._state.vao.attribs[i];
+        attrib.size = sz;
+        attrib.type = type;
+        attrib.normalized = false;
+        attrib.integer = true;
+        attrib.stride = so[0];
+        attrib.offset = so[1];
+        attrib.buffer = bound;
+      };
+      p2.vertexAttribI4i = function(index, x, y, z, w) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        const i = attribIndex(ctx, index);
+        if (i === null) return;
+        const c = ctx._state.vao.attribs[i].constantI;
+        c[0] = x | 0;
+        c[1] = y | 0;
+        c[2] = z | 0;
+        c[3] = w | 0;
+      };
+      p2.vertexAttribI4iv = function(index, values) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        const i = attribIndex(ctx, index);
+        if (i === null) return;
+        const a = toInt32List(values);
+        if (a.length < 4) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const c = ctx._state.vao.attribs[i].constantI;
+        c[0] = a[0];
+        c[1] = a[1];
+        c[2] = a[2];
+        c[3] = a[3];
+      };
+      p2.vertexAttribI4ui = function(index, x, y, z, w) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        const i = attribIndex(ctx, index);
+        if (i === null) return;
+        const c = ctx._state.vao.attribs[i].constantUI;
+        c[0] = x >>> 0;
+        c[1] = y >>> 0;
+        c[2] = z >>> 0;
+        c[3] = w >>> 0;
+      };
+      p2.vertexAttribI4uiv = function(index, values) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        const i = attribIndex(ctx, index);
+        if (i === null) return;
+        const a = toUint32List(values);
+        if (a.length < 4) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const c = ctx._state.vao.attribs[i].constantUI;
+        c[0] = a[0];
+        c[1] = a[1];
+        c[2] = a[2];
+        c[3] = a[3];
+      };
+      p2.vertexAttribDivisor = function(index, divisor) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        const i = attribIndex(ctx, index);
+        if (i === null) return;
+        ctx._state.vao.attribs[i].divisor = divisor >>> 0;
+      };
+    }
+  }
+
+  // src/gl/teximage.ts
+  var clamp012 = (v) => v < 0 ? 0 : v > 1 ? 1 : v;
+  var roundClamp = (v) => Math.round(clamp012(v) * 255);
+  function normUnpack(storage, comps, mode) {
+    const div = storage === "u8" ? 255 : storage === "i8" ? 127 : storage === "u16" ? 65535 : storage === "i16" ? 32767 : storage === "u32" ? 4294967295 : 2147483647;
+    const step = storage === "u8" || storage === "i8" ? 1 : 2;
+    return (data, off, out) => {
+      const e = off / step;
+      const v = data[e];
+      const c = v / div;
+      switch (mode) {
+        case "rgba":
+          out[0] = c;
+          out[1] = data[e + 1] / div;
+          out[2] = data[e + 2] / div;
+          out[3] = data[e + 3] / div;
+          break;
+        case "rgb":
+          out[0] = c;
+          out[1] = data[e + 1] / div;
+          out[2] = data[e + 2] / div;
+          out[3] = 1;
+          break;
+        case "rg":
+          out[0] = c;
+          out[1] = data[e + 1] / div;
+          out[2] = 0;
+          out[3] = 1;
+          break;
+        case "red":
+          out[0] = c;
+          out[1] = 0;
+          out[2] = 0;
+          out[3] = 1;
+          break;
+        case "luminance":
+          out[0] = c;
+          out[1] = c;
+          out[2] = c;
+          out[3] = 1;
+          break;
+        case "alpha":
+          out[0] = 0;
+          out[1] = 0;
+          out[2] = 0;
+          out[3] = c;
+          break;
+        case "lumalpha":
+          out[0] = c;
+          out[1] = c;
+          out[2] = c;
+          out[3] = data[e + 1] / div;
+          break;
+        default:
+          out[0] = out[1] = out[2] = 0;
+          out[3] = 1;
+      }
+      void comps;
+    };
+  }
+  function intUnpack(storage, comps, mode) {
+    const step = storage === "u8" || storage === "i8" ? 1 : storage === "u16" || storage === "i16" ? 2 : 4;
+    return (data, off, out) => {
+      const e = off / step;
+      const d = data;
+      const v = d[e];
+      switch (mode) {
+        case "rgba":
+          out[0] = v;
+          out[1] = d[e + 1];
+          out[2] = d[e + 2];
+          out[3] = d[e + 3];
+          break;
+        case "rgb":
+          out[0] = v;
+          out[1] = d[e + 1];
+          out[2] = d[e + 2];
+          out[3] = 1;
+          break;
+        case "rg":
+          out[0] = v;
+          out[1] = d[e + 1];
+          out[2] = 0;
+          out[3] = 1;
+          break;
+        case "red":
+          out[0] = v;
+          out[1] = 0;
+          out[2] = 0;
+          out[3] = 1;
+          break;
+        default:
+          out[0] = out[1] = out[2] = 0;
+          out[3] = 1;
+      }
+      void comps;
+    };
+  }
+  function floatUnpack(comps, mode) {
+    return (data, off, out) => {
+      const e = off / 4;
+      const d = data;
+      const v = d[e];
+      switch (mode) {
+        case "rgba":
+          out[0] = v;
+          out[1] = d[e + 1];
+          out[2] = d[e + 2];
+          out[3] = d[e + 3];
+          break;
+        case "rgb":
+          out[0] = v;
+          out[1] = d[e + 1];
+          out[2] = d[e + 2];
+          out[3] = 1;
+          break;
+        case "rg":
+          out[0] = v;
+          out[1] = d[e + 1];
+          out[2] = 0;
+          out[3] = 1;
+          break;
+        case "red":
+          out[0] = v;
+          out[1] = 0;
+          out[2] = 0;
+          out[3] = 1;
+          break;
+        default:
+          out[0] = out[1] = out[2] = 0;
+          out[3] = 1;
+      }
+      void comps;
+    };
+  }
+  function normPack(storage, comps) {
+    const step = storage === "u8" || storage === "i8" ? 1 : 2;
+    return (data, off, r, g2, b, a) => {
+      const e = off / step;
+      const d = data;
+      if (storage === "i8" || storage === "i16" || storage === "i32") {
+        d[e] = Math.round(clamp012(r) * (storage === "i8" ? 127 : storage === "i16" ? 32767 : 2147483647));
+        if (comps > 1) d[e + 1] = Math.round(clamp012(g2) * (storage === "i8" ? 127 : storage === "i16" ? 32767 : 2147483647));
+        if (comps > 2) d[e + 2] = Math.round(clamp012(b) * (storage === "i8" ? 127 : storage === "i16" ? 32767 : 2147483647));
+        if (comps > 3) d[e + 3] = Math.round(clamp012(a) * (storage === "i8" ? 127 : storage === "i16" ? 32767 : 2147483647));
+      } else if (storage === "u32") {
+        d[e] = Math.round(clamp012(r) * 4294967295);
+        if (comps > 1) d[e + 1] = Math.round(clamp012(g2) * 4294967295);
+        if (comps > 2) d[e + 2] = Math.round(clamp012(b) * 4294967295);
+        if (comps > 3) d[e + 3] = Math.round(clamp012(a) * 4294967295);
+      } else if (storage === "u16") {
+        d[e] = Math.round(clamp012(r) * 65535);
+        if (comps > 1) d[e + 1] = Math.round(clamp012(g2) * 65535);
+        if (comps > 2) d[e + 2] = Math.round(clamp012(b) * 65535);
+        if (comps > 3) d[e + 3] = Math.round(clamp012(a) * 65535);
+      } else {
+        d[e] = roundClamp(r);
+        if (comps > 1) d[e + 1] = roundClamp(g2);
+        if (comps > 2) d[e + 2] = roundClamp(b);
+        if (comps > 3) d[e + 3] = roundClamp(a);
+      }
+    };
+  }
+  function intPack(comps) {
+    return (data, off, r, g2, b, a) => {
+      const d = data;
+      const e = off / (data instanceof Uint16Array || data instanceof Int16Array ? 2 : data instanceof Uint32Array || data instanceof Int32Array ? 4 : 1);
+      d[e] = r | 0;
+      if (comps > 1) d[e + 1] = g2 | 0;
+      if (comps > 2) d[e + 2] = b | 0;
+      if (comps > 3) d[e + 3] = a | 0;
+    };
+  }
+  function floatPack(comps) {
+    return (data, off, r, g2, b, a) => {
+      const e = off / 4;
+      const d = data;
+      d[e] = r;
+      if (comps > 1) d[e + 1] = g2;
+      if (comps > 2) d[e + 2] = b;
+      if (comps > 3) d[e + 3] = a;
+    };
+  }
+  function packed565Unpack(data, off, out) {
+    const v = data[off / 2];
+    out[0] = (v >> 11 & 31) / 31;
+    out[1] = (v >> 5 & 63) / 63;
+    out[2] = (v & 31) / 31;
+    out[3] = 1;
+  }
+  function packed565Pack(data, off, r, g2, b, _a2) {
+    const v = Math.round(clamp012(r) * 31) << 11 | Math.round(clamp012(g2) * 63) << 5 | Math.round(clamp012(b) * 31);
+    data[off / 2] = v;
+  }
+  function packed4444Unpack(data, off, out) {
+    const v = data[off / 2];
+    out[0] = (v >> 12 & 15) / 15;
+    out[1] = (v >> 8 & 15) / 15;
+    out[2] = (v >> 4 & 15) / 15;
+    out[3] = (v & 15) / 15;
+  }
+  function packed4444Pack(data, off, r, g2, b, a) {
+    const v = Math.round(clamp012(r) * 15) << 12 | Math.round(clamp012(g2) * 15) << 8 | Math.round(clamp012(b) * 15) << 4 | Math.round(clamp012(a) * 15);
+    data[off / 2] = v;
+  }
+  function packed5551Unpack(data, off, out) {
+    const v = data[off / 2];
+    out[0] = (v >> 11 & 31) / 31;
+    out[1] = (v >> 6 & 31) / 31;
+    out[2] = (v >> 1 & 31) / 31;
+    out[3] = v & 1;
+  }
+  function packed5551Pack(data, off, r, g2, b, a) {
+    const v = Math.round(clamp012(r) * 31) << 11 | Math.round(clamp012(g2) * 31) << 6 | Math.round(clamp012(b) * 31) << 1 | (a > 0.5 ? 1 : 0);
+    data[off / 2] = v;
+  }
+  function packedRGB10A2Unpack(data, off, out) {
+    const v = data[off / 4];
+    out[0] = (v >>> 22 & 1023) / 1023;
+    out[1] = (v >>> 12 & 1023) / 1023;
+    out[2] = (v >>> 2 & 1023) / 1023;
+    out[3] = (v & 3) / 3;
+  }
+  function packedRGB10A2Pack(data, off, r, g2, b, a) {
+    const v = Math.round(clamp012(r) * 1023) << 22 | Math.round(clamp012(g2) * 1023) << 12 | Math.round(clamp012(b) * 1023) << 2 | Math.round(clamp012(a) * 3);
+    data[off / 4] = v >>> 0;
+  }
+  function packedRGB10A2UIUnpack(data, off, out) {
+    const v = data[off / 4];
+    out[0] = v >>> 22 & 1023;
+    out[1] = v >>> 12 & 1023;
+    out[2] = v >>> 2 & 1023;
+    out[3] = v & 3;
+  }
+  function packedRGB10A2UIPack(data, off, r, g2, b, a) {
+    const v = (r | 0) << 22 | (g2 | 0) << 12 | (b | 0) << 2 | (a | 0);
+    data[off / 4] = v >>> 0;
+  }
+  function depthUnpack(data, off, out) {
+    const d = data[off / 4];
+    out[0] = d;
+    out[1] = d;
+    out[2] = d;
+    out[3] = 1;
+  }
+  function depthPack(data, off, r, _g, _b, _a2) {
+    data[off / 4] = clamp012(r);
+  }
+  function buildSpec(o) {
+    var _a2, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k;
+    const mode = (_a2 = o.mode) != null ? _a2 : o.components === 4 ? "rgba" : o.components === 3 ? "rgb" : o.components === 2 ? "rg" : "red";
+    const norm = (_b = o.normalized) != null ? _b : false;
+    const integer = (_c = o.isInteger) != null ? _c : false;
+    const flt = (_d = o.isFloat) != null ? _d : false;
+    const unpack = (_e = o.unpack) != null ? _e : flt ? floatUnpack(o.components, mode) : integer ? intUnpack(o.storage, o.components, mode) : normUnpack(o.storage, o.components, mode);
+    const pack = (_f = o.pack) != null ? _f : flt ? floatPack(o.components) : integer ? intPack(o.components) : normPack(o.storage, o.components);
+    const bytesPerElement = o.storage === "u8" || o.storage === "i8" ? 1 : o.storage === "u16" || o.storage === "i16" ? 2 : o.storage === "f16" ? 2 : 4;
+    return {
+      format: o.format,
+      components: o.components,
+      bytesPerPixel: o.bytesPerPixel,
+      storage: o.storage,
+      bytesPerElement,
+      ctor: o.ctor,
+      isColor: (_g = o.isColor) != null ? _g : false,
+      isDepth: (_h = o.isDepth) != null ? _h : false,
+      isStencil: (_i = o.isStencil) != null ? _i : false,
+      isFloat: flt,
+      isSigned: (_j = o.isSigned) != null ? _j : false,
+      isInteger: integer,
+      isSRGB: (_k = o.isSRGB) != null ? _k : false,
+      normalized: norm,
+      unpack,
+      pack
+    };
+  }
+  var U8 = Uint8Array;
+  var I8 = Int8Array;
+  var U16 = Uint16Array;
+  var I16 = Int16Array;
+  var U32 = Uint32Array;
+  var I32 = Int32Array;
+  var F32 = Float32Array;
+  var SPECS = /* @__PURE__ */ new Map();
+  function reg(spec) {
+    SPECS.set(spec.format, spec);
+  }
+  reg(buildSpec({ format: C.RGBA8, components: 4, bytesPerPixel: 4, storage: "u8", ctor: U8, isColor: true, normalized: true, mode: "rgba" }));
+  reg(buildSpec({ format: C.RGB8, components: 3, bytesPerPixel: 3, storage: "u8", ctor: U8, isColor: true, normalized: true, mode: "rgb" }));
+  reg(buildSpec({ format: C.RGBA4, components: 4, bytesPerPixel: 2, storage: "u16", ctor: U16, isColor: true, normalized: true, mode: "packed", unpack: packed4444Unpack, pack: packed4444Pack }));
+  reg(buildSpec({ format: C.RGB5_A1, components: 4, bytesPerPixel: 2, storage: "u16", ctor: U16, isColor: true, normalized: true, mode: "packed", unpack: packed5551Unpack, pack: packed5551Pack }));
+  reg(buildSpec({ format: C.RGB565, components: 3, bytesPerPixel: 2, storage: "u16", ctor: U16, isColor: true, normalized: true, mode: "packed", unpack: packed565Unpack, pack: packed565Pack }));
+  reg(buildSpec({ format: C.R8, components: 1, bytesPerPixel: 1, storage: "u8", ctor: U8, isColor: true, normalized: true, mode: "red" }));
+  reg(buildSpec({ format: C.RG8, components: 2, bytesPerPixel: 2, storage: "u8", ctor: U8, isColor: true, normalized: true, mode: "rg" }));
+  reg(buildSpec({ format: C.R8_SNORM, components: 1, bytesPerPixel: 1, storage: "i8", ctor: I8, isColor: true, isSigned: true, normalized: true, mode: "red" }));
+  reg(buildSpec({ format: C.RG8_SNORM, components: 2, bytesPerPixel: 2, storage: "i8", ctor: I8, isColor: true, isSigned: true, normalized: true, mode: "rg" }));
+  reg(buildSpec({ format: C.RGB8_SNORM, components: 3, bytesPerPixel: 3, storage: "i8", ctor: I8, isColor: true, isSigned: true, normalized: true, mode: "rgb" }));
+  reg(buildSpec({ format: C.RGBA8_SNORM, components: 4, bytesPerPixel: 4, storage: "i8", ctor: I8, isColor: true, isSigned: true, normalized: true, mode: "rgba" }));
+  reg(buildSpec({ format: CExt.R16_EXT, components: 1, bytesPerPixel: 2, storage: "u16", ctor: U16, isColor: true, normalized: true, mode: "red" }));
+  reg(buildSpec({ format: CExt.RG16_EXT, components: 2, bytesPerPixel: 4, storage: "u16", ctor: U16, isColor: true, normalized: true, mode: "rg" }));
+  reg(buildSpec({ format: CExt.RGB16_EXT, components: 3, bytesPerPixel: 6, storage: "u16", ctor: U16, isColor: true, normalized: true, mode: "rgb" }));
+  reg(buildSpec({ format: CExt.RGBA16_EXT, components: 4, bytesPerPixel: 8, storage: "u16", ctor: U16, isColor: true, normalized: true, mode: "rgba" }));
+  reg(buildSpec({ format: CExt.R16_SNORM_EXT, components: 1, bytesPerPixel: 2, storage: "i16", ctor: I16, isColor: true, isSigned: true, normalized: true, mode: "red" }));
+  reg(buildSpec({ format: CExt.RG16_SNORM_EXT, components: 2, bytesPerPixel: 4, storage: "i16", ctor: I16, isColor: true, isSigned: true, normalized: true, mode: "rg" }));
+  reg(buildSpec({ format: CExt.RGB16_SNORM_EXT, components: 3, bytesPerPixel: 6, storage: "i16", ctor: I16, isColor: true, isSigned: true, normalized: true, mode: "rgb" }));
+  reg(buildSpec({ format: CExt.RGBA16_SNORM_EXT, components: 4, bytesPerPixel: 8, storage: "i16", ctor: I16, isColor: true, isSigned: true, normalized: true, mode: "rgba" }));
+  reg(buildSpec({ format: C.LUMINANCE, components: 1, bytesPerPixel: 1, storage: "u8", ctor: U8, isColor: true, normalized: true, mode: "luminance" }));
+  reg(buildSpec({ format: C.LUMINANCE_ALPHA, components: 2, bytesPerPixel: 2, storage: "u8", ctor: U8, isColor: true, normalized: true, mode: "lumalpha" }));
+  reg(buildSpec({ format: C.ALPHA, components: 1, bytesPerPixel: 1, storage: "u8", ctor: U8, isColor: true, normalized: true, mode: "alpha" }));
+  reg(buildSpec({ format: C.R16F, components: 1, bytesPerPixel: 4, storage: "f32", ctor: F32, isColor: true, isFloat: true, mode: "red" }));
+  reg(buildSpec({ format: C.RG16F, components: 2, bytesPerPixel: 8, storage: "f32", ctor: F32, isColor: true, isFloat: true, mode: "rg" }));
+  reg(buildSpec({ format: C.RGB16F, components: 3, bytesPerPixel: 12, storage: "f32", ctor: F32, isColor: true, isFloat: true, mode: "rgb" }));
+  reg(buildSpec({ format: C.RGBA16F, components: 4, bytesPerPixel: 16, storage: "f32", ctor: F32, isColor: true, isFloat: true, mode: "rgba" }));
+  reg(buildSpec({ format: C.R32F, components: 1, bytesPerPixel: 4, storage: "f32", ctor: F32, isColor: true, isFloat: true, mode: "red" }));
+  reg(buildSpec({ format: C.RG32F, components: 2, bytesPerPixel: 8, storage: "f32", ctor: F32, isColor: true, isFloat: true, mode: "rg" }));
+  reg(buildSpec({ format: C.RGB32F, components: 3, bytesPerPixel: 12, storage: "f32", ctor: F32, isColor: true, isFloat: true, mode: "rgb" }));
+  reg(buildSpec({ format: C.RGBA32F, components: 4, bytesPerPixel: 16, storage: "f32", ctor: F32, isColor: true, isFloat: true, mode: "rgba" }));
+  reg(buildSpec({ format: C.R11F_G11F_B10F, components: 3, bytesPerPixel: 12, storage: "f32", ctor: F32, isColor: true, isFloat: true, mode: "rgb" }));
+  reg(buildSpec({ format: C.RGB9_E5, components: 3, bytesPerPixel: 12, storage: "f32", ctor: F32, isColor: true, isFloat: true, mode: "rgb" }));
+  reg(buildSpec({ format: C.SRGB8, components: 3, bytesPerPixel: 3, storage: "u8", ctor: U8, isColor: true, normalized: true, isSRGB: true, mode: "rgb" }));
+  reg(buildSpec({ format: C.SRGB8_ALPHA8, components: 4, bytesPerPixel: 4, storage: "u8", ctor: U8, isColor: true, normalized: true, isSRGB: true, mode: "rgba" }));
+  reg(buildSpec({ format: C.R8UI, components: 1, bytesPerPixel: 1, storage: "u8", ctor: U8, isColor: true, isInteger: true, mode: "red" }));
+  reg(buildSpec({ format: C.R8I, components: 1, bytesPerPixel: 1, storage: "i8", ctor: I8, isColor: true, isInteger: true, isSigned: true, mode: "red" }));
+  reg(buildSpec({ format: C.RG8UI, components: 2, bytesPerPixel: 2, storage: "u8", ctor: U8, isColor: true, isInteger: true, mode: "rg" }));
+  reg(buildSpec({ format: C.RG8I, components: 2, bytesPerPixel: 2, storage: "i8", ctor: I8, isColor: true, isInteger: true, isSigned: true, mode: "rg" }));
+  reg(buildSpec({ format: C.RGB8UI, components: 3, bytesPerPixel: 3, storage: "u8", ctor: U8, isColor: true, isInteger: true, mode: "rgb" }));
+  reg(buildSpec({ format: C.RGB8I, components: 3, bytesPerPixel: 3, storage: "i8", ctor: I8, isColor: true, isInteger: true, isSigned: true, mode: "rgb" }));
+  reg(buildSpec({ format: C.RGBA8UI, components: 4, bytesPerPixel: 4, storage: "u8", ctor: U8, isColor: true, isInteger: true, mode: "rgba" }));
+  reg(buildSpec({ format: C.RGBA8I, components: 4, bytesPerPixel: 4, storage: "i8", ctor: I8, isColor: true, isInteger: true, isSigned: true, mode: "rgba" }));
+  reg(buildSpec({ format: C.R16UI, components: 1, bytesPerPixel: 2, storage: "u16", ctor: U16, isColor: true, isInteger: true, mode: "red" }));
+  reg(buildSpec({ format: C.R16I, components: 1, bytesPerPixel: 2, storage: "i16", ctor: I16, isColor: true, isInteger: true, isSigned: true, mode: "red" }));
+  reg(buildSpec({ format: C.RG16UI, components: 2, bytesPerPixel: 4, storage: "u16", ctor: U16, isColor: true, isInteger: true, mode: "rg" }));
+  reg(buildSpec({ format: C.RG16I, components: 2, bytesPerPixel: 4, storage: "i16", ctor: I16, isColor: true, isInteger: true, isSigned: true, mode: "rg" }));
+  reg(buildSpec({ format: C.RGB16UI, components: 3, bytesPerPixel: 6, storage: "u16", ctor: U16, isColor: true, isInteger: true, mode: "rgb" }));
+  reg(buildSpec({ format: C.RGB16I, components: 3, bytesPerPixel: 6, storage: "i16", ctor: I16, isColor: true, isInteger: true, isSigned: true, mode: "rgb" }));
+  reg(buildSpec({ format: C.RGBA16UI, components: 4, bytesPerPixel: 8, storage: "u16", ctor: U16, isColor: true, isInteger: true, mode: "rgba" }));
+  reg(buildSpec({ format: C.RGBA16I, components: 4, bytesPerPixel: 8, storage: "i16", ctor: I16, isColor: true, isInteger: true, isSigned: true, mode: "rgba" }));
+  reg(buildSpec({ format: C.R32UI, components: 1, bytesPerPixel: 4, storage: "u32", ctor: U32, isColor: true, isInteger: true, mode: "red" }));
+  reg(buildSpec({ format: C.R32I, components: 1, bytesPerPixel: 4, storage: "i32", ctor: I32, isColor: true, isInteger: true, isSigned: true, mode: "red" }));
+  reg(buildSpec({ format: C.RG32UI, components: 2, bytesPerPixel: 8, storage: "u32", ctor: U32, isColor: true, isInteger: true, mode: "rg" }));
+  reg(buildSpec({ format: C.RG32I, components: 2, bytesPerPixel: 8, storage: "i32", ctor: I32, isColor: true, isInteger: true, isSigned: true, mode: "rg" }));
+  reg(buildSpec({ format: C.RGB32UI, components: 3, bytesPerPixel: 12, storage: "u32", ctor: U32, isColor: true, isInteger: true, mode: "rgb" }));
+  reg(buildSpec({ format: C.RGB32I, components: 3, bytesPerPixel: 12, storage: "i32", ctor: I32, isColor: true, isInteger: true, isSigned: true, mode: "rgb" }));
+  reg(buildSpec({ format: C.RGBA32UI, components: 4, bytesPerPixel: 16, storage: "u32", ctor: U32, isColor: true, isInteger: true, mode: "rgba" }));
+  reg(buildSpec({ format: C.RGBA32I, components: 4, bytesPerPixel: 16, storage: "i32", ctor: I32, isColor: true, isInteger: true, isSigned: true, mode: "rgba" }));
+  reg(buildSpec({ format: C.RGB10_A2, components: 4, bytesPerPixel: 4, storage: "u32", ctor: U32, isColor: true, normalized: true, mode: "packed", unpack: packedRGB10A2Unpack, pack: packedRGB10A2Pack }));
+  reg(buildSpec({ format: C.RGB10_A2UI, components: 4, bytesPerPixel: 4, storage: "u32", ctor: U32, isColor: true, isInteger: true, mode: "packed", unpack: packedRGB10A2UIUnpack, pack: packedRGB10A2UIPack }));
+  reg(buildSpec({ format: C.DEPTH_COMPONENT16, components: 1, bytesPerPixel: 4, storage: "f32", ctor: F32, isDepth: true, normalized: true, mode: "red", unpack: depthUnpack, pack: depthPack }));
+  reg(buildSpec({ format: C.DEPTH_COMPONENT24, components: 1, bytesPerPixel: 4, storage: "f32", ctor: F32, isDepth: true, normalized: true, mode: "red", unpack: depthUnpack, pack: depthPack }));
+  reg(buildSpec({ format: C.DEPTH_COMPONENT32F, components: 1, bytesPerPixel: 4, storage: "f32", ctor: F32, isDepth: true, isFloat: true, mode: "red", unpack: depthUnpack, pack: depthPack }));
+  reg(buildSpec({ format: C.DEPTH24_STENCIL8, components: 1, bytesPerPixel: 4, storage: "f32", ctor: F32, isDepth: true, isStencil: true, normalized: true, mode: "red", unpack: depthUnpack, pack: depthPack }));
+  reg(buildSpec({ format: C.DEPTH32F_STENCIL8, components: 1, bytesPerPixel: 4, storage: "f32", ctor: F32, isDepth: true, isStencil: true, isFloat: true, mode: "red", unpack: depthUnpack, pack: depthPack }));
+  reg(buildSpec({ format: C.STENCIL_INDEX8, components: 1, bytesPerPixel: 1, storage: "u8", ctor: U8, isStencil: true, normalized: true, mode: "red" }));
+  function unsizedStorage(internalformat) {
+    switch (internalformat) {
+      case C.RGBA:
+        return C.RGBA8;
+      case C.RGB:
+        return C.RGB8;
+      case C.RED:
+        return C.R8;
+      case C.RG:
+        return C.RG8;
+      case C.DEPTH_COMPONENT:
+        return C.DEPTH_COMPONENT16;
+      case C.DEPTH_STENCIL:
+        return C.DEPTH24_STENCIL8;
+      case CExt.SRGB_EXT:
+        return C.SRGB8;
+      case CExt.SRGB_ALPHA_EXT:
+        return C.SRGB8_ALPHA8;
+      default:
+        return internalformat;
+    }
+  }
+  function resolveStorageSpec(internalformat) {
+    const storage = unsizedStorage(internalformat);
+    const local = SPECS.get(storage);
+    if (!local) return null;
+    const rasterInfo = getFormat(storage);
+    if (rasterInfo) {
+      return {
+        ...local,
+        unpack: (data, off, out) => rasterInfo.decode(data, off, out),
+        pack: (data, off, r, g2, b, a) => rasterInfo.encode(data, off, r, g2, b, a),
+        ctor: local.ctor
+      };
+    }
+    return local;
+  }
+  function toPixelFormatInfo(spec) {
+    return {
+      format: spec.format,
+      components: spec.components,
+      bytesPerPixel: spec.bytesPerPixel,
+      storage: spec.storage,
+      isColor: spec.isColor,
+      isDepth: spec.isDepth,
+      isStencil: spec.isStencil,
+      isFloat: spec.isFloat,
+      isSigned: spec.isSigned,
+      isInteger: spec.isInteger,
+      isSRGB: spec.isSRGB,
+      normalized: spec.normalized,
+      decode: (data, byteOffset, out) => spec.unpack(data, byteOffset, out),
+      encode: (data, byteOffset, r, g2, b, a) => spec.pack(data, byteOffset, r, g2, b, a)
+    };
+  }
+  function allocLevel(spec, w, h, d, isCube) {
+    const perFace = w * h * (isCube ? 1 : d);
+    const count = perFace * spec.bytesPerPixel / spec.bytesPerElement;
+    const views = [];
+    const n = isCube ? 6 : 1;
+    for (let i = 0; i < n; i++) views.push(new spec.ctor(count));
+    const level = { width: w, height: h, depth: d, data: views };
+    if (spec.isStencil) level.stencilData = new Uint8Array(perFace * (isCube ? 1 : 1));
+    return level;
+  }
+  var cubeFaceIndex2 = (t) => t >= C.TEXTURE_CUBE_MAP_POSITIVE_X && t <= C.TEXTURE_CUBE_MAP_NEGATIVE_Z ? t - C.TEXTURE_CUBE_MAP_POSITIVE_X : -1;
+  var canonTarget = (t) => cubeFaceIndex2(t) >= 0 ? C.TEXTURE_CUBE_MAP : t;
+  function float11ToFloat(v) {
+    const e = v >> 6 & 31;
+    const m = v & 63;
+    if (e === 0) return m === 0 ? 0 : m * 2 ** -20;
+    if (e === 31) return m === 0 ? Infinity : NaN;
+    return (1 + m / 64) * 2 ** (e - 15);
+  }
+  function float10ToFloat(v) {
+    const e = v >> 5 & 31;
+    const m = v & 31;
+    if (e === 0) return m === 0 ? 0 : m * 2 ** -19;
+    if (e === 31) return m === 0 ? Infinity : NaN;
+    return (1 + m / 32) * 2 ** (e - 15);
+  }
+  function rgb9e5ToFloat(v) {
+    const e = v >>> 27 & 31;
+    const scale = e === 0 ? 2 ** -24 : 2 ** (e - 15);
+    const r = (v >>> 18 & 511) / 512 * scale * 512;
+    const g2 = (v >>> 9 & 511) / 512 * scale * 512;
+    const b = (v & 511) / 512 * scale * 512;
+    return [r, g2, b];
+  }
+  function srcComponents(format) {
+    switch (format) {
+      case C.RGBA:
+      case C.RGBA_INTEGER:
+      case 32993:
+        return 4;
+      // BGRA (EXT_texture_format_BGRA8888, null status)
+      case C.RGB:
+      case C.RGB_INTEGER:
+        return 3;
+      case C.LUMINANCE_ALPHA:
+      case C.RG:
+      case C.RG_INTEGER:
+        return 2;
+      case C.DEPTH_STENCIL:
+        return 2;
+      // depth + stencil (packed 32-bit texels)
+      default:
+        return 1;
+    }
+  }
+  function srcBytesPerTexel(format, type) {
+    const comps = srcComponents(format);
+    switch (type) {
+      case C.UNSIGNED_BYTE:
+      case C.BYTE:
+        return comps;
+      case C.UNSIGNED_SHORT:
+      case C.SHORT:
+      case C.HALF_FLOAT:
+      case CExt.HALF_FLOAT_OES:
+      case C.UNSIGNED_SHORT_5_6_5:
+      case C.UNSIGNED_SHORT_4_4_4_4:
+      case C.UNSIGNED_SHORT_5_5_5_1:
+        return comps * 2;
+      default:
+        return 4;
+    }
+  }
+  function readSourceTexel(dv, byteOff, format, type, domain, out) {
+    const comps = srcComponents(format);
+    const norm = domain === 0;
+    const raw = domain !== 0;
+    switch (type) {
+      case C.UNSIGNED_BYTE:
+        for (let i = 0; i < comps; i++) out[i] = norm ? dv.getUint8(byteOff + i) / 255 : dv.getUint8(byteOff + i);
+        break;
+      case C.BYTE:
+        for (let i = 0; i < comps; i++) out[i] = norm ? dv.getInt8(byteOff + i) / 127 : dv.getInt8(byteOff + i);
+        break;
+      case C.UNSIGNED_SHORT:
+        for (let i = 0; i < comps; i++) out[i] = norm ? dv.getUint16(byteOff + i * 2, true) / 65535 : dv.getUint16(byteOff + i * 2, true);
+        break;
+      case C.SHORT:
+        for (let i = 0; i < comps; i++) out[i] = norm ? dv.getInt16(byteOff + i * 2, true) / 32767 : dv.getInt16(byteOff + i * 2, true);
+        break;
+      case C.UNSIGNED_INT:
+        for (let i = 0; i < comps; i++) out[i] = norm ? dv.getUint32(byteOff + i * 4, true) / 4294967295 : dv.getUint32(byteOff + i * 4, true);
+        break;
+      case C.INT:
+        for (let i = 0; i < comps; i++) out[i] = norm ? dv.getInt32(byteOff + i * 4, true) / 2147483647 : dv.getInt32(byteOff + i * 4, true);
+        break;
+      case C.FLOAT:
+        for (let i = 0; i < comps; i++) out[i] = dv.getFloat32(byteOff + i * 4, true);
+        break;
+      case C.HALF_FLOAT:
+      case CExt.HALF_FLOAT_OES:
+        for (let i = 0; i < comps; i++) out[i] = halfToFloat(dv.getUint16(byteOff + i * 2, true));
+        break;
+      case C.UNSIGNED_SHORT_5_6_5: {
+        const v = dv.getUint16(byteOff, true);
+        out[0] = (v >> 11 & 31) / 31;
+        out[1] = (v >> 5 & 63) / 63;
+        out[2] = (v & 31) / 31;
+        out[3] = 1;
+        break;
+      }
+      case C.UNSIGNED_SHORT_4_4_4_4: {
+        const v = dv.getUint16(byteOff, true);
+        out[0] = (v >> 12 & 15) / 15;
+        out[1] = (v >> 8 & 15) / 15;
+        out[2] = (v >> 4 & 15) / 15;
+        out[3] = (v & 15) / 15;
+        break;
+      }
+      case C.UNSIGNED_SHORT_5_5_5_1: {
+        const v = dv.getUint16(byteOff, true);
+        out[0] = (v >> 11 & 31) / 31;
+        out[1] = (v >> 6 & 31) / 31;
+        out[2] = (v >> 1 & 31) / 31;
+        out[3] = v & 1;
+        break;
+      }
+      case C.UNSIGNED_INT_2_10_10_10_REV: {
+        const v = dv.getUint32(byteOff, true);
+        const r = v >>> 22 & 1023, g2 = v >>> 12 & 1023, b = v >>> 2 & 1023, a = v & 3;
+        if (norm) {
+          out[0] = r / 1023;
+          out[1] = g2 / 1023;
+          out[2] = b / 1023;
+          out[3] = a / 3;
+        } else {
+          out[0] = r;
+          out[1] = g2;
+          out[2] = b;
+          out[3] = a;
+        }
+        break;
+      }
+      case C.UNSIGNED_INT_10F_11F_11F_REV: {
+        const v = dv.getUint32(byteOff, true);
+        out[0] = float10ToFloat(v >>> 22);
+        out[1] = float11ToFloat(v >>> 11 & 2047);
+        out[2] = float11ToFloat(v & 2047);
+        out[3] = 1;
+        break;
+      }
+      case C.UNSIGNED_INT_5_9_9_9_REV: {
+        const [r, g2, b] = rgb9e5ToFloat(dv.getUint32(byteOff, true));
+        out[0] = r;
+        out[1] = g2;
+        out[2] = b;
+        out[3] = 1;
+        break;
+      }
+      case C.UNSIGNED_INT_24_8: {
+        const v = dv.getUint32(byteOff, true);
+        out[0] = norm ? (v >>> 8 & 16777215) / 16777215 : v >>> 8 & 16777215;
+        out[1] = v & 255;
+        out[2] = 0;
+        out[3] = 1;
+        break;
+      }
+      case C.FLOAT_32_UNSIGNED_INT_24_8_REV: {
+        out[0] = dv.getFloat32(byteOff, true);
+        out[1] = dv.getUint8(byteOff + 4);
+        out[2] = 0;
+        out[3] = 1;
+        break;
+      }
+      default:
+        out[0] = out[1] = out[2] = 0;
+        out[3] = 1;
+    }
+    switch (format) {
+      case C.RGB:
+      case C.RGB_INTEGER:
+        out[3] = 1;
+        break;
+      case C.RG:
+      case C.RG_INTEGER:
+        out[2] = 0;
+        out[3] = 1;
+        break;
+      case C.LUMINANCE:
+        out[1] = out[0];
+        out[2] = out[0];
+        out[3] = 1;
+        break;
+      case C.LUMINANCE_ALPHA:
+        out[1] = out[0];
+        out[2] = out[0];
+        break;
+      case C.ALPHA:
+        out[0] = 0;
+        out[1] = 0;
+        out[2] = 0;
+        break;
+      case C.RED:
+      case C.RED_INTEGER:
+      case C.DEPTH_COMPONENT:
+        out[1] = 0;
+        out[2] = 0;
+        out[3] = 1;
+        break;
+      default:
+        break;
+    }
+    void raw;
+  }
+  var align4 = (v) => v + 3 & ~3;
+  function copyRows(p, dst, dstW, xoff, yoff, width, height, srcRow0, dstZOffset) {
+    const out = new Float32Array(4);
+    for (let r = 0; r < height; r++) {
+      const srcRow = srcRow0 + (p.flipY ? height - 1 - r : r);
+      const dstY = yoff + r;
+      const srcBase = srcRow * p.srcRowBytes + p.srcSkipPixels * p.srcBpp;
+      const dstBase = (dstZOffset + dstY * dstW + xoff) * p.dstBpp;
+      for (let x = 0; x < width; x++) {
+        readSourceTexel(p.src, srcBase + x * p.srcBpp, p.srcFormat, p.srcType, p.domain, out);
+        if (p.premultiply) {
+          out[0] *= out[3];
+          out[1] *= out[3];
+          out[2] *= out[3];
+        }
+        if (p.dstStencil !== void 0 && p.srcFormat === C.DEPTH_STENCIL) {
+          p.write(dst, dstBase + x * p.dstBpp, out[0], 0, 0, 0);
+          p.dstStencil[dstY * dstW + xoff + x] = out[1] & 255;
+        } else {
+          p.write(dst, dstBase + x * p.dstBpp, out[0], out[1], out[2], out[3]);
+        }
+      }
+    }
+  }
+  var PLACEHOLDER_INFO = toPixelFormatInfo(SPECS.get(C.RGBA8));
+  function ensureImage(texture, target) {
+    if (!texture._image) {
+      texture._image = {
+        target: canonTarget(target),
+        internalFormat: 0,
+        info: PLACEHOLDER_INFO,
+        width: 0,
+        height: 0,
+        depth: 1,
+        levels: [],
+        baseLevel: 0,
+        maxLevel: 0,
+        immutable: false,
+        complete: false
+      };
+    }
+    return texture._image;
+  }
+  var isPow2 = (v) => v > 0 && (v & v - 1) === 0;
+  function updateCompleteness(texture, version) {
+    const img = texture._image;
+    if (!img) return;
+    const base = Math.max(0, texture._params[33084] | 0);
+    const maxParam = Math.max(0, texture._params[33085] | 0);
+    img.maxLevel = Math.min(maxParam, img.levels.length - 1);
+    if (base > img.maxLevel) {
+      img.baseLevel = base;
+      img.complete = false;
+      return;
+    }
+    img.baseLevel = base;
+    const baseLevel = img.levels[base];
+    if (!baseLevel || baseLevel.width < 1 || baseLevel.height < 1) {
+      img.complete = false;
+      return;
+    }
+    const isCube = img.target === C.TEXTURE_CUBE_MAP;
+    const isArray = img.target === C.TEXTURE_2D_ARRAY;
+    const is3D = img.target === C.TEXTURE_3D;
+    const minFilter = texture._params[10241];
+    const needsMips = minFilter !== C.NEAREST && minFilter !== C.LINEAR;
+    const maxDim = Math.max(baseLevel.width, baseLevel.height, is3D ? baseLevel.depth : 1);
+    const chainMax = base + Math.floor(Math.log2(maxDim));
+    const requiredMax = needsMips ? Math.min(maxParam, chainMax) : base;
+    let ok = true;
+    for (let l = base; l <= requiredMax; l++) {
+      const lv = img.levels[l];
+      if (!lv) {
+        ok = false;
+        break;
+      }
+      const shift = l - base;
+      const expW = Math.max(1, baseLevel.width >> shift);
+      const expH = Math.max(1, baseLevel.height >> shift);
+      const expD = isArray ? baseLevel.depth : is3D ? Math.max(1, baseLevel.depth >> shift) : 1;
+      if (lv.width !== expW || lv.height !== expH || lv.depth !== expD) {
+        ok = false;
+        break;
+      }
+      if (isCube && lv.data.length < 6) {
+        ok = false;
+        break;
+      }
+      if (isCube) {
+        for (let f = 0; f < 6; f++) {
+          if (!lv.data[f]) {
+            ok = false;
+            break;
+          }
+        }
+        if (!ok) break;
+      }
+    }
+    if (ok && version === 1 && (!isPow2(baseLevel.width) || !isPow2(baseLevel.height))) {
+      if (needsMips || texture._params[10242] !== C.CLAMP_TO_EDGE || texture._params[10243] !== C.CLAMP_TO_EDGE) {
+        ok = false;
+      }
+    }
+    img.complete = ok;
+  }
+  var levelOrigins = /* @__PURE__ */ new WeakMap();
+  function recordLevelOrigin(texture, level, format, type) {
+    let m = levelOrigins.get(texture);
+    if (!m) {
+      m = /* @__PURE__ */ new Map();
+      levelOrigins.set(texture, m);
+    }
+    m.set(level, { format, type });
+  }
+  function getLevelOrigin(texture, level) {
+    var _a2;
+    return (_a2 = levelOrigins.get(texture)) == null ? void 0 : _a2.get(level);
+  }
+  function hasTextureLevel(texture, target, level) {
+    const img = texture._image;
+    if (!img) return false;
+    const lv = img.levels[level];
+    if (!lv) return false;
+    const fi = cubeFaceIndex2(target);
+    if (fi >= 0) return lv.data[fi] !== void 0;
+    return true;
+  }
+  function copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset) {
+    const img = texture._image;
+    const levelData = img.levels[level];
+    if (!levelData) return;
+    const isCube = img.target === C.TEXTURE_CUBE_MAP;
+    const face = cubeFaceIndex2(target);
+    const views = face >= 0 ? [levelData.data[face]] : levelData.data;
+    const dstBpp = spec.bytesPerPixel;
+    if (pixels === null || pixels === void 0) return;
+    if (typeof pixels !== "number" && !ArrayBuffer.isView(pixels) && source !== void 0) {
+      try {
+        const res = decodeImageSource(source);
+        if (res && res.ok && res.image) {
+          const im = res.image;
+          const dv2 = new DataView(im.data.buffer, im.data.byteOffset, im.data.byteLength);
+          const p2 = {
+            src: dv2,
+            srcRowBytes: im.width * 4,
+            srcSkipPixels: 0,
+            srcBpp: 4,
+            srcFormat: C.RGBA,
+            srcType: C.UNSIGNED_BYTE,
+            domain: spec.isInteger ? 2 : spec.isFloat && !spec.isDepth ? 1 : 0,
+            flipY: ctx._state.pixelStore.unpack.flipY,
+            premultiply: ctx._state.pixelStore.unpack.premultiplyAlpha,
+            write: spec.pack,
+            dstBpp,
+            dstStencil: levelData.stencilData
+          };
+          copyRows(p2, views[0], levelData.width, xoffset, yoffset, width, height, 0, 0);
+          updateCompleteness(texture, ctx._version);
+          return;
+        }
+      } catch {
+      }
+      return;
+    }
+    let srcView;
+    let baseOffset = 0;
+    if (typeof pixels === "number") {
+      const buf = ctx._state.pixelUnpackBuffer;
+      if (!buf || !buf._data) return;
+      srcView = new Uint8Array(buf._data);
+      baseOffset = pixels;
+    } else {
+      srcView = pixels;
+    }
+    if (baseOffset > srcView.byteLength) return;
+    const s = ctx._state.pixelStore.unpack;
+    const srcBpp = srcBytesPerTexel(format, type);
+    const srcRowLength = s.rowLength > 0 ? s.rowLength : width;
+    const srcRowBytes = align4(srcRowLength * srcBpp);
+    const domain = spec.isInteger ? 2 : spec.isFloat && !spec.isDepth ? 1 : 0;
+    const dv = new DataView(srcView.buffer, srcView.byteOffset + baseOffset, srcView.byteLength - baseOffset);
+    const p = {
+      src: dv,
+      srcRowBytes,
+      srcSkipPixels: s.skipPixels,
+      srcBpp,
+      srcFormat: format,
+      srcType: type,
+      domain,
+      flipY: s.flipY,
+      premultiply: false,
+      // client arrays are not premultiplied by the API
+      write: spec.pack,
+      dstBpp,
+      dstStencil: levelData.stencilData
+    };
+    const srcImageHeight = s.imageHeight > 0 ? s.imageHeight : height;
+    const srcSkipImages = s.skipImages;
+    for (let z = 0; z < depth; z++) {
+      const view = views[0];
+      const srcRow0 = s.skipRows + (srcSkipImages + z) * srcImageHeight;
+      copyRows(p, view, levelData.width, xoffset, yoffset, width, height, srcRow0, z * levelData.width * levelData.height);
+    }
+  }
+  function uploadTexImage(ctx, texture, target, level, internalformat, width, height, depth, border, format, type, pixels, source) {
+    void border;
+    if (texture._immutable) return;
+    const spec = resolveStorageSpec(internalformat);
+    if (!spec) return;
+    const img = ensureImage(texture, target);
+    const isCube = img.target === C.TEXTURE_CUBE_MAP;
+    const levelData = allocLevel(spec, width, height, depth, isCube);
+    if (isCube) {
+      const face = cubeFaceIndex2(target);
+      for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = void 0;
+    }
+    img.levels[level] = levelData;
+    texture._internalFormat = internalformat;
+    texture._compressed = false;
+    img.internalFormat = internalformat;
+    img.info = toPixelFormatInfo(spec);
+    img.target = canonTarget(target);
+    img.immutable = texture._immutable;
+    if (level === 0) {
+      img.width = width;
+      img.height = height;
+      img.depth = isCube ? 6 : depth;
+    }
+    recordLevelOrigin(texture, level, format, type);
+    copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, 0, 0, 0);
+    updateCompleteness(texture, ctx._version);
+  }
+  function uploadTexSubImage(ctx, texture, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels, source) {
+    const img = texture._image;
+    if (!img) return;
+    const levelData = img.levels[level];
+    if (!levelData) return;
+    const spec = resolveStorageSpec(img.internalFormat);
+    if (!spec) return;
+    copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset);
+    updateCompleteness(texture, ctx._version);
+  }
+  function allocateImmutableStorage(ctx, texture, target, levels, internalformat, width, height, depth) {
+    void ctx;
+    if (texture._immutable) return;
+    const spec = resolveStorageSpec(internalformat);
+    if (!spec) return;
+    const img = ensureImage(texture, target);
+    const isCube = img.target === C.TEXTURE_CUBE_MAP;
+    img.levels = [];
+    let w = width;
+    let h = height;
+    let d = depth;
+    for (let l = 0; l < levels; l++) {
+      img.levels[l] = allocLevel(spec, w, h, d, isCube);
+      w = Math.max(1, w >> 1);
+      h = Math.max(1, h >> 1);
+      if (!isCube) d = Math.max(1, d >> 1);
+    }
+    texture._immutable = true;
+    texture._internalFormat = internalformat;
+    texture._compressed = false;
+    img.immutable = true;
+    img.internalFormat = internalformat;
+    img.info = toPixelFormatInfo(spec);
+    img.target = canonTarget(target);
+    img.width = width;
+    img.height = height;
+    img.depth = isCube ? 6 : depth;
+    updateCompleteness(texture, ctx._version);
+  }
+  function copyFromReadSurface(ctx, levelData, face, spec, x, y, width, height) {
+    let surface = null;
+    try {
+      surface = resolveReadSurface(ctx);
+    } catch {
+      surface = null;
+    }
+    if (!surface) return;
+    const view = levelData.data[face >= 0 ? face : 0];
+    const sW = surface.width;
+    const sH = surface.height;
+    const dstBpp = spec.bytesPerPixel;
+    const out = new Float32Array(4);
+    try {
+      const srcIsRGBA8 = surface.format === C.RGBA8 || surface.format === C.RGBA;
+      const srcData = surface.data;
+      for (let dy = 0; dy < height; dy++) {
+        const sy = y + dy;
+        if (sy < 0 || sy >= sH) continue;
+        for (let dx = 0; dx < width; dx++) {
+          const sx = x + dx;
+          if (sx < 0 || sx >= sW) continue;
+          if (srcIsRGBA8) {
+            const o = (sy * sW + sx) * 4;
+            out[0] = srcData[o] / 255;
+            out[1] = srcData[o + 1] / 255;
+            out[2] = srcData[o + 2] / 255;
+            out[3] = srcData[o + 3] / 255;
+          } else {
+            surface.info.decode(srcData, (sy * sW + sx) * surface.info.bytesPerPixel, out);
+          }
+          spec.pack(view, (dy * levelData.width + dx) * dstBpp, out[0], out[1], out[2], out[3]);
+        }
+      }
+    } catch {
+    }
+  }
+  function copyTexImage(ctx, texture, target, level, internalformat, x, y, width, height, border) {
+    void border;
+    if (texture._immutable) return;
+    const spec = resolveStorageSpec(internalformat);
+    if (!spec) return;
+    const img = ensureImage(texture, target);
+    const isCube = img.target === C.TEXTURE_CUBE_MAP;
+    const levelData = allocLevel(spec, width, height, 1, isCube);
+    if (isCube) {
+      const face = cubeFaceIndex2(target);
+      for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = void 0;
+    }
+    img.levels[level] = levelData;
+    texture._internalFormat = internalformat;
+    texture._compressed = false;
+    img.internalFormat = internalformat;
+    img.info = toPixelFormatInfo(spec);
+    img.target = canonTarget(target);
+    if (level === 0) {
+      img.width = width;
+      img.height = height;
+      img.depth = isCube ? 6 : 1;
+    }
+    copyFromReadSurface(ctx, img.levels[level], cubeFaceIndex2(target), spec, x, y, width, height);
+    updateCompleteness(texture, ctx._version);
+  }
+  function copyTexSubImage(ctx, texture, target, level, xoffset, yoffset, zoffset, x, y, width, height) {
+    const img = texture._image;
+    if (!img) return;
+    const levelData = img.levels[level];
+    if (!levelData) return;
+    const spec = resolveStorageSpec(img.internalFormat);
+    if (!spec) return;
+    const tmp = { width, height, depth: 1, data: [new spec.ctor(width * height * spec.bytesPerPixel / spec.bytesPerElement)] };
+    if (spec.isStencil) tmp.stencilData = new Uint8Array(width * height);
+    copyFromReadSurface(ctx, tmp, -1, spec, x, y, width, height);
+    const face = cubeFaceIndex2(target);
+    const view = levelData.data[face >= 0 ? face : 0];
+    const srcView = tmp.data[0];
+    const elemsPerTexel = spec.bytesPerPixel / spec.bytesPerElement;
+    for (let dy = 0; dy < height; dy++) {
+      for (let dx = 0; dx < width; dx++) {
+        const srcElem = (dy * width + dx) * spec.bytesPerPixel / spec.bytesPerElement;
+        const dstElem = (zoffset * levelData.width * levelData.height + (yoffset + dy) * levelData.width + xoffset + dx) * spec.bytesPerPixel / spec.bytesPerElement;
+        for (let e = 0; e < elemsPerTexel; e++) {
+          view[dstElem + e] = srcView[srcElem + e];
+        }
+      }
+    }
+    if (spec.isStencil && levelData.stencilData && tmp.stencilData) {
+      for (let dy = 0; dy < height; dy++) {
+        for (let dx = 0; dx < width; dx++) {
+          levelData.stencilData[(zoffset * levelData.height + yoffset + dy) * levelData.width + xoffset + dx] = tmp.stencilData[dy * width + dx];
+        }
+      }
+    }
+    updateCompleteness(texture, ctx._version);
+  }
+  function generateMipmap(ctx, texture, target) {
+    const img = texture._image;
+    if (!img) return;
+    const base = img.levels[0];
+    if (!base) return;
+    const spec = resolveStorageSpec(img.internalFormat);
+    if (!spec) return;
+    const isCube = img.target === C.TEXTURE_CUBE_MAP;
+    const isArray = img.target === C.TEXTURE_2D_ARRAY;
+    const maxDim = Math.max(img.width, img.height, !isCube && !isArray ? img.depth : 1);
+    const levels = Math.floor(Math.log2(maxDim)) + 1;
+    const out = new Float32Array(4);
+    let w = img.width;
+    let h = img.height;
+    let d = isCube ? 6 : img.depth;
+    for (let l = 1; l < levels; l++) {
+      const nw = Math.max(1, w >> 1);
+      const nh = Math.max(1, h >> 1);
+      const nd = isArray ? d : Math.max(1, d >> 1);
+      const levelData = allocLevel(spec, nw, nh, isCube ? 1 : nd, isCube);
+      img.levels[l] = levelData;
+      const prev = img.levels[l - 1];
+      const faceCount = isCube ? 6 : 1;
+      for (let f = 0; f < faceCount; f++) {
+        const srcView = prev.data[f];
+        const dstView = levelData.data[f];
+        for (let z = 0; z < (isCube ? 1 : nd); z++) {
+          for (let y = 0; y < nh; y++) {
+            for (let x = 0; x < nw; x++) {
+              let accR = 0, accG = 0, accB = 0, accA = 0, n = 0;
+              for (let dy = 0; dy < 2; dy++) {
+                for (let dx = 0; dx < 2; dx++) {
+                  const sx = Math.min(w - 1, x * 2 + dx);
+                  const sy = Math.min(h - 1, y * 2 + dy);
+                  const srcOff = ((z * h + sy) * w + sx) * spec.bytesPerPixel;
+                  spec.unpack(srcView, srcOff, out);
+                  accR += out[0];
+                  accG += out[1];
+                  accB += out[2];
+                  accA += out[3];
+                  n++;
+                }
+              }
+              const dstOff = ((z * nh + y) * nw + x) * spec.bytesPerPixel;
+              spec.pack(dstView, dstOff, accR / n, accG / n, accB / n, accA / n);
+            }
+          }
+        }
+      }
+      w = nw;
+      h = nh;
+      d = nd;
+    }
+    void ctx;
+    updateCompleteness(texture, ctx._version);
+  }
+
+  // src/gl/api/textures.ts
+  var COMPARE_REF_TO_TEXTURE = 34894;
+  var TEXTURE_IMMUTABLE_FORMAT = 37167;
+  var TEXTURE_IMMUTABLE_LEVELS = 33503;
+  var RGB9_E52 = 35901;
+  function isLost5(ctx) {
+    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
+    return ctx._isLost;
+  }
+  var TextureCtor = WebGLTexture;
+  var TextureCtorAny = TextureCtor;
+  function validateTexture(ctx, texture) {
+    return validateObject(ctx, texture, TextureCtorAny);
+  }
+  function isValidTextureTarget(ctx, target) {
+    if (target === C1.TEXTURE_2D || target === C1.TEXTURE_CUBE_MAP) return true;
+    if (ctx._version !== 2) return false;
+    return target === C2.TEXTURE_3D || target === C2.TEXTURE_2D_ARRAY;
+  }
+  function slotForTarget(target) {
+    switch (target) {
+      case C1.TEXTURE_2D:
+        return "texture2D";
+      case C1.TEXTURE_CUBE_MAP:
+        return "textureCube";
+      case C2.TEXTURE_3D:
+        return "texture3D";
+      default:
+        return "texture2DArray";
+    }
+  }
+  function boundTextureForTarget(ctx, target) {
+    const unit = ctx._state.textureUnits[ctx._state.activeTexture];
+    return unit[slotForTarget(target)];
+  }
+  function unbindTextureEverywhere(ctx, texture) {
+    let found = false;
+    for (const unit of ctx._state.textureUnits) {
+      const u = unit;
+      for (const slot of ["texture2D", "textureCube", "texture3D", "texture2DArray"]) {
+        if (u[slot] === texture) {
+          u[slot] = null;
+          found = true;
+        }
+      }
+    }
+    return found;
+  }
+  var TEX_PARAM_PNAMES_W1 = [
+    C1.TEXTURE_MIN_FILTER,
+    C1.TEXTURE_MAG_FILTER,
+    C1.TEXTURE_WRAP_S,
+    C1.TEXTURE_WRAP_T
+  ];
+  var TEX_PARAM_PNAMES_W2 = [
+    ...TEX_PARAM_PNAMES_W1,
+    C2.TEXTURE_WRAP_R,
+    C2.TEXTURE_MIN_LOD,
+    C2.TEXTURE_MAX_LOD,
+    C2.TEXTURE_BASE_LEVEL,
+    C2.TEXTURE_MAX_LEVEL,
+    C2.TEXTURE_COMPARE_MODE,
+    C2.TEXTURE_COMPARE_FUNC
+  ];
+  var MIN_FILTER_VALUES = [
+    C1.NEAREST,
+    C1.LINEAR,
+    C1.NEAREST_MIPMAP_NEAREST,
+    C1.NEAREST_MIPMAP_LINEAR,
+    C1.LINEAR_MIPMAP_NEAREST,
+    C1.LINEAR_MIPMAP_LINEAR
+  ];
+  var MAG_FILTER_VALUES = [C1.NEAREST, C1.LINEAR];
+  var WRAP_VALUES = [C1.REPEAT, C1.CLAMP_TO_EDGE, C1.MIRRORED_REPEAT];
+  var COMPARE_MODE_VALUES = [C1.NONE, COMPARE_REF_TO_TEXTURE];
+  var COMPARE_FUNC_VALUES = [
+    C1.NEVER,
+    C1.LESS,
+    C1.EQUAL,
+    C1.LEQUAL,
+    C1.GREATER,
+    C1.NOTEQUAL,
+    C1.GEQUAL,
+    C1.ALWAYS
+  ];
+  function isValidTexParamPname(ctx, pname) {
+    if (TEX_PARAM_PNAMES_W1.includes(pname)) return true;
+    if (pname === 34046) {
+      return ctx.getExtension("EXT_texture_filter_anisotropic") !== null;
+    }
+    if (ctx._version !== 2) return false;
+    return TEX_PARAM_PNAMES_W2.includes(pname);
+  }
+  function isValidTexParamValue(ctx, pname, param) {
+    switch (pname) {
+      case C1.TEXTURE_MIN_FILTER:
+        if (!MIN_FILTER_VALUES.includes(param)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return false;
+        }
+        return true;
+      case C1.TEXTURE_MAG_FILTER:
+        if (!MAG_FILTER_VALUES.includes(param)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return false;
+        }
+        return true;
+      case C1.TEXTURE_WRAP_S:
+      case C1.TEXTURE_WRAP_T:
+      case C2.TEXTURE_WRAP_R:
+        if (!WRAP_VALUES.includes(param)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return false;
+        }
+        return true;
+      case C2.TEXTURE_COMPARE_MODE:
+        if (!COMPARE_MODE_VALUES.includes(param)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return false;
+        }
+        return true;
+      case C2.TEXTURE_COMPARE_FUNC:
+        if (!COMPARE_FUNC_VALUES.includes(param)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return false;
+        }
+        return true;
+      case C2.TEXTURE_BASE_LEVEL:
+      case C2.TEXTURE_MAX_LEVEL:
+        if (param < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return false;
+        }
+        return true;
+      case 34046:
+        if (param < 1) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return false;
+        }
+        return true;
+      default:
+        return true;
+    }
+  }
+  function texParameterImpl(ctx, target, pname, param) {
+    if (isLost5(ctx)) return;
+    if (!isValidTextureTarget(ctx, target)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    const tex = boundTextureForTarget(ctx, target);
+    if (tex === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (!isValidTexParamPname(ctx, pname)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    if (!isValidTexParamValue(ctx, pname, param)) return;
+    tex._params[pname] = param;
+  }
+  function installTexturesApi(proto) {
+    proto.createTexture = function() {
+      const ctx = this;
+      if (isLost5(ctx)) return null;
+      return createObject(ctx, TextureCtor);
+    };
+    proto.deleteTexture = function(texture) {
+      const ctx = this;
+      if (isLost5(ctx)) return;
+      if (texture === null || texture === void 0) return;
+      if (!(texture instanceof WebGLTexture)) {
+        throw new TypeError(`Argument is not of type 'WebGLTexture'`);
+      }
+      if (texture._context !== ctx) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (texture._deleted) return;
+      const wasBound = unbindTextureEverywhere(ctx, texture);
+      texture._deleted = true;
+      texture._deletePending = wasBound;
+      ctx._resources.untrack(texture);
+    };
+    proto.isTexture = function(texture) {
+      const ctx = this;
+      if (isLost5(ctx)) return false;
+      if (texture === null || texture === void 0) return false;
+      if (!(texture instanceof WebGLTexture)) return false;
+      if (texture._context !== ctx) return false;
+      if (texture._deleted) return false;
+      return true;
+    };
+    proto.bindTexture = function(target, texture) {
+      const ctx = this;
+      if (isLost5(ctx)) return;
+      if (!isValidTextureTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const unit = ctx._state.textureUnits[ctx._state.activeTexture];
+      const slot = slotForTarget(target);
+      if (texture === null || texture === void 0) {
+        unit[slot] = null;
+        return;
+      }
+      if (texture instanceof WebGLTexture && texture._deletePending) {
+        unbindTextureEverywhere(ctx, texture);
+        texture._deletePending = false;
+      }
+      const tex = validateTexture(ctx, texture);
+      if (tex === null) return;
+      if (tex._target === 0) tex._target = target;
+      else if (tex._target !== target) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      unit[slot] = tex;
+    };
+    proto.texParameterf = function(target, pname, param) {
+      texParameterImpl(this, target, pname, param);
+    };
+    proto.texParameteri = function(target, pname, param) {
+      texParameterImpl(this, target, pname, param);
+    };
+    proto.getTexParameter = function(target, pname) {
+      const ctx = this;
+      if (isLost5(ctx)) return null;
+      if (!isValidTextureTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return null;
+      }
+      const tex = boundTextureForTarget(ctx, target);
+      if (tex === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
+      if (pname === TEXTURE_IMMUTABLE_FORMAT || pname === TEXTURE_IMMUTABLE_LEVELS) {
+        if (ctx._version !== 2) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        }
+        if (pname === TEXTURE_IMMUTABLE_FORMAT) return tex._immutable ? 1 : 0;
+        return tex._immutable ? tex._image.levels.length : 0;
+      }
+      if (!isValidTexParamPname(ctx, pname)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return null;
+      }
+      return tex._params[pname];
+    };
+    proto.generateMipmap = function(target) {
+      var _a2;
+      const ctx = this;
+      if (isLost5(ctx)) return;
+      if (!isValidTextureTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const tex = boundTextureForTarget(ctx, target);
+      if (tex === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const img = tex._image;
+      if (!img) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const base = (_a2 = tex._params[C2.TEXTURE_BASE_LEVEL]) != null ? _a2 : 0;
+      const lv = img.levels[base];
+      if (!lv || lv.width < 1 || lv.height < 1) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (img.target === C1.TEXTURE_CUBE_MAP) {
+        for (let f = 0; f < 6; f++) {
+          if (lv.data[f] === void 0) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+        }
+      }
+      if (img.info.isDepth || img.info.isStencil || img.info.isInteger || tex._compressed) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (img.info.isFloat) {
+        if (ctx._version === 2) {
+          if (img.internalFormat === RGB9_E52 || ctx.getExtension("EXT_color_buffer_float") === null) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+        } else if (ctx.getExtension("OES_texture_float_linear") === null && ctx.getExtension("OES_texture_half_float_linear") === null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+      }
+      generateMipmap(ctx, tex, target);
+    };
+  }
+
+  // src/gl/api/teximage.ts
+  var HALF_FLOAT_OES = 36193;
+  var UNSIGNED_INT_24_8_WEBGL = 34042;
+  var SRGB_EXT = 35904;
+  var SRGB_ALPHA_EXT = 35906;
+  function isLost6(ctx) {
+    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
+    return ctx._isLost;
+  }
+  var CUBE_FACES = [
+    C1.TEXTURE_CUBE_MAP_POSITIVE_X,
+    C1.TEXTURE_CUBE_MAP_NEGATIVE_X,
+    C1.TEXTURE_CUBE_MAP_POSITIVE_Y,
+    C1.TEXTURE_CUBE_MAP_NEGATIVE_Y,
+    C1.TEXTURE_CUBE_MAP_POSITIVE_Z,
+    C1.TEXTURE_CUBE_MAP_NEGATIVE_Z
+  ];
+  function isCubeFace2(target) {
+    return target >= C1.TEXTURE_CUBE_MAP_POSITIVE_X && target <= C1.TEXTURE_CUBE_MAP_NEGATIVE_Z;
+  }
+  function is2DTarget(target) {
+    return target === C1.TEXTURE_2D || isCubeFace2(target);
+  }
+  function is3DTarget(ctx, target) {
+    return ctx._version === 2 && (target === C2.TEXTURE_3D || target === C2.TEXTURE_2D_ARRAY);
+  }
+  function boundTextureForTarget2(ctx, target) {
+    const unit = ctx._state.textureUnits[ctx._state.activeTexture];
+    if (target === C1.TEXTURE_2D) return unit.texture2D;
+    if (isCubeFace2(target)) return unit.textureCube;
+    if (target === C2.TEXTURE_3D) return unit.texture3D;
+    if (target === C2.TEXTURE_2D_ARRAY) return unit.texture2DArray;
+    return null;
+  }
+  function dimLimit(ctx, target) {
+    const lim = ctx._state.limits;
+    if (isCubeFace2(target)) return { maxW: lim.MAX_CUBE_MAP_TEXTURE_SIZE, maxH: lim.MAX_CUBE_MAP_TEXTURE_SIZE, maxD: 1, maxDim: lim.MAX_CUBE_MAP_TEXTURE_SIZE };
+    if (target === C2.TEXTURE_3D) return { maxW: lim.MAX_3D_TEXTURE_SIZE, maxH: lim.MAX_3D_TEXTURE_SIZE, maxD: lim.MAX_3D_TEXTURE_SIZE, maxDim: lim.MAX_3D_TEXTURE_SIZE };
+    if (target === C2.TEXTURE_2D_ARRAY) return { maxW: lim.MAX_TEXTURE_SIZE, maxH: lim.MAX_TEXTURE_SIZE, maxD: lim.MAX_ARRAY_TEXTURE_LAYERS, maxDim: lim.MAX_TEXTURE_SIZE };
+    return { maxW: lim.MAX_TEXTURE_SIZE, maxH: lim.MAX_TEXTURE_SIZE, maxD: 1, maxDim: lim.MAX_TEXTURE_SIZE };
+  }
+  var isPow22 = (v) => v > 0 && (v & v - 1) === 0;
+  function commonTexImageValidation(ctx, target, level, width, height, depth, border, is3D) {
+    if (is3D ? !is3DTarget(ctx, target) : !is2DTarget(target)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return null;
+    }
+    const tex = boundTextureForTarget2(ctx, target);
+    if (tex === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    if (tex._immutable) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    if (border !== 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    if (level < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    if (width < 0 || height < 0 || depth < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    const lim = dimLimit(ctx, target);
+    if (width > lim.maxW || height > lim.maxH || depth > lim.maxD) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    if (level > Math.floor(Math.log2(lim.maxDim))) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    if (ctx._version === 1 && level > 0 && (!isPow22(width) || !isPow22(height))) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    return tex;
+  }
+  var W1_INTERNALFORMATS = [C1.RGBA, C1.RGB, C1.ALPHA, C1.LUMINANCE, C1.LUMINANCE_ALPHA];
+  var W1_FORMATS = [C1.RGBA, C1.RGB, C1.ALPHA, C1.LUMINANCE, C1.LUMINANCE_ALPHA];
+  var W1_TYPES = [
+    C1.UNSIGNED_BYTE,
+    C1.UNSIGNED_SHORT_5_6_5,
+    C1.UNSIGNED_SHORT_4_4_4_4,
+    C1.UNSIGNED_SHORT_5_5_5_1
+  ];
+  var W1_COMBOS = {
+    [C1.RGBA]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_4_4_4_4, C1.UNSIGNED_SHORT_5_5_5_1] },
+    [C1.RGB]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_6_5] },
+    [C1.LUMINANCE]: { format: C1.LUMINANCE, types: [C1.UNSIGNED_BYTE] },
+    [C1.LUMINANCE_ALPHA]: { format: C1.LUMINANCE_ALPHA, types: [C1.UNSIGNED_BYTE] },
+    [C1.ALPHA]: { format: C1.ALPHA, types: [C1.UNSIGNED_BYTE] },
+    [C1.DEPTH_COMPONENT]: { format: C1.DEPTH_COMPONENT, types: [C1.UNSIGNED_INT, C1.UNSIGNED_SHORT, UNSIGNED_INT_24_8_WEBGL] },
+    [C1.DEPTH_STENCIL]: { format: C1.DEPTH_STENCIL, types: [UNSIGNED_INT_24_8_WEBGL] },
+    [34843]: { format: C1.RGB, types: [HALF_FLOAT_OES] },
+    // RGB16F
+    [34842]: { format: C1.RGBA, types: [HALF_FLOAT_OES] },
+    // RGBA16F
+    [34837]: { format: C1.RGB, types: [C1.FLOAT] },
+    // RGB32F
+    [34836]: { format: C1.RGBA, types: [C1.FLOAT] },
+    // RGBA32F
+    [SRGB_EXT]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE] },
+    [SRGB_ALPHA_EXT]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE] }
+  };
+  function w1InternalformatValid(ctx, fmt) {
+    if (W1_INTERNALFORMATS.includes(fmt)) return true;
+    switch (fmt) {
+      case C1.DEPTH_COMPONENT:
+      case C1.DEPTH_STENCIL:
+        return ctx.getExtension("WEBGL_depth_texture") !== null;
+      case 34843:
+      case 34842:
+        return ctx.getExtension("OES_texture_half_float") !== null;
+      case 34837:
+      case 34836:
+        return ctx.getExtension("OES_texture_float") !== null;
+      case SRGB_EXT:
+      case SRGB_ALPHA_EXT:
+        return ctx.getExtension("EXT_sRGB") !== null;
+      default:
+        return false;
+    }
+  }
+  function w1FormatValid(ctx, fmt) {
+    if (W1_FORMATS.includes(fmt)) return true;
+    if (fmt === C1.DEPTH_COMPONENT || fmt === C1.DEPTH_STENCIL) {
+      return ctx.getExtension("WEBGL_depth_texture") !== null;
+    }
+    return false;
+  }
+  function w1TypeValid(ctx, type) {
+    if (W1_TYPES.includes(type)) return true;
+    switch (type) {
+      case C1.FLOAT:
+        return ctx.getExtension("OES_texture_float") !== null;
+      case HALF_FLOAT_OES:
+        return ctx.getExtension("OES_texture_half_float") !== null;
+      case C1.UNSIGNED_INT:
+      case C1.UNSIGNED_SHORT:
+      case UNSIGNED_INT_24_8_WEBGL:
+        return ctx.getExtension("WEBGL_depth_texture") !== null;
+      default:
+        return false;
+    }
+  }
+  function w1TypeMatchesView(type, pixels) {
+    const v = pixels;
+    switch (type) {
+      case C1.UNSIGNED_BYTE:
+        return v instanceof Uint8Array || v instanceof Uint8ClampedArray;
+      case C1.UNSIGNED_SHORT_5_6_5:
+      case C1.UNSIGNED_SHORT_4_4_4_4:
+      case C1.UNSIGNED_SHORT_5_5_5_1:
+      case C1.UNSIGNED_SHORT:
+      case HALF_FLOAT_OES:
+        return v instanceof Uint16Array;
+      case C1.FLOAT:
+        return v instanceof Float32Array;
+      case C1.UNSIGNED_INT:
+      case UNSIGNED_INT_24_8_WEBGL:
+        return v instanceof Uint32Array;
+      default:
+        return true;
+    }
+  }
+  function w1ValidateFormatType(ctx, internalformat, format, type, pixels) {
+    if (!w1InternalformatValid(ctx, internalformat)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return false;
+    }
+    if (!w1FormatValid(ctx, format)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return false;
+    }
+    if (!w1TypeValid(ctx, type)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return false;
+    }
+    const combo = W1_COMBOS[internalformat];
+    if (!combo) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return false;
+    }
+    if (combo.format !== format) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    if (!combo.types.includes(type)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    if (internalformat !== format) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    if (pixels !== null && pixels !== void 0) {
+      if (!ArrayBuffer.isView(pixels)) {
+        throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
+      }
+      if (!w1TypeMatchesView(type, pixels)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return false;
+      }
+    }
+    return true;
+  }
+  var W2_FORMATS = [
+    C2.RED,
+    C2.RG,
+    C1.RGB,
+    C1.RGBA,
+    C2.RED_INTEGER,
+    C2.RG_INTEGER,
+    C2.RGB_INTEGER,
+    C2.RGBA_INTEGER,
+    C1.DEPTH_COMPONENT,
+    C1.DEPTH_STENCIL,
+    C1.LUMINANCE,
+    C1.LUMINANCE_ALPHA,
+    C1.ALPHA
+  ];
+  var W2_TYPES = [
+    C1.UNSIGNED_BYTE,
+    C1.BYTE,
+    C1.UNSIGNED_SHORT,
+    C1.SHORT,
+    C1.UNSIGNED_INT,
+    C1.INT,
+    C2.HALF_FLOAT,
+    C1.FLOAT,
+    C1.UNSIGNED_SHORT_5_6_5,
+    C1.UNSIGNED_SHORT_4_4_4_4,
+    C1.UNSIGNED_SHORT_5_5_5_1,
+    C2.UNSIGNED_INT_2_10_10_10_REV,
+    C2.UNSIGNED_INT_10F_11F_11F_REV,
+    C2.UNSIGNED_INT_5_9_9_9_REV,
+    C2.UNSIGNED_INT_24_8,
+    C2.FLOAT_32_UNSIGNED_INT_24_8_REV
+  ];
+  var W2_COMBOS = {
+    // ---- unsized ----
+    [C1.RGBA]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_4_4_4_4, C1.UNSIGNED_SHORT_5_5_5_1] },
+    [C1.RGB]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_6_5] },
+    [C2.RG]: { format: C2.RG, types: [C1.UNSIGNED_BYTE] },
+    [C2.RED]: { format: C2.RED, types: [C1.UNSIGNED_BYTE] },
+    [C2.RGBA_INTEGER]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
+    [C2.RGB_INTEGER]: { format: C2.RGB_INTEGER, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
+    [C2.RG_INTEGER]: { format: C2.RG_INTEGER, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
+    [C2.RED_INTEGER]: { format: C2.RED_INTEGER, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
+    [C1.DEPTH_COMPONENT]: { format: C1.DEPTH_COMPONENT, types: [C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
+    [C1.DEPTH_STENCIL]: { format: C1.DEPTH_STENCIL, types: [C2.UNSIGNED_INT_24_8] },
+    [C1.LUMINANCE_ALPHA]: { format: C1.LUMINANCE_ALPHA, types: [C1.UNSIGNED_BYTE] },
+    [C1.LUMINANCE]: { format: C1.LUMINANCE, types: [C1.UNSIGNED_BYTE] },
+    [C1.ALPHA]: { format: C1.ALPHA, types: [C1.UNSIGNED_BYTE] },
+    // ---- sized normalized ----
+    [C2.R8]: { format: C2.RED, types: [C1.UNSIGNED_BYTE] },
+    [C2.RG8]: { format: C2.RG, types: [C1.UNSIGNED_BYTE] },
+    [C2.RGB8]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE] },
+    [C2.RGBA8]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE] },
+    [C2.R8_SNORM]: { format: C2.RED, types: [C1.BYTE] },
+    [C2.RG8_SNORM]: { format: C2.RG, types: [C1.BYTE] },
+    [C2.RGB8_SNORM]: { format: C1.RGB, types: [C1.BYTE] },
+    [C2.RGBA8_SNORM]: { format: C1.RGBA, types: [C1.BYTE] },
+    [C1.RGBA4]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_4_4_4_4] },
+    [C1.RGB5_A1]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_5_5_1] },
+    [C1.RGB565]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_6_5] },
+    [C2.RGB10_A2]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C2.UNSIGNED_INT_2_10_10_10_REV] },
+    [C2.SRGB8]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE] },
+    [C2.SRGB8_ALPHA8]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE] },
+    // ---- floats ----
+    [C2.R16F]: { format: C2.RED, types: [C2.HALF_FLOAT, C1.FLOAT] },
+    [C2.RG16F]: { format: C2.RG, types: [C2.HALF_FLOAT, C1.FLOAT] },
+    [C2.RGB16F]: { format: C1.RGB, types: [C2.HALF_FLOAT, C1.FLOAT] },
+    [C2.RGBA16F]: { format: C1.RGBA, types: [C2.HALF_FLOAT, C1.FLOAT] },
+    [C2.R32F]: { format: C2.RED, types: [C1.FLOAT] },
+    [C2.RG32F]: { format: C2.RG, types: [C1.FLOAT] },
+    [C2.RGB32F]: { format: C1.RGB, types: [C1.FLOAT] },
+    [C2.RGBA32F]: { format: C1.RGBA, types: [C1.FLOAT] },
+    [C2.R11F_G11F_B10F]: { format: C1.RGB, types: [C2.UNSIGNED_INT_10F_11F_11F_REV, C2.HALF_FLOAT, C1.FLOAT] },
+    [C2.RGB9_E5]: { format: C1.RGB, types: [C2.UNSIGNED_INT_5_9_9_9_REV, C2.HALF_FLOAT, C1.FLOAT] },
+    // ---- integers ----
+    [C2.R8UI]: { format: C2.RED_INTEGER, types: [C1.UNSIGNED_BYTE] },
+    [C2.R8I]: { format: C2.RED_INTEGER, types: [C1.BYTE] },
+    [C2.R16UI]: { format: C2.RED_INTEGER, types: [C1.UNSIGNED_SHORT] },
+    [C2.R16I]: { format: C2.RED_INTEGER, types: [C1.SHORT] },
+    [C2.R32UI]: { format: C2.RED_INTEGER, types: [C1.UNSIGNED_INT] },
+    [C2.R32I]: { format: C2.RED_INTEGER, types: [C1.INT] },
+    [C2.RG8UI]: { format: C2.RG_INTEGER, types: [C1.UNSIGNED_BYTE] },
+    [C2.RG8I]: { format: C2.RG_INTEGER, types: [C1.BYTE] },
+    [C2.RG16UI]: { format: C2.RG_INTEGER, types: [C1.UNSIGNED_SHORT] },
+    [C2.RG16I]: { format: C2.RG_INTEGER, types: [C1.SHORT] },
+    [C2.RG32UI]: { format: C2.RG_INTEGER, types: [C1.UNSIGNED_INT] },
+    [C2.RG32I]: { format: C2.RG_INTEGER, types: [C1.INT] },
+    [C2.RGB8UI]: { format: C2.RGB_INTEGER, types: [C1.UNSIGNED_BYTE] },
+    [C2.RGB8I]: { format: C2.RGB_INTEGER, types: [C1.BYTE] },
+    [C2.RGB16UI]: { format: C2.RGB_INTEGER, types: [C1.UNSIGNED_SHORT] },
+    [C2.RGB16I]: { format: C2.RGB_INTEGER, types: [C1.SHORT] },
+    [C2.RGB32UI]: { format: C2.RGB_INTEGER, types: [C1.UNSIGNED_INT] },
+    [C2.RGB32I]: { format: C2.RGB_INTEGER, types: [C1.INT] },
+    [C2.RGBA8UI]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_BYTE] },
+    [C2.RGBA8I]: { format: C2.RGBA_INTEGER, types: [C1.BYTE] },
+    [C2.RGBA16UI]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_SHORT] },
+    [C2.RGBA16I]: { format: C2.RGBA_INTEGER, types: [C1.SHORT] },
+    [C2.RGBA32UI]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_INT] },
+    [C2.RGBA32I]: { format: C2.RGBA_INTEGER, types: [C1.INT] },
+    [C2.RGB10_A2UI]: { format: C2.RGBA_INTEGER, types: [C2.UNSIGNED_INT_2_10_10_10_REV] },
+    // ---- norm16 (EXT_texture_norm16) ----
+    [CExt.R16_EXT]: { format: C2.RED, types: [C1.UNSIGNED_SHORT] },
+    [CExt.RG16_EXT]: { format: C2.RG, types: [C1.UNSIGNED_SHORT] },
+    [CExt.RGB16_EXT]: { format: C1.RGB, types: [C1.UNSIGNED_SHORT] },
+    [CExt.RGBA16_EXT]: { format: C1.RGBA, types: [C1.UNSIGNED_SHORT] },
+    [CExt.R16_SNORM_EXT]: { format: C2.RED, types: [C1.SHORT] },
+    [CExt.RG16_SNORM_EXT]: { format: C2.RG, types: [C1.SHORT] },
+    [CExt.RGB16_SNORM_EXT]: { format: C1.RGB, types: [C1.SHORT] },
+    [CExt.RGBA16_SNORM_EXT]: { format: C1.RGBA, types: [C1.SHORT] },
+    // ---- depth ----
+    [C2.DEPTH_COMPONENT16]: { format: C1.DEPTH_COMPONENT, types: [C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
+    [C2.DEPTH_COMPONENT24]: { format: C1.DEPTH_COMPONENT, types: [C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
+    [C2.DEPTH_COMPONENT32F]: { format: C1.DEPTH_COMPONENT, types: [C1.FLOAT] },
+    [C2.DEPTH24_STENCIL8]: { format: C1.DEPTH_STENCIL, types: [C2.UNSIGNED_INT_24_8] },
+    [C2.DEPTH32F_STENCIL8]: { format: C1.DEPTH_STENCIL, types: [C2.FLOAT_32_UNSIGNED_INT_24_8_REV] }
+  };
+  var NORM16_FORMATS = [
+    CExt.R16_EXT,
+    CExt.RG16_EXT,
+    CExt.RGB16_EXT,
+    CExt.RGBA16_EXT,
+    CExt.R16_SNORM_EXT,
+    CExt.RG16_SNORM_EXT,
+    CExt.RGB16_SNORM_EXT,
+    CExt.RGBA16_SNORM_EXT
+  ];
+  function isNorm16Format(fmt) {
+    return NORM16_FORMATS.includes(fmt);
+  }
+  function w2InternalformatValid(ctx, fmt) {
+    if (isNorm16Format(fmt)) return ctx.getExtension("EXT_texture_norm16") !== null;
+    return fmt in W2_COMBOS;
+  }
+  function w2TypeMatchesView(type, pixels) {
+    const v = pixels;
+    switch (type) {
+      case C1.BYTE:
+        return v instanceof Int8Array;
+      case C1.UNSIGNED_BYTE:
+        return v instanceof Uint8Array || v instanceof Uint8ClampedArray;
+      case C1.SHORT:
+        return v instanceof Int16Array;
+      case C1.UNSIGNED_SHORT:
+      case C1.UNSIGNED_SHORT_5_6_5:
+      case C1.UNSIGNED_SHORT_4_4_4_4:
+      case C1.UNSIGNED_SHORT_5_5_5_1:
+      case C2.HALF_FLOAT:
+        return v instanceof Uint16Array;
+      case C1.INT:
+        return v instanceof Int32Array;
+      case C1.UNSIGNED_INT:
+      case C2.UNSIGNED_INT_5_9_9_9_REV:
+      case C2.UNSIGNED_INT_2_10_10_10_REV:
+      case C2.UNSIGNED_INT_10F_11F_11F_REV:
+      case C2.UNSIGNED_INT_24_8:
+        return v instanceof Uint32Array;
+      case C1.FLOAT:
+        return v instanceof Float32Array;
+      default:
+        return true;
+    }
+  }
+  function w2ValidateFormatType(ctx, internalformat, format, type, pixels) {
+    if (!w2InternalformatValid(ctx, internalformat)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return false;
+    }
+    if (!W2_FORMATS.includes(format)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return false;
+    }
+    if (!W2_TYPES.includes(type)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return false;
+    }
+    const combo = W2_COMBOS[internalformat];
+    if (!combo) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return false;
+    }
+    if (combo.format !== format) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    if (!combo.types.includes(type)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    if (internalformat === C2.DEPTH32F_STENCIL8 && pixels !== null && pixels !== void 0) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    if (pixels !== null && pixels !== void 0 && typeof pixels !== "number" && !ArrayBuffer.isView(pixels)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    if (ArrayBuffer.isView(pixels) && !w2TypeMatchesView(type, pixels)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    return true;
+  }
+  function w2ValidateSubFormatType(ctx, internalFormat, format, type) {
+    if (!W2_FORMATS.includes(format)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return false;
+    }
+    if (!W2_TYPES.includes(type)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return false;
+    }
+    const combo = W2_COMBOS[internalFormat];
+    if (!combo) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return false;
+    }
+    if (combo.format !== format) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    if (!combo.types.includes(type)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    return true;
+  }
+  var align = (v, a) => v + a - 1 & ~(a - 1);
+  function componentsOf(format) {
+    switch (format) {
+      case C1.RGBA:
+      case C2.RGBA_INTEGER:
+        return 4;
+      case C1.RGB:
+      case C2.RGB_INTEGER:
+        return 3;
+      case C1.LUMINANCE_ALPHA:
+      case C2.RG:
+      case C2.RG_INTEGER:
+        return 2;
+      case C1.DEPTH_STENCIL:
+        return 2;
+      default:
+        return 1;
+    }
+  }
+  function bytesPerTexel(ctx, format, type) {
+    const comps = componentsOf(format);
+    switch (type) {
+      case C1.UNSIGNED_BYTE:
+        return comps;
+      case C1.BYTE:
+        return ctx._version === 2 ? comps : 1;
+      case C1.UNSIGNED_SHORT_5_6_5:
+      case C1.UNSIGNED_SHORT_4_4_4_4:
+      case C1.UNSIGNED_SHORT_5_5_5_1:
+        return 2;
+      // packed
+      case C1.UNSIGNED_SHORT:
+        return comps * 2;
+      case C1.SHORT:
+        return ctx._version === 2 ? comps * 2 : 2;
+      case C1.UNSIGNED_INT:
+        return comps * 4;
+      case C1.INT:
+        return ctx._version === 2 ? comps * 4 : 4;
+      case C2.HALF_FLOAT:
+      case HALF_FLOAT_OES:
+        return comps * 2;
+      case C1.FLOAT:
+        return comps * 4;
+      case UNSIGNED_INT_24_8_WEBGL:
+      case C2.UNSIGNED_INT_2_10_10_10_REV:
+      case C2.UNSIGNED_INT_10F_11F_11F_REV:
+      case C2.UNSIGNED_INT_5_9_9_9_REV:
+        return 4;
+      // packed
+      case C2.FLOAT_32_UNSIGNED_INT_24_8_REV:
+        return 8;
+      // packed
+      default:
+        return 1;
+    }
+  }
+  function validatePixelsSize(ctx, pixels, width, height, depth, format, type) {
+    const unpack = ctx._state.pixelStore.unpack;
+    const srcBpp = bytesPerTexel(ctx, format, type);
+    const rowLength = unpack.rowLength > 0 ? unpack.rowLength : width;
+    const rowBytes = align(rowLength * srcBpp, unpack.alignment);
+    const imageHeight = unpack.imageHeight > 0 ? unpack.imageHeight : height;
+    const required = (unpack.skipRows + (unpack.skipImages + depth) * imageHeight) * rowBytes + unpack.skipPixels * srcBpp;
+    if (typeof pixels === "number") {
+      const buf = ctx._state.pixelUnpackBuffer;
+      if (buf === null || buf._data === null || pixels + required > buf._size) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return false;
+      }
+      return true;
+    }
+    if (pixels.byteLength < required) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    return true;
+  }
+  function w2ValidatePbo(ctx, pixels) {
+    const buf = ctx._state.pixelUnpackBuffer;
+    if (buf === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    const unpack = ctx._state.pixelStore.unpack;
+    if (unpack.flipY || unpack.premultiplyAlpha) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    if (pixels < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return false;
+    }
+    if (buf._data === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    return true;
+  }
+  function sourceDims(source) {
+    if (source !== null && typeof source === "object") {
+      const s = source;
+      if (typeof s.width === "number" && typeof s.height === "number") {
+        return { width: s.width, height: s.height };
+      }
+    }
+    return null;
+  }
+  function texImage2DDOM(ctx, target, level, internalformat, format, type, source) {
+    if (source === null || source === void 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    const dims = sourceDims(source);
+    if (dims === null) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    const tex = commonTexImageValidation(ctx, target, level, dims.width, dims.height, 1, 0, false);
+    if (tex === null) return;
+    if (ctx._version === 2) {
+      if (!(internalformat in W2_DOM)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const entry = W2_DOM[internalformat];
+      if (entry.format !== format) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (!entry.types.includes(type)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+    } else if (!w1ValidateFormatType(ctx, internalformat, format, type, null)) {
+      return;
+    }
+    uploadTexImage(
+      ctx,
+      tex,
+      target,
+      level,
+      internalformat,
+      dims.width,
+      dims.height,
+      1,
+      0,
+      format,
+      type,
+      source,
+      source
+    );
+  }
+  var W2_DOM = {
+    [C2.R8]: { format: C2.RED, types: [C1.UNSIGNED_BYTE] },
+    [C2.R16F]: { format: C2.RED, types: [C2.HALF_FLOAT, C1.FLOAT] },
+    [C2.R32F]: { format: C2.RED, types: [C1.FLOAT] },
+    [C2.R8UI]: { format: C2.RED_INTEGER, types: [C1.UNSIGNED_BYTE] },
+    [C2.RG8]: { format: C2.RG, types: [C1.UNSIGNED_BYTE] },
+    [C2.RG16F]: { format: C2.RG, types: [C2.HALF_FLOAT, C1.FLOAT] },
+    [C2.RG32F]: { format: C2.RG, types: [C1.FLOAT] },
+    [C2.RG8UI]: { format: C2.RG_INTEGER, types: [C1.UNSIGNED_BYTE] },
+    [C2.RGB8]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE] },
+    [C2.SRGB8]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE] },
+    [C1.RGB565]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_6_5] },
+    [C2.R11F_G11F_B10F]: { format: C1.RGB, types: [C2.UNSIGNED_INT_10F_11F_11F_REV, C2.HALF_FLOAT, C1.FLOAT] },
+    [C2.RGB9_E5]: { format: C1.RGB, types: [C2.UNSIGNED_INT_5_9_9_9_REV, C2.HALF_FLOAT, C1.FLOAT] },
+    [C2.RGB16F]: { format: C1.RGB, types: [C2.HALF_FLOAT, C1.FLOAT] },
+    [C2.RGB32F]: { format: C1.RGB, types: [C1.FLOAT] },
+    [C2.RGB8UI]: { format: C2.RGB_INTEGER, types: [C1.UNSIGNED_BYTE] },
+    [C2.RGBA8]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE] },
+    [C2.SRGB8_ALPHA8]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE] },
+    [C1.RGB5_A1]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_5_5_1] },
+    [C2.RGB10_A2]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C2.UNSIGNED_INT_2_10_10_10_REV] },
+    [C1.RGBA4]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_4_4_4_4] },
+    [C2.RGBA16F]: { format: C1.RGBA, types: [C2.HALF_FLOAT, C1.FLOAT] },
+    [C2.RGBA32F]: { format: C1.RGBA, types: [C1.FLOAT] },
+    [C2.RGBA8UI]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_BYTE] }
+  };
+  function texImage2DBuffer(ctx, target, level, internalformat, width, height, border, format, type, pixels) {
+    const tex = commonTexImageValidation(ctx, target, level, width, height, 1, border, false);
+    if (tex === null) return;
+    if (ctx._version === 2) {
+      if (!w2ValidateFormatType(ctx, internalformat, format, type, pixels)) return;
+      if (typeof pixels === "number") {
+        if (!w2ValidatePbo(ctx, pixels)) return;
+        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+      } else if (ArrayBuffer.isView(pixels)) {
+        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+      }
+    } else {
+      if (!w1ValidateFormatType(ctx, internalformat, format, type, pixels)) return;
+      if (ArrayBuffer.isView(pixels)) {
+        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+      }
+    }
+    uploadTexImage(ctx, tex, target, level, internalformat, width, height, 1, border, format, type, pixels);
+  }
+  function texImage3DDOM(ctx, target, level, internalformat, format, type, source) {
+    void internalformat;
+    void format;
+    void type;
+    if (!is3DTarget(ctx, target)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    const tex = boundTextureForTarget2(ctx, target);
+    if (tex === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (source === null || source === void 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    ctx._errors.push(C1.INVALID_OPERATION);
+  }
+  function texImage3DBuffer(ctx, target, level, internalformat, width, height, depth, border, format, type, pixels) {
+    const tex = commonTexImageValidation(ctx, target, level, width, height, depth, border, true);
+    if (tex === null) return;
+    if (!w2ValidateFormatType(ctx, internalformat, format, type, pixels)) return;
+    if (typeof pixels === "number") {
+      if (!w2ValidatePbo(ctx, pixels)) return;
+      if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type)) return;
+    } else if (ArrayBuffer.isView(pixels)) {
+      if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type)) return;
+    }
+    uploadTexImage(ctx, tex, target, level, internalformat, width, height, depth, border, format, type, pixels);
+  }
+  function commonTexSubValidation(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, is3D) {
+    if (is3D ? !is3DTarget(ctx, target) : !is2DTarget(target)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return null;
+    }
+    const tex = boundTextureForTarget2(ctx, target);
+    if (tex === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    if (level < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    if (!hasTextureLevel(tex, target, level)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    if (width < 0 || height < 0 || depth < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    if (xoffset < 0 || yoffset < 0 || zoffset < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    const levelData = tex._image.levels[level];
+    if (xoffset + width > levelData.width || yoffset + height > levelData.height) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    if (is3D && zoffset >= levelData.depth) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    return tex;
+  }
+  function texSubImage2DDOM(ctx, target, level, xoffset, yoffset, format, type, source) {
+    if (source === null || source === void 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    const dims = sourceDims(source);
+    if (dims === null) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    const tex = commonTexSubValidation(ctx, target, level, xoffset, yoffset, 0, dims.width, dims.height, 1, false);
+    if (tex === null) return;
+    if (ctx._version === 2) {
+      if (!w2ValidateSubFormatType(ctx, tex._image.internalFormat, format, type)) return;
+    } else {
+      if (!w1FormatValid(ctx, format)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (!w1TypeValid(ctx, type)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const origin = getLevelOrigin(tex, level);
+      if (!origin || origin.format !== format || origin.type !== type) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+    }
+    uploadTexSubImage(
+      ctx,
+      tex,
+      target,
+      level,
+      xoffset,
+      yoffset,
+      0,
+      dims.width,
+      dims.height,
+      1,
+      format,
+      type,
+      source,
+      source
+    );
+  }
+  function texSubImage2DBuffer(ctx, target, level, xoffset, yoffset, width, height, format, type, pixels) {
+    const tex = commonTexSubValidation(ctx, target, level, xoffset, yoffset, 0, width, height, 1, false);
+    if (tex === null) return;
+    if (pixels === null || pixels === void 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (ctx._version === 2) {
+      if (!w2ValidateSubFormatType(ctx, tex._image.internalFormat, format, type)) return;
+      if (typeof pixels === "number") {
+        if (!w2ValidatePbo(ctx, pixels)) return;
+        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+      } else if (ArrayBuffer.isView(pixels)) {
+        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+      } else {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+    } else {
+      if (!w1FormatValid(ctx, format)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (!w1TypeValid(ctx, type)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (!ArrayBuffer.isView(pixels)) {
+        throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
+      }
+      if (!w1TypeMatchesView(type, pixels)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const origin = getLevelOrigin(tex, level);
+      if (!origin || origin.format !== format || origin.type !== type) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+    }
+    uploadTexSubImage(ctx, tex, target, level, xoffset, yoffset, 0, width, height, 1, format, type, pixels);
+  }
+  function texSubImage3DDOM(ctx, target, level, xoffset, yoffset, zoffset, format, type, source) {
+    void format;
+    void type;
+    const tex = commonTexSubValidation(ctx, target, level, xoffset, yoffset, zoffset, 0, 0, 1, true);
+    if (tex === null) return;
+    if (source === null || source === void 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    ctx._errors.push(C1.INVALID_OPERATION);
+  }
+  function texSubImage3DBuffer(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels) {
+    const tex = commonTexSubValidation(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, true);
+    if (tex === null) return;
+    if (pixels === null || pixels === void 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (!w2ValidateSubFormatType(ctx, tex._image.internalFormat, format, type)) return;
+    if (typeof pixels === "number") {
+      if (!w2ValidatePbo(ctx, pixels)) return;
+      if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type)) return;
+    } else if (ArrayBuffer.isView(pixels)) {
+      if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type)) return;
+    } else {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    uploadTexSubImage(ctx, tex, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
+  }
+  var W2_COPY_INTERNALFORMATS = [
+    C2.R8,
+    C2.RG8,
+    C2.RGB8,
+    C2.RGBA8,
+    C1.RGBA4,
+    C1.RGB5_A1,
+    C1.RGB565,
+    C2.RGB10_A2,
+    C2.SRGB8_ALPHA8,
+    C2.R16F,
+    C2.RG16F,
+    C2.RGBA16F,
+    C2.R11F_G11F_B10F,
+    C2.R8I,
+    C2.R8UI,
+    C2.R16I,
+    C2.R16UI,
+    C2.R32I,
+    C2.R32UI,
+    C2.RG8I,
+    C2.RG8UI,
+    C2.RG16I,
+    C2.RG16UI,
+    C2.RG32I,
+    C2.RG32UI,
+    C2.RGB8I,
+    C2.RGB8UI,
+    C2.RGB16I,
+    C2.RGB16UI,
+    C2.RGB32I,
+    C2.RGB32UI,
+    C2.RGBA8I,
+    C2.RGBA8UI,
+    C2.RGBA16I,
+    C2.RGBA16UI,
+    C2.RGBA32I,
+    C2.RGBA32UI
+  ];
+  function isW2CopyInternalFormatValid(ctx, fmt) {
+    if (W2_COPY_INTERNALFORMATS.includes(fmt)) return true;
+    if (fmt === C2.R32F || fmt === C2.RG32F || fmt === C2.RGBA32F) {
+      return ctx.getExtension("EXT_color_buffer_float") !== null;
+    }
+    return false;
+  }
+  function copyTexImage2DImpl(ctx, target, level, internalformat, x, y, width, height, border) {
+    if (!is2DTarget(target)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    const tex = boundTextureForTarget2(ctx, target);
+    if (tex === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (tex._immutable) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (border !== 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (level < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (width < 0 || height < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    const lim = dimLimit(ctx, target);
+    if (width > lim.maxW || height > lim.maxH) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (level > Math.floor(Math.log2(lim.maxDim))) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (ctx._version === 1 && level > 0 && (!isPow22(width) || !isPow22(height))) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (ctx._version === 2) {
+      if (!isW2CopyInternalFormatValid(ctx, internalformat)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+    } else if (!w1InternalformatValid(ctx, internalformat)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    try {
+      copyTexImage(ctx, tex, target, level, internalformat, x, y, width, height, border);
+    } catch {
+      ctx._errors.push(C1.INVALID_OPERATION);
+    }
+  }
+  function copyTexSubImage2DImpl(ctx, target, level, xoffset, yoffset, x, y, width, height) {
+    if (!is2DTarget(target)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    const tex = boundTextureForTarget2(ctx, target);
+    if (tex === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (level < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (!hasTextureLevel(tex, target, level)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (width < 0 || height < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (xoffset < 0 || yoffset < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    const levelData = tex._image.levels[level];
+    if (xoffset + width > levelData.width || yoffset + height > levelData.height) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    try {
+      copyTexSubImage(ctx, tex, target, level, xoffset, yoffset, 0, x, y, width, height);
+    } catch {
+      ctx._errors.push(C1.INVALID_OPERATION);
+    }
+  }
+  function copyTexSubImage3DImpl(ctx, target, level, xoffset, yoffset, zoffset, x, y, width, height) {
+    if (!is3DTarget(ctx, target)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    const tex = boundTextureForTarget2(ctx, target);
+    if (tex === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (level < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (!hasTextureLevel(tex, target, level)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (width < 0 || height < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (xoffset < 0 || yoffset < 0 || zoffset < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    const levelData = tex._image.levels[level];
+    if (xoffset + width > levelData.width || yoffset + height > levelData.height || zoffset >= levelData.depth) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    try {
+      copyTexSubImage(ctx, tex, target, level, xoffset, yoffset, zoffset, x, y, width, height);
+    } catch {
+      ctx._errors.push(C1.INVALID_OPERATION);
+    }
+  }
+  function compressedTexImage2DImpl(ctx, target, level, internalformat, width, height, border, data) {
+    void level;
+    void internalformat;
+    void width;
+    void height;
+    void border;
+    void data;
+    if (!is2DTarget(target)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    ctx._errors.push(C1.INVALID_ENUM);
+  }
+  function compressedTexImage3DImpl(ctx, target, level, internalformat, width, height, depth, border, data) {
+    void level;
+    void internalformat;
+    void width;
+    void height;
+    void depth;
+    void border;
+    void data;
+    if (!is3DTarget(ctx, target)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    ctx._errors.push(C1.INVALID_ENUM);
+  }
+  function compressedTexSubImage2DImpl(ctx, target, level, xoffset, yoffset, width, height, format, data) {
+    void level;
+    void xoffset;
+    void yoffset;
+    void width;
+    void height;
+    void format;
+    void data;
+    if (!is2DTarget(target)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    ctx._errors.push(C1.INVALID_ENUM);
+  }
+  function compressedTexSubImage3DImpl(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, data) {
+    void level;
+    void xoffset;
+    void yoffset;
+    void zoffset;
+    void width;
+    void height;
+    void depth;
+    void format;
+    void data;
+    if (!is3DTarget(ctx, target)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    ctx._errors.push(C1.INVALID_ENUM);
+  }
+  var W2_UNSIZED = [
+    C1.RGBA,
+    C1.RGB,
+    C2.RG,
+    C2.RED,
+    C2.RGBA_INTEGER,
+    C2.RGB_INTEGER,
+    C2.RG_INTEGER,
+    C2.RED_INTEGER,
+    C1.DEPTH_COMPONENT,
+    C1.DEPTH_STENCIL,
+    C1.LUMINANCE,
+    C1.LUMINANCE_ALPHA,
+    C1.ALPHA
+  ];
+  function isW2SizedInternalFormat(ctx, fmt) {
+    if (isNorm16Format(fmt)) return ctx.getExtension("EXT_texture_norm16") !== null;
+    return fmt in W2_COMBOS && !W2_UNSIZED.includes(fmt);
+  }
+  function texStorage2DImpl(ctx, target, levels, internalformat, width, height) {
+    if (target !== C1.TEXTURE_2D && target !== C1.TEXTURE_CUBE_MAP) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    const tex = boundTextureForTarget2(ctx, target);
+    if (tex === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (tex._immutable) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (levels < 1) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (width < 1 || height < 1) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    const lim = dimLimit(ctx, target);
+    if (width > lim.maxW || height > lim.maxH) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (!isW2SizedInternalFormat(ctx, internalformat)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    const maxLevels = Math.floor(Math.log2(Math.max(width, height))) + 1;
+    if (levels > maxLevels) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    allocateImmutableStorage(ctx, tex, target, levels, internalformat, width, height, target === C1.TEXTURE_CUBE_MAP ? 6 : 1);
+  }
+  function texStorage3DImpl(ctx, target, levels, internalformat, width, height, depth) {
+    if (target !== C2.TEXTURE_3D && target !== C2.TEXTURE_2D_ARRAY) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    const tex = boundTextureForTarget2(ctx, target);
+    if (tex === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (tex._immutable) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (levels < 1) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (width < 1 || height < 1 || depth < 1) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    const lim = dimLimit(ctx, target);
+    if (width > lim.maxW || height > lim.maxH || depth > lim.maxD) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (!isW2SizedInternalFormat(ctx, internalformat)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    const maxLevels = Math.floor(Math.log2(Math.max(width, height, target === C2.TEXTURE_3D ? depth : 1))) + 1;
+    if (levels > maxLevels) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    allocateImmutableStorage(ctx, tex, target, levels, internalformat, width, height, depth);
+  }
+  function installTexImageApi(proto) {
+    proto.texImage2D = function(target, level, internalformat, width, height, border, format, type, pixels) {
+      const ctx = this;
+      if (isLost6(ctx)) return;
+      if (arguments.length === 6) {
+        texImage2DDOM(ctx, target, level, internalformat, width, height, border);
+        return;
+      }
+      texImage2DBuffer(ctx, target, level, internalformat, width, height, border, format, type, pixels != null ? pixels : null);
+    };
+    proto.texSubImage2D = function(target, level, xoffset, yoffset, width, height, format, type, pixels) {
+      const ctx = this;
+      if (isLost6(ctx)) return;
+      if (arguments.length === 7) {
+        texSubImage2DDOM(ctx, target, level, xoffset, yoffset, width, height, format);
+        return;
+      }
+      texSubImage2DBuffer(ctx, target, level, xoffset, yoffset, width, height, format, type, pixels != null ? pixels : null);
+    };
+    proto.copyTexImage2D = function(target, level, internalformat, x, y, width, height, border) {
+      const ctx = this;
+      if (isLost6(ctx)) return;
+      copyTexImage2DImpl(ctx, target, level, internalformat, x, y, width, height, border);
+    };
+    proto.copyTexSubImage2D = function(target, level, xoffset, yoffset, x, y, width, height) {
+      const ctx = this;
+      if (isLost6(ctx)) return;
+      copyTexSubImage2DImpl(ctx, target, level, xoffset, yoffset, x, y, width, height);
+    };
+    proto.compressedTexImage2D = function(target, level, internalformat, width, height, border, data) {
+      const ctx = this;
+      if (isLost6(ctx)) return;
+      compressedTexImage2DImpl(ctx, target, level, internalformat, width, height, border, data);
+    };
+    proto.compressedTexSubImage2D = function(target, level, xoffset, yoffset, width, height, format, data) {
+      const ctx = this;
+      if (isLost6(ctx)) return;
+      compressedTexSubImage2DImpl(ctx, target, level, xoffset, yoffset, width, height, format, data);
+    };
+    if ("texImage3D" in proto) {
+      const p = proto;
+      p.texImage3D = function(target, level, internalformat, width, height, depth, border, format, type, pixels) {
+        const ctx = this;
+        if (isLost6(ctx)) return;
+        if (arguments.length === 6) {
+          texImage3DDOM(ctx, target, level, internalformat, width, height, border);
+          return;
+        }
+        texImage3DBuffer(ctx, target, level, internalformat, width, height, depth, border, format, type, pixels != null ? pixels : null);
+      };
+      p.texSubImage3D = function(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels) {
+        const ctx = this;
+        if (isLost6(ctx)) return;
+        if (arguments.length === 8) {
+          texSubImage3DDOM(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth);
+          return;
+        }
+        texSubImage3DBuffer(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels != null ? pixels : null);
+      };
+      p.texStorage2D = function(target, levels, internalformat, width, height) {
+        const ctx = this;
+        if (isLost6(ctx)) return;
+        if (ctx._version !== 2) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        texStorage2DImpl(ctx, target, levels, internalformat, width, height);
+      };
+      p.texStorage3D = function(target, levels, internalformat, width, height, depth) {
+        const ctx = this;
+        if (isLost6(ctx)) return;
+        if (ctx._version !== 2) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        texStorage3DImpl(ctx, target, levels, internalformat, width, height, depth);
+      };
+      p.compressedTexImage3D = function(target, level, internalformat, width, height, depth, border, data) {
+        const ctx = this;
+        if (isLost6(ctx)) return;
+        compressedTexImage3DImpl(ctx, target, level, internalformat, width, height, depth, border, data);
+      };
+      p.compressedTexSubImage3D = function(target, level, xoffset, yoffset, zoffset, width, height, depth, format, data) {
+        const ctx = this;
+        if (isLost6(ctx)) return;
+        compressedTexSubImage3DImpl(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, data);
+      };
+      p.copyTexSubImage3D = function(target, level, xoffset, yoffset, zoffset, x, y, width, height) {
+        const ctx = this;
+        if (isLost6(ctx)) return;
+        copyTexSubImage3DImpl(ctx, target, level, xoffset, yoffset, zoffset, x, y, width, height);
+      };
+    }
+  }
+
+  // src/glsl/compiler.ts
+  function compileShader(source, opts) {
+    throw new Error("not implemented");
+  }
+  function linkProgram(vs, fs, opts) {
+    throw new Error("not implemented");
+  }
+
+  // src/gl/api/programs.ts
+  var shaderResults = /* @__PURE__ */ new WeakMap();
+  var programModels = /* @__PURE__ */ new WeakMap();
+  var shaderAttachCounts = /* @__PURE__ */ new WeakMap();
+  var linkGen = /* @__PURE__ */ new WeakMap();
+  var locGen = /* @__PURE__ */ new WeakMap();
+  var uniformLocInfo = /* @__PURE__ */ new WeakMap();
+  var validateStatus = /* @__PURE__ */ new WeakMap();
+  var uniformBlockBindings = /* @__PURE__ */ new WeakMap();
+  var blockReferenced = /* @__PURE__ */ new WeakMap();
+  var fragDataMaps = /* @__PURE__ */ new WeakMap();
+  function isLost7(ctx) {
+    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
+    return ctx._isLost;
+  }
+  var ShaderCtor = WebGLShader;
+  var ShaderCtorAny = ShaderCtor;
+  var ProgramCtor = WebGLProgram;
+  var ProgramCtorAny = ProgramCtor;
+  function validateShader(ctx, shader) {
+    return validateObject(ctx, shader, ShaderCtorAny);
+  }
+  function validateProgram(ctx, program) {
+    return validateObject(ctx, program, ProgramCtorAny);
+  }
+  function validateShaderQuery(ctx, shader) {
+    var _a2;
+    if (!(shader instanceof WebGLShader)) throw new TypeError(`Argument is not of type 'WebGLShader'`);
+    if (shader._context !== ctx) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    if (shader._deleted && ((_a2 = shaderAttachCounts.get(shader)) != null ? _a2 : 0) === 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    return shader;
+  }
+  function validateProgramQuery(ctx, program) {
+    if (!(program instanceof WebGLProgram)) throw new TypeError(`Argument is not of type 'WebGLProgram'`);
+    if (program._context !== ctx) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    if (program._deleted && !program._inUse && !program._inTransformFeedback) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    return program;
+  }
+  function hasBadNameChars(name) {
+    for (let i = 0; i < name.length; i++) {
+      const c = name.charCodeAt(i);
+      if (c === 34 || c === 36 || c === 96 || c === 64 || c === 92 || c === 39) return true;
+    }
+    return false;
+  }
+  function isReservedPrefix(name) {
+    return name.startsWith("gl_") || name.startsWith("webgl_") || name.startsWith("_webgl_");
+  }
+  function nameTooLong(ctx, name) {
+    if (name.length > (ctx._version === 2 ? 1024 : 256)) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return true;
+    }
+    return false;
+  }
+  function badNameChars(ctx, name) {
+    if (hasBadNameChars(name)) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return true;
+    }
+    return false;
+  }
+  function isMatrixType(type) {
+    switch (type) {
+      case C1.FLOAT_MAT2:
+      case C1.FLOAT_MAT3:
+      case C1.FLOAT_MAT4:
+      case 35685:
+      case 35686:
+      case 35687:
+      case 35688:
+      case 35689:
+      case 35690:
+        return true;
+      default:
+        return false;
+    }
+  }
+  function matrixCols(type) {
+    switch (type) {
+      case C1.FLOAT_MAT2:
+      case 35685:
+      case 35686:
+        return 2;
+      case C1.FLOAT_MAT3:
+      case 35687:
+      case 35688:
+        return 3;
+      default:
+        return 4;
+    }
+  }
+  function matrixRows(type) {
+    switch (type) {
+      case C1.FLOAT_MAT2:
+      case 35687:
+      case 35689:
+        return 2;
+      case C1.FLOAT_MAT3:
+      case 35685:
+      case 35690:
+        return 3;
+      default:
+        return 4;
+    }
+  }
+  function elementSlots(uniform) {
+    return isMatrixType(uniform.type) ? matrixCols(uniform.type) : Math.ceil(uniform.components / 4);
+  }
+  function doCompileShader(ctx, shader) {
+    shader._compileStatus = false;
+    shader._infoLog = "";
+    shader._compiled = null;
+    shader._translatedSource = null;
+    shaderResults.delete(shader);
+    let result;
+    try {
+      result = compileShader(shader._source, {
+        type: shader._type === C1.VERTEX_SHADER ? "VERTEX" : "FRAGMENT",
+        version: ctx._version === 2 ? 300 : 100,
+        defines: {},
+        extensions: new Set(ctx.getSupportedExtensions())
+      });
+    } catch (e) {
+      shader._infoLog = `internal compiler error: ${e instanceof Error ? e.message : String(e)}`;
+      return;
+    }
+    if (result.ok) {
+      shader._compileStatus = true;
+      shader._compiled = { ok: true };
+      shader._translatedSource = shader._source;
+      shaderResults.set(shader, result.shader);
+    } else {
+      shader._infoLog = result.errors.map((e) => `ERROR: 0:${e.line}: ${e.message}`).join("\n");
+      shader._compiled = { ok: false, errors: result.errors };
+      shader._translatedSource = "";
+    }
+  }
+  function buildLinkLimits(ctx) {
+    const l = ctx._state.limits;
+    return {
+      maxVertexAttribs: l.MAX_VERTEX_ATTRIBS,
+      maxVertexUniformVectors: l.MAX_VERTEX_UNIFORM_VECTORS,
+      maxFragmentUniformVectors: l.MAX_FRAGMENT_UNIFORM_VECTORS,
+      maxVaryingVectors: l.MAX_VARYING_VECTORS,
+      maxVertexTextureImageUnits: l.MAX_VERTEX_TEXTURE_IMAGE_UNITS,
+      maxTextureImageUnits: l.MAX_TEXTURE_IMAGE_UNITS,
+      maxCombinedTextureImageUnits: l.MAX_COMBINED_TEXTURE_IMAGE_UNITS,
+      maxDrawBuffers: l.MAX_DRAW_BUFFERS,
+      maxUniformBufferBindings: l.MAX_UNIFORM_BUFFER_BINDINGS,
+      maxUniformBlockSize: l.MAX_UNIFORM_BLOCK_SIZE,
+      maxVertexUniformBlocks: l.MAX_VERTEX_UNIFORM_BLOCKS,
+      maxFragmentUniformBlocks: l.MAX_FRAGMENT_UNIFORM_BLOCKS,
+      maxCombinedUniformBlocks: l.MAX_COMBINED_UNIFORM_BLOCKS,
+      maxTransformFeedbackSeparateAttribs: l.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS,
+      maxTransformFeedbackInterleavedComponents: l.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS,
+      maxTransformFeedbackSeparateComponents: l.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS
+    };
+  }
+  function markBlockRefs(refs, blocks, bit, pm) {
+    for (const bd of blocks) {
+      for (let i = 0; i < pm.uniformBlocks.length; i++) {
+        const bn = pm.uniformBlocks[i].name;
+        if (bn === bd.name || bd.arraySize > 1 && bn.startsWith(`${bd.name}[`)) refs[i] |= bit;
+      }
+    }
+  }
+  function failLink(p, log) {
+    p._linkStatus = false;
+    p._infoLog = log;
+    p._program = null;
+    p._uniformStore = null;
+    p._blockStores = [];
+    programModels.delete(p);
+  }
+  function doLinkProgram(ctx, p) {
+    var _a2, _b;
+    linkGen.set(p, ((_a2 = linkGen.get(p)) != null ? _a2 : 0) + 1);
+    const shaders = [...p._attachedShaders];
+    const vs = shaders.find((s) => s._type === C1.VERTEX_SHADER);
+    const fs = shaders.find((s) => s._type === C1.FRAGMENT_SHADER);
+    const vsR = vs !== void 0 ? shaderResults.get(vs) : void 0;
+    const fsR = fs !== void 0 ? shaderResults.get(fs) : void 0;
+    if (vs === void 0 || fs === void 0 || !vs._compileStatus || !fs._compileStatus || !vsR || !fsR) {
+      failLink(p, "missing vertex/fragment shader");
+      return;
+    }
+    const opts = { limits: buildLinkLimits(ctx), attribBindings: p._bindAttribLocations };
+    if (p._transformFeedbackVaryings !== null) {
+      opts.transformFeedback = {
+        varyings: p._transformFeedbackVaryings,
+        bufferMode: p._tfBufferMode === C2.SEPARATE_ATTRIBS ? "SEPARATE_ATTRIBS" : "INTERLEAVED_ATTRIBS"
+      };
+    }
+    let result;
+    try {
+      result = linkProgram(vsR, fsR, opts);
+    } catch (e) {
+      failLink(p, `internal compiler error: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    if (!result.ok) {
+      failLink(p, result.log);
+      return;
+    }
+    const pm = result.program;
+    p._program = pm;
+    p._linkStatus = true;
+    p._infoLog = "";
+    p._uniformStore = new DataView(pm.floatStore.buffer, pm.floatStore.byteOffset, pm.floatStore.byteLength);
+    p._blockStores = pm.uniformBlocks.map((b) => new DataView(new ArrayBuffer(Math.max(b.size, 16))));
+    if (p._tfBufferMode === 0) p._tfBufferMode = C2.INTERLEAVED_ATTRIBS;
+    programModels.set(p, pm);
+    uniformBlockBindings.set(p, new Uint32Array(pm.uniformBlocks.length));
+    const refs = new Uint32Array(pm.uniformBlocks.length);
+    if (vsR) markBlockRefs(refs, vsR.info.uniformBlocks, 1, pm);
+    if (fsR) markBlockRefs(refs, fsR.info.uniformBlocks, 2, pm);
+    blockReferenced.set(p, refs);
+    const fmap = /* @__PURE__ */ new Map();
+    for (const o of fsR.info.outputs) {
+      if (o.index !== null || o.name.startsWith("gl_Frag")) continue;
+      fmap.set(o.name, (_b = o.location) != null ? _b : 0);
+    }
+    fragDataMaps.set(p, fmap);
+  }
+  function readStoreValue(pm, uniform, elementIdx, comp, asUint) {
+    const slot = uniform.location + elementIdx * elementSlots(uniform);
+    if (isMatrixType(uniform.type)) return pm.floatStore[slot * 4 + comp];
+    if (isFloatType(uniform.type)) return pm.floatStore[slot * 4 + comp];
+    const v = pm.intStore[slot * 4 + comp];
+    return asUint ? v >>> 0 : v;
+  }
+  function isFloatType(type) {
+    return type === C1.FLOAT || type === C1.FLOAT_VEC2 || type === C1.FLOAT_VEC3 || type === C1.FLOAT_VEC4 || isMatrixType(type);
+  }
+  function isIntType(type) {
+    return type === C1.INT || type === C1.INT_VEC2 || type === C1.INT_VEC3 || type === C1.INT_VEC4;
+  }
+  function isUintType(type) {
+    return type === C1.UNSIGNED_INT || type === C2.UNSIGNED_INT_VEC2 || type === C2.UNSIGNED_INT_VEC3 || type === C2.UNSIGNED_INT_VEC4;
+  }
+  function isSamplerType(type) {
+    switch (type) {
+      case C1.SAMPLER_2D:
+      case C1.SAMPLER_CUBE:
+      case C2.SAMPLER_3D:
+      case C2.SAMPLER_2D_ARRAY:
+      case C2.SAMPLER_2D_SHADOW:
+      case C2.SAMPLER_CUBE_SHADOW:
+      case C2.SAMPLER_2D_ARRAY_SHADOW:
+      case C2.INT_SAMPLER_2D:
+      case C2.INT_SAMPLER_3D:
+      case C2.INT_SAMPLER_CUBE:
+      case C2.INT_SAMPLER_2D_ARRAY:
+      case C2.UNSIGNED_INT_SAMPLER_2D:
+      case C2.UNSIGNED_INT_SAMPLER_3D:
+      case C2.UNSIGNED_INT_SAMPLER_CUBE:
+      case C2.UNSIGNED_INT_SAMPLER_2D_ARRAY:
+        return true;
+      default:
+        return false;
+    }
+  }
+  function readUniform(pm, uniform, elem, whole) {
+    const count = whole ? uniform.size : 1;
+    const slots = elementSlots(uniform);
+    const read = (e, comp) => readStoreValue(pm, uniform, e, comp, isUintType(uniform.type));
+    const components = uniform.components;
+    if (uniform.type === C1.FLOAT || uniform.type === C1.INT || uniform.type === C1.UNSIGNED_INT) {
+      if (count === 1) {
+        const v = read(elem, 0);
+        return uniform.type === C1.INT ? v : uniform.type === C1.UNSIGNED_INT ? v >>> 0 : v;
+      }
+      const out = uniform.type === C1.FLOAT ? new Float32Array(count) : uniform.type === C1.INT ? new Int32Array(count) : new Uint32Array(count);
+      for (let e = 0; e < count; e++) out[e] = read(elem + e, 0);
+      return out;
+    }
+    if (isMatrixType(uniform.type)) {
+      const c = matrixCols(uniform.type);
+      const r = matrixRows(uniform.type);
+      const out = new Float32Array(count * c * r);
+      for (let e = 0; e < count; e++)
+        for (let col = 0; col < c; col++)
+          for (let row = 0; row < r; row++) out[e * c * r + col * r + row] = pm.floatStore[(uniform.location + (elem + e) * slots + col) * 4 + row];
+      return out;
+    }
+    if (isFloatType(uniform.type) || uniform.type === C1.BOOL_VEC2) {
+      const n = components;
+      const out = new Float32Array(count * n);
+      for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(elem + e, i);
+      return out;
+    }
+    if (isIntType(uniform.type) || uniform.type === C1.BOOL_VEC3) {
+      const n = components;
+      const out = new Int32Array(count * n);
+      for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(elem + e, i);
+      return out;
+    }
+    if (isUintType(uniform.type) || uniform.type === C1.BOOL_VEC4) {
+      const n = components;
+      const out = new Uint32Array(count * n);
+      for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(elem + e, i);
+      return out;
+    }
+    if (uniform.type === C1.BOOL) {
+      if (count === 1) return read(elem, 0) !== 0;
+      const out = new Uint32Array(count);
+      for (let e = 0; e < count; e++) out[e] = read(elem + e, 0) !== 0 ? 1 : 0;
+      return out;
+    }
+    if (isSamplerType(uniform.type)) {
+      if (count === 1) return pm.intStore[(uniform.location + elem) * 4];
+      const out = new Int32Array(count);
+      for (let e = 0; e < count; e++) out[e] = pm.intStore[(uniform.location + elem + e) * 4];
+      return out;
+    }
+    return null;
+  }
+  function installProgramsApi(proto) {
+    proto.createShader = function(type) {
+      const ctx = this;
+      if (isLost7(ctx)) return null;
+      if (type !== C1.VERTEX_SHADER && type !== C1.FRAGMENT_SHADER) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return null;
+      }
+      const shader = createObject(ctx, ShaderCtor);
+      shader._type = type;
+      return shader;
+    };
+    proto.deleteShader = function(shader) {
+      const ctx = this;
+      if (isLost7(ctx)) return;
+      if (shader === null || shader === void 0) return;
+      if (!(shader instanceof WebGLShader)) throw new TypeError(`Argument is not of type 'WebGLShader'`);
+      if (shader._context !== ctx) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (shader._deleted) return;
+      shader._deleted = true;
+      ctx._resources.untrack(shader);
+    };
+    proto.isShader = function(shader) {
+      const ctx = this;
+      if (isLost7(ctx)) return false;
+      if (shader === null || shader === void 0) return false;
+      if (!(shader instanceof WebGLShader)) throw new TypeError(`Argument is not of type 'WebGLShader'`);
+      if (shader._context !== ctx) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return false;
+      }
+      return !shader._deleted;
+    };
+    proto.shaderSource = function(shader, source) {
+      const ctx = this;
+      if (isLost7(ctx)) return;
+      const s = validateShaderQuery(ctx, shader);
+      if (s === null) return;
+      const src = requireString(source, "source");
+      s._source = src;
+      s._compileStatus = false;
+      s._infoLog = "";
+      s._compiled = null;
+      s._translatedSource = null;
+      shaderResults.delete(s);
+    };
+    proto.compileShader = function(shader) {
+      const ctx = this;
+      if (isLost7(ctx)) return;
+      const s = validateShaderQuery(ctx, shader);
+      if (s === null) return;
+      doCompileShader(ctx, s);
+    };
+    proto.getShaderParameter = function(shader, pname) {
+      const ctx = this;
+      if (isLost7(ctx)) return null;
+      const s = validateShaderQuery(ctx, shader);
+      if (s === null) return null;
+      switch (pname) {
+        case C1.COMPILE_STATUS:
+          return s._compileStatus;
+        case C1.DELETE_STATUS:
+          return s._deleted;
+        case C1.SHADER_TYPE:
+          return s._type;
+        case CExt.COMPLETION_STATUS_KHR:
+          if (ctx.getExtension("KHR_parallel_shader_compile") !== null) return true;
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        default:
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+      }
+    };
+    proto.getShaderInfoLog = function(shader) {
+      const ctx = this;
+      if (isLost7(ctx)) return null;
+      const s = validateShaderQuery(ctx, shader);
+      if (s === null) return null;
+      return s._infoLog;
+    };
+    proto.getShaderSource = function(shader) {
+      const ctx = this;
+      if (isLost7(ctx)) return null;
+      const s = validateShaderQuery(ctx, shader);
+      if (s === null) return null;
+      return s._source;
+    };
+    proto.getShaderPrecisionFormat = function(shadertype, precisiontype) {
+      const ctx = this;
+      if (isLost7(ctx)) return null;
+      if (shadertype !== C1.VERTEX_SHADER && shadertype !== C1.FRAGMENT_SHADER) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return null;
+      }
+      switch (precisiontype) {
+        case C1.LOW_FLOAT:
+        case C1.MEDIUM_FLOAT:
+        case C1.HIGH_FLOAT:
+          return new WebGLShaderPrecisionFormat(127, 127, 23);
+        case C1.LOW_INT:
+        case C1.MEDIUM_INT:
+        case C1.HIGH_INT:
+          return new WebGLShaderPrecisionFormat(31, 30, 0);
+        default:
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+      }
+    };
+    proto.createProgram = function() {
+      const ctx = this;
+      if (isLost7(ctx)) return null;
+      return createObject(ctx, ProgramCtor);
+    };
+    proto.deleteProgram = function(program) {
+      const ctx = this;
+      if (isLost7(ctx)) return;
+      if (program === null || program === void 0) return;
+      if (!(program instanceof WebGLProgram)) throw new TypeError(`Argument is not of type 'WebGLProgram'`);
+      if (program._context !== ctx) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (program._deleted) return;
+      program._deleted = true;
+      if (!program._inUse && !program._inTransformFeedback) {
+        ctx._resources.untrack(program);
+        if (ctx._state.currentProgram === program) ctx._state.currentProgram = null;
+      }
+    };
+    proto.isProgram = function(program) {
+      const ctx = this;
+      if (isLost7(ctx)) return false;
+      if (program === null || program === void 0) return false;
+      if (!(program instanceof WebGLProgram)) throw new TypeError(`Argument is not of type 'WebGLProgram'`);
+      if (program._context !== ctx) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return false;
+      }
+      return !program._deleted;
+    };
+    proto.useProgram = function(program) {
+      const ctx = this;
+      if (isLost7(ctx)) return;
+      if (program === null || program === void 0) {
+        if (ctx._state.currentProgram !== null) {
+          ctx._state.currentProgram._inUse = false;
+          if (ctx._state.currentProgram._deleted) ctx._resources.untrack(ctx._state.currentProgram);
+          ctx._state.currentProgram = null;
+        }
+        return;
+      }
+      const p = validateProgram(ctx, program);
+      if (p === null) return;
+      if (!p._linkStatus || p._program === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const prev = ctx._state.currentProgram;
+      if (prev !== null) {
+        prev._inUse = false;
+        if (prev._deleted) ctx._resources.untrack(prev);
+      }
+      p._inUse = true;
+      ctx._state.currentProgram = p;
+    };
+    proto.attachShader = function(program, shader) {
+      var _a2;
+      const ctx = this;
+      if (isLost7(ctx)) return;
+      const p = validateProgram(ctx, program);
+      if (p === null) return;
+      const s = validateShader(ctx, shader);
+      if (s === null) return;
+      if (p._attachedShaders.has(s)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      for (const a of p._attachedShaders) {
+        if (a._type === s._type) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+      }
+      p._attachedShaders.add(s);
+      shaderAttachCounts.set(s, ((_a2 = shaderAttachCounts.get(s)) != null ? _a2 : 0) + 1);
+    };
+    proto.detachShader = function(program, shader) {
+      var _a2;
+      const ctx = this;
+      if (isLost7(ctx)) return;
+      const p = validateProgram(ctx, program);
+      if (p === null) return;
+      const s = validateShader(ctx, shader);
+      if (s === null) return;
+      if (!p._attachedShaders.has(s)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      p._attachedShaders.delete(s);
+      const n = ((_a2 = shaderAttachCounts.get(s)) != null ? _a2 : 1) - 1;
+      if (n <= 0) shaderAttachCounts.delete(s);
+      else shaderAttachCounts.set(s, n);
+    };
+    proto.linkProgram = function(program) {
+      const ctx = this;
+      if (isLost7(ctx)) return;
+      const p = validateProgram(ctx, program);
+      if (p === null) return;
+      doLinkProgram(ctx, p);
+    };
+    proto.validateProgram = function(program) {
+      const ctx = this;
+      if (isLost7(ctx)) return;
+      const p = validateProgram(ctx, program);
+      if (p === null) return;
+      const ok = p._linkStatus && p._program !== null && p._attachedShaders.size > 0;
+      validateStatus.set(p, ok);
+    };
+    proto.getProgramParameter = function(program, pname) {
+      var _a2;
+      const ctx = this;
+      if (isLost7(ctx)) return null;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return null;
+      switch (pname) {
+        case C1.DELETE_STATUS:
+          return p._deleted;
+        case C1.LINK_STATUS:
+          return p._linkStatus;
+        case C1.VALIDATE_STATUS:
+          return (_a2 = validateStatus.get(p)) != null ? _a2 : false;
+        case C1.ATTACHED_SHADERS:
+          return p._attachedShaders.size;
+        case C1.ACTIVE_ATTRIBUTES: {
+          const pm = programModels.get(p);
+          return pm === void 0 ? 0 : pm.attributes.length;
+        }
+        case C1.ACTIVE_UNIFORMS: {
+          const pm = programModels.get(p);
+          return pm === void 0 ? 0 : pm.uniforms.length;
+        }
+        case C2.ACTIVE_UNIFORM_BLOCKS: {
+          const pm = programModels.get(p);
+          return pm === void 0 ? 0 : pm.uniformBlocks.length;
+        }
+        case C2.TRANSFORM_FEEDBACK_VARYINGS: {
+          const pm = programModels.get(p);
+          return pm === void 0 ? 0 : pm.transformFeedbackVaryings.length;
+        }
+        case C2.TRANSFORM_FEEDBACK_BUFFER_MODE:
+          return p._tfBufferMode;
+        case CExt.COMPLETION_STATUS_KHR:
+          if (ctx.getExtension("KHR_parallel_shader_compile") !== null) return true;
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        default:
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+      }
+    };
+    proto.getProgramInfoLog = function(program) {
+      const ctx = this;
+      if (isLost7(ctx)) return null;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return null;
+      return p._infoLog;
+    };
+    proto.getAttribLocation = function(program, name) {
+      const ctx = this;
+      if (isLost7(ctx)) return -1;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return -1;
+      if (!p._linkStatus || p._program === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return -1;
+      }
+      const nm = requireString(name, "name");
+      if (nameTooLong(ctx, nm) || badNameChars(ctx, nm)) return -1;
+      if (isReservedPrefix(nm)) return -1;
+      const pm = programModels.get(p);
+      if (pm === void 0) return -1;
+      const target = nm.endsWith("[0]") ? nm.slice(0, -3) : nm;
+      const a = pm.attributes.find((at) => at.name === target);
+      return a === void 0 ? -1 : a.location;
+    };
+    proto.getUniformLocation = function(program, name) {
+      var _a2;
+      const ctx = this;
+      if (isLost7(ctx)) return null;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return null;
+      if (!p._linkStatus || p._program === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
+      const nm = requireString(name, "name");
+      if (nameTooLong(ctx, nm) || badNameChars(ctx, nm)) return null;
+      if (isReservedPrefix(nm)) return null;
+      const pm = programModels.get(p);
+      if (pm === void 0) return null;
+      const u = pm.uniformMap.get(nm);
+      if (u === void 0) return null;
+      let elem = 0;
+      let whole = false;
+      if (u.size > 1) {
+        const m = /\[(\d+)\]$/.exec(nm);
+        if (m !== null) elem = parseInt(m[1], 10);
+        else whole = true;
+        if (elem >= u.size) return null;
+      }
+      const idx = pm.uniforms.indexOf(u);
+      const loc = new WebGLUniformLocation(p, idx, u.name);
+      locGen.set(loc, (_a2 = linkGen.get(p)) != null ? _a2 : 0);
+      uniformLocInfo.set(loc, { elem, whole });
+      return loc;
+    };
+    proto.bindAttribLocation = function(program, index, name) {
+      const ctx = this;
+      if (isLost7(ctx)) return;
+      const p = validateProgram(ctx, program);
+      if (p === null) return;
+      const nm = requireString(name, "name");
+      if (isReservedPrefix(nm)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (nameTooLong(ctx, nm) || badNameChars(ctx, nm)) return;
+      if (index >= ctx._state.limits.MAX_VERTEX_ATTRIBS) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      p._bindAttribLocations.set(nm, index);
+    };
+    proto.getActiveAttrib = function(program, index) {
+      const ctx = this;
+      if (isLost7(ctx)) return null;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return null;
+      const pm = programModels.get(p);
+      if (pm === void 0 || index >= pm.attributes.length) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return null;
+      }
+      const a = pm.attributes[index];
+      const name = a.size > 1 ? `${a.name}[0]` : a.name;
+      return new WebGLActiveInfo(a.size, a.type, name);
+    };
+    proto.getActiveUniform = function(program, index) {
+      const ctx = this;
+      if (isLost7(ctx)) return null;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return null;
+      const pm = programModels.get(p);
+      if (pm === void 0 || index >= pm.uniforms.length) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return null;
+      }
+      const u = pm.uniforms[index];
+      return new WebGLActiveInfo(u.size, u.type, u.name);
+    };
+    proto.getUniform = function(program, location) {
+      var _a2, _b, _c;
+      const ctx = this;
+      if (isLost7(ctx)) return null;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return null;
+      if (!(location instanceof WebGLUniformLocation)) throw new TypeError(`Argument is not of type 'WebGLUniformLocation'`);
+      if (location._program !== p) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
+      if (!p._linkStatus || p._program === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
+      if (((_a2 = locGen.get(location)) != null ? _a2 : -1) !== ((_b = linkGen.get(p)) != null ? _b : 0)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
+      const pm = programModels.get(p);
+      if (pm === void 0) return null;
+      const uniform = pm.uniforms[location._index];
+      if (uniform === void 0 || uniform.blockIndex >= 0) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
+      const info = (_c = uniformLocInfo.get(location)) != null ? _c : { elem: 0, whole: true };
+      return readUniform(pm, uniform, info.elem, info.whole);
+    };
+    if ("uniformBlockBinding" in proto) {
+      const p2 = proto;
+      p2.transformFeedbackVaryings = function(program, varyings, bufferMode) {
+        const ctx = this;
+        if (isLost7(ctx)) return;
+        const p = validateProgram(ctx, program);
+        if (p === null) return;
+        const vs = Array.from(varyings != null ? varyings : []).map((v) => requireString(v, "varyings"));
+        if (bufferMode !== C2.INTERLEAVED_ATTRIBS && bufferMode !== C2.SEPARATE_ATTRIBS) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (bufferMode === C2.SEPARATE_ATTRIBS && vs.length > ctx._state.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        p._transformFeedbackVaryings = vs;
+        p._tfBufferMode = bufferMode;
+      };
+      p2.getTransformFeedbackVarying = function(program, index) {
+        const ctx = this;
+        if (isLost7(ctx)) return null;
+        const p = validateProgramQuery(ctx, program);
+        if (p === null) return null;
+        const pm = programModels.get(p);
+        if (pm === void 0 || index >= pm.transformFeedbackVaryings.length) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return null;
+        }
+        const v = pm.transformFeedbackVaryings[index];
+        return new WebGLActiveInfo(v.size, v.type, v.name);
+      };
+      p2.getUniformBlockIndex = function(program, uniformBlockName) {
+        const ctx = this;
+        if (isLost7(ctx)) return C2.INVALID_INDEX;
+        const p = validateProgramQuery(ctx, program);
+        if (p === null) return C2.INVALID_INDEX;
+        const nm = requireString(uniformBlockName, "uniformBlockName");
+        if (nameTooLong(ctx, nm) || badNameChars(ctx, nm)) return C2.INVALID_INDEX;
+        const pm = programModels.get(p);
+        if (pm === void 0) return C2.INVALID_INDEX;
+        const b = pm.uniformBlocks.find((blk) => blk.name === nm);
+        return b === void 0 ? C2.INVALID_INDEX : b.index;
+      };
+      p2.getActiveUniformBlockParameter = function(program, uniformBlockIndex, pname) {
+        var _a2, _b, _c;
+        const ctx = this;
+        if (isLost7(ctx)) return null;
+        const p = validateProgramQuery(ctx, program);
+        if (p === null) return null;
+        const pm = programModels.get(p);
+        if (pm === void 0 || uniformBlockIndex >= pm.uniformBlocks.length) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return null;
+        }
+        const block = pm.uniformBlocks[uniformBlockIndex];
+        const refs = (_a2 = blockReferenced.get(p)) != null ? _a2 : new Uint32Array(0);
+        switch (pname) {
+          case C2.UNIFORM_BLOCK_BINDING: {
+            const bindings = uniformBlockBindings.get(p);
+            return bindings !== void 0 ? bindings[uniformBlockIndex] : 0;
+          }
+          case C2.UNIFORM_BLOCK_DATA_SIZE:
+            return block.size;
+          case C2.UNIFORM_BLOCK_ACTIVE_UNIFORMS:
+            return block.activeUniforms.length;
+          case C2.UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES: {
+            const idxs = [];
+            for (const m of block.activeUniforms) {
+              const i = pm.uniforms.findIndex((u) => u.blockIndex === uniformBlockIndex && u.name === m.name);
+              if (i >= 0) idxs.push(i);
+            }
+            return new Uint32Array(idxs);
+          }
+          case C2.UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:
+            return (((_b = refs[uniformBlockIndex]) != null ? _b : 0) & 1) !== 0;
+          case C2.UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:
+            return (((_c = refs[uniformBlockIndex]) != null ? _c : 0) & 2) !== 0;
+          default:
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+        }
+      };
+      p2.getActiveUniformBlockName = function(program, uniformBlockIndex) {
+        const ctx = this;
+        if (isLost7(ctx)) return null;
+        const p = validateProgramQuery(ctx, program);
+        if (p === null) return null;
+        const pm = programModels.get(p);
+        if (pm === void 0 || uniformBlockIndex >= pm.uniformBlocks.length) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return null;
+        }
+        return pm.uniformBlocks[uniformBlockIndex].name;
+      };
+      p2.uniformBlockBinding = function(program, uniformBlockIndex, uniformBlockBinding) {
+        const ctx = this;
+        if (isLost7(ctx)) return;
+        const p = validateProgram(ctx, program);
+        if (p === null) return;
+        const pm = programModels.get(p);
+        if (pm === void 0 || uniformBlockIndex >= pm.uniformBlocks.length) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (uniformBlockBinding >= ctx._state.limits.MAX_UNIFORM_BUFFER_BINDINGS) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        const bindings = uniformBlockBindings.get(p);
+        if (bindings !== void 0) bindings[uniformBlockIndex] = uniformBlockBinding;
+      };
+      p2.getUniformIndices = function(program, uniformNames) {
+        var _a2;
+        const ctx = this;
+        if (isLost7(ctx)) return null;
+        const p = validateProgramQuery(ctx, program);
+        if (p === null) return null;
+        const pm = programModels.get(p);
+        if (pm === void 0) return null;
+        const names = Array.from(uniformNames != null ? uniformNames : []).map((n) => requireString(n, "uniformNames"));
+        for (const n of names) {
+          if (nameTooLong(ctx, n) || badNameChars(ctx, n)) return null;
+        }
+        const out = [];
+        for (const n of names) {
+          const u = (_a2 = pm.uniformMap.get(n)) != null ? _a2 : pm.uniforms.find((un) => un.name === n);
+          out.push(u === void 0 ? C2.INVALID_INDEX : pm.uniforms.indexOf(u));
+        }
+        return out;
+      };
+      const activeUniformsImpl = function(program, uniformIndices, pname) {
+        const ctx = this;
+        if (isLost7(ctx)) return null;
+        const p = validateProgramQuery(ctx, program);
+        if (p === null) return null;
+        const pm = programModels.get(p);
+        if (pm === void 0) return null;
+        switch (pname) {
+          case C2.UNIFORM_TYPE:
+          case C2.UNIFORM_SIZE:
+          case C2.UNIFORM_BLOCK_INDEX:
+          case C2.UNIFORM_OFFSET:
+          case C2.UNIFORM_ARRAY_STRIDE:
+          case C2.UNIFORM_MATRIX_STRIDE:
+          case C2.UNIFORM_IS_ROW_MAJOR:
+            break;
+          default:
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+        }
+        const indices = Array.from(uniformIndices != null ? uniformIndices : []).map((i) => i >>> 0);
+        const out = [];
+        for (const i of indices) {
+          const u = pm.uniforms[i];
+          if (u === void 0) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return null;
+          }
+          switch (pname) {
+            case C2.UNIFORM_TYPE:
+              out.push(u.type);
+              break;
+            case C2.UNIFORM_SIZE:
+              out.push(u.size);
+              break;
+            case C2.UNIFORM_BLOCK_INDEX:
+              out.push(u.blockIndex);
+              break;
+            default: {
+              if (u.blockIndex < 0 || u.blockIndex >= pm.uniformBlocks.length) {
+                out.push(-1);
+                break;
+              }
+              const m = pm.uniformBlocks[u.blockIndex].activeUniforms.find((mm) => mm.name === u.name);
+              if (m === void 0) {
+                out.push(-1);
+                break;
+              }
+              switch (pname) {
+                case C2.UNIFORM_OFFSET:
+                  out.push(m.offset);
+                  break;
+                case C2.UNIFORM_ARRAY_STRIDE:
+                  out.push(m.arrayStride);
+                  break;
+                case C2.UNIFORM_MATRIX_STRIDE:
+                  out.push(m.matrixStride);
+                  break;
+                default:
+                  out.push(m.rowMajor ? 1 : 0);
+                  break;
+              }
+              break;
+            }
+          }
+        }
+        return out;
+      };
+      p2.getActiveUniforms = activeUniformsImpl;
+      p2.getActiveUniformsiv = activeUniformsImpl;
+      p2.getFragDataLocation = function(program, name) {
+        var _a2;
+        const ctx = this;
+        if (isLost7(ctx)) return -1;
+        const p = validateProgramQuery(ctx, program);
+        if (p === null) return -1;
+        const nm = requireString(name, "name");
+        if (nameTooLong(ctx, nm) || badNameChars(ctx, nm)) return -1;
+        const pm = programModels.get(p);
+        if (pm === void 0) return -1;
+        const fmap = fragDataMaps.get(p);
+        if (fmap === void 0) return -1;
+        return (_a2 = fmap.get(nm)) != null ? _a2 : -1;
+      };
+    }
+  }
+
+  // src/gl/api/uniforms.ts
+  var FLOAT_MAT2x3 = 35685;
+  var FLOAT_MAT2x4 = 35686;
+  var FLOAT_MAT3x2 = 35687;
+  var FLOAT_MAT3x4 = 35688;
+  var FLOAT_MAT4x2 = 35689;
+  var FLOAT_MAT4x3 = 35690;
+  function isLost8(ctx) {
+    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
+    return ctx._isLost;
+  }
+  function toFloat32List2(v) {
+    if (v instanceof DataView) throw new TypeError("Argument is not a Float32List");
+    if (v instanceof Float32Array) return v;
+    if (Array.isArray(v)) return new Float32Array(v);
+    if (ArrayBuffer.isView(v)) return new Float32Array(v);
+    throw new TypeError("Argument is not a Float32List");
+  }
+  function toInt32List2(v) {
+    if (v instanceof DataView) throw new TypeError("Argument is not an Int32List");
+    if (v instanceof Int32Array) return v;
+    if (Array.isArray(v)) return Int32Array.from(v);
+    if (ArrayBuffer.isView(v)) return Int32Array.from(v);
+    throw new TypeError("Argument is not an Int32List");
+  }
+  function toUint32List2(v) {
+    if (v instanceof DataView) throw new TypeError("Argument is not a Uint32List");
+    if (v instanceof Uint32Array) return v;
+    if (Array.isArray(v)) return Uint32Array.from(v);
+    if (ArrayBuffer.isView(v)) return Uint32Array.from(v);
+    throw new TypeError("Argument is not a Uint32List");
+  }
+  function isSamplerType2(type) {
+    switch (type) {
+      case C1.SAMPLER_2D:
+      case C1.SAMPLER_CUBE:
+      case C2.SAMPLER_3D:
+      case C2.SAMPLER_2D_ARRAY:
+      case C2.SAMPLER_2D_SHADOW:
+      case C2.SAMPLER_CUBE_SHADOW:
+      case C2.SAMPLER_2D_ARRAY_SHADOW:
+      case C2.INT_SAMPLER_2D:
+      case C2.INT_SAMPLER_3D:
+      case C2.INT_SAMPLER_CUBE:
+      case C2.INT_SAMPLER_2D_ARRAY:
+      case C2.UNSIGNED_INT_SAMPLER_2D:
+      case C2.UNSIGNED_INT_SAMPLER_3D:
+      case C2.UNSIGNED_INT_SAMPLER_CUBE:
+      case C2.UNSIGNED_INT_SAMPLER_2D_ARRAY:
+        return true;
+      default:
+        return false;
+    }
+  }
+  function typeIsFloatFamily(type, k) {
+    switch (type) {
+      case C1.FLOAT:
+        return k === 1;
+      case C1.FLOAT_VEC2:
+        return k === 2;
+      case C1.FLOAT_VEC3:
+        return k === 3;
+      case C1.FLOAT_VEC4:
+        return k === 4;
+      case C1.BOOL:
+        return k === 1;
+      case C1.BOOL_VEC2:
+        return k === 2;
+      case C1.BOOL_VEC3:
+        return k === 3;
+      case C1.BOOL_VEC4:
+        return k === 4;
+      default:
+        return false;
+    }
+  }
+  function typeIsIntFamily(type, k) {
+    switch (type) {
+      case C1.INT:
+        return k === 1;
+      case C1.INT_VEC2:
+        return k === 2;
+      case C1.INT_VEC3:
+        return k === 3;
+      case C1.INT_VEC4:
+        return k === 4;
+      case C1.BOOL:
+        return k === 1;
+      case C1.BOOL_VEC2:
+        return k === 2;
+      case C1.BOOL_VEC3:
+        return k === 3;
+      case C1.BOOL_VEC4:
+        return k === 4;
+      default:
+        return isSamplerType2(type) && k === 1;
+    }
+  }
+  function typeIsUintFamily(type, k) {
+    switch (type) {
+      case C1.UNSIGNED_INT:
+        return k === 1;
+      case C2.UNSIGNED_INT_VEC2:
+        return k === 2;
+      case C2.UNSIGNED_INT_VEC3:
+        return k === 3;
+      case C2.UNSIGNED_INT_VEC4:
+        return k === 4;
+      default:
+        return false;
+    }
+  }
+  function prepareUniform(ctx, loc) {
+    var _a2, _b;
+    if (loc === null || loc === void 0) return null;
+    if (!(loc instanceof WebGLUniformLocation)) throw new TypeError(`Argument is not of type 'WebGLUniformLocation'`);
+    const program = ctx._state.currentProgram;
+    if (program === null || program._deleted) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    if (loc._program !== program) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    if (((_a2 = locGen.get(loc)) != null ? _a2 : -1) !== ((_b = linkGen.get(program)) != null ? _b : 0)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    const pm = programModels.get(program);
+    if (pm === void 0 || program._program === null || !program._linkStatus) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    const uniform = pm.uniforms[loc._index];
+    if (uniform === void 0 || uniform.blockIndex >= 0) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    return { program, pm, uniform, slots: elementSlots(uniform) };
+  }
+  function writeFloatAt(t, slotOffset, comp, v) {
+    const dv = t.program._uniformStore;
+    if (dv === null) return;
+    dv.setFloat32((t.uniform.location + slotOffset) * 16 + comp * 4, v, true);
+  }
+  function writeIntAt(t, slotOffset, comp, v, mode) {
+    const store = t.pm.intStore;
+    const idx = (t.uniform.location + slotOffset) * 4 + comp;
+    switch (mode) {
+      case "int":
+        store[idx] = v | 0;
+        break;
+      case "uint":
+        store[idx] = v >>> 0;
+        break;
+      case "bool":
+        store[idx] = (v | 0) !== 0 ? 1 : 0;
+        break;
+      case "boolf":
+        store[idx] = v !== 0 ? 1 : 0;
+        break;
+    }
+  }
+  function isBoolType(type) {
+    return type === C1.BOOL || type === C1.BOOL_VEC2 || type === C1.BOOL_VEC3 || type === C1.BOOL_VEC4;
+  }
+  function uniformScalar(ctx, location, k, family, vals) {
+    if (isLost8(ctx)) return;
+    const t = prepareUniform(ctx, location);
+    if (t === null) return;
+    const ok = family === "f" ? typeIsFloatFamily(t.uniform.type, k) : family === "i" ? typeIsIntFamily(t.uniform.type, k) : typeIsUintFamily(t.uniform.type, k);
+    if (!ok) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (family === "i" && isSamplerType2(t.uniform.type)) {
+      for (const v of vals) {
+        if ((v | 0) >= ctx._state.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+      }
+    }
+    const isBool = isBoolType(t.uniform.type);
+    for (let c = 0; c < k; c++) {
+      const v = vals[c];
+      if (family === "f") {
+        if (isBool) writeIntAt(t, 0, c, v, "boolf");
+        else writeFloatAt(t, 0, c, v);
+      } else if (family === "i") writeIntAt(t, 0, c, v, isBool ? "bool" : "int");
+      else writeIntAt(t, 0, c, v, "uint");
+    }
+  }
+  function uniformVector(ctx, location, k, family, values) {
+    if (isLost8(ctx)) return;
+    const t = prepareUniform(ctx, location);
+    if (t === null) return;
+    const ok = family === "f" ? typeIsFloatFamily(t.uniform.type, k) : family === "i" ? typeIsIntFamily(t.uniform.type, k) : typeIsUintFamily(t.uniform.type, k);
+    if (!ok) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (values.length < k || values.length % k !== 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (family === "i" && isSamplerType2(t.uniform.type)) {
+      for (let i = 0; i < values.length; i++) {
+        if ((values[i] | 0) >= ctx._state.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+      }
+    }
+    const isBool = isBoolType(t.uniform.type);
+    const total = Math.min(values.length, t.uniform.size * k);
+    for (let i = 0; i < total; i++) {
+      const element = Math.floor(i / k);
+      const comp = i % k;
+      const v = values[i];
+      if (family === "f") {
+        if (isBool) writeIntAt(t, element, comp, v, "boolf");
+        else writeFloatAt(t, element, comp, v);
+      } else if (family === "i") writeIntAt(t, element, comp, v, isBool ? "bool" : "int");
+      else writeIntAt(t, element, comp, v, "uint");
+    }
+  }
+  function uniformMatrix(ctx, location, transpose, value, cols, rows, typeConst) {
+    if (isLost8(ctx)) return;
+    const t = prepareUniform(ctx, location);
+    if (t === null) return;
+    if (t.uniform.type !== typeConst) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    if (transpose) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    const values = toFloat32List2(value);
+    const n = cols * rows;
+    if (values.length < n || values.length % n !== 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    const total = Math.min(values.length, t.uniform.size * n);
+    for (let i = 0; i < total; i++) {
+      const element = Math.floor(i / n);
+      const col = Math.floor(i % n / rows);
+      const row = i % rows;
+      writeFloatAt(t, element * t.slots + col, row, values[i]);
+    }
+  }
+  function installUniformsApi(proto) {
+    proto.uniform1f = function(location, x) {
+      uniformScalar(this, location, 1, "f", [x]);
+    };
+    proto.uniform2f = function(location, x, y) {
+      uniformScalar(this, location, 2, "f", [x, y]);
+    };
+    proto.uniform3f = function(location, x, y, z) {
+      uniformScalar(this, location, 3, "f", [x, y, z]);
+    };
+    proto.uniform4f = function(location, x, y, z, w) {
+      uniformScalar(this, location, 4, "f", [x, y, z, w]);
+    };
+    proto.uniform1i = function(location, x) {
+      uniformScalar(this, location, 1, "i", [x]);
+    };
+    proto.uniform2i = function(location, x, y) {
+      uniformScalar(this, location, 2, "i", [x, y]);
+    };
+    proto.uniform3i = function(location, x, y, z) {
+      uniformScalar(this, location, 3, "i", [x, y, z]);
+    };
+    proto.uniform4i = function(location, x, y, z, w) {
+      uniformScalar(this, location, 4, "i", [x, y, z, w]);
+    };
+    proto.uniform1fv = function(location, v) {
+      uniformVector(this, location, 1, "f", toFloat32List2(v));
+    };
+    proto.uniform2fv = function(location, v) {
+      uniformVector(this, location, 2, "f", toFloat32List2(v));
+    };
+    proto.uniform3fv = function(location, v) {
+      uniformVector(this, location, 3, "f", toFloat32List2(v));
+    };
+    proto.uniform4fv = function(location, v) {
+      uniformVector(this, location, 4, "f", toFloat32List2(v));
+    };
+    proto.uniform1iv = function(location, v) {
+      uniformVector(this, location, 1, "i", toInt32List2(v));
+    };
+    proto.uniform2iv = function(location, v) {
+      uniformVector(this, location, 2, "i", toInt32List2(v));
+    };
+    proto.uniform3iv = function(location, v) {
+      uniformVector(this, location, 3, "i", toInt32List2(v));
+    };
+    proto.uniform4iv = function(location, v) {
+      uniformVector(this, location, 4, "i", toInt32List2(v));
+    };
+    proto.uniformMatrix2fv = function(location, transpose, value) {
+      uniformMatrix(this, location, transpose, value, 2, 2, C1.FLOAT_MAT2);
+    };
+    proto.uniformMatrix3fv = function(location, transpose, value) {
+      uniformMatrix(this, location, transpose, value, 3, 3, C1.FLOAT_MAT3);
+    };
+    proto.uniformMatrix4fv = function(location, transpose, value) {
+      uniformMatrix(this, location, transpose, value, 4, 4, C1.FLOAT_MAT4);
+    };
+    if ("uniform1ui" in proto) {
+      const p2 = proto;
+      p2.uniform1ui = function(location, x) {
+        uniformScalar(this, location, 1, "ui", [x]);
+      };
+      p2.uniform2ui = function(location, x, y) {
+        uniformScalar(this, location, 2, "ui", [x, y]);
+      };
+      p2.uniform3ui = function(location, x, y, z) {
+        uniformScalar(this, location, 3, "ui", [x, y, z]);
+      };
+      p2.uniform4ui = function(location, x, y, z, w) {
+        uniformScalar(this, location, 4, "ui", [x, y, z, w]);
+      };
+      p2.uniform1uiv = function(location, v) {
+        uniformVector(this, location, 1, "ui", toUint32List2(v));
+      };
+      p2.uniform2uiv = function(location, v) {
+        uniformVector(this, location, 2, "ui", toUint32List2(v));
+      };
+      p2.uniform3uiv = function(location, v) {
+        uniformVector(this, location, 3, "ui", toUint32List2(v));
+      };
+      p2.uniform4uiv = function(location, v) {
+        uniformVector(this, location, 4, "ui", toUint32List2(v));
+      };
+      p2.uniformMatrix2x3fv = function(location, transpose, value) {
+        uniformMatrix(this, location, transpose, value, 2, 3, FLOAT_MAT2x3);
+      };
+      p2.uniformMatrix2x4fv = function(location, transpose, value) {
+        uniformMatrix(this, location, transpose, value, 2, 4, FLOAT_MAT2x4);
+      };
+      p2.uniformMatrix3x2fv = function(location, transpose, value) {
+        uniformMatrix(this, location, transpose, value, 3, 2, FLOAT_MAT3x2);
+      };
+      p2.uniformMatrix3x4fv = function(location, transpose, value) {
+        uniformMatrix(this, location, transpose, value, 3, 4, FLOAT_MAT3x4);
+      };
+      p2.uniformMatrix4x2fv = function(location, transpose, value) {
+        uniformMatrix(this, location, transpose, value, 4, 2, FLOAT_MAT4x2);
+      };
+      p2.uniformMatrix4x3fv = function(location, transpose, value) {
+        uniformMatrix(this, location, transpose, value, 4, 3, FLOAT_MAT4x3);
+      };
+    }
+  }
+
+  // src/gl/api/framebuffers.ts
+  var TEXTURE_SAMPLES_EXT2 = 37168;
+  var FRAMEBUFFER_DEFAULT = 33304;
+  var COLOR_ATTACHMENT04 = 36064;
+  var DEPTH_ATTACHMENT3 = 36096;
+  var STENCIL_ATTACHMENT3 = 36128;
+  var DEPTH_STENCIL_ATTACHMENT2 = 33306;
+  var NONE4 = 0;
+  var BACK3 = 1029;
+  var TEXTURE = 5890;
+  var LINEAR = 9729;
+  var SRGB = 35904;
+  var UNSIGNED_NORMALIZED = 35863;
+  var SIGNED_NORMALIZED = 36764;
+  var FLOAT = 5126;
+  var INT = 5124;
+  var UNSIGNED_INT = 5125;
+  var CUBE_POSITIVE_X3 = 34069;
+  var CUBE_NEGATIVE_Z3 = 34074;
+  function isLost9(ctx) {
+    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
+    return ctx._isLost;
+  }
+  var FboCtor = WebGLFramebuffer;
+  var FboCtorAny = FboCtor;
+  var RboCtor = WebGLRenderbuffer;
+  var RboCtorAny = RboCtor;
+  var TexCtor = WebGLTexture;
+  var TexCtorAny = TexCtor;
+  function validateFbo(ctx, obj) {
+    return validateObject(ctx, obj, FboCtorAny);
+  }
+  function validateRbo(ctx, obj) {
+    return validateObject(ctx, obj, RboCtorAny);
+  }
+  function validateTex(ctx, obj) {
+    return validateObject(ctx, obj, TexCtorAny);
+  }
+  function isValidFramebufferTarget(ctx, target) {
+    if (target === C1.FRAMEBUFFER) return true;
+    if (ctx._version !== 2) return false;
+    return target === C2.DRAW_FRAMEBUFFER || target === C2.READ_FRAMEBUFFER;
+  }
+  function boundFramebufferForTarget(ctx, target) {
+    if (ctx._version === 2 && target === C2.READ_FRAMEBUFFER) return ctx._state.readFramebuffer;
+    return ctx._state.drawFramebuffer;
+  }
+  function numLevelsFromSize(size) {
+    let levels = 0;
+    while (size >> levels > 0) ++levels;
+    return levels;
+  }
+  function isCubeFace3(textarget) {
+    return textarget >= CUBE_POSITIVE_X3 && textarget <= CUBE_NEGATIVE_Z3;
+  }
+  function isTextureTarget2D(textarget) {
+    return textarget === C1.TEXTURE_2D || isCubeFace3(textarget);
+  }
+  function isValidAttachment(ctx, attachment) {
+    const maxColor = ctx._version === 1 ? 1 : ctx._state.limits.MAX_COLOR_ATTACHMENTS;
+    if (attachment >= COLOR_ATTACHMENT04 && attachment < COLOR_ATTACHMENT04 + maxColor) return true;
+    if (attachment === DEPTH_ATTACHMENT3 || attachment === STENCIL_ATTACHMENT3) return true;
+    return attachment === DEPTH_STENCIL_ATTACHMENT2;
+  }
+  function attachmentKeys(ctx, attachment) {
+    if (ctx._version === 2 && attachment === DEPTH_STENCIL_ATTACHMENT2) {
+      return [DEPTH_ATTACHMENT3, STENCIL_ATTACHMENT3];
+    }
+    return [attachment];
+  }
+  function resolveAttachmentRecord(fbo, attachment) {
+    var _a2, _b, _c;
+    if (attachment === DEPTH_STENCIL_ATTACHMENT2 && fbo._attachments.has(DEPTH_ATTACHMENT3)) {
+      const d = (_a2 = fbo._attachments.get(DEPTH_ATTACHMENT3)) != null ? _a2 : null;
+      const s = (_b = fbo._attachments.get(STENCIL_ATTACHMENT3)) != null ? _b : null;
+      if (d === null || s === null) return { rec: null, conflict: true };
+      if (d !== s) return { rec: null, conflict: true };
+      return { rec: d, conflict: false };
+    }
+    return { rec: (_c = fbo._attachments.get(attachment)) != null ? _c : null, conflict: false };
+  }
+  function invalidateFboStatuses(ctx) {
+    for (const obj of ctx._resources.all) {
+      if (obj instanceof WebGLFramebuffer) {
+        obj._status = 0;
+        let ms = false;
+        for (const rec of obj._attachments.values()) {
+          if (rec.type === "renderbuffer") {
+            if (rec.renderbuffer._samples > 0) ms = true;
+          } else if (rec.texture._msaaSamples > 0) {
+            ms = true;
+          }
+        }
+        obj._multisampled = ms;
+      }
+    }
+  }
+  function invalidateFboStatus(fbo) {
+    fbo._status = 0;
+    let ms = false;
+    for (const rec of fbo._attachments.values()) {
+      if (rec.type === "renderbuffer") {
+        if (rec.renderbuffer._samples > 0) ms = true;
+      } else if (rec.texture._msaaSamples > 0) {
+        ms = true;
+      }
+    }
+    fbo._multisampled = ms;
+  }
+  function isValidRenderbufferFormat(ctx, format) {
+    if (ctx._version === 1) {
+      if (format === C1.RGBA4 || format === C1.RGB565 || format === C1.RGB5_A1 || format === C1.DEPTH_COMPONENT16 || format === C1.STENCIL_INDEX8) return true;
+      if (format === CExt.SRGB_ALPHA_EXT && ctx.getExtension("EXT_sRGB") !== null) return true;
+      if ((format === C1.DEPTH_COMPONENT || format === C1.DEPTH_STENCIL) && ctx.getExtension("WEBGL_depth_texture") !== null) return true;
+      if (format === C2.RGBA16F && ctx.getExtension("EXT_color_buffer_half_float") !== null) return true;
+      return false;
+    }
+    if (W2_RB_FORMATS.has(format)) return true;
+    if ((format === CExt.R16_EXT || format === CExt.RG16_EXT || format === CExt.RGB16_EXT || format === CExt.RGBA16_EXT) && ctx.getExtension("EXT_texture_norm16") !== null) return true;
+    if (format === C2.RGB9_E5 && ctx.getExtension("WEBGL_render_shared_exponent") !== null) return true;
+    return false;
+  }
+  var W2_RB_FORMATS = /* @__PURE__ */ new Set([
+    C2.R8,
+    C2.R16F,
+    C2.R32F,
+    C2.R8UI,
+    C2.R8I,
+    C2.R16UI,
+    C2.R16I,
+    C2.R32UI,
+    C2.R32I,
+    C2.RG8,
+    C2.RG16F,
+    C2.RG32F,
+    C2.RG8UI,
+    C2.RG8I,
+    C2.RG16UI,
+    C2.RG16I,
+    C2.RG32UI,
+    C2.RG32I,
+    C2.RGB8,
+    C2.RGB16F,
+    C2.RGB32F,
+    C2.RGB8UI,
+    C2.RGB8I,
+    C2.RGB16UI,
+    C2.RGB16I,
+    C2.RGB32UI,
+    C2.RGB32I,
+    C2.RGBA8,
+    C2.RGBA16F,
+    C2.RGBA32F,
+    C2.RGBA8UI,
+    C2.RGBA8I,
+    C2.RGBA16UI,
+    C2.RGBA16I,
+    C2.RGBA32UI,
+    C2.RGBA32I,
+    C2.RGB10_A2,
+    C1.RGBA4,
+    C1.RGB5_A1,
+    C1.RGB565,
+    C2.SRGB8_ALPHA8,
+    C1.DEPTH_COMPONENT16,
+    C2.DEPTH_COMPONENT24,
+    C2.DEPTH_COMPONENT32F,
+    C2.DEPTH24_STENCIL8,
+    C2.DEPTH32F_STENCIL8,
+    C1.DEPTH_STENCIL
+  ]);
+  var DEPTH_STENCIL_DESC = {
+    bpp: 4,
+    storage: "f32",
+    components: 1,
+    isColor: false,
+    isDepth: true,
+    isStencil: true,
+    isFloat: true,
+    isSigned: false,
+    isInteger: false,
+    isSRGB: false,
+    normalized: false
+  };
+  var DEPTH_DESC = {
+    bpp: 4,
+    storage: "f32",
+    components: 1,
+    isColor: false,
+    isDepth: true,
+    isStencil: false,
+    isFloat: true,
+    isSigned: false,
+    isInteger: false,
+    isSRGB: false,
+    normalized: false
+  };
+  var STENCIL_DESC = {
+    bpp: 1,
+    storage: "u8",
+    components: 1,
+    isColor: false,
+    isDepth: false,
+    isStencil: true,
+    isFloat: false,
+    isSigned: false,
+    isInteger: false,
+    isSRGB: false,
+    normalized: false
+  };
+  function colorDesc(bpp, storage, components, extra) {
+    return {
+      bpp,
+      storage,
+      components,
+      isColor: true,
+      isDepth: false,
+      isStencil: false,
+      isFloat: storage === "f32",
+      isSigned: storage === "i8" || storage === "i16" || storage === "i32",
+      isInteger: storage === "i8" || storage === "i16" || storage === "i32" || storage === "u8" || storage === "u16" || storage === "u32",
+      isSRGB: false,
+      normalized: storage === "u8" || storage === "u16" || storage === "i8" || storage === "i16",
+      ...extra
+    };
+  }
+  function localFormatDesc(format) {
+    switch (format) {
+      case C1.RGBA4:
+      case C1.RGB5_A1:
+      case C1.RGB565:
+        return colorDesc(2, "u16", format === C1.RGB565 ? 3 : 4);
+      case C1.RGBA8:
+      case C2.SRGB8_ALPHA8:
+      case CExt.SRGB_ALPHA_EXT:
+        return colorDesc(4, "u8", 4, { isSRGB: format !== C1.RGBA8 });
+      case C2.RGB8:
+        return colorDesc(3, "u8", 3);
+      case C2.R8:
+        return colorDesc(1, "u8", 1);
+      case C2.RG8:
+        return colorDesc(2, "u8", 2);
+      case CExt.R16_EXT:
+        return colorDesc(2, "u16", 1);
+      case CExt.RG16_EXT:
+        return colorDesc(4, "u16", 2);
+      case CExt.RGB16_EXT:
+        return colorDesc(6, "u16", 3);
+      case CExt.RGBA16_EXT:
+        return colorDesc(8, "u16", 4);
+      case C2.R16F:
+        return colorDesc(2, "f32", 1);
+      case C2.RG16F:
+        return colorDesc(4, "f32", 2);
+      case C2.RGB16F:
+        return colorDesc(6, "f32", 3);
+      case C2.RGBA16F:
+        return colorDesc(8, "f32", 4);
+      case C2.R32F:
+        return colorDesc(4, "f32", 1);
+      case C2.RG32F:
+        return colorDesc(8, "f32", 2);
+      case C2.RGB32F:
+        return colorDesc(12, "f32", 3);
+      case C2.RGBA32F:
+        return colorDesc(16, "f32", 4);
+      case C2.RGB9_E5:
+        return colorDesc(12, "f32", 3);
+      case C2.R8I:
+        return colorDesc(1, "i8", 1);
+      case C2.R8UI:
+        return colorDesc(1, "u8", 1);
+      case C2.R16I:
+        return colorDesc(2, "i16", 1);
+      case C2.R16UI:
+        return colorDesc(2, "u16", 1);
+      case C2.R32I:
+        return colorDesc(4, "i32", 1);
+      case C2.R32UI:
+        return colorDesc(4, "u32", 1);
+      case C2.RG8I:
+        return colorDesc(2, "i8", 2);
+      case C2.RG8UI:
+        return colorDesc(2, "u8", 2);
+      case C2.RG16I:
+        return colorDesc(4, "i16", 2);
+      case C2.RG16UI:
+        return colorDesc(4, "u16", 2);
+      case C2.RG32I:
+        return colorDesc(8, "i32", 2);
+      case C2.RG32UI:
+        return colorDesc(8, "u32", 2);
+      case C2.RGB8I:
+        return colorDesc(3, "i8", 3);
+      case C2.RGB8UI:
+        return colorDesc(3, "u8", 3);
+      case C2.RGB16I:
+        return colorDesc(6, "i16", 3);
+      case C2.RGB16UI:
+        return colorDesc(6, "u16", 3);
+      case C2.RGB32I:
+        return colorDesc(12, "i32", 3);
+      case C2.RGB32UI:
+        return colorDesc(12, "u32", 3);
+      case C2.RGBA8I:
+        return colorDesc(4, "i8", 4);
+      case C2.RGBA8UI:
+        return colorDesc(4, "u8", 4);
+      case C2.RGBA16I:
+        return colorDesc(8, "i16", 4);
+      case C2.RGBA16UI:
+        return colorDesc(8, "u16", 4);
+      case C2.RGBA32I:
+        return colorDesc(16, "i32", 4);
+      case C2.RGBA32UI:
+        return colorDesc(16, "u32", 4);
+      case C2.RGB10_A2:
+        return colorDesc(4, "u32", 4);
+      case C1.DEPTH_COMPONENT16:
+      case C2.DEPTH_COMPONENT24:
+      case C2.DEPTH_COMPONENT32F:
+      case C1.DEPTH_COMPONENT:
+        return DEPTH_DESC;
+      case C2.DEPTH24_STENCIL8:
+      case C2.DEPTH32F_STENCIL8:
+      case C1.DEPTH_STENCIL:
+        return DEPTH_STENCIL_DESC;
+      case C1.STENCIL_INDEX8:
+        return STENCIL_DESC;
+      default:
+        return colorDesc(4, "u8", 4);
+    }
+  }
+  var noopDecode = (_data, _byteOffset, _out) => {
+  };
+  var noopEncode = (_data, _byteOffset, _r, _g, _b, _a2) => {
+  };
+  function syntheticInfo(format, d) {
+    return {
+      format,
+      components: d.components,
+      bytesPerPixel: d.bpp,
+      storage: d.storage,
+      isColor: d.isColor,
+      isDepth: d.isDepth,
+      isStencil: d.isStencil,
+      isFloat: d.isFloat,
+      isSigned: d.isSigned,
+      isInteger: d.isInteger,
+      isSRGB: d.isSRGB,
+      normalized: d.normalized,
+      decode: noopDecode,
+      encode: noopEncode
+    };
+  }
+  function allocateRenderbufferSurface(ctx, rb, format, w, h) {
+    var _a2;
+    let surf = null;
+    try {
+      surf = createSurface(format, w, h);
+    } catch {
+      surf = null;
+    }
+    if (surf === null) {
+      const d = localFormatDesc(format);
+      const n = w * h;
+      let data;
+      switch (d.storage) {
+        case "f32":
+          data = new Float32Array(n);
+          break;
+        case "i8":
+          data = new Int8Array(n);
+          break;
+        case "i16":
+          data = new Int16Array(n);
+          break;
+        case "i32":
+          data = new Int32Array(n);
+          break;
+        case "u16":
+          data = new Uint16Array(n);
+          break;
+        case "u32":
+          data = new Uint32Array(n);
+          break;
+        default:
+          data = new Uint8Array(n);
+      }
+      const info = (_a2 = getFormat(format)) != null ? _a2 : syntheticInfo(format, d);
+      const s = { width: w, height: h, format, info, data };
+      if (d.isStencil && d.isDepth) s.stencilData = new Uint8Array(n);
+      surf = s;
+    }
+    rb._surface = surf;
+    void ctx;
+  }
+  function formatComponentBits(format) {
+    const zero = [0, 0, 0, 0, 0, 0];
+    switch (format) {
+      case C1.RGBA8:
+      case C2.SRGB8_ALPHA8:
+      case CExt.SRGB_ALPHA_EXT:
+        return [8, 8, 8, 8, 0, 0];
+      case C2.RGB8:
+      case C2.SRGB8:
+        return [8, 8, 8, 0, 0, 0];
+      case C1.RGBA4:
+        return [4, 4, 4, 4, 0, 0];
+      case C1.RGB5_A1:
+        return [5, 5, 5, 1, 0, 0];
+      case C1.RGB565:
+        return [5, 6, 5, 0, 0, 0];
+      case C2.R8:
+      case C2.R8I:
+      case C2.R8UI:
+      case C2.R16F:
+      case C2.R32F:
+      case CExt.R16_EXT:
+        return [8, 0, 0, 0, 0, 0];
+      case C2.RG8:
+      case C2.RG8I:
+      case C2.RG8UI:
+      case C2.RG16F:
+      case C2.RG32F:
+      case CExt.RG16_EXT:
+        return [8, 8, 0, 0, 0, 0];
+      case C2.R16I:
+      case C2.R16UI:
+        return [16, 0, 0, 0, 0, 0];
+      case C2.RG16I:
+      case C2.RG16UI:
+        return [16, 16, 0, 0, 0, 0];
+      case C2.R32I:
+      case C2.R32UI:
+        return [32, 0, 0, 0, 0, 0];
+      case C2.RG32I:
+      case C2.RG32UI:
+        return [32, 32, 0, 0, 0, 0];
+      case C2.RGB8I:
+      case C2.RGB8UI:
+        return [8, 8, 8, 0, 0, 0];
+      case C2.RGB16I:
+      case C2.RGB16UI:
+        return [16, 16, 16, 0, 0, 0];
+      case C2.RGB32I:
+      case C2.RGB32UI:
+        return [32, 32, 32, 0, 0, 0];
+      case C2.RGBA8I:
+      case C2.RGBA8UI:
+        return [8, 8, 8, 8, 0, 0];
+      case C2.RGBA16I:
+      case C2.RGBA16UI:
+      case CExt.RGBA16_EXT:
+        return [16, 16, 16, 16, 0, 0];
+      case C2.RGBA32I:
+      case C2.RGBA32UI:
+        return [32, 32, 32, 32, 0, 0];
+      case C2.RGB16F:
+        return [16, 16, 16, 0, 0, 0];
+      case C2.RGB32F:
+      case C2.RGB9_E5:
+        return [32, 32, 32, 0, 0, 0];
+      case C2.RGBA16F:
+        return [16, 16, 16, 16, 0, 0];
+      case C2.RGBA32F:
+        return [32, 32, 32, 32, 0, 0];
+      case C2.R16F:
+        return [16, 0, 0, 0, 0, 0];
+      case C2.RG16F:
+        return [16, 16, 0, 0, 0, 0];
+      case C2.R32F:
+        return [32, 0, 0, 0, 0, 0];
+      case C2.RG32F:
+        return [32, 32, 0, 0, 0, 0];
+      case C2.RGB10_A2:
+        return [10, 10, 10, 2, 0, 0];
+      case CExt.RGB16_EXT:
+        return [16, 16, 16, 0, 0, 0];
+      case C1.DEPTH_COMPONENT16:
+        return [0, 0, 0, 0, 16, 0];
+      case C2.DEPTH_COMPONENT24:
+        return [0, 0, 0, 0, 24, 0];
+      case C2.DEPTH_COMPONENT32F:
+        return [0, 0, 0, 0, 32, 0];
+      case C2.DEPTH24_STENCIL8:
+      case C1.DEPTH_STENCIL:
+        return [0, 0, 0, 0, 24, 8];
+      case C2.DEPTH32F_STENCIL8:
+        return [0, 0, 0, 0, 32, 8];
+      case C1.STENCIL_INDEX8:
+        return [0, 0, 0, 0, 0, 8];
+      default:
+        return zero;
+    }
+  }
+  function attachmentInternalFormat(rec) {
+    if (rec.type === "renderbuffer") return rec.renderbuffer._internalformat;
+    return rec.texture._image ? rec.texture._image.internalFormat : 0;
+  }
+  function formatColorEncoding(format) {
+    return format === C2.SRGB8_ALPHA8 || format === C2.SRGB8 || format === CExt.SRGB_ALPHA_EXT ? SRGB : LINEAR;
+  }
+  function formatComponentType(format) {
+    const d = localFormatDesc(format);
+    if (d.isDepth || d.isStencil) {
+      if (format === C2.DEPTH_COMPONENT32F || format === C2.DEPTH32F_STENCIL8) return FLOAT;
+      return UNSIGNED_INT;
+    }
+    if (d.isInteger) return d.isSigned ? INT : UNSIGNED_INT;
+    if (d.isFloat) return FLOAT;
+    if (d.isSigned) return SIGNED_NORMALIZED;
+    return UNSIGNED_NORMALIZED;
+  }
+  function localCheckFramebufferStatus(ctx, fbo) {
+    void ctx;
+    if (fbo._attachments.size === 0) return C1.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+    for (const rec of fbo._attachments.values()) {
+      if (rec.type === "renderbuffer") {
+        if (rec.renderbuffer._surface === null) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+      } else {
+        const tex = rec.texture;
+        if (tex._image === null) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        if (rec.level < 0 || rec.level >= tex._image.levels.length) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        const lvl = tex._image.levels[rec.level];
+        if (!lvl || lvl.data.length === 0) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        if (isCubeFace3(rec.face) && lvl.data.length < 6) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        if (rec.layer !== 0 && rec.layer >= lvl.depth) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+      }
+    }
+    return C1.FRAMEBUFFER_COMPLETE;
+  }
+  function computeFramebufferStatus(ctx, fbo) {
+    let status;
+    try {
+      status = checkFramebufferStatus(ctx, fbo);
+    } catch {
+      status = localCheckFramebufferStatus(ctx, fbo);
+    }
+    fbo._status = status;
+    return status;
+  }
+  function attachmentImageKey(fbo, attachment) {
+    if (fbo === null) {
+      if (attachment === BACK3 || attachment === COLOR_ATTACHMENT04 || attachment === 6144) {
+        return { kind: "default" };
+      }
+      return null;
+    }
+    const { rec, conflict } = resolveAttachmentRecord(fbo, attachment);
+    if (conflict || rec === null) return null;
+    if (rec.type === "renderbuffer") return { kind: "rb", rb: rec.renderbuffer };
+    return { kind: "tex", texture: rec.texture, level: rec.level, face: rec.face, layer: rec.layer };
+  }
+  function sameImage2(a, b) {
+    if (a === null || b === null) return false;
+    if (a.kind !== b.kind) return false;
+    if (a.kind === "rb") return b.kind === "rb" && a.rb === b.rb;
+    if (a.kind === "default") return true;
+    if (b.kind !== "tex") return false;
+    return a.texture === b.texture && a.level === b.level && a.face === b.face && a.layer === b.layer;
+  }
+  function installFramebuffersApi(proto) {
+    proto.createFramebuffer = function() {
+      const ctx = this;
+      if (isLost9(ctx)) return null;
+      return createObject(ctx, FboCtor);
+    };
+    proto.deleteFramebuffer = function(framebuffer) {
+      const ctx = this;
+      if (isLost9(ctx)) return;
+      if (framebuffer === null || framebuffer === void 0) return;
+      if (!(framebuffer instanceof WebGLFramebuffer)) throw new TypeError("Argument is not of type 'WebGLFramebuffer'");
+      if (framebuffer._context !== ctx) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (framebuffer._deleted) return;
+      framebuffer._deleted = true;
+      const s = ctx._state;
+      if (s.drawFramebuffer === framebuffer) s.drawFramebuffer = null;
+      if (s.readFramebuffer === framebuffer) s.readFramebuffer = null;
+      ctx._resources.untrack(framebuffer);
+    };
+    proto.isFramebuffer = function(framebuffer) {
+      const ctx = this;
+      if (ctx._isLost) return false;
+      if (framebuffer === null || framebuffer === void 0) return false;
+      if (!(framebuffer instanceof WebGLFramebuffer)) throw new TypeError("Argument is not of type 'WebGLFramebuffer'");
+      if (framebuffer._context !== ctx) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return false;
+      }
+      return !framebuffer._deleted;
+    };
+    proto.bindFramebuffer = function(target, framebuffer) {
+      const ctx = this;
+      if (isLost9(ctx)) return;
+      if (!isValidFramebufferTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const fbo = framebuffer === null || framebuffer === void 0 ? null : validateFbo(ctx, framebuffer);
+      if (framebuffer !== null && framebuffer !== void 0 && fbo === null) return;
+      const s = ctx._state;
+      const prev = boundFramebufferForTarget(ctx, target);
+      if (prev instanceof WebGLFramebuffer) prev._isBound = false;
+      if (ctx._version === 2 && target === C2.READ_FRAMEBUFFER) {
+        s.readFramebuffer = fbo;
+      } else {
+        s.drawFramebuffer = fbo;
+        if (ctx._version === 2 && target === C1.FRAMEBUFFER) s.readFramebuffer = fbo;
+      }
+      if (fbo) fbo._isBound = true;
+    };
+    proto.framebufferRenderbuffer = function(target, attachment, renderbuffertarget, renderbuffer) {
+      const ctx = this;
+      if (isLost9(ctx)) return;
+      if (!isValidFramebufferTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const fbo = boundFramebufferForTarget(ctx, target);
+      if (fbo === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (!isValidAttachment(ctx, attachment)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (renderbuffertarget !== C1.RENDERBUFFER) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const rb = renderbuffer === null || renderbuffer === void 0 ? null : validateRbo(ctx, renderbuffer);
+      if (renderbuffer !== null && renderbuffer !== void 0 && rb === null) return;
+      if (rb !== null && ctx._version === 1 && !everBoundRenderbuffers.has(rb)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      for (const key of attachmentKeys(ctx, attachment)) {
+        if (rb === null) fbo._attachments.delete(key);
+        else fbo._attachments.set(key, { type: "renderbuffer", renderbuffer: rb });
+      }
+      invalidateFboStatus(fbo);
+    };
+    proto.framebufferTexture2D = function(target, attachment, textarget, texture, level) {
+      const ctx = this;
+      if (isLost9(ctx)) return;
+      if (!isValidFramebufferTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const fbo = boundFramebufferForTarget(ctx, target);
+      if (fbo === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (!isValidAttachment(ctx, attachment)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (!isTextureTarget2D(textarget)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const tex = texture === null || texture === void 0 ? null : validateTex(ctx, texture);
+      if (texture !== null && texture !== void 0 && tex === null) return;
+      if (tex !== null) {
+        const cubeTex = tex._target === C1.TEXTURE_CUBE_MAP;
+        const flatTex = tex._target === C1.TEXTURE_2D || tex._target === 0;
+        if (isCubeFace3(textarget)) {
+          if (!cubeTex && tex._target !== 0) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+        } else if (!flatTex) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        let maxLevel;
+        if (ctx._version === 1) {
+          if (level !== 0 && ctx.getExtension("OES_fbo_render_mipmap") === null) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          maxLevel = numLevelsFromSize(ctx._state.limits.MAX_TEXTURE_SIZE);
+        } else {
+          maxLevel = numLevelsFromSize(ctx._state.limits.MAX_TEXTURE_SIZE);
+        }
+        if (level < 0 || level >= maxLevel) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+      }
+      for (const key of attachmentKeys(ctx, attachment)) {
+        if (tex === null) fbo._attachments.delete(key);
+        else fbo._attachments.set(key, { type: "texture", texture: tex, level, face: textarget, layer: 0 });
+      }
+      invalidateFboStatus(fbo);
+    };
+    proto.checkFramebufferStatus = function(target) {
+      const ctx = this;
+      if (ctx._isLost) return C1.FRAMEBUFFER_UNSUPPORTED;
+      if (!isValidFramebufferTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return 0;
+      }
+      const fbo = boundFramebufferForTarget(ctx, target);
+      if (fbo === null) return C1.FRAMEBUFFER_COMPLETE;
+      return computeFramebufferStatus(ctx, fbo);
+    };
+    proto.getFramebufferAttachmentParameter = function(target, attachment, pname) {
+      const ctx = this;
+      if (isLost9(ctx)) return null;
+      if (!isValidFramebufferTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return null;
+      }
+      const fbo = boundFramebufferForTarget(ctx, target);
+      if (fbo === null) {
+        if (ctx._version === 1) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return null;
+        }
+        if (attachment !== BACK3 && attachment !== C2.DEPTH && attachment !== C2.STENCIL) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        }
+        return defaultFbAttachmentParameter(ctx, pname);
+      }
+      if (!isValidAttachment(ctx, attachment)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return null;
+      }
+      const { rec, conflict } = resolveAttachmentRecord(fbo, attachment);
+      if (conflict) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
+      if (ctx._version === 1) {
+        switch (pname) {
+          case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
+            return rec === null ? NONE4 : rec.type === "renderbuffer" ? C1.RENDERBUFFER : TEXTURE;
+          case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
+            if (rec === null) {
+              ctx._errors.push(C1.INVALID_ENUM);
+              return null;
+            }
+            return rec.type === "renderbuffer" ? rec.renderbuffer : rec.texture;
+          case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+            if (rec === null) {
+              ctx._errors.push(C1.INVALID_ENUM);
+              return null;
+            }
+            return rec.type === "renderbuffer" ? 0 : rec.level;
+          case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+            if (rec === null) {
+              ctx._errors.push(C1.INVALID_ENUM);
+              return null;
+            }
+            return rec.type === "renderbuffer" ? 0 : rec.face;
+          default:
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+        }
+      }
+      switch (pname) {
+        case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
+          return rec === null ? NONE4 : rec.type === "renderbuffer" ? C1.RENDERBUFFER : TEXTURE;
+        case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
+          if (rec === null) return null;
+          return rec.type === "renderbuffer" ? rec.renderbuffer : rec.texture;
+        case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+          if (rec === null) return 0;
+          return rec.type === "renderbuffer" ? 0 : rec.level;
+        case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+          if (rec === null) return 0;
+          return rec.type === "renderbuffer" ? 0 : rec.face;
+        case C2.FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+          if (rec === null) return 0;
+          return rec.type === "renderbuffer" ? 0 : rec.layer;
+        case C2.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+        case C2.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+        case C2.FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+        case C2.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+        case C2.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+        case C2.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
+        case C2.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+        case C2.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+          if (rec === null) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return null;
+          }
+          return attachmentParameterValue(ctx, rec, pname);
+        case TEXTURE_SAMPLES_EXT2:
+          if (ctx.getExtension("WEBGL_multisampled_render_to_texture") === null) {
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+          }
+          if (rec === null) return 0;
+          return rec.type === "texture" ? rec.texture._msaaSamples : 0;
+        default:
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+      }
+    };
+    proto.createRenderbuffer = function() {
+      const ctx = this;
+      if (isLost9(ctx)) return null;
+      return createObject(ctx, RboCtor);
+    };
+    proto.deleteRenderbuffer = function(renderbuffer) {
+      const ctx = this;
+      if (isLost9(ctx)) return;
+      if (renderbuffer === null || renderbuffer === void 0) return;
+      if (!(renderbuffer instanceof WebGLRenderbuffer)) throw new TypeError("Argument is not of type 'WebGLRenderbuffer'");
+      if (renderbuffer._context !== ctx) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (renderbuffer._deleted) return;
+      renderbuffer._deleted = true;
+      if (ctx._state.renderbuffer === renderbuffer) ctx._state.renderbuffer = null;
+      let touched = false;
+      for (const obj of ctx._resources.all) {
+        if (obj instanceof WebGLFramebuffer) {
+          let changed = false;
+          for (const [key, rec] of obj._attachments) {
+            if (rec.type === "renderbuffer" && rec.renderbuffer === renderbuffer) {
+              obj._attachments.delete(key);
+              changed = true;
+            }
+          }
+          if (changed) {
+            invalidateFboStatus(obj);
+            touched = true;
+          }
+        }
+      }
+      void touched;
+      ctx._resources.untrack(renderbuffer);
+    };
+    proto.isRenderbuffer = function(renderbuffer) {
+      const ctx = this;
+      if (ctx._isLost) return false;
+      if (renderbuffer === null || renderbuffer === void 0) return false;
+      if (!(renderbuffer instanceof WebGLRenderbuffer)) throw new TypeError("Argument is not of type 'WebGLRenderbuffer'");
+      if (renderbuffer._context !== ctx) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return false;
+      }
+      return !renderbuffer._deleted;
+    };
+    proto.bindRenderbuffer = function(target, renderbuffer) {
+      const ctx = this;
+      if (isLost9(ctx)) return;
+      if (target !== C1.RENDERBUFFER) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const rb = renderbuffer === null || renderbuffer === void 0 ? null : validateRbo(ctx, renderbuffer);
+      if (renderbuffer !== null && renderbuffer !== void 0 && rb === null) return;
+      if (rb !== null) everBoundRenderbuffers.add(rb);
+      ctx._state.renderbuffer = rb;
+    };
+    proto.renderbufferStorage = function(target, internalformat, width, height) {
+      const ctx = this;
+      if (isLost9(ctx)) return;
+      if (target !== C1.RENDERBUFFER) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const rb = ctx._state.renderbuffer;
+      if (rb === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (width < 0 || height < 0 || width > ctx._state.limits.MAX_RENDERBUFFER_SIZE || height > ctx._state.limits.MAX_RENDERBUFFER_SIZE) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (!isValidRenderbufferFormat(ctx, internalformat)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      allocateRenderbufferSurface(ctx, rb, internalformat, width, height);
+      rb._internalformat = internalformat;
+      rb._width = width;
+      rb._height = height;
+      rb._samples = 0;
+      invalidateFboStatuses(ctx);
+    };
+    proto.getRenderbufferParameter = function(target, pname) {
+      const ctx = this;
+      if (isLost9(ctx)) return null;
+      if (target !== C1.RENDERBUFFER) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return null;
+      }
+      const rb = ctx._state.renderbuffer;
+      if (rb === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
+      switch (pname) {
+        case C1.RENDERBUFFER_WIDTH:
+          return rb._width;
+        case C1.RENDERBUFFER_HEIGHT:
+          return rb._height;
+        case C1.RENDERBUFFER_INTERNAL_FORMAT:
+          return rb._internalformat;
+        case C2.RENDERBUFFER_SAMPLES:
+          return rb._samples;
+        case C1.RENDERBUFFER_RED_SIZE:
+        case C1.RENDERBUFFER_GREEN_SIZE:
+        case C1.RENDERBUFFER_BLUE_SIZE:
+        case C1.RENDERBUFFER_ALPHA_SIZE:
+        case C1.RENDERBUFFER_DEPTH_SIZE:
+        case C1.RENDERBUFFER_STENCIL_SIZE: {
+          const bits = formatComponentBits(rb._internalformat);
+          return bits[pname - C1.RENDERBUFFER_RED_SIZE];
+        }
+        default:
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+      }
+    };
+    const p2 = proto;
+    if ("framebufferTextureLayer" in proto) {
+      p2.framebufferTextureLayer = function(target, attachment, texture, level, layer) {
+        const ctx = this;
+        if (isLost9(ctx)) return;
+        if (!isValidFramebufferTarget(ctx, target)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const fbo = boundFramebufferForTarget(ctx, target);
+        if (fbo === null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (!isValidAttachment(ctx, attachment)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const tex = texture === null || texture === void 0 ? null : validateTex(ctx, texture);
+        if (texture !== null && texture !== void 0 && tex === null) return;
+        if (tex !== null) {
+          if (tex._target !== 0 && tex._target !== C2.TEXTURE_2D_ARRAY && tex._target !== C2.TEXTURE_3D) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          const maxLevel = numLevelsFromSize(ctx._state.limits.MAX_3D_TEXTURE_SIZE);
+          if (level < 0 || level >= maxLevel) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          const depth = tex._image ? tex._image.depth : 1;
+          if (layer < 0 || layer >= depth) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+        }
+        for (const key of attachmentKeys(ctx, attachment)) {
+          if (tex === null) fbo._attachments.delete(key);
+          else fbo._attachments.set(key, { type: "texture", texture: tex, level, face: C2.TEXTURE_2D_ARRAY, layer });
+        }
+        invalidateFboStatus(fbo);
+      };
+    }
+    if ("renderbufferStorageMultisample" in proto) {
+      p2.renderbufferStorageMultisample = function(target, samples, internalformat, width, height) {
+        const ctx = this;
+        if (isLost9(ctx)) return;
+        if (target !== C1.RENDERBUFFER) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const rb = ctx._state.renderbuffer;
+        if (rb === null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (width < 0 || height < 0 || width > ctx._state.limits.MAX_RENDERBUFFER_SIZE || height > ctx._state.limits.MAX_RENDERBUFFER_SIZE) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (samples < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (samples > ctx._state.limits.MAX_SAMPLES) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (!isValidRenderbufferFormat(ctx, internalformat)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        allocateRenderbufferSurface(ctx, rb, internalformat, width, height);
+        rb._internalformat = internalformat;
+        rb._width = width;
+        rb._height = height;
+        rb._samples = samples;
+        invalidateFboStatuses(ctx);
+      };
+    }
+    if ("drawBuffers" in proto) {
+      p2.drawBuffers = function(buffers) {
+        const ctx = this;
+        if (isLost9(ctx)) return;
+        const s = ctx._state;
+        let arr;
+        try {
+          arr = Array.from(buffers, (v) => {
+            const n = Number(v);
+            if (!Number.isFinite(n)) throw new TypeError("drawBuffers: invalid GLenum in sequence");
+            return n >>> 0;
+          });
+        } catch {
+          throw new TypeError("drawBuffers: buffers is not a sequence<GLenum>");
+        }
+        if (arr.length > s.limits.MAX_DRAW_BUFFERS) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (arr.length === 0) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (s.drawFramebuffer === null) {
+          if (arr.length !== 1 || arr[0] !== BACK3 && arr[0] !== NONE4) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          s.drawBuffers = arr;
+          return;
+        }
+        let last = -1;
+        for (const b of arr) {
+          if (b === NONE4) continue;
+          if (b === BACK3) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          const idx = b - COLOR_ATTACHMENT04;
+          if (idx < 0 || idx >= s.limits.MAX_COLOR_ATTACHMENTS) {
+            ctx._errors.push(C1.INVALID_ENUM);
+            return;
+          }
+          if (idx <= last) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+          last = idx;
+        }
+        s.drawBuffers = arr;
+      };
+    }
+    if ("readBuffer" in proto) {
+      p2.readBuffer = function(src) {
+        const ctx = this;
+        if (isLost9(ctx)) return;
+        const s = ctx._state;
+        if (src === NONE4) {
+          s.readBuffer = src;
+          return;
+        }
+        if (s.readFramebuffer === null) {
+          if (src === BACK3) {
+            s.readBuffer = src;
+            return;
+          }
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (src === BACK3) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const idx = src - COLOR_ATTACHMENT04;
+        if (idx < 0) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        if (idx >= s.limits.MAX_COLOR_ATTACHMENTS) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        s.readBuffer = src;
+      };
+    }
+    if ("invalidateFramebuffer" in proto) {
+      p2.invalidateFramebuffer = function(target, attachments) {
+        const ctx = this;
+        if (isLost9(ctx)) return;
+        if (!isValidFramebufferTarget(ctx, target)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const arr = toGlenumSequence(attachments);
+        if (!validateInvalidateAttachments(ctx, target, arr)) return;
+      };
+      p2.invalidateSubFramebuffer = function(target, attachments, x, y, width, height) {
+        const ctx = this;
+        if (isLost9(ctx)) return;
+        if (!isValidFramebufferTarget(ctx, target)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const arr = toGlenumSequence(attachments);
+        if (!validateInvalidateAttachments(ctx, target, arr)) return;
+        if (width < 0 || height < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        void x;
+        void y;
+      };
+    }
+    if ("blitFramebuffer" in proto) {
+      p2.blitFramebuffer = function(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter) {
+        const ctx = this;
+        if (isLost9(ctx)) return;
+        const s = ctx._state;
+        const allowedMask = C1.COLOR_BUFFER_BIT | C1.DEPTH_BUFFER_BIT | C1.STENCIL_BUFFER_BIT;
+        if ((mask & ~allowedMask) !== 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (filter !== C1.NEAREST && filter !== LINEAR) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        if (filter === LINEAR && (mask & (C1.DEPTH_BUFFER_BIT | C1.STENCIL_BUFFER_BIT)) !== 0) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const readFbo = s.readFramebuffer;
+        const drawFbo = s.drawFramebuffer;
+        if (readFbo === drawFbo) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (readFbo !== null && computeFramebufferStatus(ctx, readFbo) !== C1.FRAMEBUFFER_COMPLETE) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (drawFbo !== null && computeFramebufferStatus(ctx, drawFbo) !== C1.FRAMEBUFFER_COMPLETE) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if ((mask & C1.COLOR_BUFFER_BIT) !== 0) {
+          const readKey = attachmentImageKey(readFbo, readFbo === null ? BACK3 : s.readBuffer);
+          if (readKey !== null) {
+            const dbList = drawFbo === null ? [BACK3] : s.drawBuffers;
+            for (const db of dbList) {
+              if (db === NONE4) continue;
+              if (sameImage2(readKey, attachmentImageKey(drawFbo, db))) {
+                ctx._errors.push(C1.INVALID_OPERATION);
+                return;
+              }
+            }
+          }
+        }
+        if ((mask & C1.DEPTH_BUFFER_BIT) !== 0 && sameImage2(attachmentImageKey(readFbo, DEPTH_ATTACHMENT3), attachmentImageKey(drawFbo, DEPTH_ATTACHMENT3))) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if ((mask & C1.STENCIL_BUFFER_BIT) !== 0 && sameImage2(attachmentImageKey(readFbo, STENCIL_ATTACHMENT3), attachmentImageKey(drawFbo, STENCIL_ATTACHMENT3))) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const readMS = readFbo !== null && readFbo._multisampled;
+        const drawMS = drawFbo !== null && drawFbo._multisampled;
+        if (drawMS) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        try {
+          executeBlitFramebuffer(ctx, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+  }
+  var everBoundRenderbuffers = /* @__PURE__ */ new WeakSet();
+  function defaultFbAttachmentParameter(ctx, pname) {
+    switch (pname) {
+      case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
+        return FRAMEBUFFER_DEFAULT;
+      case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
+        return null;
+      case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+      case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+      case C2.FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+        return 0;
+      case C2.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+        return LINEAR;
+      case C2.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+        return UNSIGNED_NORMALIZED;
+      case C2.FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+      case C2.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+      case C2.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+      case C2.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE: {
+        const fb = ctx._defaultFB;
+        const format = fb ? fb.color.format : 0;
+        const bits = formatComponentBits(format);
+        return bits[pname - C2.FRAMEBUFFER_ATTACHMENT_RED_SIZE];
+      }
+      case C2.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE: {
+        const fb = ctx._defaultFB;
+        const format = fb && fb.depth ? fb.depth.format : 0;
+        return formatComponentBits(format)[4];
+      }
+      case C2.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE: {
+        const fb = ctx._defaultFB;
+        const format = fb && fb.stencil ? fb.stencil.format : 0;
+        return formatComponentBits(format)[5];
+      }
+      default:
+        ctx._errors.push(C1.INVALID_ENUM);
+        return null;
+    }
+  }
+  function attachmentParameterValue(ctx, rec, pname) {
+    const format = attachmentInternalFormat(rec);
+    switch (pname) {
+      case C2.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+        return formatColorEncoding(format);
+      case C2.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+        return formatComponentType(format);
+      default: {
+        const bits = formatComponentBits(format);
+        const idx = pname - C2.FRAMEBUFFER_ATTACHMENT_RED_SIZE;
+        if (idx >= 0 && idx <= 5) return bits[idx];
+        ctx._errors.push(C1.INVALID_ENUM);
+        return null;
+      }
+    }
+  }
+  function toGlenumSequence(attachments) {
+    return Array.from(attachments, (v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) throw new TypeError("attachments: invalid GLenum in sequence");
+      return n >>> 0;
+    });
+  }
+  function validateInvalidateAttachments(ctx, target, arr) {
+    const isDefault = boundFramebufferForTarget(ctx, target) === null;
+    const maxColor = ctx._state.limits.MAX_COLOR_ATTACHMENTS;
+    for (const a of arr) {
+      if (isDefault) {
+        if (a === C2.COLOR || a === C2.DEPTH || a === C2.STENCIL) continue;
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return false;
+      }
+      if (a === DEPTH_ATTACHMENT3 || a === STENCIL_ATTACHMENT3 || a === DEPTH_STENCIL_ATTACHMENT2) continue;
+      const idx = a - COLOR_ATTACHMENT04;
+      if (idx >= 0 && idx < maxColor) continue;
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    return true;
+  }
+
+  // src/gl/api/draw.ts
+  function isLost10(ctx) {
+    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
+    return ctx._isLost;
+  }
+  var GL_COLOR_INT = 35727;
+  var GL_COLOR_UINT = 35728;
+  var CLEAR_BUFFERS = /* @__PURE__ */ new Set([
+    C2.COLOR,
+    GL_COLOR_INT,
+    GL_COLOR_UINT,
+    C2.DEPTH,
+    C2.STENCIL,
+    C2.DEPTH_STENCIL
+  ]);
+  var CLEAR_FV = /* @__PURE__ */ new Set([C2.COLOR, C2.DEPTH, C2.STENCIL]);
+  var CLEAR_IV = /* @__PURE__ */ new Set([GL_COLOR_INT, C2.DEPTH, C2.STENCIL]);
+  var CLEAR_UIV = /* @__PURE__ */ new Set([GL_COLOR_UINT]);
+  function toList(values, Ctor, name) {
+    if (values instanceof Ctor) return values;
+    if (Array.isArray(values) || ArrayBuffer.isView(values)) {
+      return new Ctor(values);
+    }
+    throw new TypeError(`Argument is not of type '${name}'`);
+  }
+  function validateClearBufferArgs(ctx, buffer, drawbuffer) {
+    const s = ctx._state;
+    if (!CLEAR_BUFFERS.has(buffer)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return false;
+    }
+    if (drawbuffer < 0 || drawbuffer >= s.limits.MAX_DRAW_BUFFERS) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return false;
+    }
+    if (buffer !== C2.COLOR && buffer !== GL_COLOR_INT && buffer !== GL_COLOR_UINT && drawbuffer !== 0) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    return true;
+  }
+  var RP_FORMATS_1 = /* @__PURE__ */ new Set([
+    C1.RGBA,
+    C1.RGB,
+    C1.LUMINANCE,
+    C1.LUMINANCE_ALPHA,
+    C1.ALPHA
+  ]);
+  var RP_FORMATS_2 = /* @__PURE__ */ new Set([
+    ...RP_FORMATS_1,
+    C2.RED,
+    C2.RG,
+    C2.RED_INTEGER,
+    C2.RG_INTEGER,
+    C2.RGB_INTEGER,
+    C2.RGBA_INTEGER,
+    C1.DEPTH_COMPONENT,
+    C2.DEPTH_STENCIL
+  ]);
+  var RP_TYPES_1 = /* @__PURE__ */ new Set([
+    C1.UNSIGNED_BYTE,
+    C1.BYTE,
+    C1.UNSIGNED_SHORT,
+    C1.SHORT,
+    C1.UNSIGNED_INT,
+    C1.INT,
+    C1.FLOAT,
+    C1.UNSIGNED_SHORT_5_6_5,
+    C1.UNSIGNED_SHORT_4_4_4_4,
+    C1.UNSIGNED_SHORT_5_5_5_1,
+    5131,
+    36193
+  ]);
+  var RP_TYPES_2 = /* @__PURE__ */ new Set([
+    ...RP_TYPES_1,
+    C2.UNSIGNED_INT_2_10_10_10_REV,
+    C2.UNSIGNED_INT_24_8,
+    C2.FLOAT_32_UNSIGNED_INT_24_8_REV
+  ]);
+  function expectedViewForType(type) {
+    switch (type) {
+      case C1.UNSIGNED_BYTE:
+        return "u8";
+      case C1.BYTE:
+        return Int8Array;
+      case C1.UNSIGNED_SHORT:
+      case C1.UNSIGNED_SHORT_5_6_5:
+      case C1.UNSIGNED_SHORT_4_4_4_4:
+      case C1.UNSIGNED_SHORT_5_5_5_1:
+      case 5131:
+      case 36193:
+        return Uint16Array;
+      case C1.SHORT:
+        return Int16Array;
+      case C1.UNSIGNED_INT:
+      case C2.UNSIGNED_INT_2_10_10_10_REV:
+      case C2.UNSIGNED_INT_24_8:
+        return Uint32Array;
+      case C1.INT:
+        return Int32Array;
+      case C1.FLOAT:
+      case C2.FLOAT_32_UNSIGNED_INT_24_8_REV:
+        return Float32Array;
+      default:
+        return null;
+    }
+  }
+  function floatReadOK(ctx, type, halfFloat) {
+    if (type === C1.FLOAT) return extSupported(ctx, "EXT_color_buffer_float");
+    if (type === C2.HALF_FLOAT || type === 36193) {
+      return halfFloat && (extSupported(ctx, "EXT_color_buffer_float") || extSupported(ctx, "EXT_color_buffer_half_float"));
+    }
+    if (type === C2.UNSIGNED_INT_10F_11F_11F_REV) return extSupported(ctx, "EXT_color_buffer_float");
+    return false;
+  }
+  function readComboOK(ctx, internalFormat, format, type) {
+    switch (internalFormat) {
+      // Unsigned normalized color
+      case C1.RGBA:
+      case C1.RGBA8:
+      case C2.RGBA8:
+      case C2.SRGB8_ALPHA8:
+        return format === C1.RGBA && type === C1.UNSIGNED_BYTE;
+      case C1.RGBA4:
+        return format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4);
+      case C1.RGB5_A1:
+        return format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_5_5_1);
+      case C1.RGB565:
+        return format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5);
+      case C1.RGB:
+      case C2.RGB8:
+        return format === C1.RGB && type === C1.UNSIGNED_BYTE;
+      case C2.R8:
+        return format === C2.RED && type === C1.UNSIGNED_BYTE;
+      case C2.RG8:
+        return format === C2.RG && type === C1.UNSIGNED_BYTE;
+      case C2.RGB10_A2:
+        return format === C1.RGBA && type === C2.UNSIGNED_INT_2_10_10_10_REV;
+      case C2.RGB10_A2UI:
+        return format === C2.RGBA_INTEGER && type === C1.UNSIGNED_INT;
+      // Floating point (renderable only with the color-buffer-float extensions)
+      case C2.R16F:
+        return format === C2.RED && floatReadOK(ctx, type, true);
+      case C2.RG16F:
+        return format === C2.RG && floatReadOK(ctx, type, true);
+      case C2.RGBA16F:
+        return format === C1.RGBA && floatReadOK(ctx, type, true);
+      case C2.R32F:
+        return format === C2.RED && floatReadOK(ctx, type, false);
+      case C2.RG32F:
+        return format === C2.RG && floatReadOK(ctx, type, false);
+      case C2.RGBA32F:
+        return format === C1.RGBA && floatReadOK(ctx, type, false);
+      case C2.R11F_G11F_B10F:
+        return format === C1.RGB && floatReadOK(ctx, type, true);
+      // Signed / unsigned integer
+      case C2.R8I:
+        return format === C2.RED_INTEGER && type === C1.BYTE;
+      case C2.R8UI:
+        return format === C2.RED_INTEGER && type === C1.UNSIGNED_BYTE;
+      case C2.R16I:
+        return format === C2.RED_INTEGER && type === C1.SHORT;
+      case C2.R16UI:
+        return format === C2.RED_INTEGER && type === C1.UNSIGNED_SHORT;
+      case C2.R32I:
+        return format === C2.RED_INTEGER && type === C1.INT;
+      case C2.R32UI:
+        return format === C2.RED_INTEGER && type === C1.UNSIGNED_INT;
+      case C2.RG8I:
+        return format === C2.RG_INTEGER && type === C1.BYTE;
+      case C2.RG8UI:
+        return format === C2.RG_INTEGER && type === C1.UNSIGNED_BYTE;
+      case C2.RG16I:
+        return format === C2.RG_INTEGER && type === C1.SHORT;
+      case C2.RG16UI:
+        return format === C2.RG_INTEGER && type === C1.UNSIGNED_SHORT;
+      case C2.RG32I:
+        return format === C2.RG_INTEGER && type === C1.INT;
+      case C2.RG32UI:
+        return format === C2.RG_INTEGER && type === C1.UNSIGNED_INT;
+      case C2.RGB8I:
+        return format === C2.RGB_INTEGER && type === C1.BYTE;
+      case C2.RGB8UI:
+        return format === C2.RGB_INTEGER && type === C1.UNSIGNED_BYTE;
+      case C2.RGB16I:
+        return format === C2.RGB_INTEGER && type === C1.SHORT;
+      case C2.RGB16UI:
+        return format === C2.RGB_INTEGER && type === C1.UNSIGNED_SHORT;
+      case C2.RGB32I:
+        return format === C2.RGB_INTEGER && type === C1.INT;
+      case C2.RGB32UI:
+        return format === C2.RGB_INTEGER && type === C1.UNSIGNED_INT;
+      case C2.RGBA8I:
+        return format === C2.RGBA_INTEGER && type === C1.BYTE;
+      case C2.RGBA8UI:
+        return format === C2.RGBA_INTEGER && type === C1.UNSIGNED_BYTE;
+      case C2.RGBA16I:
+        return format === C2.RGBA_INTEGER && type === C1.SHORT;
+      case C2.RGBA16UI:
+        return format === C2.RGBA_INTEGER && type === C1.UNSIGNED_SHORT;
+      case C2.RGBA32I:
+        return format === C2.RGBA_INTEGER && type === C1.INT;
+      case C2.RGBA32UI:
+        return format === C2.RGBA_INTEGER && type === C1.UNSIGNED_INT;
+      // Depth / depth-stencil
+      case C1.DEPTH_COMPONENT16:
+        return format === C1.DEPTH_COMPONENT && (type === C1.UNSIGNED_SHORT || type === C1.UNSIGNED_INT);
+      case C2.DEPTH_COMPONENT24:
+        return format === C1.DEPTH_COMPONENT && type === C1.UNSIGNED_INT;
+      case C2.DEPTH_COMPONENT32F:
+        return format === C1.DEPTH_COMPONENT && type === C1.FLOAT;
+      case C2.DEPTH24_STENCIL8:
+        return format === C2.DEPTH_STENCIL && type === C2.UNSIGNED_INT_24_8;
+      case C2.DEPTH32F_STENCIL8:
+        return format === C2.DEPTH_STENCIL && type === C2.FLOAT_32_UNSIGNED_INT_24_8_REV;
+      default:
+        return false;
+    }
+  }
+  function packBytesPerPixel2(format, type) {
+    const comps = format === C1.RGBA || format === C2.RGBA_INTEGER ? 4 : format === C1.RGB || format === C2.RGB_INTEGER ? 3 : format === C1.LUMINANCE_ALPHA || format === C2.RG || format === C2.RG_INTEGER || format === C2.DEPTH_STENCIL ? 2 : 1;
+    switch (type) {
+      case C1.UNSIGNED_BYTE:
+      case C1.BYTE:
+        return comps;
+      case C1.UNSIGNED_SHORT_5_6_5:
+      case C1.UNSIGNED_SHORT_4_4_4_4:
+      case C1.UNSIGNED_SHORT_5_5_5_1:
+      case C1.UNSIGNED_SHORT:
+      case C1.SHORT:
+      case C2.HALF_FLOAT:
+      case 36193:
+        return comps * 2;
+      case C2.UNSIGNED_INT_2_10_10_10_REV:
+        return 4;
+      case C2.FLOAT_32_UNSIGNED_INT_24_8_REV:
+        return 8;
+      default:
+        return comps * 4;
+    }
+  }
+  function alignUp2(n, align2) {
+    return Math.ceil(n / align2) * align2;
+  }
+  function installDrawApi(proto) {
+    proto.drawArrays = function(mode, first, count) {
+      const ctx = this;
+      if (isLost10(ctx)) return;
+      const req = validateDrawArrays(ctx, mode, first, count, 1);
+      if (!req) return;
+      try {
+        executeDraw(ctx, req);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    };
+    proto.drawElements = function(mode, count, type, offset) {
+      const ctx = this;
+      if (isLost10(ctx)) return;
+      const req = validateDrawElements(ctx, mode, count, type, offset);
+      if (!req) return;
+      try {
+        executeDraw(ctx, req);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    };
+    proto.clear = function(mask) {
+      const ctx = this;
+      if (isLost10(ctx)) return;
+      if ((mask & ~(C1.COLOR_BUFFER_BIT | C1.DEPTH_BUFFER_BIT | C1.STENCIL_BUFFER_BIT)) !== 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      try {
+        executeClear(ctx, mask);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    };
+    proto.flush = function() {
+      if (isLost10(this)) return;
+    };
+    proto.finish = function() {
+      if (isLost10(this)) return;
+    };
+    proto.readPixels = function(x, y, width, height, format, type, pixels) {
+      var _a2, _b;
+      const ctx = this;
+      if (isLost10(ctx)) return;
+      if (pixels === null || pixels === void 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (!ArrayBuffer.isView(pixels)) {
+        throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
+      }
+      const s = ctx._state;
+      if (width < 0 || height < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      const formats = s.version === 2 ? RP_FORMATS_2 : RP_FORMATS_1;
+      const types = s.version === 2 ? RP_TYPES_2 : RP_TYPES_1;
+      if (!formats.has(format)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (!types.has(type)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (s.pixelPackBuffer && s.pixelPackBuffer._data) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const fbo = s.readFramebuffer;
+      if (fbo === null) {
+        if (format !== C1.RGBA || type !== C1.UNSIGNED_BYTE) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+      } else {
+        const rb = s.version === 2 ? s.readBuffer : C1.COLOR_ATTACHMENT0;
+        const att = fbo._attachments.get(rb);
+        if (!att) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const internalFormat = att.type === "renderbuffer" ? att.renderbuffer._internalformat : (_b = (_a2 = att.texture._image) == null ? void 0 : _a2.internalFormat) != null ? _b : 0;
+        if (!readComboOK(ctx, internalFormat, format, type)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+      }
+      const want = expectedViewForType(type);
+      if (want === null) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const viewOK = want === "u8" ? pixels instanceof Uint8Array || pixels instanceof Uint8ClampedArray : pixels instanceof want;
+      if (!viewOK) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const bpp = packBytesPerPixel2(format, type);
+      const pack = s.pixelStore.pack;
+      const rowLen = pack.rowLength || width;
+      if (s.version === 2 && pack.skipPixels + width > rowLen) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const rowStride = alignUp2(rowLen * bpp, pack.alignment);
+      const needed = pack.skipRows * rowStride + pack.skipPixels * bpp + (height > 0 ? rowStride * (height - 1) + width * bpp : 0);
+      if (pixels.byteLength - pixels.byteOffset < needed) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      try {
+        executeReadPixels(ctx, x, y, width, height, format, type, pixels);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    };
+    const p2 = proto;
+    if ("drawArraysInstanced" in p2) {
+      p2.drawArraysInstanced = function(mode, first, count, instanceCount) {
+        const ctx = this;
+        if (isLost10(ctx)) return;
+        const req = validateDrawArrays(ctx, mode, first, count, instanceCount);
+        if (!req) return;
+        try {
+          executeDraw(ctx, req);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+    if ("drawElementsInstanced" in p2) {
+      p2.drawElementsInstanced = function(mode, count, type, offset, instanceCount) {
+        const ctx = this;
+        if (isLost10(ctx)) return;
+        const req = validateDrawElements(ctx, mode, count, type, offset, { instanceCount });
+        if (!req) return;
+        try {
+          executeDraw(ctx, req);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+    if ("drawRangeElements" in p2) {
+      p2.drawRangeElements = function(mode, start, end, count, type, offset) {
+        const ctx = this;
+        if (isLost10(ctx)) return;
+        const req = validateDrawElements(ctx, mode, count, type, offset, { range: [start, end] });
+        if (!req) return;
+        try {
+          executeDraw(ctx, req);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+    if ("clearBufferfv" in p2) {
+      p2.clearBufferfv = function(buffer, drawbuffer, values) {
+        const ctx = this;
+        if (isLost10(ctx)) return;
+        const v = toList(values, Float32Array, "Float32List");
+        if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
+        if (!CLEAR_FV.has(buffer)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const need = buffer === C2.COLOR ? 4 : 1;
+        if (v.length < need) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        try {
+          executeClearBuffer(ctx, buffer, drawbuffer, v);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+    if ("clearBufferiv" in p2) {
+      p2.clearBufferiv = function(buffer, drawbuffer, values) {
+        const ctx = this;
+        if (isLost10(ctx)) return;
+        const v = toList(values, Int32Array, "Int32List");
+        if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
+        if (!CLEAR_IV.has(buffer)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const need = buffer === GL_COLOR_INT ? 4 : 1;
+        if (v.length < need) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        try {
+          executeClearBuffer(ctx, buffer, drawbuffer, v);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+    if ("clearBufferuiv" in p2) {
+      p2.clearBufferuiv = function(buffer, drawbuffer, values) {
+        const ctx = this;
+        if (isLost10(ctx)) return;
+        const v = toList(values, Uint32Array, "Uint32List");
+        if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
+        if (!CLEAR_UIV.has(buffer)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (v.length < 4) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        try {
+          executeClearBuffer(ctx, buffer, drawbuffer, v);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+    if ("clearBufferfi" in p2) {
+      p2.clearBufferfi = function(buffer, drawbuffer, depth, stencil) {
+        const ctx = this;
+        if (isLost10(ctx)) return;
+        if (!CLEAR_BUFFERS.has(buffer)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        if (buffer !== C2.DEPTH_STENCIL) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (drawbuffer !== 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        try {
+          executeClearBuffer(ctx, buffer, drawbuffer, null, depth, stencil);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+  }
+
+  // src/gl/api/webgl2.ts
+  function isLost11(ctx) {
+    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
+    return ctx._isLost;
+  }
+  function ctorPair(C3) {
+    const make = C3;
+    return { make, any: make };
+  }
+  var Query = ctorPair(WebGLQuery);
+  var Sync = ctorPair(WebGLSync);
+  var Sampler = ctorPair(WebGLSampler);
+  var Vao = ctorPair(WebGLVertexArrayObject);
+  var Tf = ctorPair(WebGLTransformFeedback);
+  var QUERY_TARGETS = /* @__PURE__ */ new Set([
+    C2.ANY_SAMPLES_PASSED,
+    C2.ANY_SAMPLES_PASSED_CONSERVATIVE,
+    C2.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN
+  ]);
+  function activeQueryAt(ctx, target) {
+    var _a2;
+    const slots = ctx._state.activeQueries;
+    return (_a2 = slots[target]) != null ? _a2 : null;
+  }
+  function setActiveQuery(ctx, target, q) {
+    const slots = ctx._state.activeQueries;
+    slots[target] = q;
+  }
+  var nextSyncId = 1;
+  var MIN_FILTER_VALUES2 = /* @__PURE__ */ new Set([
+    C1.NEAREST,
+    C1.LINEAR,
+    C1.NEAREST_MIPMAP_NEAREST,
+    C1.NEAREST_MIPMAP_LINEAR,
+    C1.LINEAR_MIPMAP_NEAREST,
+    C1.LINEAR_MIPMAP_LINEAR
+  ]);
+  var MAG_FILTER_VALUES2 = /* @__PURE__ */ new Set([C1.NEAREST, C1.LINEAR]);
+  var WRAP_VALUES2 = /* @__PURE__ */ new Set([C1.REPEAT, C1.CLAMP_TO_EDGE, C1.MIRRORED_REPEAT]);
+  var COMPARE_MODE_VALUES2 = /* @__PURE__ */ new Set([C1.NONE, C2.COMPARE_REF_TO_TEXTURE]);
+  var COMPARE_FUNC_VALUES2 = /* @__PURE__ */ new Set([
+    C1.NEVER,
+    C1.LESS,
+    C1.EQUAL,
+    C1.LEQUAL,
+    C1.GREATER,
+    C1.NOTEQUAL,
+    C1.GEQUAL,
+    C1.ALWAYS
+  ]);
+  function anisotropyEnabled(ctx) {
+    return ctx.getExtension("EXT_texture_filter_anisotropic") !== null;
+  }
+  var everBoundVAOs = /* @__PURE__ */ new WeakSet();
+  function defaultVAO2(ctx) {
+    if (!ctx._defaultVAO) ctx._defaultVAO = defaultVAOState(ctx._state.limits.MAX_VERTEX_ATTRIBS);
+    return ctx._defaultVAO;
+  }
+  var everBoundTFs = /* @__PURE__ */ new WeakSet();
+  var defaultTFs = /* @__PURE__ */ new WeakMap();
+  function getDefaultTF(ctx) {
+    let tf = defaultTFs.get(ctx);
+    if (!tf) {
+      tf = new Tf.make(ctx);
+      defaultTFs.set(ctx, tf);
+    }
+    return tf;
+  }
+  function tfBindingAtIndex2(ctx, index) {
+    for (const obj of ctx._resources.all) {
+      if (obj instanceof WebGLBuffer) {
+        for (const e of obj._tfRangeBindings) {
+          if (e.index === index) return { buffer: obj, offset: e.offset, size: e.size };
+        }
+      }
+    }
+    return { buffer: null, offset: 0, size: 0 };
+  }
+  function syncTfBuffers(ctx, tf) {
+    const n = ctx._state.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
+    if (tf._buffers.length !== n) {
+      tf._buffers = new Array(n).fill(null);
+      tf._bufferRanges = Array.from({ length: n }, () => ({ offset: 0, size: 0 }));
+    }
+    for (let i = 0; i < n; i++) {
+      const b = tfBindingAtIndex2(ctx, i);
+      tf._buffers[i] = b.buffer;
+      tf._bufferRanges[i] = { offset: b.offset, size: b.size };
+    }
+  }
+  function activeTF(ctx) {
+    const bound = ctx._state.transformFeedback;
+    if (bound && bound._active) return bound;
+    const def = defaultTFs.get(ctx);
+    if (def && def._active) return def;
+    return null;
+  }
+  var RENDERBUFFER_FORMATS = /* @__PURE__ */ new Set([
+    C1.RGBA4,
+    C1.RGB565,
+    C1.RGB5_A1,
+    C2.R8,
+    C2.RG8,
+    C2.RGB8,
+    C2.RGBA8,
+    C2.RGB10_A2,
+    C2.SRGB8_ALPHA8,
+    C2.R16F,
+    C2.RG16F,
+    C2.RGBA16F,
+    C2.R32F,
+    C2.RG32F,
+    C2.RGBA32F,
+    C2.R11F_G11F_B10F,
+    C2.R8I,
+    C2.R8UI,
+    C2.R16I,
+    C2.R16UI,
+    C2.R32I,
+    C2.R32UI,
+    C2.RG8I,
+    C2.RG8UI,
+    C2.RG16I,
+    C2.RG16UI,
+    C2.RG32I,
+    C2.RG32UI,
+    C2.RGBA8I,
+    C2.RGBA8UI,
+    C2.RGBA16I,
+    C2.RGBA16UI,
+    C2.RGBA32I,
+    C2.RGBA32UI,
+    C2.RGB10_A2UI,
+    C1.DEPTH_COMPONENT16,
+    C2.DEPTH_COMPONENT24,
+    C2.DEPTH_COMPONENT32F,
+    C2.DEPTH24_STENCIL8,
+    C2.DEPTH32F_STENCIL8,
+    C1.STENCIL_INDEX8,
+    CExt.R16_EXT,
+    CExt.RG16_EXT,
+    CExt.RGBA16_EXT
+  ]);
+  function installWebGL2Api(proto) {
+    if ("beginQuery" in proto) {
+      proto.beginQuery = function(target, query) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        if (!QUERY_TARGETS.has(target)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const q = validateObject(ctx, query, Query.any);
+        if (q === null) return;
+        if (activeQueryAt(ctx, target) !== null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (q._active) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (q._target !== 0 && q._target !== target) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        q._target = target;
+        q._active = true;
+        q._result = 0;
+        q._resultAvailable = false;
+        setActiveQuery(ctx, target, q);
+      };
+    }
+    if ("endQuery" in proto) {
+      proto.endQuery = function(target) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        if (!QUERY_TARGETS.has(target)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const q = activeQueryAt(ctx, target);
+        if (q === null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        q._active = false;
+        q._resultAvailable = true;
+        setActiveQuery(ctx, target, null);
+      };
+    }
+    if ("createQuery" in proto) {
+      proto.createQuery = function() {
+        const ctx = this;
+        if (isLost11(ctx)) return null;
+        return createObject(ctx, Query.make);
+      };
+    }
+    if ("deleteQuery" in proto) {
+      proto.deleteQuery = function(query) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        if (query === null || query === void 0) return;
+        if (!(query instanceof WebGLQuery)) {
+          throw new TypeError(`Argument is not of type 'WebGLQuery'`);
+        }
+        if (query._context !== ctx) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (query._deleted) return;
+        for (const t of QUERY_TARGETS) {
+          if (activeQueryAt(ctx, t) === query) setActiveQuery(ctx, t, null);
+        }
+        query._active = false;
+        query._deleted = true;
+        ctx._resources.untrack(query);
+      };
+    }
+    if ("isQuery" in proto) {
+      proto.isQuery = function(query) {
+        const ctx = this;
+        if (isLost11(ctx)) return false;
+        if (query === null || query === void 0) return false;
+        if (!(query instanceof WebGLQuery)) {
+          throw new TypeError(`Argument is not of type 'WebGLQuery'`);
+        }
+        if (query._context !== ctx) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return false;
+        }
+        return !query._deleted && query._target !== 0;
+      };
+    }
+    if ("getQuery" in proto) {
+      proto.getQuery = function(target, pname) {
+        const ctx = this;
+        if (isLost11(ctx)) return null;
+        if (!QUERY_TARGETS.has(target)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        }
+        if (pname !== C2.CURRENT_QUERY) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        }
+        return activeQueryAt(ctx, target);
+      };
+    }
+    if ("getQueryParameter" in proto) {
+      proto.getQueryParameter = function(query, pname) {
+        const ctx = this;
+        if (isLost11(ctx)) return null;
+        const q = validateObject(ctx, query, Query.any);
+        if (q === null) return null;
+        switch (pname) {
+          case C2.QUERY_RESULT:
+            return q._result;
+          // synchronous: no blocking (never-begun → 0)
+          case C2.QUERY_RESULT_AVAILABLE:
+            return q._resultAvailable;
+          default:
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+        }
+      };
+    }
+    if ("fenceSync" in proto) {
+      proto.fenceSync = function(condition, flags) {
+        const ctx = this;
+        if (isLost11(ctx)) return null;
+        if (condition !== C2.SYNC_GPU_COMMANDS_COMPLETE) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        }
+        if (flags !== 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return null;
+        }
+        const sync = createObject(ctx, Sync.make);
+        sync._condition = condition;
+        sync._flags = flags;
+        sync._signaled = true;
+        sync._id = nextSyncId++;
+        return sync;
+      };
+    }
+    if ("isSync" in proto) {
+      proto.isSync = function(sync) {
+        const ctx = this;
+        if (isLost11(ctx)) return false;
+        if (sync === null || sync === void 0) return false;
+        if (!(sync instanceof WebGLSync)) {
+          throw new TypeError(`Argument is not of type 'WebGLSync'`);
+        }
+        if (sync._context !== ctx) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return false;
+        }
+        return !sync._deleted;
+      };
+    }
+    if ("deleteSync" in proto) {
+      proto.deleteSync = function(sync) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        if (sync === null || sync === void 0) return;
+        if (!(sync instanceof WebGLSync)) {
+          throw new TypeError(`Argument is not of type 'WebGLSync'`);
+        }
+        if (sync._context !== ctx) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (sync._deleted) return;
+        sync._deleted = true;
+        ctx._resources.untrack(sync);
+      };
+    }
+    if ("clientWaitSync" in proto) {
+      proto.clientWaitSync = function(sync, flags, timeout) {
+        const ctx = this;
+        if (isLost11(ctx)) return C2.WAIT_FAILED;
+        const s = validateObject(ctx, sync, Sync.any);
+        if (s === null) return C2.WAIT_FAILED;
+        if (flags !== 0 && flags !== C2.SYNC_FLUSH_COMMANDS_BIT) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return C2.WAIT_FAILED;
+        }
+        if (timeout > ctx._state.limits.MAX_CLIENT_WAIT_TIMEOUT_WEBGL) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return C2.WAIT_FAILED;
+        }
+        return C2.ALREADY_SIGNALED;
+      };
+    }
+    if ("waitSync" in proto) {
+      proto.waitSync = function(sync, flags, timeout) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        const s = validateObject(ctx, sync, Sync.any);
+        if (s === null) return;
+        if (flags !== 0 && flags !== C2.SYNC_FLUSH_COMMANDS_BIT) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (timeout > ctx._state.limits.MAX_CLIENT_WAIT_TIMEOUT_WEBGL) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+      };
+    }
+    if ("getSyncParameter" in proto) {
+      proto.getSyncParameter = function(sync, pname) {
+        const ctx = this;
+        if (isLost11(ctx)) return null;
+        const s = validateObject(ctx, sync, Sync.any);
+        if (s === null) return null;
+        switch (pname) {
+          case C2.SYNC_STATUS:
+            return s._signaled ? C2.SIGNALED : C2.UNSIGNALED;
+          case C2.SYNC_CONDITION:
+            return s._condition;
+          case C2.SYNC_FLAGS:
+            return s._flags;
+          default:
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+        }
+      };
+    }
+    if ("createSampler" in proto) {
+      proto.createSampler = function() {
+        const ctx = this;
+        if (isLost11(ctx)) return null;
+        return createObject(ctx, Sampler.make);
+      };
+    }
+    if ("deleteSampler" in proto) {
+      proto.deleteSampler = function(sampler) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        if (sampler === null || sampler === void 0) return;
+        if (!(sampler instanceof WebGLSampler)) {
+          throw new TypeError(`Argument is not of type 'WebGLSampler'`);
+        }
+        if (sampler._context !== ctx) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (sampler._deleted) return;
+        for (const u of ctx._state.textureUnits) {
+          if (u.sampler === sampler) u.sampler = null;
+        }
+        sampler._deleted = true;
+        ctx._resources.untrack(sampler);
+      };
+    }
+    if ("isSampler" in proto) {
+      proto.isSampler = function(sampler) {
+        const ctx = this;
+        if (isLost11(ctx)) return false;
+        if (sampler === null || sampler === void 0) return false;
+        if (!(sampler instanceof WebGLSampler)) {
+          throw new TypeError(`Argument is not of type 'WebGLSampler'`);
+        }
+        if (sampler._context !== ctx) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return false;
+        }
+        return !sampler._deleted;
+      };
+    }
+    if ("bindSampler" in proto) {
+      proto.bindSampler = function(unit, sampler) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        const s = ctx._state;
+        if (unit < 0 || unit >= s.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (sampler === null || sampler === void 0) {
+          s.textureUnits[unit].sampler = null;
+          return;
+        }
+        const smp = validateObject(ctx, sampler, Sampler.any);
+        if (smp === null) return;
+        s.textureUnits[unit].sampler = smp;
+      };
+    }
+    if ("samplerParameterf" in proto) {
+      proto.samplerParameterf = function(sampler, pname, param) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        const smp = validateObject(ctx, sampler, Sampler.any);
+        if (smp === null) return;
+        setSamplerParam(ctx, smp, pname, param);
+      };
+    }
+    if ("samplerParameteri" in proto) {
+      proto.samplerParameteri = function(sampler, pname, param) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        const smp = validateObject(ctx, sampler, Sampler.any);
+        if (smp === null) return;
+        setSamplerParam(ctx, smp, pname, param);
+      };
+    }
+    if ("getSamplerParameter" in proto) {
+      proto.getSamplerParameter = function(sampler, pname) {
+        const ctx = this;
+        if (isLost11(ctx)) return null;
+        const smp = validateObject(ctx, sampler, Sampler.any);
+        if (smp === null) return null;
+        switch (pname) {
+          case C1.TEXTURE_MIN_FILTER:
+          case C1.TEXTURE_MAG_FILTER:
+          case C1.TEXTURE_WRAP_S:
+          case C1.TEXTURE_WRAP_T:
+          case C2.TEXTURE_WRAP_R:
+          case C2.TEXTURE_COMPARE_MODE:
+          case C2.TEXTURE_COMPARE_FUNC:
+            return smp._params[pname];
+          // int
+          case C2.TEXTURE_MIN_LOD:
+          case C2.TEXTURE_MAX_LOD:
+            return smp._params[pname];
+          // float
+          case CExt.TEXTURE_MAX_ANISOTROPY_EXT:
+            if (!anisotropyEnabled(ctx)) {
+              ctx._errors.push(C1.INVALID_ENUM);
+              return null;
+            }
+            return smp._params[pname];
+          // float
+          default:
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+        }
+      };
+    }
+    if ("createVertexArray" in proto) {
+      proto.createVertexArray = function() {
+        const ctx = this;
+        if (isLost11(ctx)) return null;
+        const vao = createObject(ctx, Vao.make);
+        vao._vao = defaultVAOState(ctx._state.limits.MAX_VERTEX_ATTRIBS);
+        return vao;
+      };
+    }
+    if ("deleteVertexArray" in proto) {
+      proto.deleteVertexArray = function(vertexArray) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        if (vertexArray === null || vertexArray === void 0) return;
+        if (!(vertexArray instanceof WebGLVertexArrayObject)) {
+          throw new TypeError(`Argument is not of type 'WebGLVertexArrayObject'`);
+        }
+        if (vertexArray._context !== ctx) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (vertexArray._deleted) return;
+        if (ctx._state.vaoBinding === vertexArray) {
+          ctx._state.vaoBinding = null;
+          ctx._state.vao = defaultVAO2(ctx);
+        }
+        vertexArray._deleted = true;
+        ctx._resources.untrack(vertexArray);
+      };
+    }
+    if ("isVertexArray" in proto) {
+      proto.isVertexArray = function(vertexArray) {
+        const ctx = this;
+        if (isLost11(ctx)) return false;
+        if (vertexArray === null || vertexArray === void 0) return false;
+        if (!(vertexArray instanceof WebGLVertexArrayObject)) {
+          throw new TypeError(`Argument is not of type 'WebGLVertexArrayObject'`);
+        }
+        if (vertexArray._context !== ctx) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return false;
+        }
+        return !vertexArray._deleted && everBoundVAOs.has(vertexArray);
+      };
+    }
+    if ("bindVertexArray" in proto) {
+      proto.bindVertexArray = function(array) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        const s = ctx._state;
+        if (array === null || array === void 0) {
+          s.vaoBinding = null;
+          s.vao = defaultVAO2(ctx);
+          return;
+        }
+        const vao = validateObject(ctx, array, Vao.any);
+        if (vao === null) return;
+        s.vaoBinding = vao;
+        s.vao = vao._vao;
+        everBoundVAOs.add(vao);
+      };
+    }
+    if ("createTransformFeedback" in proto) {
+      proto.createTransformFeedback = function() {
+        const ctx = this;
+        if (isLost11(ctx)) return null;
+        const tf = createObject(ctx, Tf.make);
+        const n = ctx._state.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
+        tf._buffers = new Array(n).fill(null);
+        tf._bufferRanges = Array.from({ length: n }, () => ({ offset: 0, size: 0 }));
+        return tf;
+      };
+    }
+    if ("deleteTransformFeedback" in proto) {
+      proto.deleteTransformFeedback = function(transformFeedback) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        if (transformFeedback === null || transformFeedback === void 0) return;
+        if (!(transformFeedback instanceof WebGLTransformFeedback)) {
+          throw new TypeError(`Argument is not of type 'WebGLTransformFeedback'`);
+        }
+        if (transformFeedback._context !== ctx) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (transformFeedback._deleted) return;
+        if (transformFeedback._active) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (ctx._state.transformFeedback === transformFeedback) {
+          ctx._state.transformFeedback = null;
+        }
+        transformFeedback._deleted = true;
+        ctx._resources.untrack(transformFeedback);
+      };
+    }
+    if ("isTransformFeedback" in proto) {
+      proto.isTransformFeedback = function(transformFeedback) {
+        const ctx = this;
+        if (isLost11(ctx)) return false;
+        if (transformFeedback === null || transformFeedback === void 0) return false;
+        if (!(transformFeedback instanceof WebGLTransformFeedback)) {
+          throw new TypeError(`Argument is not of type 'WebGLTransformFeedback'`);
+        }
+        if (transformFeedback._context !== ctx) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return false;
+        }
+        return !transformFeedback._deleted && everBoundTFs.has(transformFeedback);
+      };
+    }
+    if ("bindTransformFeedback" in proto) {
+      proto.bindTransformFeedback = function(target, transformFeedback) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        if (target !== C2.TRANSFORM_FEEDBACK) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const s = ctx._state;
+        if (s.transformFeedback && s.transformFeedback._active && !s.transformFeedback._paused) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (transformFeedback === null || transformFeedback === void 0) {
+          s.transformFeedback = null;
+          return;
+        }
+        const tf = validateObject(ctx, transformFeedback, Tf.any);
+        if (tf === null) return;
+        s.transformFeedback = tf;
+        everBoundTFs.add(tf);
+        syncTfBuffers(ctx, tf);
+      };
+    }
+    if ("beginTransformFeedback" in proto) {
+      proto.beginTransformFeedback = function(primitiveMode) {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        if (primitiveMode !== C1.POINTS && primitiveMode !== C1.LINES && primitiveMode !== C1.TRIANGLES) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const s = ctx._state;
+        const bound = s.transformFeedback;
+        if (bound && bound._active) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const program = s.currentProgram;
+        if (program === null || !program._linkStatus) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const varyings = program._transformFeedbackVaryings;
+        if (!varyings || varyings.length === 0) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const needed = program._tfBufferMode === C2.SEPARATE_ATTRIBS ? varyings.length : 1;
+        let boundCount = 0;
+        for (let i = 0; i < s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS; i++) {
+          if (tfBindingAtIndex2(ctx, i).buffer !== null) boundCount++;
+        }
+        if (boundCount < needed) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const tf = bound !== null ? bound : getDefaultTF(ctx);
+        syncTfBuffers(ctx, tf);
+        tf._program = program;
+        tf._active = true;
+        tf._paused = false;
+        tf._primitiveMode = primitiveMode;
+        tf._primitivesWritten = 0;
+      };
+    }
+    if ("endTransformFeedback" in proto) {
+      proto.endTransformFeedback = function() {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        const tf = activeTF(ctx);
+        if (tf === null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        tf._active = false;
+        tf._paused = false;
+        tf._program = null;
+        tf._primitivesWritten = 0;
+      };
+    }
+    if ("pauseTransformFeedback" in proto) {
+      proto.pauseTransformFeedback = function() {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        const tf = activeTF(ctx);
+        if (tf === null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (tf._paused) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        tf._paused = true;
+      };
+    }
+    if ("resumeTransformFeedback" in proto) {
+      proto.resumeTransformFeedback = function() {
+        const ctx = this;
+        if (isLost11(ctx)) return;
+        const tf = activeTF(ctx);
+        if (tf === null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (!tf._paused) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        tf._paused = false;
+      };
+    }
+    if ("getInternalformatParameter" in proto) {
+      proto.getInternalformatParameter = function(target, internalformat, pname) {
+        const ctx = this;
+        if (isLost11(ctx)) return null;
+        if (target !== C1.RENDERBUFFER) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        }
+        if (pname !== C1.SAMPLES) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        }
+        if (!RENDERBUFFER_FORMATS.has(internalformat)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        }
+        return new Int32Array([4]);
+      };
+    }
+  }
+  function setSamplerParam(ctx, sampler, pname, param) {
+    switch (pname) {
+      case C1.TEXTURE_MIN_FILTER:
+        if (!MIN_FILTER_VALUES2.has(param)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        break;
+      case C1.TEXTURE_MAG_FILTER:
+        if (!MAG_FILTER_VALUES2.has(param)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        break;
+      case C1.TEXTURE_WRAP_S:
+      case C1.TEXTURE_WRAP_T:
+      case C2.TEXTURE_WRAP_R:
+        if (!WRAP_VALUES2.has(param)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        break;
+      case C2.TEXTURE_MIN_LOD:
+      case C2.TEXTURE_MAX_LOD:
+        break;
+      // any value accepted
+      case C2.TEXTURE_COMPARE_MODE:
+        if (!COMPARE_MODE_VALUES2.has(param)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        break;
+      case C2.TEXTURE_COMPARE_FUNC:
+        if (!COMPARE_FUNC_VALUES2.has(param)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        break;
+      case CExt.TEXTURE_MAX_ANISOTROPY_EXT:
+        if (!anisotropyEnabled(ctx)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        if (param < 1) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        break;
+      default:
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+    }
+    sampler._params[pname] = param;
+  }
+
+  // src/gl/api/index.ts
+  function installAll(proto) {
+    installContextApi(proto);
+    installStateApi(proto);
+    installBuffersApi(proto);
+    installVertexAttribApi(proto);
+    installTexturesApi(proto);
+    installTexImageApi(proto);
+    installProgramsApi(proto);
+    installUniformsApi(proto);
+    installFramebuffersApi(proto);
+    installDrawApi(proto);
+    installWebGL2Api(proto);
+  }
 
   // src/gl/types.ts
   var DEFAULT_CONTEXT_ATTRIBUTES = {
@@ -834,6 +13038,9 @@
   // src/gl/webgl1.ts
   var CONTEXT_TOKEN = /* @__PURE__ */ Symbol("software-webgl-context");
   var nextContextId = 1;
+  function drawingBufferDim(v) {
+    return typeof v === "number" ? Math.max(1, v) : 0;
+  }
   var WebGLRenderingContext = class {
     /**
      * @internal — only lifecycle.ts may construct (via CONTEXT_TOKEN).
@@ -870,23 +13077,28 @@
       }
       this._canvas = canvas;
       this._type = type;
-      this._attrs = { ...DEFAULT_CONTEXT_ATTRIBUTES, ...attrs != null ? attrs : {} };
+      this._attrs = { ...DEFAULT_CONTEXT_ATTRIBUTES, ...attrs != null ? attrs : {}, antialias: false };
       this._contextId = nextContextId++;
       this._state = createDefaultState(1);
       this._errors = new ErrorQueue();
       this._resources = new Resources(this);
-      this._drawingBufferWidth = typeof canvas.width === "number" ? canvas.width : 0;
-      this._drawingBufferHeight = typeof canvas.height === "number" ? canvas.height : 0;
+      this._drawingBufferWidth = drawingBufferDim(canvas.width);
+      this._drawingBufferHeight = drawingBufferDim(canvas.height);
     }
     // ---- Properties (spec: getters on the prototype) ----
     get canvas() {
       return this._canvas;
     }
+    /**
+     * Live drawing-buffer size: tracks canvas.width/height immediately (CTS
+     * canvas/drawingbuffer-test.html: drawingBufferWidth === canvas.width;
+     * context/zero-sized-canvas.html: immediate update after width set, 0 → 1).
+     */
     get drawingBufferWidth() {
-      return this._drawingBufferWidth;
+      return drawingBufferDim(this._canvas.width);
     }
     get drawingBufferHeight() {
-      return this._drawingBufferHeight;
+      return drawingBufferDim(this._canvas.height);
     }
     // ---- Context attributes & lifecycle ----
     getContextAttributes() {
@@ -1300,6 +13512,7 @@
     }
   };
   installConstants(WebGLRenderingContext.prototype, C1);
+  installAll(WebGLRenderingContext.prototype);
 
   // src/gl/webgl2.ts
   var WebGL2RenderingContext = class extends WebGLRenderingContext {
@@ -1311,6 +13524,7 @@
       if (token !== CONTEXT_TOKEN) return;
       this._version = 2;
       this._state = createDefaultState(2);
+      this._attrs.antialias = attrs && typeof attrs.antialias === "boolean" ? attrs.antialias : DEFAULT_CONTEXT_ATTRIBUTES.antialias;
     }
     // ---- Queries ----
     beginQuery(target, query) {
@@ -1589,804 +13803,7 @@
     }
   };
   installConstants(WebGL2RenderingContext.prototype, C2);
-
-  // src/gl/extensions/index.ts
-  var EXTENSION_SPECS = [
-    // ---- WebGL1 classic (implement — mandated by objective; three.js/Babylon need them) ----
-    { name: "ANGLE_instanced_arrays", versions: [1], status: "implement" },
-    { name: "EXT_blend_minmax", versions: [1], status: "implement" },
-    { name: "EXT_frag_depth", versions: [1], status: "implement" },
-    { name: "EXT_shader_texture_lod", versions: [1], status: "implement" },
-    { name: "EXT_sRGB", versions: [1, 2], status: "implement" },
-    { name: "OES_element_index_uint", versions: [1], status: "implement" },
-    { name: "OES_fbo_render_mipmap", versions: [1, 2], status: "implement" },
-    { name: "OES_standard_derivatives", versions: [1], status: "implement" },
-    { name: "OES_texture_float", versions: [1], status: "implement" },
-    { name: "OES_texture_float_linear", versions: [1, 2], status: "implement" },
-    { name: "OES_texture_half_float", versions: [1], status: "implement" },
-    { name: "OES_texture_half_float_linear", versions: [1, 2], status: "implement" },
-    { name: "OES_vertex_array_object", versions: [1], status: "implement" },
-    {
-      name: "WEBGL_depth_texture",
-      versions: [1],
-      status: "implement"
-    },
-    { name: "WEBGL_draw_buffers", versions: [1], status: "implement" },
-    { name: "WEBGL_blend_func_extended", versions: [1, 2], status: "implement" },
-    { name: "WEBGL_lose_context", versions: [1, 2], status: "implement" },
-    { name: "WEBGL_debug_renderer_info", versions: [1, 2], status: "implement" },
-    { name: "WEBGL_debug_shaders", versions: [1, 2], status: "implement" },
-    { name: "EXT_texture_filter_anisotropic", aliases: ["WEBKIT_EXT_texture_filter_anisotropic", "MOZ_EXT_texture_filter_anisotropic"], versions: [1, 2], status: "implement" },
-    // ---- WebGL2-side (implement — mandated by objective) ----
-    { name: "EXT_clip_control", versions: [1, 2], status: "implement" },
-    { name: "EXT_color_buffer_float", versions: [2], status: "implement" },
-    { name: "EXT_color_buffer_half_float", versions: [1, 2], status: "implement" },
-    { name: "EXT_float_blend", versions: [1, 2], status: "implement" },
-    { name: "EXT_texture_norm16", versions: [2], status: "implement" },
-    { name: "KHR_parallel_shader_compile", versions: [1, 2], status: "implement" },
-    { name: "OES_draw_buffers_indexed", versions: [2], status: "implement" },
-    { name: "WEBGL_clip_cull_distance", versions: [2], status: "implement" },
-    { name: "WEBGL_multi_draw", versions: [1, 2], status: "implement" },
-    { name: "WEBGL_multisampled_render_to_texture", versions: [2], status: "implement" },
-    { name: "WEBGL_render_shared_exponent", versions: [2], status: "implement" },
-    // ---- 'null' status (CTS tests skip; three.js/Babylon degrade gracefully) ----
-    { name: "EXT_conservative_depth", versions: [2], status: "null" },
-    { name: "EXT_depth_clamp", versions: [1, 2], status: "null" },
-    { name: "EXT_disjoint_timer_query", versions: [1], status: "null" },
-    { name: "EXT_disjoint_timer_query_webgl2", versions: [2], status: "null" },
-    { name: "EXT_polygon_offset_clamp", versions: [1, 2], status: "null" },
-    { name: "EXT_render_snorm", versions: [2], status: "null" },
-    { name: "EXT_texture_compression_bptc", versions: [1, 2], status: "null" },
-    { name: "EXT_texture_compression_rgtc", versions: [1, 2], status: "null" },
-    { name: "EXT_texture_mirror_clamp_to_edge", versions: [1, 2], status: "null" },
-    { name: "NV_shader_noperspective_interpolation", versions: [2], status: "null" },
-    { name: "OES_sample_variables", versions: [2], status: "null" },
-    { name: "OES_shader_multisample_interpolation", versions: [2], status: "null" },
-    { name: "OVR_multiview2", versions: [2], status: "null" },
-    { name: "WEBGL_compressed_texture_astc", versions: [1, 2], status: "null" },
-    { name: "WEBGL_compressed_texture_etc", versions: [1, 2], status: "null" },
-    { name: "WEBGL_compressed_texture_etc1", versions: [1, 2], status: "null" },
-    { name: "WEBGL_compressed_texture_pvrtc", versions: [1, 2], status: "null" },
-    { name: "WEBGL_compressed_texture_s3tc", versions: [1, 2], status: "null" },
-    { name: "WEBGL_compressed_texture_s3tc_srgb", versions: [1, 2], status: "null" },
-    { name: "WEBGL_polygon_mode", versions: [1, 2], status: "null" },
-    { name: "WEBGL_provoking_vertex", versions: [2], status: "null" },
-    { name: "WEBGL_shader_pixel_local_storage", versions: [2], status: "null" },
-    { name: "WEBGL_stencil_texturing", versions: [2], status: "null" },
-    { name: "WEBGL_webcodecs_video_frame", versions: [1, 2], status: "null" }
-  ];
-  var SPEC_BY_NAME = /* @__PURE__ */ new Map();
-  var _a;
-  for (const spec of EXTENSION_SPECS) {
-    SPEC_BY_NAME.set(spec.name, spec);
-    for (const alias of (_a = spec.aliases) != null ? _a : []) SPEC_BY_NAME.set(alias, spec);
-  }
-  function getSupportedExtensionNames(version) {
-    const out = [];
-    for (const spec of EXTENSION_SPECS) {
-      if (spec.status !== "implement") continue;
-      if (!spec.versions.includes(version)) continue;
-      out.push(spec.name);
-    }
-    return out;
-  }
-  function getExtensionObject(ctx, name) {
-    const spec = SPEC_BY_NAME.get(name);
-    if (!spec) return null;
-    const version = ctx._version;
-    if (!spec.versions.includes(version)) return null;
-    if (spec.status !== "implement") return null;
-    if (spec.available && !spec.available(ctx)) return null;
-    const cache = ctx._extensions;
-    const existing = cache.get(spec.name);
-    if (existing !== void 0) return existing;
-    const ext = createExtension(ctx, spec);
-    cache.set(spec.name, ext);
-    return ext;
-  }
-  function createExtension(ctx, spec) {
-    throw new Error(
-      `GL extension factory not implemented yet: ${spec.name} (Phase 2 \u2014 see src/gl/CONTEXT.md)`
-    );
-  }
-
-  // src/gl/framebuffer-util.ts
-  function resolveFramebufferTarget(ctx) {
-    void ctx;
-    throw new Error("GL stub: framebuffer-util resolveFramebufferTarget (framebuffers agent)");
-  }
-
-  // src/raster/types.ts
-  var ALIASED_POINT_SIZE_RANGE = [1, 1024];
-  var ALIASED_LINE_WIDTH_RANGE = [1, 1];
-
-  // src/raster/formats.ts
-  var _f32 = new Float32Array(1);
-  var _u32 = new Uint32Array(_f32.buffer);
-  var _halfScratch = new DataView(new ArrayBuffer(4));
-
-  // src/gl/getters.ts
-  var CURRENT_PROGRAM = 35725;
-  var SAMPLE_MASK = 36433;
-  var DRAW_BUFFER0 = 34853;
-  var DRAW_BUFFER15 = 34868;
-  var BACK = 1029;
-  var NONE = 0;
-  var INTERLEAVED_ATTRIBS = 35980;
-  function getParameter(ctx, pname) {
-    var _a2, _b, _c;
-    if (ctx._isLost) return null;
-    const s = ctx._state;
-    const lim = s.limits;
-    const v2 = ctx._version === 2;
-    if (pname >= DRAW_BUFFER0 && pname <= DRAW_BUFFER15) {
-      if (!v2) {
-        ctx._errors.push(C.INVALID_ENUM);
-        return null;
-      }
-      const i = pname - DRAW_BUFFER0;
-      return s.drawFramebuffer === null ? i === 0 ? BACK : NONE : (_a2 = s.drawBuffers[i]) != null ? _a2 : NONE;
-    }
-    switch (pname) {
-      // ---- Capabilities (isEnabled/getParameter parity) ----
-      case C.BLEND:
-        return s.caps.BLEND;
-      case C.CULL_FACE:
-        return s.caps.CULL_FACE;
-      case C.DEPTH_TEST:
-        return s.caps.DEPTH_TEST;
-      case C.DITHER:
-        return s.caps.DITHER;
-      case C.POLYGON_OFFSET_FILL:
-        return s.caps.POLYGON_OFFSET_FILL;
-      case C.SAMPLE_ALPHA_TO_COVERAGE:
-        return s.caps.SAMPLE_ALPHA_TO_COVERAGE;
-      case C.SAMPLE_COVERAGE:
-        return s.caps.SAMPLE_COVERAGE;
-      case C.SCISSOR_TEST:
-        return s.caps.SCISSOR_TEST;
-      case C.STENCIL_TEST:
-        return s.caps.STENCIL_TEST;
-      case C.RASTERIZER_DISCARD:
-        if (!v2) break;
-        return s.caps.RASTERIZER_DISCARD;
-      case SAMPLE_MASK:
-        if (!v2) break;
-        return false;
-      // single-sampled software renderer — mask never applied
-      // ---- Simple numbers ----
-      case C.ACTIVE_TEXTURE:
-        return C.TEXTURE0 + s.activeTexture;
-      case C.BLEND_SRC_RGB:
-        return s.blend.srcRGB;
-      case C.BLEND_SRC_ALPHA:
-        return s.blend.srcAlpha;
-      case C.BLEND_DST_RGB:
-        return s.blend.dstRGB;
-      case C.BLEND_DST_ALPHA:
-        return s.blend.dstAlpha;
-      case C.BLEND_EQUATION_RGB:
-        return s.blend.eqRGB;
-      case C.BLEND_EQUATION_ALPHA:
-        return s.blend.eqAlpha;
-      case C.DEPTH_CLEAR_VALUE:
-        return s.clearDepth;
-      case C.STENCIL_CLEAR_VALUE:
-        return s.clearStencil;
-      case C.LINE_WIDTH:
-        return s.lineWidth;
-      case C.POLYGON_OFFSET_FACTOR:
-        return s.polygonOffset.factor;
-      case C.POLYGON_OFFSET_UNITS:
-        return s.polygonOffset.units;
-      case C.SAMPLE_COVERAGE_VALUE:
-        return s.sampleCoverage.value;
-      case C.SAMPLE_COVERAGE_INVERT:
-        return s.sampleCoverage.invert;
-      case C.CULL_FACE_MODE:
-        return s.cullFace;
-      case C.FRONT_FACE:
-        return s.frontFace;
-      case C.GENERATE_MIPMAP_HINT:
-        return s.hints.generateMipmap;
-      case C.FRAGMENT_SHADER_DERIVATIVE_HINT:
-        if (!v2 && !ctx._extensions.has("OES_standard_derivatives")) break;
-        return s.hints.fragmentShaderDerivative;
-      case C.DEPTH_FUNC:
-        return s.depth.func;
-      case C.DEPTH_WRITEMASK:
-        return s.depth.mask;
-      // ---- Stencil state (front + back) ----
-      case C.STENCIL_FUNC:
-        return s.stencil.front.func;
-      case C.STENCIL_REF:
-        return s.stencil.front.ref;
-      case C.STENCIL_VALUE_MASK:
-        return s.stencil.front.valueMask;
-      case C.STENCIL_FAIL:
-        return s.stencil.front.fail;
-      case C.STENCIL_PASS_DEPTH_FAIL:
-        return s.stencil.front.depthFail;
-      case C.STENCIL_PASS_DEPTH_PASS:
-        return s.stencil.front.depthPass;
-      case C.STENCIL_WRITEMASK:
-        return s.stencil.front.writeMask;
-      case C.STENCIL_BACK_FUNC:
-        return s.stencil.back.func;
-      case C.STENCIL_BACK_REF:
-        return s.stencil.back.ref;
-      case C.STENCIL_BACK_VALUE_MASK:
-        return s.stencil.back.valueMask;
-      case C.STENCIL_BACK_FAIL:
-        return s.stencil.back.fail;
-      case C.STENCIL_BACK_PASS_DEPTH_FAIL:
-        return s.stencil.back.depthFail;
-      case C.STENCIL_BACK_PASS_DEPTH_PASS:
-        return s.stencil.back.depthPass;
-      case C.STENCIL_BACK_WRITEMASK:
-        return s.stencil.back.writeMask;
-      // ---- Object bindings ----
-      case CURRENT_PROGRAM:
-        return s.currentProgram;
-      case C.ARRAY_BUFFER_BINDING:
-        return s.arrayBuffer;
-      case C.ELEMENT_ARRAY_BUFFER_BINDING:
-        return s.vao.elementArrayBuffer;
-      case C.FRAMEBUFFER_BINDING:
-        return s.drawFramebuffer;
-      case C.RENDERBUFFER_BINDING:
-        return s.renderbuffer;
-      case C.TEXTURE_BINDING_2D:
-        return s.textureUnits[s.activeTexture].texture2D;
-      case C.TEXTURE_BINDING_CUBE_MAP:
-        return s.textureUnits[s.activeTexture].textureCube;
-      case C.DRAW_FRAMEBUFFER_BINDING:
-        if (!v2) break;
-        return s.drawFramebuffer;
-      case C.READ_FRAMEBUFFER_BINDING:
-        if (!v2) break;
-        return s.readFramebuffer;
-      case C.VERTEX_ARRAY_BINDING:
-        if (!v2) break;
-        return s.vaoBinding;
-      case C.SAMPLER_BINDING:
-        if (!v2) break;
-        return s.textureUnits[s.activeTexture].sampler;
-      case C.TEXTURE_BINDING_3D:
-        if (!v2) break;
-        return s.textureUnits[s.activeTexture].texture3D;
-      case C.TEXTURE_BINDING_2D_ARRAY:
-        if (!v2) break;
-        return s.textureUnits[s.activeTexture].texture2DArray;
-      case C.PIXEL_PACK_BUFFER_BINDING:
-        if (!v2) break;
-        return s.pixelPackBuffer;
-      case C.PIXEL_UNPACK_BUFFER_BINDING:
-        if (!v2) break;
-        return s.pixelUnpackBuffer;
-      case C.UNIFORM_BUFFER_BINDING:
-        if (!v2) break;
-        return (_b = s.uniformBuffers[0]) != null ? _b : null;
-      case C.COPY_READ_BUFFER_BINDING:
-        if (!v2) break;
-        return s.copyReadBuffer;
-      case C.COPY_WRITE_BUFFER_BINDING:
-        if (!v2) break;
-        return s.copyWriteBuffer;
-      case C.TRANSFORM_FEEDBACK_BINDING:
-        if (!v2) break;
-        return s.transformFeedback;
-      case C.TRANSFORM_FEEDBACK_BUFFER_BINDING:
-        if (!v2) break;
-        return (_c = s.transformFeedback && s.transformFeedback._buffers[0]) != null ? _c : null;
-      // ---- WebGL2 booleans / misc ----
-      case C.TRANSFORM_FEEDBACK_ACTIVE:
-        if (!v2) break;
-        return s.transformFeedback ? s.transformFeedback._active : false;
-      case C.TRANSFORM_FEEDBACK_PAUSED:
-        if (!v2) break;
-        return s.transformFeedback ? s.transformFeedback._paused : false;
-      case C.TRANSFORM_FEEDBACK_BUFFER_MODE:
-        if (!v2) break;
-        return s.currentProgram && s.currentProgram._tfBufferMode !== 0 ? s.currentProgram._tfBufferMode : INTERLEAVED_ATTRIBS;
-      case C.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
-        if (!v2) break;
-        return s.transformFeedback ? s.transformFeedback._primitivesWritten : 0;
-      case C.READ_BUFFER:
-        if (!v2) break;
-        return s.readFramebuffer === null ? BACK : s.readBuffer;
-      // ---- Vectors (fresh arrays every call) ----
-      case C.COLOR_CLEAR_VALUE:
-        return new Float32Array(s.clearColor);
-      case C.BLEND_COLOR:
-        return new Float32Array(s.blend.color);
-      case C.DEPTH_RANGE:
-        return new Float32Array(s.depth.range);
-      case C.SCISSOR_BOX:
-        return new Int32Array([s.scissor.x, s.scissor.y, s.scissor.w, s.scissor.h]);
-      case C.VIEWPORT:
-        return new Int32Array([s.viewport.x, s.viewport.y, s.viewport.w, s.viewport.h]);
-      case C.COLOR_WRITEMASK:
-        return [s.colorMask[0], s.colorMask[1], s.colorMask[2], s.colorMask[3]];
-      case C.ALIASED_POINT_SIZE_RANGE:
-        return new Float32Array([ALIASED_POINT_SIZE_RANGE[0], ALIASED_POINT_SIZE_RANGE[1]]);
-      case C.ALIASED_LINE_WIDTH_RANGE:
-        return new Float32Array([ALIASED_LINE_WIDTH_RANGE[0], ALIASED_LINE_WIDTH_RANGE[1]]);
-      case C.MAX_VIEWPORT_DIMS:
-        return new Int32Array([lim.MAX_VIEWPORT_DIMS[0], lim.MAX_VIEWPORT_DIMS[1]]);
-      // ---- Pixel storage (getParameter mirrors pixelStorei) ----
-      case C.UNPACK_ALIGNMENT:
-        return s.pixelStore.unpack.alignment;
-      case C.PACK_ALIGNMENT:
-        return s.pixelStore.pack.alignment;
-      case C.UNPACK_FLIP_Y_WEBGL:
-        return s.pixelStore.unpack.flipY;
-      case C.UNPACK_PREMULTIPLY_ALPHA_WEBGL:
-        return s.pixelStore.unpack.premultiplyAlpha;
-      case C.UNPACK_COLORSPACE_CONVERSION_WEBGL:
-        return s.pixelStore.unpack.colorspaceConversion;
-      case C.PACK_ROW_LENGTH:
-        if (!v2) break;
-        return s.pixelStore.pack.rowLength;
-      case C.PACK_SKIP_PIXELS:
-        if (!v2) break;
-        return s.pixelStore.pack.skipPixels;
-      case C.PACK_SKIP_ROWS:
-        if (!v2) break;
-        return s.pixelStore.pack.skipRows;
-      case C.UNPACK_ROW_LENGTH:
-        if (!v2) break;
-        return s.pixelStore.unpack.rowLength;
-      case C.UNPACK_IMAGE_HEIGHT:
-        if (!v2) break;
-        return s.pixelStore.unpack.imageHeight;
-      case C.UNPACK_SKIP_PIXELS:
-        if (!v2) break;
-        return s.pixelStore.unpack.skipPixels;
-      case C.UNPACK_SKIP_ROWS:
-        if (!v2) break;
-        return s.pixelStore.unpack.skipRows;
-      case C.UNPACK_SKIP_IMAGES:
-        if (!v2) break;
-        return s.pixelStore.unpack.skipImages;
-      // ---- Limits (WebGL1 + WebGL2-shared) ----
-      case C.MAX_VERTEX_ATTRIBS:
-        return lim.MAX_VERTEX_ATTRIBS;
-      case C.MAX_VERTEX_UNIFORM_VECTORS:
-        return lim.MAX_VERTEX_UNIFORM_VECTORS;
-      case C.MAX_FRAGMENT_UNIFORM_VECTORS:
-        return lim.MAX_FRAGMENT_UNIFORM_VECTORS;
-      case C.MAX_VARYING_VECTORS:
-        return lim.MAX_VARYING_VECTORS;
-      case C.MAX_COMBINED_TEXTURE_IMAGE_UNITS:
-        return lim.MAX_COMBINED_TEXTURE_IMAGE_UNITS;
-      case C.MAX_VERTEX_TEXTURE_IMAGE_UNITS:
-        return lim.MAX_VERTEX_TEXTURE_IMAGE_UNITS;
-      case C.MAX_TEXTURE_IMAGE_UNITS:
-        return lim.MAX_TEXTURE_IMAGE_UNITS;
-      case C.MAX_TEXTURE_SIZE:
-        return lim.MAX_TEXTURE_SIZE;
-      case C.MAX_CUBE_MAP_TEXTURE_SIZE:
-        return lim.MAX_CUBE_MAP_TEXTURE_SIZE;
-      case C.MAX_RENDERBUFFER_SIZE:
-        return lim.MAX_RENDERBUFFER_SIZE;
-      // ---- Limits (WebGL2-only) ----
-      case C.MAX_3D_TEXTURE_SIZE:
-        if (!v2) break;
-        return lim.MAX_3D_TEXTURE_SIZE;
-      case C.MAX_ARRAY_TEXTURE_LAYERS:
-        if (!v2) break;
-        return lim.MAX_ARRAY_TEXTURE_LAYERS;
-      case C.MAX_SAMPLES:
-        if (!v2) break;
-        return lim.MAX_SAMPLES;
-      case C.MAX_DRAW_BUFFERS:
-        if (!v2) {
-          if (!ctx._extensions.has("WEBGL_draw_buffers")) break;
-        }
-        return lim.MAX_DRAW_BUFFERS;
-      case C.MAX_COLOR_ATTACHMENTS:
-        if (!v2) {
-          if (!ctx._extensions.has("WEBGL_draw_buffers")) break;
-        }
-        return lim.MAX_COLOR_ATTACHMENTS;
-      case C.MAX_ELEMENT_INDEX:
-        if (!v2) break;
-        return lim.MAX_ELEMENT_INDEX;
-      case C.MAX_UNIFORM_BUFFER_BINDINGS:
-        if (!v2) break;
-        return lim.MAX_UNIFORM_BUFFER_BINDINGS;
-      case C.MAX_UNIFORM_BLOCK_SIZE:
-        if (!v2) break;
-        return lim.MAX_UNIFORM_BLOCK_SIZE;
-      case C.MAX_VERTEX_UNIFORM_BLOCKS:
-        if (!v2) break;
-        return lim.MAX_VERTEX_UNIFORM_BLOCKS;
-      case C.MAX_FRAGMENT_UNIFORM_BLOCKS:
-        if (!v2) break;
-        return lim.MAX_FRAGMENT_UNIFORM_BLOCKS;
-      case C.MAX_COMBINED_UNIFORM_BLOCKS:
-        if (!v2) break;
-        return lim.MAX_COMBINED_UNIFORM_BLOCKS;
-      case C.MAX_VERTEX_OUTPUT_COMPONENTS:
-        if (!v2) break;
-        return lim.MAX_VERTEX_OUTPUT_COMPONENTS;
-      case C.MAX_FRAGMENT_INPUT_COMPONENTS:
-        if (!v2) break;
-        return lim.MAX_FRAGMENT_INPUT_COMPONENTS;
-      case C.MAX_VERTEX_ATTRIB_STRIDE:
-        if (!v2) break;
-        return lim.MAX_VERTEX_ATTRIB_STRIDE;
-      case C.MAX_VERTEX_ATTRIB_RELATIVE_OFFSET:
-        if (!v2) break;
-        return lim.MAX_VERTEX_ATTRIB_RELATIVE_OFFSET;
-      case C.MAX_TEXTURE_LOD_BIAS:
-        if (!v2) break;
-        return lim.MAX_TEXTURE_LOD_BIAS;
-      case C.MIN_PROGRAM_TEXEL_OFFSET:
-        if (!v2) break;
-        return lim.MIN_PROGRAM_TEXEL_OFFSET;
-      case C.MAX_PROGRAM_TEXEL_OFFSET:
-        if (!v2) break;
-        return lim.MAX_PROGRAM_TEXEL_OFFSET;
-      case C.MAX_SERVER_WAIT_TIMEOUT:
-        if (!v2) break;
-        return lim.MAX_SERVER_WAIT_TIMEOUT;
-      case C.MAX_CLIENT_WAIT_TIMEOUT_WEBGL:
-        if (!v2) break;
-        return lim.MAX_CLIENT_WAIT_TIMEOUT_WEBGL;
-      case C.MAX_ELEMENTS_VERTICES:
-        if (!v2) break;
-        return lim.MAX_ELEMENTS_VERTICES;
-      case C.MAX_ELEMENTS_INDICES:
-        if (!v2) break;
-        return lim.MAX_ELEMENTS_INDICES;
-      case C.UNIFORM_BUFFER_OFFSET_ALIGNMENT:
-        if (!v2) break;
-        return lim.UNIFORM_BUFFER_OFFSET_ALIGNMENT;
-      case C.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS:
-        if (!v2) break;
-        return lim.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS;
-      case C.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS:
-        if (!v2) break;
-        return lim.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS;
-      case C.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS:
-        if (!v2) break;
-        return lim.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
-      case C.MAX_VARYING_COMPONENTS:
-        if (!v2) break;
-        return lim.MAX_VARYING_VECTORS * 4;
-      case C.MAX_VERTEX_UNIFORM_COMPONENTS:
-        if (!v2) break;
-        return lim.MAX_VERTEX_UNIFORM_VECTORS * 4;
-      case C.MAX_FRAGMENT_UNIFORM_COMPONENTS:
-        if (!v2) break;
-        return lim.MAX_FRAGMENT_UNIFORM_VECTORS * 4;
-      case C.MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS:
-        if (!v2) break;
-        return Math.max(
-          lim.MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS,
-          lim.MAX_VERTEX_UNIFORM_BLOCKS * (lim.MAX_UNIFORM_BLOCK_SIZE / 4) + lim.MAX_VERTEX_UNIFORM_VECTORS * 4
-        );
-      case C.MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS:
-        if (!v2) break;
-        return Math.max(
-          lim.MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS,
-          lim.MAX_FRAGMENT_UNIFORM_BLOCKS * (lim.MAX_UNIFORM_BLOCK_SIZE / 4) + lim.MAX_FRAGMENT_UNIFORM_VECTORS * 4
-        );
-      // ---- Misc state ----
-      case C.SHADER_COMPILER:
-        return true;
-      // software compiler always available
-      case C.NUM_SHADER_BINARY_FORMATS:
-        return 0;
-      // no binary shader formats
-      case C.COMPRESSED_TEXTURE_FORMATS:
-        return new Uint32Array(0);
-      // no compressed formats
-      case C.SUBPIXEL_BITS:
-        return 8;
-      case C.IMPLEMENTATION_COLOR_READ_FORMAT:
-      case C.IMPLEMENTATION_COLOR_READ_TYPE:
-        if (drawFramebufferIncomplete(ctx)) {
-          ctx._errors.push(C.INVALID_OPERATION);
-          return null;
-        }
-        return pname === C.IMPLEMENTATION_COLOR_READ_FORMAT ? C.RGBA : C.UNSIGNED_BYTE;
-      // ---- FBO-dependent bits (draw framebuffer) ----
-      case C.SAMPLE_BUFFERS:
-        return 0;
-      // single-sampled drawing buffer, always
-      case C.SAMPLES:
-        return 0;
-      case C.RED_BITS:
-      case C.GREEN_BITS:
-      case C.BLUE_BITS:
-      case C.ALPHA_BITS:
-      case C.DEPTH_BITS:
-      case C.STENCIL_BITS: {
-        const b = drawFramebufferBits(ctx);
-        switch (pname) {
-          case C.RED_BITS:
-            return b.r;
-          case C.GREEN_BITS:
-            return b.g;
-          case C.BLUE_BITS:
-            return b.b;
-          case C.ALPHA_BITS:
-            return b.a;
-          case C.DEPTH_BITS:
-            return b.depth;
-          default:
-            return b.stencil;
-        }
-      }
-      // ---- Extension-gated pnames ----
-      case 34047:
-        if (!ctx._extensions.has("EXT_texture_filter_anisotropic")) break;
-        return lim.MAX_TEXTURE_MAX_ANISOTROPY_EXT;
-      case 37445:
-        if (!ctx._extensions.has("WEBGL_debug_renderer_info")) break;
-        return "Software Renderer";
-      case 37446:
-        if (!ctx._extensions.has("WEBGL_debug_renderer_info")) break;
-        return "Software Renderer (JS)";
-      case 35068:
-        if (!ctx._extensions.has("WEBGL_blend_func_extended")) break;
-        return lim.MAX_DUAL_SOURCE_DRAW_BUFFERS_WEBGL;
-      case 3378:
-        if (!v2 || !ctx._extensions.has("WEBGL_clip_cull_distance")) break;
-        return lim.MAX_CLIP_DISTANCES_WEBGL;
-      case 33529:
-        if (!v2 || !ctx._extensions.has("WEBGL_clip_cull_distance")) break;
-        return lim.MAX_CULL_DISTANCES_WEBGL;
-      case 33530:
-        if (!v2 || !ctx._extensions.has("WEBGL_clip_cull_distance")) break;
-        return lim.MAX_COMBINED_CLIP_AND_CULL_DISTANCES_WEBGL;
-      default:
-        break;
-    }
-    ctx._errors.push(C.INVALID_ENUM);
-    return null;
-  }
-  function drawFramebufferIncomplete(ctx) {
-    if (ctx._state.drawFramebuffer === null) return false;
-    try {
-      return resolveFramebufferTarget(ctx) === null;
-    } catch {
-      return true;
-    }
-  }
-  function drawFramebufferBits(ctx) {
-    const s = ctx._state;
-    if (s.drawFramebuffer === null) {
-      return {
-        r: 8,
-        g: 8,
-        b: 8,
-        a: ctx._attrs.alpha ? 8 : 0,
-        depth: ctx._attrs.depth ? ctx._version === 2 ? 24 : 16 : 0,
-        stencil: ctx._attrs.stencil ? 8 : 0
-      };
-    }
-    let fb = null;
-    try {
-      fb = resolveFramebufferTarget(ctx);
-    } catch {
-      fb = null;
-    }
-    if (!fb) return { r: 0, g: 0, b: 0, a: 0, depth: 0, stencil: 0 };
-    const color = fb.color[0];
-    const cb = color ? colorChannelBits(color.format, color.info) : [0, 0, 0, 0];
-    return {
-      r: cb[0],
-      g: cb[1],
-      b: cb[2],
-      a: cb[3],
-      depth: fb.depth ? depthBits(fb.depth.format) : 0,
-      stencil: fb.stencil ? stencilBits(fb.stencil.format) : 0
-    };
-  }
-  function colorChannelBits(format, info) {
-    switch (format) {
-      case 6406:
-        return [0, 0, 0, 8];
-      case 6409:
-        return [8, 8, 8, 0];
-      case 6410:
-        return [8, 8, 8, 8];
-      case 36194:
-        return [5, 6, 5, 0];
-      case 32854:
-        return [4, 4, 4, 4];
-      case 32855:
-        return [5, 5, 5, 1];
-      case 32857:
-      case 36975:
-        return [10, 10, 10, 2];
-      case 35898:
-        return [11, 11, 10, 0];
-      default: {
-        if (info.isFloat || info.isInteger) {
-          const bits = info.bytesPerPixel * 8 / info.components;
-          return [bits, bits, bits, bits];
-        }
-        switch (info.components) {
-          case 1:
-            return [8, 0, 0, 0];
-          case 2:
-            return [8, 8, 0, 0];
-          case 3:
-            return [8, 8, 8, 0];
-          case 4:
-            return [8, 8, 8, 8];
-          default:
-            return [0, 0, 0, 0];
-        }
-      }
-    }
-  }
-  function depthBits(format) {
-    switch (format) {
-      case 33189:
-        return 16;
-      case 33190:
-        return 24;
-      case 36012:
-        return 32;
-      case 35056:
-        return 24;
-      case 36013:
-        return 32;
-      default:
-        return 16;
-    }
-  }
-  function stencilBits(format) {
-    switch (format) {
-      case 36168:
-        return 8;
-      case 35056:
-        return 8;
-      case 36013:
-        return 8;
-      default:
-        return 8;
-    }
-  }
-
-  // src/gl/api/context.ts
-  var INVALID_ENUM = 1280;
-  var INVALID_OPERATION = 1282;
-  var NO_ERROR = 0;
-  var CONTEXT_LOST_WEBGL = 37442;
-  var lostErrorState = /* @__PURE__ */ new WeakMap();
-  function installContextApi(proto) {
-    proto.getContextAttributes = function() {
-      return { ...this._attrs };
-    };
-    proto.isContextLost = function() {
-      return this._isLost;
-    };
-    proto.getSupportedExtensions = function() {
-      return getSupportedExtensionNames(this._version);
-    };
-    proto.getExtension = function(name) {
-      const n = String(name);
-      try {
-        return getExtensionObject(this, n);
-      } catch {
-        return null;
-      }
-    };
-    proto.getError = function() {
-      if (this._isLost) {
-        let st = lostErrorState.get(this);
-        if (!st || !st.lostEpoch) {
-          st = { lostEpoch: true, consumed: false };
-          lostErrorState.set(this, st);
-        }
-        if (!st.consumed) {
-          st.consumed = true;
-          return CONTEXT_LOST_WEBGL;
-        }
-        return NO_ERROR;
-      }
-      lostErrorState.delete(this);
-      return this._errors.get();
-    };
-    proto.getString = function(name) {
-      if (this._isLost) return null;
-      switch (name) {
-        case 7938:
-          return this._version === 2 ? "WebGL 2.0 (Software Renderer)" : "WebGL 1.0 (Software Renderer)";
-        case 35724:
-          return this._version === 2 ? "WebGL GLSL ES 3.00 (Software)" : "WebGL GLSL ES 1.00 (Software)";
-        case 7936:
-          return "Software Renderer";
-        case 7937:
-          return "Software Renderer (JS)";
-        case 7939:
-          return getSupportedExtensionNames(this._version).join(" ");
-        default:
-          this._errors.push(INVALID_ENUM);
-          return null;
-      }
-    };
-    proto.getParameter = function(pname) {
-      try {
-        return getParameter(this, pname);
-      } catch {
-        this._errors.push(INVALID_OPERATION);
-        return null;
-      }
-    };
-  }
-
-  // src/gl/api/state.ts
-  function installStateApi(proto) {
-    void proto;
-  }
-
-  // src/gl/api/buffers.ts
-  function installBuffersApi(proto) {
-    void proto;
-  }
-
-  // src/gl/api/vertex-attrib.ts
-  function installVertexAttribApi(proto) {
-    void proto;
-  }
-
-  // src/gl/api/textures.ts
-  function installTexturesApi(proto) {
-    void proto;
-  }
-
-  // src/gl/api/teximage.ts
-  function installTexImageApi(proto) {
-    void proto;
-  }
-
-  // src/gl/api/programs.ts
-  function installProgramsApi(proto) {
-    void proto;
-  }
-
-  // src/gl/api/uniforms.ts
-  function installUniformsApi(proto) {
-    void proto;
-  }
-
-  // src/gl/api/framebuffers.ts
-  function installFramebuffersApi(proto) {
-    void proto;
-  }
-
-  // src/gl/api/draw.ts
-  function installDrawApi(proto) {
-    void proto;
-  }
-
-  // src/gl/api/webgl2.ts
-  function installWebGL2Api(proto) {
-    void proto;
-  }
-
-  // src/gl/api/index.ts
-  function installAll(proto) {
-    installContextApi(proto);
-    installStateApi(proto);
-    installBuffersApi(proto);
-    installVertexAttribApi(proto);
-    installTexturesApi(proto);
-    installTexImageApi(proto);
-    installProgramsApi(proto);
-    installUniformsApi(proto);
-    installFramebuffersApi(proto);
-    installDrawApi(proto);
-    installWebGL2Api(proto);
-  }
+  installAll(WebGL2RenderingContext.prototype);
 
   // src/gl/lifecycle.ts
   var registry = /* @__PURE__ */ new WeakMap();
@@ -2404,15 +13821,18 @@
   function createContext(canvas, attrs, type) {
     const slot = slotFor(canvas);
     const key = slotKey(type);
+    installMockEventShim(canvas);
     if (key === "webgl2") {
       if (slot.webgl2) return slot.webgl2;
       if (slot.webgl) return null;
       slot.webgl2 = new WebGL2RenderingContext(canvas, attrs, type, CONTEXT_TOKEN);
+      initContextResources(slot.webgl2);
       return slot.webgl2;
     }
     if (slot.webgl) return slot.webgl;
     if (slot.webgl2) return null;
     slot.webgl = new WebGLRenderingContext(canvas, attrs, type, CONTEXT_TOKEN);
+    initContextResources(slot.webgl);
     return slot.webgl;
   }
 
