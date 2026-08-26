@@ -960,7 +960,11 @@ function analyzeBuiltinCall(e: CallExpr, name: string, ctx: SemContext): void {
     ctx.error(e.loc.line, `'${name}' : no matching function`);
     return;
   }
-  const enabled = all.filter((s) => s.extension === undefined || ctx.enabledExtensions.has(s.extension));
+  // GL_OES_standard_derivatives functions (dFdx/dFdy/fwidth) are CORE in
+  // GLSL ES 3.00 — their extension gate applies to 1.00 shaders only.
+  const coreIn300 = (s: BuiltinSignature): boolean =>
+    ctx.version === 300 && s.extension === 'GL_OES_standard_derivatives';
+  const enabled = all.filter((s) => s.extension === undefined || coreIn300(s) || ctx.enabledExtensions.has(s.extension));
   if (enabled.length === 0) {
     ctx.error(e.loc.line, `'${name}' : requires extension '${all[0].extension}' which is not enabled`);
     return;
