@@ -1,11 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// compare.ts is implemented in a sibling worktree; in the integrated tree it
-// exports sanitizeReferenceName. While it is absent here (empty placeholder),
-// fall back to the local mirror below — same rule, so behavior is identical.
-// @ts-ignore -- sanitizeReferenceName is exported by compare.ts
-import { sanitizeReferenceName as compareSanitizeReferenceName } from "./compare";
+import { sanitizeReferenceName } from "./compare";
 
 export type SceneEntry = {
   kind: "file" | "script";
@@ -24,20 +20,6 @@ export type SceneEntry = {
   useLargeWorldRendering?: boolean;
   excludeFromAutomaticTesting?: boolean;
 };
-
-/**
- * Local mirror of compare.ts's `sanitizeReferenceName`: strip the extension,
- * collapse runs of characters outside [A-Za-z0-9._-] to "-", append ".png".
- * Used only until compare.ts lands; compare's implementation takes precedence.
- */
-function sanitizeReferenceNameFallback(name: string): string {
-  return name.replace(/\.[^/.]+$/, "").replace(/[^A-Za-z0-9._-]+/g, "-") + ".png";
-}
-
-const sanitizeReferenceName: (name: string) => string =
-  typeof compareSanitizeReferenceName === "function"
-    ? compareSanitizeReferenceName
-    : sanitizeReferenceNameFallback;
 
 /** Default (non-full) run: the 16 scenes from config.json with local goldens. */
 export const CURATED_TITLES: string[] = [

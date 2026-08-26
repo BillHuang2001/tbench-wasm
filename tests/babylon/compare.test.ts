@@ -6,7 +6,11 @@ import { createRequire } from "node:module";
 import sharp from "sharp";
 import { afterAll, describe, expect, it } from "vitest";
 import { compareScreenshots, goldenPath, sanitizeReferenceName } from "./compare.js";
-import pixelmatch from "./pixelmatch.js";
+
+// Load the vendored CommonJS pixelmatch via require() (see compare.ts) — a
+// static import would be parsed as ESM under this repo's "type": "module".
+const cjsRequire = createRequire(import.meta.url);
+const pixelmatch = cjsRequire("./pixelmatch.cjs") as typeof import("./pixelmatch.js");
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "babylon-compare-"));
 

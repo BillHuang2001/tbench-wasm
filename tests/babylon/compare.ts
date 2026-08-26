@@ -1,7 +1,14 @@
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import sharp from "sharp";
-import pixelmatch from "./pixelmatch.js";
+
+// pixelmatch.cjs is vendored CommonJS (from playwright-core); under this
+// repo's "type": "module" a static import would be parsed as ESM, so load it
+// via require() — `.cjs` is unambiguous CommonJS for Node. Types come from
+// pixelmatch.d.ts (the `.js` specifier is type-only, resolved by tsc only).
+const req = createRequire(import.meta.url);
+const pixelmatch = req("./pixelmatch.cjs") as typeof import("./pixelmatch.js");
 
 export interface CompareScreenshotOptions {
   actualPng: Buffer;

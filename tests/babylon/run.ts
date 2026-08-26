@@ -266,7 +266,7 @@ async function main(): Promise<number> {
     });
     const pass = cmp.ok && sceneResult.ok;
     if (!pass) {
-      const baseName = sanitizeReferenceName(sceneResult.reference);
+      const baseName = sanitizeReferenceName(sceneResult.reference).replace(/\.png$/, "");
       writeFileSync(path.join(reportDir, baseName + ".png"), sceneResult.screenshot);
       if (cmp.diffPng) {
         writeFileSync(path.join(reportDir, baseName + ".diff.png"), cmp.diffPng);
