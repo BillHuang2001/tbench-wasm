@@ -404,3 +404,6 @@ export function createDefaultState(version: 1 | 2): State {
 
 /** 0x1E00 = KEEP (stencil op). */
 export const KEEP = 0x1e00;
+
+/** Alias kept for tests/unit/state.test.ts (createState === createDefaultState). */
+export const createState = createDefaultState;

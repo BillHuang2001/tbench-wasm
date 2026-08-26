@@ -38,6 +38,7 @@ import type {
 import { C1, installConstants } from './constants';
 import { ErrorQueue } from './errors';
 import { createDefaultState, type State } from './state';
+import { installAll } from './api';
 import { Resources } from './objects';
 import type {
   WebGLActiveInfo,
@@ -358,3 +359,5 @@ export interface WebGLRenderingContext {
 
 // Install WebGL1 constants on the prototype (gl.COLOR_BUFFER_BIT etc.).
 installConstants(WebGLRenderingContext.prototype, C1);
+// Wire the api/ prototype mixins (idempotent — entry.ts also calls installAll).
+installAll(WebGLRenderingContext.prototype);

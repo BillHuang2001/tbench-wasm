@@ -32,6 +32,7 @@ import type {
 import { C2, installConstants } from './constants';
 import { createDefaultState } from './state';
 import { WebGLRenderingContext, CONTEXT_TOKEN } from './webgl1';
+import { installAll } from './api';
 import type {
   WebGLActiveInfo,
   WebGLBuffer,
@@ -200,3 +201,6 @@ export interface WebGL2RenderingContext {
 
 // Install WebGL2 constants on the WebGL2 prototype (gl2.X via prototype chain).
 installConstants(WebGL2RenderingContext.prototype, C2);
+// Wire the api/ prototype mixins for WebGL2 (idempotent — entry.ts also calls
+// installAll; WebGL1 methods arrive via the prototype chain from webgl1.ts).
+installAll(WebGL2RenderingContext.prototype);
