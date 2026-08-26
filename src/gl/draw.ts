@@ -30,7 +30,7 @@
  * All engine functions take the context and mutate only context-owned state.
  *
  * CROSS-AGENT CONTRACT NOTES (stub era):
- *  - rasterizer.draw / clear*/blit* helpers are STUBS that throw. The engine
+ *  - rasterizer.draw / clear* / blit* helpers are STUBS that throw. The engine
  *    calls them inside try/catch and falls back to LOCAL implementations
  *    (direct typed-array fills/copies/packs, "replace when raster lands").
  *    Raster throws are SWALLOWED (no GL error) so the stub era stays
@@ -63,7 +63,7 @@ import type { WebGLRenderingContext } from './webgl1';
 import type { GLenum, GLint, GLintptr, GLsizei, GLuint } from './types';
 import { C1, C2 } from './constants';
 import { resolveFramebufferTarget, resolveReadSurface, getAttachmentSurface } from './framebuffer-util';
-import { handleCanvasResize } from './lifecycle';
+import { handleCanvasResize } from './lost';
 import {
   computeVertexStride,
   RECORD_HEADER_FLOATS,

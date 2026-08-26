@@ -83,11 +83,11 @@ import type { GLboolean, GLenum, GLint, GLuint } from '../types';
 /** Full glsl compile result per WebGLShader (link input). */
 const shaderResults = new WeakMap<WebGLShader, GlslShader>();
 /** glsl Program per linked WebGLProgram (stores, uniformMap, TF varyings). */
-const programModels = new WeakMap<WebGLProgram, GlslProgram>();
+export const programModels = new WeakMap<WebGLProgram, GlslProgram>();
 /** Attach refcount per WebGLShader (deferred deletion while attached). */
 const shaderAttachCounts = new WeakMap<WebGLShader, number>();
 /** Link generation counter per WebGLProgram (relink invalidation). */
-const linkGen = new WeakMap<WebGLProgram, number>();
+export const linkGen = new WeakMap<WebGLProgram, number>();
 /** Link generation captured at getUniformLocation (per WebGLUniformLocation). */
 export const locGen = new WeakMap<WebGLUniformLocation, number>();
 /** validateProgram result per WebGLProgram (VALIDATE_STATUS). */
@@ -674,4 +674,17 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     }
     const p = validateProgram(ctx, program);
     if (p === null) return;
-    if (!p._linkStatus || p._program === nul
+    if (!p._linkStatus || p._program === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    // Release the previously bound program (mirror of the null branch above:
+    // a deleted program stays tracked only while _inUse).
+    if (ctx._state.currentProgram !== null && ctx._state.currentProgram !== p) {
+      ctx._state.currentProgram._inUse = false;
+      if (ctx._state.currentProgram._deleted) ctx._resources.untrack(ctx._state.currentProgram);
+    }
+    p._inUse = true;
+    ctx._state.currentProgram = p;
+  };
+}
