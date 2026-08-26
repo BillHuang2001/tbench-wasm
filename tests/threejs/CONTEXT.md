@@ -1,0 +1,34 @@
+# tests/threejs/ — three.js Visual Regression Driver
+
+## Intent
+Runs a curated subset of three.js example pages (`/testsuites/three.js/examples/*.html`) against the software WebGL renderer in headless Chromium (Playwright), screenshots each page after a **deterministic single-frame render** (mirroring three.js's own e2e technique), and compares against three.js's official golden references (`examples/screenshots/<page>.jpg`) with the official pass criterion: fewer than 0.1% of pixels may exceed normalized squared-RGB distance 0.01 (threshold 0.1). Reports per-page pass/fail + diff stats; exits non-zero on any failure. Must work end-to-end even with a stub renderer (pages fail with RENDERER_NOT_FOUND console errors, but the driver completes, screenshots, diffs, and reports).
+
+## API Surface
+- `run.ts` — CLI entry (`npm run test:threejs`). Flags: `--filter <substr>` (substring match on page names), `--full` (scan all eligible pages in the foreign repo), `--workers N` (default 3; renderer is CPU-bound), `--renderer <path>` (sets `WEBGL_SOFTWARE_RENDERER` before injection; default `./renderer.js`), `--attempts N` (default 3; retries guard page-init flakiness — frames are otherwise identical), `--timeout <sec>` (per-attempt goto timeout, default 120), `--list` (print selected pages and exit 0), `--out <dir>` (report dir, default `tests/reports/threejs/`). Exit code = number of failed pages (0 = pass).
+- `list.ts` — `DEFAULT_PAGES` (curated ~38 pages, each verified to have html + golden + local-only assets), `selectPages(repoPath, opts)` (applies filter/`--full` scan + eligibility), `hasGolden(repoPath, name)`, `pagePath(repoPath, name)`. Eligibility for `--full`: excludes `index.html`, `webgpu_*`, `webxr_*`, `css2d_*`, `css3d_*` prefixes, pages missing a golden, and `NETWORK_EXCLUDED` (pages needing CDN assets, e.g. `physics_ammo_cloth`).
+- `driver.ts` — `createServer(repoPath)` (plain Node http server, root = three.js repo root, 127.0.0.1:0; no-cache; path-traversal guard; MIME map incl. glb/hdr/typeface.json/mp4/ogv; HTTP Range support for video; **patches build bytes in memory** for `/build/three.module.js` + `/build/three.core.js` + `/build/three.webgpu.js`: `Math.random() * 0xffffffff` → `Math._random() * 0xffffffff` and WebGPU `trackTimestamp` disable — goldens must never be written). `deterministicInjection()` (verbatim port of `/testsuites/three.js/test/e2e/deterministic-injection.js`: sin-seeded PRNG on `Math.random` (original saved as `Math._random`), clocks frozen to 0 (`Date.now`/`Date.prototype.getTime`/`performance.now`; original saved as `performance._now`), rAF polls `window._renderStarted` on a 100 ms interval and fires ONE `cb(0)` then sets `window._renderFinished` (later rAF registrations no-op), video play→pause-on-first-timeupdate override, `window.TESTING = true`). `runSuite(pages, opts)` (worker pool over one browser, one context per worker; per attempt: `addInitScript(buildInterceptScript() from ../../src/context-intercept)` + `addInitScript(deterministic)`, `goto(waitUntil: 'networkidle0')`, cleanPage (port of `test/e2e/clean-page.js`), 2 s network idle, 1 s/MB parse delay (bytes from response content-length), set `_renderStarted`, poll `_renderFinished` (5 s render timeout → screenshot anyway), screenshot 800×500 (viewport 400×250, deviceScaleFactor 2), console `error` → page fail, `pageerror` → warn only; artifacts `<name>-{actual,expected,diff}.{png,jpg}`).
+- `compare.ts` — `readImage` (sharp → RGBA raw), `downscale2x` (exact 2×2 box average, 800×500 → 400×250 — identical to official `image.js` scale(1/2) since 2.0 is an integer ratio), `compareImages(actual, expected, threshold = 0.1)` → `{ numDiffPixels, diffPercent, maxDelta, meanDelta, pass }` (normalized squared RGB distance; `pass = diffPercent < 0.1`), `makeDiffImage` (diff pixels red, matches dimmed ×0.2), PNG encode via sharp.
+- Shared types (`PageResult`, `RunOptions`, `DiffStats`, `Report`) exported from `driver.ts`.
+
+## Constraints
+- Foreign repo `/testsuites/three.js` is READ-ONLY (spatial contract). Never write goldens, patched builds, or `output-screenshots/` there. Repo path resolution: env `THREEJS_REPO` (default `/testsuites/three.js`).
+- Mirror official e2e semantics exactly — single deterministic frame, frozen clocks, seeded PRNG, `Math._random` for UUID entropy. Do NOT invent a visual-stability heuristic (the official suite has none; retries only guard flakiness).
+- The deterministic injection and build patch MUST be verbatim ports, including the undefined-`RAF` quirk in the video override (matches upstream; the resulting unhandled rejection is why `pageerror` is warn-only, not fail).
+- No new npm deps (playwright + sharp already in package.json). Run via `tsx`; must pass `npm run typecheck` (tsconfig has `moduleResolution: bundler`, extensionless imports; no `allowImportingTsExtensions`).
+- Files ≤ ~1000 lines. Reports/artifacts under `tests/reports/threejs/` (gitignored) — never commit screenshots.
+
+## Test Strategy / Notes for Agents
+- Smoke (must work with stub renderer): `npm run test:threejs -- --filter webgl_buffergeometry --workers 1 --attempts 1` — page fails with RENDERER_NOT_FOUND, but JSON report + artifacts are produced and exit code = 1.
+- Golden naming: `examples/screenshots/<page>.jpg` (JPEG q95, 400×250). Screenshot flow: 800×500 PNG → exact 2×2 box average → 400×250 RGBA compare.
+- Official e2e reference (read-only, mirror it): `/testsuites/three.js/test/e2e/{puppeteer,deterministic-injection,clean-page,image}.js` — golden naming, console-error normalization (`[.WebGL-...]` prefix strip, 'Timestamp tracking is disabled' ignore), pass criterion all live there.
+- `webgl_materials_video` needs video serving with Range support; may be flaky headless — acceptable, it reports per-page.
+- 3 default-subset pages (`webgl_materials_cubemap_dynamic`, `webgl_materials_displacementmap`, `webgl_shadowmap`) are on the official exceptionList (slow) — kept deliberately; they exercise heavy paths.
+- `--full` is ~500+ pages; expect long runtime. Use `--filter` for iteration.
+- three.js v0.185-dev: WebGLRenderer requests `webgl2` only; missing extensions must be handled gracefully by the renderer (root CONTEXT.md lists them).
+
+## Routing Table
+- `run.ts` → CLI entry point (arg parsing, orchestration, report summary, exit code)
+- `driver.ts` → server + browser + per-page flow (serve, inject, navigate, wait, screenshot, artifacts)
+- `compare.ts` → image decode/downscale/diff vs goldens
+- `list.ts` → curated page list + `--full` scan/eligibility
+- `../../src/context-intercept.ts` → `buildInterceptScript()` renderer injection (imported, not duplicated)
