@@ -49,6 +49,10 @@ export const GL = {
   DEPTH_COMPONENT24: 0x81a6,
   DEPTH_COMPONENT32F: 0x8cac,
   DEPTH24_STENCIL8: 0x88f0,
+
+  // Data types (texImage2D / readPixels)
+  UNSIGNED_BYTE: 0x1401,
+  FLOAT: 0x1406,
 } as const;
 
 /**
