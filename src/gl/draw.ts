@@ -30,7 +30,7 @@
  * All engine functions take the context and mutate only context-owned state.
  *
  * CROSS-AGENT CONTRACT NOTES (stub era):
- *  - rasterizer.draw / clear*/blit* helpers are STUBS that throw. The engine
+ *  - rasterizer.draw / clear/blit helpers are STUBS that throw. The engine
  *    calls them inside try/catch and falls back to LOCAL implementations
  *    (direct typed-array fills/copies/packs, "replace when raster lands").
  *    Raster throws are SWALLOWED (no GL error) so the stub era stays
@@ -589,10 +589,11 @@ function buildAttribs(
       if (a.integer) {
         // raw integer path (vertexAttribIPointer)
         const unsigned = a.type === C1.UNSIGNED_BYTE || a.type === C1.UNSIGNED_SHORT || a.type === C1.UNSIGNED_INT;
-        const pool = unsigned ? sc.uintPool : sc.intPool;
         const need = elemCount * comps;
-        ensurePool(pool, need);
-        const dst = unsigned ? new Uint32Array(pool.buffer, 0, need) : new Int32Array(pool.buffer, 0, need);
+        ensurePool(sc, unsigned ? 'uintPool' : 'intPool', need);
+        const dst = unsigned
+          ? new Uint32Array(sc.uintPool.buffer, 0, need)
+          : new Int32Array(sc.intPool.buffer, 0, need);
         for (let e = 0; e < elemCount; e++) {
           const element = a.divisor > 0 ? e : (indices ? indices[e] : req.firstOrOffset + e);
           const byteOff = a.offset + element * stride + colOffset;
@@ -608,7 +609,7 @@ function buildAttribs(
       } else {
         // float path with normalization
         const need = elemCount * comps;
-        ensurePool(sc.floatPool, need);
+        ensurePool(sc, 'floatPool', need);
         const dst = new Float32Array(sc.floatPool.buffer, 0, need);
         const normalized = a.normalized;
         for (let e = 0; e < elemCount; e++) {
@@ -637,10 +638,18 @@ function buildAttribs(
   return { attribs, plans };
 }
 
-function ensurePool(pool: Float32Array | Int32Array | Uint32Array, need: number): void {
-  // The pool may have been reallocated; callers use pool.buffer, so we grow in place.
-  void pool;
-  void need;
+/**
+ * Grow a scratch pool on demand. Pools start 0-length; callers create typed-array
+ * views over `sc[which].buffer` right after, so the scratch object's field is
+ * reassigned here (a bare parameter reassignment would be lost).
+ */
+function ensurePool(sc: DrawScratch, which: 'floatPool' | 'intPool' | 'uintPool', need: number): void {
+  const pool = sc[which];
+  if (pool.length >= need) return;
+  const len = Math.max(need, 64);
+  if (which === 'floatPool') sc.floatPool = new Float32Array(len);
+  else if (which === 'intPool') sc.intPool = new Int32Array(len);
+  else sc.uintPool = new Uint32Array(len);
 }
 
 function attribTypeSize(type: GLenum): number {
@@ -1566,4 +1575,186 @@ export function executeClearBuffer(
     }
   }
   presentIfDefault(ctx);
+}
+
+/* ================================================================== */
+/* Shared draw validation (api/draw.ts single draws + multiDraw engine) */
+/* ================================================================== */
+
+const DRAW_MODES = new Set<number>([
+  C1.POINTS, C1.LINE_STRIP, C1.LINE_LOOP, C1.LINES,
+  C1.TRIANGLE_STRIP, C1.TRIANGLE_FAN, C1.TRIANGLES,
+]);
+
+/** Bytes per index for drawElements types. */
+function indexTypeSize(type: GLenum): number {
+  return type === C1.UNSIGNED_BYTE ? 1 : type === C1.UNSIGNED_SHORT ? 2 : 4;
+}
+
+/**
+ * Preconditions shared by every draw (ordered per spec, AFTER the mode/count/
+ * type/offset argument checks): program linked + in use (INVALID_OPERATION),
+ * transform-feedback active mode mismatch (INVALID_OPERATION), every enabled
+ * attrib array backed by a buffer (INVALID_OPERATION), draw target resolvable
+ * (INVALID_FRAMEBUFFER_OPERATION). The engine's executeDraw re-checks these as
+ * a safety net; the api layer checks first so error ordering is exact.
+ */
+function validateCommonDraw(ctx: WebGLRenderingContext, mode: GLenum): boolean {
+  const s = ctx._state;
+  const prog = s.currentProgram;
+  if (!prog || !prog._linkStatus || !prog._program) {
+    pushError(ctx, C1.INVALID_OPERATION);
+    return false;
+  }
+  // Transform feedback active (bound object; the default TF object is
+  // api/webgl2.ts-private — engine scope covers the bound TF, which is also
+  // the only TF executeDraw captures from).
+  const tf = s.transformFeedback;
+  if (tf && tf._active && !tf._paused && tf._primitiveMode !== mode) {
+    pushError(ctx, C1.INVALID_OPERATION);
+    return false;
+  }
+  const vao = s.vao;
+  const maxAttribs = s.limits.MAX_VERTEX_ATTRIBS;
+  for (let loc = 0; loc < maxAttribs; loc++) {
+    const a = vao.attribs[loc];
+    if (a.enabled && !a.buffer) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return false;
+    }
+  }
+  if (!resolveDrawTarget(ctx)) {
+    pushError(ctx, C1.INVALID_FRAMEBUFFER_OPERATION);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Validate a drawArrays-style call (shared by api/draw.ts drawArrays and the
+ * WEBGL_multi_draw engine entry). Returns the assembled DrawRequest, or null
+ * after pushing the first error (spec error order: mode → first/count/
+ * instanceCount → common preconditions).
+ */
+export function validateDrawArrays(
+  ctx: WebGLRenderingContext,
+  mode: GLenum, first: GLint, count: GLsizei,
+  instanceCount: GLsizei = 1,
+): DrawRequest | null {
+  if (!DRAW_MODES.has(mode)) { pushError(ctx, C1.INVALID_ENUM); return null; }
+  if (first < 0 || count < 0 || instanceCount < 0) { pushError(ctx, C1.INVALID_VALUE); return null; }
+  if (!validateCommonDraw(ctx, mode)) return null;
+  return { mode, count, instanceCount, firstOrOffset: first, indexed: false };
+}
+
+/** Options for validateDrawElements (instanced count + drawRangeElements range). */
+export interface DrawElementsOpts {
+  instanceCount?: GLsizei;
+  range?: [GLuint, GLuint];
+}
+
+/**
+ * Validate a drawElements-style call (shared by api/draw.ts drawElements and
+ * the WEBGL_multi_draw engine entry). Error order per spec: mode → count →
+ * type → offset → offset-multiple → (range) → element-array-buffer →
+ * common preconditions. UNSIGNED_INT requires WebGL2 or OES_element_index_uint.
+ */
+export function validateDrawElements(
+  ctx: WebGLRenderingContext,
+  mode: GLenum, count: GLsizei, type: GLenum, offset: GLintptr,
+  opts: DrawElementsOpts = {},
+): DrawRequest | null {
+  const instanceCount = opts.instanceCount ?? 1;
+  if (!DRAW_MODES.has(mode)) { pushError(ctx, C1.INVALID_ENUM); return null; }
+  if (count < 0 || instanceCount < 0) { pushError(ctx, C1.INVALID_VALUE); return null; }
+  const s = ctx._state;
+  const uintOK = s.version === 2 || extSupported(ctx, 'OES_element_index_uint');
+  if (type !== C1.UNSIGNED_BYTE && type !== C1.UNSIGNED_SHORT &&
+      !(type === C1.UNSIGNED_INT && uintOK)) {
+    pushError(ctx, C1.INVALID_ENUM);
+    return null;
+  }
+  if (offset < 0) { pushError(ctx, C1.INVALID_VALUE); return null; }
+  const ts = indexTypeSize(type);
+  if (offset % ts !== 0) { pushError(ctx, C1.INVALID_OPERATION); return null; }
+  const range = opts.range;
+  if (range) {
+    if (range[0] > range[1]) { pushError(ctx, C1.INVALID_VALUE); return null; }
+    if (count > range[1] - range[0] + 1) { pushError(ctx, C1.INVALID_OPERATION); return null; }
+  }
+  const eb = s.vao.elementArrayBuffer;
+  if (!eb || !eb._data || offset + count * ts > eb._size) {
+    pushError(ctx, C1.INVALID_OPERATION);
+    return null;
+  }
+  if (!validateCommonDraw(ctx, mode)) return null;
+  const req: DrawRequest = {
+    mode, count, instanceCount, firstOrOffset: offset, indexed: true, indexType: type,
+  };
+  if (range) req.range = range;
+  return req;
+}
+
+/* ================================================================== */
+/* WEBGL_multi_draw engine entries (extensions/misc.ts delegates here)  */
+/* ================================================================== */
+
+/**
+ * multiDrawArraysWEBGL engine: validate EVERY subdraw first (any invalid →
+ * push the error + NO drawing at all), then execute each subdraw via
+ * executeDraw. drawcount ≤ 0 → NO_ERROR no-op. firsts/counts are
+ * Int32Array/sequence (values are WebIDL longs).
+ *
+ * NOTE: `mode` is a parameter here (the objective's shorthand omitted it) —
+ * executeDraw requires the per-subdraw mode, and the extension validates it
+ * against the same DRAW_MODES table before any drawing.
+ */
+export function executeMultiDrawArrays(
+  ctx: WebGLRenderingContext,
+  mode: GLenum,
+  firsts: Int32Array | number[],
+  counts: Int32Array | number[],
+  drawcount: number,
+): void {
+  if (ctx._isLost) { pushError(ctx, C1.CONTEXT_LOST_WEBGL); return; }
+  const n = drawcount | 0;
+  if (n <= 0) return; // NO_ERROR no-op
+  for (let i = 0; i < n; i++) {
+    if (!validateDrawArrays(ctx, mode, firsts[i], counts[i], 1)) return;
+  }
+  for (let i = 0; i < n; i++) {
+    try {
+      executeDraw(ctx, { mode, count: counts[i], instanceCount: 1, firstOrOffset: firsts[i], indexed: false });
+    } catch {
+      pushError(ctx, C1.INVALID_OPERATION); // engine must not throw; guard anyway
+    }
+  }
+}
+
+/**
+ * multiDrawElementsWEBGL engine entry (same validate-all-first contract as
+ * executeMultiDrawArrays). counts/offsets are Int32Array/sequence; offsets are
+ * byte offsets into the element array buffer.
+ */
+export function executeMultiDrawElements(
+  ctx: WebGLRenderingContext,
+  mode: GLenum,
+  counts: Int32Array | number[],
+  type: GLenum,
+  offsets: Int32Array | number[],
+  drawcount: number,
+): void {
+  if (ctx._isLost) { pushError(ctx, C1.CONTEXT_LOST_WEBGL); return; }
+  const n = drawcount | 0;
+  if (n <= 0) return; // NO_ERROR no-op
+  for (let i = 0; i < n; i++) {
+    if (!validateDrawElements(ctx, mode, counts[i], type, offsets[i])) return;
+  }
+  for (let i = 0; i < n; i++) {
+    try {
+      executeDraw(ctx, { mode, count: counts[i], instanceCount: 1, firstOrOffset: offsets[i], indexed: true, indexType: type });
+    } catch {
+      pushError(ctx, C1.INVALID_OPERATION); // engine must not throw; guard anyway
+    }
+  }
 }
