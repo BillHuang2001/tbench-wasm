@@ -9,10 +9,16 @@
  *  - bindBuffer: target ∈ {ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER} (WebGL1) +
  *    {COPY_READ/WRITE_BUFFER, PIXEL_PACK/UNPACK_BUFFER, TRANSFORM_FEEDBACK_BUFFER,
  *    UNIFORM_BUFFER} (WebGL2). First bind fixes the buffer's target; rebinding to
- *    another target → INVALID_OPERATION. null unbinds (ELEMENT_ARRAY_BUFFER
- *    binding lives in the VAO state). WebGL2: bindBuffer(UNIFORM_BUFFER, b) is
- *    equivalent to bindBufferBase(UNIFORM_BUFFER, 0, b); bindBuffer with
- *    TRANSFORM_FEEDBACK_BUFFER → INVALID_OPERATION (no generic TF binding).
+ *    another target → INVALID_OPERATION (except TRANSFORM_FEEDBACK_BUFFER — see
+ *    below). null unbinds (ELEMENT_ARRAY_BUFFER binding lives in the VAO state).
+ *    WebGL2: bindBuffer(UNIFORM_BUFFER, b) is equivalent to
+ *    bindBufferBase(UNIFORM_BUFFER, 0, b); bindBuffer(TRANSFORM_FEEDBACK_BUFFER, b)
+ *    is equivalent to bindBufferBase(TRANSFORM_FEEDBACK_BUFFER, 0, b) (CTS
+ *    transform_feedback.html runTFBufferBindingTest + switching-objects.html).
+ *    Per WebGL2 §BUFFER_OBJECT_BINDING the buffer-type split is element-array vs
+ *    other-data: a TF bind only rejects element-array buffers and does NOT fix
+ *    the buffer's target (a TF-bound buffer can later bind ARRAY_BUFFER —
+ *    runTFBufferBindingTest binds a TF buffer to ARRAY_BUFFER with NO_ERROR).
  *  - bufferData: size number → allocate zero-filled; ArrayBuffer/ArrayBufferView
  *    → copy (view bytes only, honoring byteOffset/byteLength); usage ∈
  *    {STREAM,STATIC,DYNAMIC}_DRAW (WebGL2 adds the *_READ/*_COPY usages) else
@@ -20,11 +26,16 @@
  *    INVALID_OPERATION. Allocation failure (huge size) → OUT_OF_MEMORY.
  *  - bufferSubData: offset+byteLength bounds vs buffer size (INVALID_VALUE);
  *    copies the view's bytes at offset.
- *  - deleteBuffer: marks _deleted, untracks, unbinds the buffer from ALL
+ *  - deleteBuffer: marks _deleted, untracks, unbinds the buffer from all NON-TF
  *    binding points (context bindings, current + default VAO, all VAO objects,
- *    UBO bindings, pixel/copy buffers, TF bindings incl. _tfRangeBindings);
- *    _deletePending = true when it was bound anywhere (deferred deletion per
- *    spec — isBuffer returns false immediately).
+ *    UBO bindings, pixel/copy buffers). A transform-feedback binding HOLDS A
+ *    REFERENCE: while the generic indexed binding or an UNBOUND TF object still
+ *    references the buffer, it is kept alive — bindings and resource tracking
+ *    are preserved (CTS transform_feedback.html runUnboundDeleteTest). Deleting
+ *    while the BOUND TF object references it unbinds it from that TF and from
+ *    the generic indexed binding (runBoundDeleteTest). _deletePending = true
+ *    when it was bound anywhere (deferred deletion per spec — isBuffer returns
+ *    false immediately).
  *  - bindBufferBase/Range: UNIFORM_BUFFER index < MAX_UNIFORM_BUFFER_BINDINGS,
  *    TRANSFORM_FEEDBACK_BUFFER index < MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
  *    UBO range offset aligned to UNIFORM_BUFFER_OFFSET_ALIGNMENT,
@@ -34,8 +45,10 @@
  *    on the buffer object (_tfRangeBindings — last bind at an index wins).
  *  - getIndexedParameter: UNIFORM_BUFFER_BINDING/START/SIZE (from
  *    state.uniformBuffers/uniformBufferRanges), TRANSFORM_FEEDBACK_BUFFER_BINDING/
- *    START/SIZE (from _tfRangeBindings entries); invalid target → INVALID_ENUM,
- *    index OOB → INVALID_VALUE.
+ *    START/SIZE (from the BOUND transform feedback object's _buffers/
+ *    _bufferRanges — indexed TF bindings are per-object state per GLES 3.0
+ *    §6.24; null/0 when no TF object is bound — CTS runTFBufferBindingTest);
+ *    invalid target → INVALID_ENUM, index OOB → INVALID_VALUE.
  *  - getBufferSubData: reads bytes from the bound buffer into dstBuffer at
  *    dstOffset (elements); PIXEL_PACK_BUFFER target → INVALID_OPERATION;
  *    negative args → INVALID_VALUE; range overflow → INVALID_OPERATION.
@@ -172,8 +185,16 @@ function boundBufferForTarget(ctx: WebGLRenderingContext, target: GLenum): WebGL
  * current VAO, default VAO, all VAO objects, UBO bindings, pixel/copy buffers,
  * TF object bindings and its own _tfRangeBindings). Returns true when it was
  * bound somewhere (deletion was deferred per spec).
+ *
+ * `skipTfBindings` leaves the TF state alone (transform-feedback bindings hold a
+ * reference — deleteBuffer handles them separately so an unbound TF object can
+ * keep a deleted buffer alive, CTS runUnboundDeleteTest).
  */
-function unbindBufferEverywhere(ctx: WebGLRenderingContext, buffer: WebGLBuffer): boolean {
+function unbindBufferEverywhere(
+  ctx: WebGLRenderingContext,
+  buffer: WebGLBuffer,
+  skipTfBindings = false,
+): boolean {
   let found = false;
   const nullIf = (b: WebGLBuffer | null): WebGLBuffer | null => {
     if (b === buffer) {
@@ -203,7 +224,7 @@ function unbindBufferEverywhere(ctx: WebGLRenderingContext, buffer: WebGLBuffer)
     s.copyReadBuffer = nullIf(s.copyReadBuffer);
     s.copyWriteBuffer = nullIf(s.copyWriteBuffer);
   }
-  if (s.transformFeedback) {
+  if (s.transformFeedback && !skipTfBindings) {
     for (let i = 0; i < s.transformFeedback._buffers.length; i++) {
       if (s.transformFeedback._buffers[i] === buffer) {
         s.transformFeedback._buffers[i] = null;
@@ -211,27 +232,29 @@ function unbindBufferEverywhere(ctx: WebGLRenderingContext, buffer: WebGLBuffer)
       }
     }
   }
-  for (const obj of ctx._resources.all) {
-    if (obj instanceof WebGLVertexArrayObject && obj._vao) {
-      obj._vao.elementArrayBuffer = nullIf(obj._vao.elementArrayBuffer);
-      for (const a of obj._vao.attribs) a.buffer = nullIf(a.buffer);
-    } else if (obj instanceof WebGLTransformFeedback) {
-      for (let i = 0; i < obj._buffers.length; i++) {
-        if (obj._buffers[i] === buffer) {
-          obj._buffers[i] = null;
-          found = true;
+  if (!skipTfBindings) {
+    for (const obj of ctx._resources.all) {
+      if (obj instanceof WebGLVertexArrayObject && obj._vao) {
+        obj._vao.elementArrayBuffer = nullIf(obj._vao.elementArrayBuffer);
+        for (const a of obj._vao.attribs) a.buffer = nullIf(a.buffer);
+      } else if (obj instanceof WebGLTransformFeedback) {
+        for (let i = 0; i < obj._buffers.length; i++) {
+          if (obj._buffers[i] === buffer) {
+            obj._buffers[i] = null;
+            found = true;
+          }
         }
       }
     }
-  }
-  if (buffer._tfRangeBindings.length > 0) {
-    found = true;
-    buffer._tfRangeBindings.length = 0;
+    if (buffer._tfRangeBindings.length > 0) {
+      found = true;
+      buffer._tfRangeBindings.length = 0;
+    }
   }
   return found;
 }
 
-/** Shared bindBufferBase logic (also used by bindBuffer(UNIFORM_BUFFER, b)). */
+/** Shared bindBufferBase logic (also used by bindBuffer(UNIFORM_BUFFER/TRANSFORM_FEEDBACK_BUFFER, b)). */
 function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: GLuint, buffer: WebGLBuffer | null): void {
   const s = ctx._state;
   const max =
@@ -248,6 +271,13 @@ function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: G
       s.uniformBufferRanges[index] = { offset: 0, size: 0 };
     } else {
       clearTfBinding(ctx, index);
+      // Unbinding while a TF object is bound clears that object's indexed
+      // binding too (indexed TF bindings are per-object state).
+      const boundTf = s.transformFeedback;
+      if (boundTf) {
+        boundTf._buffers[index] = null;
+        boundTf._bufferRanges[index] = { offset: 0, size: 0 };
+      }
     }
     return;
   }
@@ -260,15 +290,32 @@ function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: G
   }
   const buf = validateBuffer(ctx, buffer);
   if (buf === null) return; // cross-context/deleted → INVALID_OPERATION pushed
-  if (buf._target === 0) buf._target = target;
-  else if (buf._target !== target) {
-    ctx._errors.push(C1.INVALID_OPERATION);
-    return;
-  }
   if (target === C2.UNIFORM_BUFFER) {
+    if (buf._target === 0) buf._target = target;
+    else if (buf._target !== target) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     s.uniformBuffers[index] = buf;
     s.uniformBufferRanges[index] = { offset: 0, size: buf._size }; // whole buffer
   } else {
+    // TRANSFORM_FEEDBACK_BUFFER: per WebGL2 §BUFFER_OBJECT_BINDING the buffer
+    // type split is element-array vs other-data — only element-array buffers are
+    // rejected, and a TF bind does NOT fix the buffer's target (a TF-bound
+    // buffer can later bind ARRAY_BUFFER — CTS runTFBufferBindingTest).
+    if (buf._target === C1.ELEMENT_ARRAY_BUFFER) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    // Indexed TF bindings are transform-feedback-OBJECT state (GLES 3.0 §6.24):
+    // record on the bound object (getIndexedParameter reads it) and mirror into
+    // the global _tfRangeBindings (source for the webgl2 agent's bind/begin
+    // sync, begin's buffer-count validation, and generic bufferData access).
+    const boundTf = s.transformFeedback;
+    if (boundTf) {
+      boundTf._buffers[index] = buf;
+      boundTf._bufferRanges[index] = { offset: 0, size: buf._size };
+    }
     setTfBinding(ctx, index, buf, 0, buf._size); // whole buffer
   }
 }
@@ -292,10 +339,38 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       return;
     }
     if (buffer._deleted) return; // already deleted: silent no-op (spec)
-    const wasBound = unbindBufferEverywhere(ctx, buffer);
+    // A transform-feedback binding holds a reference to the buffer: while an
+    // UNBOUND TF object or the generic indexed binding references it, the buffer
+    // stays alive — bindings and resource tracking are preserved (CTS
+    // transform_feedback.html runUnboundDeleteTest: deleting a buffer attached
+    // to an unbound TF keeps it; getIndexedParameter still returns it after the
+    // TF is re-bound). Deleting while the BOUND TF object references it unbinds
+    // it from that TF and from the generic indexed binding (runBoundDeleteTest:
+    // getIndexedParameter → null after re-binding the TF).
+    const s = ctx._state;
+    const boundTf = s.transformFeedback;
+    const boundTfRefs = !!boundTf && boundTf._buffers.includes(buffer);
+    const tfRefs =
+      buffer._tfRangeBindings.length > 0 ||
+      [...ctx._resources.all].some(
+        (o) => o instanceof WebGLTransformFeedback && o._buffers.includes(buffer),
+      );
+    // Unbind from every NON-TF binding point (TF state is handled below).
+    const wasBound = unbindBufferEverywhere(ctx, buffer, true /* skipTfBindings */);
+    if (boundTfRefs) {
+      for (let i = 0; i < boundTf._buffers.length; i++) {
+        if (boundTf._buffers[i] === buffer) {
+          boundTf._buffers[i] = null;
+          boundTf._bufferRanges[i] = { offset: 0, size: 0 };
+        }
+      }
+      buffer._tfRangeBindings.length = 0; // bind/begin sync must not repopulate
+    }
     buffer._deleted = true;
-    buffer._deletePending = wasBound;
-    ctx._resources.untrack(buffer);
+    buffer._deletePending = wasBound || tfRefs || boundTfRefs;
+    // Untrack only when nothing holds the buffer anymore (a still-referencing
+    // TF keeps it findable by the global binding scan used at bind/begin sync).
+    if (!tfRefs || boundTfRefs) ctx._resources.untrack(buffer);
   };
 
   proto.isBuffer = function (this: WebGLRenderingContext, buffer: WebGLBuffer | null): GLboolean {
@@ -321,8 +396,11 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       return;
     }
     if (ctx._version === 2 && target === C2.TRANSFORM_FEEDBACK_BUFFER) {
-      // WebGL2: no generic TF binding — bindBufferBase/bindBufferRange only.
-      ctx._errors.push(C1.INVALID_OPERATION);
+      // WebGL2: bindBuffer(TRANSFORM_FEEDBACK_BUFFER, b) binds the generic TF
+      // binding point — equivalent to bindBufferBase(TRANSFORM_FEEDBACK_BUFFER,
+      // 0, b) (CTS transform_feedback.html runTFBufferBindingTest line 108,
+      // switching-objects.html line 101).
+      bindBufferBaseImpl(ctx, target, 0, buffer);
       return;
     }
     if (ctx._version === 2 && target === C2.UNIFORM_BUFFER) {
@@ -508,6 +586,13 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
           s.uniformBufferRanges[index] = { offset: 0, size: 0 };
         } else {
           clearTfBinding(ctx, index);
+          // Unbinding while a TF object is bound clears that object's indexed
+          // binding too (indexed TF bindings are per-object state).
+          const boundTf = s.transformFeedback;
+          if (boundTf) {
+            boundTf._buffers[index] = null;
+            boundTf._bufferRanges[index] = { offset: 0, size: 0 };
+          }
         }
         return;
       }
@@ -548,15 +633,27 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
           return;
         }
       }
-      if (buf._target === 0) buf._target = target;
-      else if (buf._target !== target) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
       if (target === C2.UNIFORM_BUFFER) {
+        if (buf._target === 0) buf._target = target;
+        else if (buf._target !== target) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
         s.uniformBuffers[index] = buf;
         s.uniformBufferRanges[index] = { offset, size };
       } else {
+        // TRANSFORM_FEEDBACK_BUFFER: same buffer-type rule as bindBufferBase —
+        // only element-array buffers are rejected; a TF bind does NOT fix the
+        // buffer's target (see bindBufferBaseImpl).
+        if (buf._target === C1.ELEMENT_ARRAY_BUFFER) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const boundTf = s.transformFeedback;
+        if (boundTf) {
+          boundTf._buffers[index] = buf;
+          boundTf._bufferRanges[index] = { offset, size };
+        }
         setTfBinding(ctx, index, buf, offset, size);
       }
     };
@@ -592,12 +689,22 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
           return s.uniformBufferRanges[index].offset;
         case C2.UNIFORM_BUFFER_SIZE:
           return s.uniformBufferRanges[index].size;
-        case C2.TRANSFORM_FEEDBACK_BUFFER_BINDING:
-          return tfBindingAtIndex(ctx, index).buffer;
-        case C2.TRANSFORM_FEEDBACK_BUFFER_START:
-          return tfBindingAtIndex(ctx, index).offset;
-        default: // TRANSFORM_FEEDBACK_BUFFER_SIZE
-          return tfBindingAtIndex(ctx, index).size;
+        case C2.TRANSFORM_FEEDBACK_BUFFER_BINDING: {
+          // Indexed TF buffer bindings are transform-feedback-OBJECT state
+          // (GLES 3.0 §6.24): the query reflects the BOUND object; with no
+          // object bound nothing is bound → null (CTS transform_feedback.html
+          // runTFBufferBindingTest line 122).
+          const tf = s.transformFeedback;
+          return tf ? (tf._buffers[index] ?? null) : null;
+        }
+        case C2.TRANSFORM_FEEDBACK_BUFFER_START: {
+          const tf = s.transformFeedback;
+          return tf ? (tf._bufferRanges[index]?.offset ?? 0) : 0;
+        }
+        default: { // TRANSFORM_FEEDBACK_BUFFER_SIZE
+          const tf = s.transformFeedback;
+          return tf ? (tf._bufferRanges[index]?.size ?? 0) : 0;
+        }
       }
     };
 

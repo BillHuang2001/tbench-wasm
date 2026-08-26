@@ -41,6 +41,9 @@ const lostErrorState = new WeakMap<WebGLRenderingContext, { lostEpoch: boolean; 
 
 export function installContextApi(proto: WebGLRenderingContext): void {
   proto.getContextAttributes = function (this: WebGLRenderingContext) {
+    // Spec: getContextAttributes returns null while the context is lost (CTS
+    // conformance/context/context-lost.html nullTests).
+    if (this._isLost) return null;
     // Resolved attributes, copied (spec: returns a fresh dictionary each call).
     return { ...this._attrs };
   };
