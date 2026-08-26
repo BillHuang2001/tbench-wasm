@@ -2,14 +2,16 @@
  * src/gl/extensions/misc.ts — WEBGL_lose_context, WEBGL_debug_shaders,
  * EXT_clip_control, WEBGL_clip_cull_distance, WEBGL_multi_draw.
  *
- *  - WEBGL_lose_context: implements the spec semantics inline. NOTE: a static
- *    import of '../lifecycle' here creates a module cycle
- *    (webgl1 → api → extensions → misc → lifecycle → webgl2 → webgl1) that
- *    breaks evaluation (TDZ on WebGLRenderingContext); dynamic import would
- *    break the esbuild IIFE bundle. So loseContext/restoreContext set the
- *    context flag + invalidate resources here; when the lifecycle agent lands,
- *    it should either route its lose/restore engine through these helpers or
- *    switch this file to lifecycle.ts after the api-mixin wiring is reworked.
+ *  - WEBGL_lose_context: delegates to the SHARED loss engine in ../lost.ts
+ *    (loseContext/restoreContext). The engine lives in its own module because
+ *    a static import of '../lifecycle' here would create a module cycle
+ *    (webgl1 → api → extensions → misc → lifecycle → webgl1) that breaks
+ *    evaluation with a TDZ ReferenceError on WebGLRenderingContext; ../lost.ts
+ *    imports only cycle-free modules and operates on the context structurally.
+ *    The engine fires the async `webglcontextlost`/`webglcontextrestored`
+ *    events, invalidates resources, resets state on restore, and keeps the
+ *    WEBGL_lose_context extension singleton intact across restore (CTS
+ *    context-lost.html / context-lost-restored.html).
  *  - WEBGL_debug_shaders: getTranslatedShaderSource returns the shader's
  *    translated-source cache (set at compile time by the programs agent) — the
  *    CTS test requires '' before compilation, the source after, and the cached
@@ -31,6 +33,7 @@
 import type { WebGLRenderingContext } from '../webgl1';
 import { C1, CExt } from '../constants';
 import { WebGLShader } from '../objects';
+import { loseContext, restoreContext } from '../lost';
 import { setClipControl } from './clip-state';
 import { buildExtension, isLost } from './util';
 
@@ -42,18 +45,11 @@ import { buildExtension, isLost } from './util';
 export function createWEBGLLoseContext(ctx: WebGLRenderingContext): object {
   return buildExtension({}, {
     loseContext: (): void => {
-      const gl = ctx;
-      // Spec: context lost → all resources invalidated, API calls no-ops.
-      gl._isLost = true;
-      gl._resources.invalidateAll();
+      loseContext(ctx);
     },
 
     restoreContext: (): void => {
-      const gl = ctx;
-      // Spec: restore → state reset, error queue cleared (minimal engine; the
-      // lifecycle agent's restoreContext owns the full reset + events).
-      gl._isLost = false;
-      gl._errors.clear();
+      restoreContext(ctx);
     },
   });
 }

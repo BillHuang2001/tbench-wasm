@@ -63,7 +63,7 @@ import type { WebGLRenderingContext } from './webgl1';
 import type { GLenum, GLint, GLintptr, GLsizei, GLuint } from './types';
 import { C1, C2 } from './constants';
 import { resolveFramebufferTarget, resolveReadSurface, getAttachmentSurface } from './framebuffer-util';
-import { handleCanvasResize } from './lifecycle';
+import { handleCanvasResize } from './lost';
 import {
   computeVertexStride,
   RECORD_HEADER_FLOATS,
