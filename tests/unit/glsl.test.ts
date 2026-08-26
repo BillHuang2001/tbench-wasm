@@ -1,15 +1,39 @@
 /**
  * Unit tests for the GLSL ES compiler/linker (src/glsl) — written against the
- * FINAL contract in src/CONTEXT.md §1 (compileShader / linkProgram / Program
- * model). Fails (module not found) until src/glsl lands; these tests are then
- * the executable spec.
+ * REAL contract in src/glsl/compiler.ts + src/glsl/program.ts (both re-exported
+ * by `../../src/glsl/index`). Fails (module not found / stub 'not implemented')
+ * until src/glsl lands; these tests are then the executable spec.
  *
- * Assumed import: `../../src/glsl/index` exports `compileShader` and
- * `linkProgram` with the exact signatures from src/CONTEXT.md §1.
- * If the glsl module layout differs, update ONLY this import line.
+ * Execution contexts (src/glsl/program.ts):
+ * - BaseExecCtx: { uniforms: Float32Array (program.floatStore),
+ *   intUniforms: Int32Array (program.intStore), blockStores: Float32Array[],
+ *   blockIntStores: Int32Array[], textures: (TextureImage|null)[],
+ *   samplerStates: SamplerState[], scratch: Float32Array (>= scratchSize),
+ *   intScratch: Int32Array (>= intScratchSize) }
+ * - VertexExecCtx = BaseExecCtx + { attribs: AttribSource[],
+ *   attribIndices: Int32Array, vertexId: number, instanceId: number,
+ *   out: { position: Float32Array(4), pointSize: number,
+ *   varyings: Float32Array (packed per Program.varyings order) } }
+ * - FragmentExecCtx = BaseExecCtx + { varyings: VaryingValues[]
+ *   ({ v: Float32Array, ddx?, ddy? }), fragCoord: Float32Array(4),
+ *   frontFacing: boolean, pointCoord: Float32Array(2), discarded: boolean,
+ *   out: { color: Float32Array[], fragDepth: number } }
+ *
+ * Helpers `makeVertexCtx` / `makeFragmentCtx` (below) build full structural
+ * contexts: uniforms/intUniforms ARE the program's own stores (so uniform
+ * writes via UniformInfo.location hit the real data), scratch is sized from
+ * program.scratchSize/intScratchSize, and out arrays are preallocated to the
+ * program's layout (varyings packed per Program.varyings order; one color
+ * Float32Array(4) per fragment.outputs entry).
  */
 import { describe, it, expect } from "vitest";
-import { compileShader, linkProgram } from "../../src/glsl/index";
+import {
+  compileShader,
+  linkProgram,
+  type Program,
+  type VertexExecCtx,
+  type FragmentExecCtx,
+} from "../../src/glsl/index";
 import { expectArrayClose } from "./helpers";
 
 type CompileOpts = { type: "VERTEX" | "FRAGMENT"; version: 100 | 300 };
@@ -40,22 +64,76 @@ function linkOk(vs: Shader, fs: Shader) {
   return res.program;
 }
 
+/** Total packed varying components, in Program.varyings order. */
+function totalVaryingComponents(program: Program): number {
+  return program.varyings.reduce((n, v) => n + v.components, 0);
+}
+
+/**
+ * Full structural VertexExecCtx per src/glsl/program.ts. `attribs` is indexed
+ * by attribute location (Float32Array per attribute, or a scalar constant).
+ */
+function makeVertexCtx(
+  program: Program,
+  attribs: (Float32Array | number)[],
+  opts?: { vertexId?: number; instanceId?: number },
+): VertexExecCtx {
+  return {
+    attribs,
+    attribIndices: new Int32Array(attribs.length),
+    uniforms: program.floatStore,
+    intUniforms: program.intStore,
+    blockStores: [],
+    blockIntStores: [],
+    textures: [],
+    samplerStates: [],
+    scratch: new Float32Array(Math.max(program.scratchSize, 16)),
+    intScratch: new Int32Array(Math.max(program.intScratchSize, 16)),
+    vertexId: opts?.vertexId ?? 0,
+    instanceId: opts?.instanceId ?? 0,
+    out: {
+      position: new Float32Array(4),
+      pointSize: 1,
+      varyings: new Float32Array(totalVaryingComponents(program)),
+    },
+  };
+}
+
+/** Full structural FragmentExecCtx per src/glsl/program.ts. */
+function makeFragmentCtx(
+  program: Program,
+  opts?: {
+    fragCoord?: Float32Array;
+    frontFacing?: boolean;
+    pointCoord?: Float32Array;
+  },
+): FragmentExecCtx {
+  return {
+    uniforms: program.floatStore,
+    intUniforms: program.intStore,
+    blockStores: [],
+    blockIntStores: [],
+    textures: [],
+    samplerStates: [],
+    scratch: new Float32Array(Math.max(program.scratchSize, 16)),
+    intScratch: new Int32Array(Math.max(program.intScratchSize, 16)),
+    varyings: program.varyings.map((v) => ({ v: new Float32Array(v.components) })),
+    fragCoord: opts?.fragCoord ?? new Float32Array([0, 0, 0, 1]),
+    frontFacing: opts?.frontFacing ?? true,
+    pointCoord: opts?.pointCoord ?? new Float32Array(2),
+    discarded: false,
+    out: {
+      color: program.fragment.outputs.map(() => new Float32Array(4)),
+      fragDepth: 0,
+    },
+  };
+}
+
 const VERT_SIMPLE = `attribute vec4 a_position;
 void main() { gl_Position = a_position; }`;
 
 const FRAG_SIMPLE = `precision mediump float;
 void main() { gl_FragColor = vec4(1.0, 0.5, 0.0, 1.0); }`;
-
-/** Minimal vertex-execution context per src/CONTEXT.md §1. */
-function vertexCtx(attribs: (ArrayLike<number> | number | undefined)[], uniformCount: number) {
-  return {
-    attribs,
-    uniforms: new Float32Array(Math.max(16, uniformCount)),
-    vertexId: 0,
-    instanceId: 0,
-    out: { position: [0, 0, 0, 0], pointSize: 1, varyings: new Float32Array(0) },
-  };
-}
 
 describe("compileShader", () => {
   it("compiles a trivial vertex shader (GLSL ES 1.00)", () => {
@@ -145,7 +223,7 @@ describe("vertex program execution", () => {
       compileOk(VERT_SIMPLE, { type: "VERTEX", version: 100 }),
       compileOk(FRAG_SIMPLE, { type: "FRAGMENT", version: 100 }),
     );
-    const ctx = vertexCtx([new Float32Array([1, 2, 3, 1])], 0);
+    const ctx = makeVertexCtx(program, [new Float32Array([1, 2, 3, 1])]);
     program.vertex.run(ctx);
     expectArrayClose(ctx.out.position, [1, 2, 3, 1]);
   });
@@ -170,11 +248,11 @@ void main() { gl_FragColor = vec4(v_uv, 0.0, 1.0); }`,
     expect(program.varyings[0].name).toBe("v_uv");
     expect(program.varyings[0].components).toBe(2);
 
-    const ctx = vertexCtx(
-      [new Float32Array([0, 0, 0, 1]), new Float32Array([0.25, 0.75])],
-      0,
-    );
-    ctx.out.varyings = new Float32Array(2);
+    // out.varyings is preallocated by makeVertexCtx to the packed layout (2).
+    const ctx = makeVertexCtx(program, [
+      new Float32Array([0, 0, 0, 1]),
+      new Float32Array([0.25, 0.75]),
+    ]);
     program.vertex.run(ctx);
     expectArrayClose(ctx.out.varyings, [0.25, 0.75]);
   });
@@ -193,11 +271,12 @@ void main() { gl_Position = a_position * u_color; }`,
     if (!uniform) return;
     expect(uniform.components).toBe(4);
 
-    const ctx = vertexCtx([new Float32Array([1, 1, 1, 1])], 4);
-    ctx.uniforms[uniform.location + 0] = 0.5;
-    ctx.uniforms[uniform.location + 1] = 0.25;
-    ctx.uniforms[uniform.location + 2] = 0.125;
-    ctx.uniforms[uniform.location + 3] = 1.0;
+    // ctx.uniforms IS program.floatStore: writes by location hit the real store.
+    const ctx = makeVertexCtx(program, [new Float32Array([1, 1, 1, 1])]);
+    program.floatStore[uniform.location + 0] = 0.5;
+    program.floatStore[uniform.location + 1] = 0.25;
+    program.floatStore[uniform.location + 2] = 0.125;
+    program.floatStore[uniform.location + 3] = 1.0;
     program.vertex.run(ctx);
     expectArrayClose(ctx.out.position, [0.5, 0.25, 0.125, 1.0]);
   });
@@ -211,7 +290,7 @@ void main() { gl_PointSize = 3.0; gl_Position = a_position; }`,
     const program = linkOk(vs, compileOk(FRAG_SIMPLE, { type: "FRAGMENT", version: 100 }));
     expect(program.usesPointSize).toBe(true);
 
-    const ctx = vertexCtx([new Float32Array([0, 0, 0, 1])], 0);
+    const ctx = makeVertexCtx(program, [new Float32Array([0, 0, 0, 1])]);
     program.vertex.run(ctx);
     expect(ctx.out.pointSize).toBeCloseTo(3.0, 5);
   });
@@ -230,7 +309,7 @@ void main() {
       { type: "VERTEX", version: 100 },
     );
     const program = linkOk(vs, compileOk(FRAG_SIMPLE, { type: "FRAGMENT", version: 100 }));
-    const ctx = vertexCtx([new Float32Array([0, 2.0, 0])], 0);
+    const ctx = makeVertexCtx(program, [new Float32Array([0, 2.0, 0])]);
     program.vertex.run(ctx);
     // sin(0)=0, mix=5, clamp(2,0,1)=1, dot(normalize(3,4,0),(1,0,0))=0.6
     expectArrayClose(ctx.out.position, [0, 5, 1, 0.6], 1e-4);
@@ -252,9 +331,7 @@ void main() { outColor = vec4(1.0); }`,
       { type: "FRAGMENT", version: 300 },
     );
     const program = linkOk(vs, fs);
-    const ctx = vertexCtx([], 0);
-    ctx.vertexId = 7;
-    ctx.instanceId = 3;
+    const ctx = makeVertexCtx(program, [], { vertexId: 7, instanceId: 3 });
     program.vertex.run(ctx);
     expectArrayClose(ctx.out.position, [7, 3, 0, 1]);
   });
@@ -266,14 +343,10 @@ describe("fragment program execution", () => {
       compileOk(VERT_SIMPLE, { type: "VERTEX", version: 100 }),
       compileOk(FRAG_SIMPLE, { type: "FRAGMENT", version: 100 }),
     );
-    const ctx = {
-      varyings: [],
-      fragCoord: [0, 0, 0, 1],
-      frontFacing: true,
-      pointCoord: [0, 0],
-      uniforms: new Float32Array(0),
-      out: { color: [[0, 0, 0, 0]] },
-    };
+    // GL_FLOAT_VEC4 = 0x8b52; WebGL1 programs have exactly one output.
+    expect(program.fragment.outputs).toEqual([{ location: 0, type: 0x8b52 }]);
+
+    const ctx = makeFragmentCtx(program);
     program.fragment.run(ctx);
     expectArrayClose(ctx.out.color[0], [1, 0.5, 0, 1], 1e-4);
   });
