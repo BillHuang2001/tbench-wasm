@@ -23,7 +23,7 @@ The bottom of the dependency DAG: pure, dependency-free helpers shared by every 
 - **GLSL-named functions centralized in util** rather than inlined in codegen: one correct, unit-testable implementation (CTS shader tests are strict about e.g. mod/fract/roundEven semantics).
 - **Generic vecMap/vecMap2** for the long tail of componentwise builtins (sin/cos/tanh/exp2…) instead of dozens of near-identical functions; dedicated functions only for hot or semantically tricky ops.
 - **TypedArrayKind strings, not GL enums**: util must not know GL; gl/ maps GLenum ↔ kind.
-- **Stub bodies now**: files define the complete public API contract (signatures + JSDoc with exact semantics); implementation is delegated to the Manager phase.
+- **Half-float canonical in misc.ts**: `toHalfFloat`/`fromHalfFloat` (IEEE 754 binary16, round-to-nearest-even, full subnormal support, ±Inf, NaN) are the single source of truth; `math.ts` `packHalf2x16`/`unpackHalf2x16` import them — never re-implement (a private mirror once diverged on a subnormal boundary: returned −0 where the canonical gives 0x8001).
 
 ## Known Issues
 - `smoothstep` with edge0 == edge1 is undefined in GLSL; our implementation returns 0 (no NaN).
