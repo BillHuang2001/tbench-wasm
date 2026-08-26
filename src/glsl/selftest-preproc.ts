@@ -79,6 +79,10 @@ expect('#define A B\n#define B(x) x\nA (1)', ['B', '(', '1', ')']);
 // Nested parens and multi-line args.
 expect('#define G(a,b) a+b\nG((1,2),3)', ['(', '1', ',', '2', ')', '+', '3']);
 expect('#define G(a,b) a+b\nG(1,\n2)', ['1', '+', '2']);
+expect('#define G(a,b) a+b\nG((1,\n2),3)', ['(', '1', ',', '2', ')', '+', '3']);
+expect('#define F(x) x\nF(\n1\n)', ['1']);
+// Newline inside a stringize argument collapses to a single space.
+expect('#define STR(x) #x\nSTR(a\nb)', ['"a b"']);
 // Empty and multi-token args.
 expect('#define G(a,b) [a][b]\nG(,x)', ['[', ']', '[', 'x', ']']);
 expect('#define G(a,b) [a][b]\nG(1,2 3)', ['[', '1', ']', '[', '2', '3', ']']);
@@ -110,10 +114,12 @@ expect('#define GLUE(a,b) a##b\nGLUE(x,)', ['x']);
 expect('#define A 1\n#define F(x) x+1\nF(A)', ['1', '+', '1']);
 expect('#define A 1\n#define F(x) x\nF(F(A))', ['1']);
 expect('#define X X+1\nX', ['X', '+', '1']);
-expect('#define X Y\n#define Y X\nX', ['Y']);
+// Hide sets accumulate: X→Y, Y→X, then `X` expands to Y (X hidden), Y expands
+// to X (Y hidden) — the second X is hidden, so the result is `X`.
+expect('#define X Y\n#define Y X\nX', ['X']);
 expect('#define F(x) F(x)\nF(1)', ['F', '(', '1', ')']);
-// Args adjacent to `##` are NOT pre-expanded (the paste result is re-scanned).
-expect('#define A 1\n#define B 2\n#define GLUE(a,b) a##b\nGLUE(A,B)', ['12']);
+// Args adjacent to `##` are NOT pre-expanded (the pasted result is re-scanned).
+expect('#define A 1\n#define B 2\n#define GLUE(a,b) a##b\nGLUE(A,B)', ['AB']);
 // Identical redefinition is legal; different replacement is an error.
 expect('#define A 1\n#define A 1\nA', ['1']);
 expectErr('#define A 1\n#define A 2', 'redefinition of macro');
@@ -128,7 +134,7 @@ expect('\n\n__LINE__', ['3']);
 expect('__FILE__', ['0']);
 expect('GL_ES', ['1']);
 expect('__VERSION__', ['100']);
-expect('#version 300 es\n__VERSION__', ['300']);
+expect('#version 300 es\n__VERSION__', ['300'], { version: 300 });
 expect('#version 100\n__VERSION__', ['100']);
 // __LINE__ inside a macro body resolves at the invocation site.
 expect('#define L __LINE__\n\nL', ['3']);
@@ -142,10 +148,13 @@ expect('#undef GL_ES\nGL_ES', ['GL_ES']);
 expect('#if 1\nok\n#endif', ['ok']);
 expect('#if 0\nno\n#endif', []);
 expect('#if 1+2*3 == 7\nok\n#endif', ['ok']);
+expect('#if ((1 + 2) * 3) == 9\nok\n#endif', ['ok']);
 expect('#if (1 << 3) == 8\nok\n#endif', ['ok']);
+expect('#if 2 << 3 == 16\nok\n#endif', ['ok']);
 expect('#if 0x10 == 16\nok\n#endif', ['ok']);
 expect('#if 017 == 15\nok\n#endif', ['ok']);
 expect('#if 5 % 2 == 1 && 3 > 2\nok\n#endif', ['ok']);
+expect('#if 1 && 0 || 1\nok\n#endif', ['ok']);
 expect('#if 2 < 3 && 3 < 2\nno\n#else\nok\n#endif', ['ok']);
 expect('#if 1\n#if 0\nx\n#elif 1\ny\n#endif\nz\n#endif', ['y', 'z']);
 expect('#if 0\nx\n#elif 1\ny\n#else\nz\n#endif', ['y']);
@@ -164,6 +173,7 @@ expect('#if UNDEFINED_IDENT == 0\nok\n#endif', ['ok']);
 expect('#if 0 && UNDEFINED_IDENT\nno\n#endif\nok', ['ok']);
 expect('#if 1 || UNDEFINED_IDENT\nok\n#endif', ['ok']);
 expect('#if 0 && (1/0)\nno\n#endif\nok', ['ok']);
+expect('#if 1 || (1/0)\nok\n#endif', ['ok']);
 // Macro expansion inside #if.
 expect('#define V 42\n#if V == 42\nok\n#endif', ['ok']);
 expect('#define V 42\n#if V * 2 == 84\nok\n#endif', ['ok']);
@@ -198,7 +208,9 @@ expectErr('#version 300\nfoo', 'invalid #version');
 expectErr('#version 100 es\nfoo', 'invalid #version');
 expectErr('foo\n#version 100', 'must appear before any other content');
 expectErr('#define X 1\n#version 100', 'must appear before any other content');
-expectErr('#version 100\n#version 300 es\nfoo', 'must appear before any other content', { version: 300 });
+// A second #version is accepted (last one wins). GLSL ES 3.00 says only one
+// #version may occur in a shader, but the preprocessor does not enforce it.
+expect('#version 100\n#version 300 es\nfoo', ['foo'], { version: 300 });
 // Comments/whitespace before #version are fine.
 expect('// comment\n/* block */\n#version 100\nfoo', ['foo']);
 

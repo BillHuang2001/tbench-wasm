@@ -234,18 +234,17 @@ function splice(source: string): Char[] {
     if (c === '\\') {
       const next = source[i + 1];
       if (next === '\n') {
+        // Splice: the continuation is part of the SAME logical line, so the
+        // physical line counter does not advance (per GLSL ES §3.4 / C phase 2).
         i += 2;
-        line++;
         continue;
       }
       if (next === '\r') {
         if (source[i + 2] === '\n') {
           i += 3;
-          line++;
           continue;
         }
         i += 2;
-        line++;
         continue;
       }
     }
@@ -396,6 +395,22 @@ function tokenize(chars: Char[]): PToken[] {
       const r = scanNumber(chars, i);
       text = r.text;
       i = r.next;
+    } else if (c.ch === '"') {
+      // String literal: ONE token (so stringize/#error preserve it verbatim).
+      // Backslash escapes do not close the literal; an unterminated literal
+      // runs to the end of the line (the lexer validates it later).
+      let j = i + 1;
+      while (j < n && chars[j].ch !== '\n') {
+        if (chars[j].ch === '\\' && j + 1 < n && chars[j + 1].ch !== '\n') {
+          j += 2;
+          continue;
+        }
+        if (chars[j].ch === '"') break;
+        j++;
+      }
+      if (j < n && chars[j].ch === '"') j++;
+      text = chars.slice(i, j).map((x) => x.ch).join('');
+      i = j;
     } else {
       const two = c.ch + (i + 1 < n ? chars[i + 1].ch : '');
       const three = two + (i + 2 < n ? chars[i + 2].ch : '');
@@ -467,8 +482,15 @@ function expandTokens(list: PToken[], baseHidden: Set<string> | null, st: State)
       const args: PToken[][] = [];
       let cur: PToken[] = [];
       let end = -1;
+      let sawComma = false; // `F()` is zero args; `G(,)` is two empty args
       while (k < queue.length) {
         const u = queue[k];
+        if (u.text === '\n') {
+          // Newlines inside an argument list are whitespace (C phase 3: the
+          // invocation continues across lines until the matching `)`).
+          k++;
+          continue;
+        }
         if (u.text === '(') {
           depth++;
           cur.push(u);
@@ -478,7 +500,9 @@ function expandTokens(list: PToken[], baseHidden: Set<string> | null, st: State)
         if (u.text === ')') {
           depth--;
           if (depth === 0) {
-            args.push(cur);
+            // `()` is ZERO arguments for a 0-parameter macro (`F()` → 42) but
+            // ONE empty argument otherwise (`STR()` → `""`, per cpp/C11).
+            if (sawComma || cur.length > 0 || m.params.length > 0) args.push(cur);
             end = k;
             break;
           }
@@ -489,6 +513,7 @@ function expandTokens(list: PToken[], baseHidden: Set<string> | null, st: State)
         if (depth === 1 && u.text === ',') {
           args.push(cur);
           cur = [];
+          sawComma = true;
           k++;
           continue;
         }
@@ -511,7 +536,11 @@ function expandTokens(list: PToken[], baseHidden: Set<string> | null, st: State)
         continue;
       }
       const hidden = addHidden(t.hidden, t.text);
-      const expandedArgs = args.map((arg, ai) => (m.rawArgs[ai] ? arg : expandTokens(arg, hidden, st)));
+      // C99 6.10.3.1: argument pre-expansion happens with the CURRENT hide set
+      // (the one the arg tokens carry at the invocation site) — the macro being
+      // expanded is NOT hidden here; it is hidden only during the re-scan of
+      // its own replacement text below.
+      const expandedArgs = args.map((arg, ai) => (m.rawArgs[ai] ? arg : expandTokens(arg, null, st)));
       const body = substitute(m, expandedArgs, hidden, t);
       queue.splice(i, end - i + 1, ...body);
       continue;
@@ -630,6 +659,8 @@ const BINOP: Record<string, { prec: number; fn: (a: number, b: number) => number
 class ExprParser {
   private i = 0;
   private failed = false;
+  /** When set, parse errors are suppressed (short-circuited && / || rhs). */
+  private quiet = false;
 
   constructor(private readonly tokens: PToken[], private readonly st: State, private readonly line: number) {}
 
@@ -640,7 +671,7 @@ class ExprParser {
   }
 
   private err(): void {
-    if (this.failed) return;
+    if (this.failed || this.quiet) return;
     this.failed = true;
     this.st.errors.push({ line: remap(this.st, this.line), message: 'invalid expression in #if' });
   }
@@ -658,6 +689,21 @@ class ExprParser {
       const op = BINOP[t.text];
       if (!op || op.prec < minPrec) break;
       this.i++;
+      if (op.prec === 1 || op.prec === 2) {
+        // Short-circuit `||` (prec 1) and `&&` (prec 2): the right side is not
+        // evaluated. It is still consumed so the parse position stays correct,
+        // but errors inside it (e.g. undefined identifiers, 1/0) are ignored.
+        if (op.prec === 1 ? v !== 0 : v === 0) {
+          const saved = this.quiet;
+          this.quiet = true;
+          this.parseExpr(op.prec + 1);
+          this.quiet = saved;
+          v = op.prec === 1 ? 1 : 0;
+        } else {
+          v = op.fn(v, this.parseExpr(op.prec + 1));
+        }
+        continue;
+      }
       v = op.fn(v, this.parseExpr(op.prec + 1));
     }
     return v;
@@ -699,7 +745,10 @@ class ExprParser {
       this.i++;
       return v;
     }
-    if (isDigit(t.text[0]) || (t.text[0] === '.' && t.text.length > 1)) return parseIntLiteral(t.text);
+    if (isDigit(t.text[0]) || (t.text[0] === '.' && t.text.length > 1)) {
+      this.i++;
+      return parseIntLiteral(t.text);
+    }
     if (isIdent(t.text)) {
       this.i++;
       return 0; // undefined identifier
@@ -1097,10 +1146,11 @@ export function preprocess(source: string, opts: PreprocessOptions): PreprocessR
     // Regular token (a `#` elsewhere is an ordinary token; the lexer validates it).
     st.sawContent = true;
     if (condActive(st)) {
+      // Collect the run across newlines (function-like invocations may span
+      // lines; `\n` tokens are whitespace to expansion and filtered below).
       const run: PToken[] = [];
       while (i < tokens.length) {
         const u = tokens[i];
-        if (u.text === '\n') break;
         const uDir = u.text === '#' && (i === 0 || tokens[i - 1].text === '\n');
         if (uDir) break;
         run.push(u);
@@ -1108,6 +1158,7 @@ export function preprocess(source: string, opts: PreprocessOptions): PreprocessR
       }
       const expanded = expandTokens(run, null, st);
       for (const e of expanded) {
+        if (e.text === '\n') continue;
         out.push({ text: e.text, line: remap(st, e.line), column: e.column });
       }
     } else {
