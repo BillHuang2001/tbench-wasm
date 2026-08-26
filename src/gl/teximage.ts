@@ -26,13 +26,14 @@
 
 import type { WebGLRenderingContext } from './webgl1';
 import type { WebGLTexture, TextureLevel } from './objects';
-import type { GLenum, GLint, GLsizei } from './types';
+import type { GLenum, GLint, GLsizei, TexImageSource } from './types';
 import { C, CExt } from './constants';
 import { getFormat, halfToFloat, type PixelFormatInfo, type StorageKind } from '../raster';
 import { resolveReadSurface } from './framebuffer-util';
+import { decodeImageSource } from '../present';
 import type { Surface } from '../raster';
 
-export type TexImageSourceArg = ArrayBufferView | number | null;
+export type TexImageSourceArg = ArrayBufferView | number | TexImageSource | null;
 
 // ---------------------------------------------------------------------------
 // Local storage-format registry (per-texel decode/encode on the SURFACE

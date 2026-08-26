@@ -88,7 +88,9 @@ function slotForTarget(target: GLenum): TextureSlotKey {
 /** The texture bound to a (valid) target in the active unit — null when none. */
 function boundTextureForTarget(ctx: WebGLRenderingContext, target: GLenum): WebGLTexture | null {
   const unit = ctx._state.textureUnits[ctx._state.activeTexture];
-  return unit[slotForTarget(target)];
+  // state.ts texture-unit slots are typed with the DOM WebGLTexture interface;
+  // they always hold renderer WebGLTexture instances (bindTexture writes them).
+  return unit[slotForTarget(target)] as unknown as WebGLTexture | null;
 }
 
 /** Unbind `texture` from every texture-unit slot. Returns true when it was bound. */
@@ -349,7 +351,7 @@ export function installTexturesApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
-    const base = tex._params[C1.TEXTURE_BASE_LEVEL] ?? 0;
+    const base = tex._params[C2.TEXTURE_BASE_LEVEL] ?? 0;
     const lv = img.levels[base];
     if (!lv || lv.width < 1 || lv.height < 1) {
       ctx._errors.push(C1.INVALID_OPERATION);

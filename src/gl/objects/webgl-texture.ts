@@ -40,6 +40,8 @@ export class WebGLTexture extends WebGLObject {
   _target: GLenum = 0;
   /** texStorage* set → immutable (further storage calls are INVALID_OPERATION). */
   _immutable = false;
+  /** True when deleteTexture() was called while still bound — real delete deferred. */
+  _deletePending = false;
   /** True when the texture is attached to a currently-bound FBO (feedback-loop checks). */
   _attachedToFramebuffer = false;
   /** Sample count set by WEBGL_multisampled_render_to_texture (0 = single-sampled). */

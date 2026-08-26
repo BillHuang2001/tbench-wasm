@@ -192,14 +192,18 @@ function isCubeFace(face: GLenum): boolean {
 
 /** True when two attachment entries reference the identical image. */
 function sameImage(a: FramebufferAttachment, b: FramebufferAttachment): boolean {
-  if (a.type !== b.type) return false;
-  if (a.type === 'renderbuffer') return a.renderbuffer === b.renderbuffer;
-  return (
-    a.texture === b.texture &&
-    a.level === b.level &&
-    a.face === b.face &&
-    a.layer === b.layer
-  );
+  if (a.type === 'renderbuffer' && b.type === 'renderbuffer') {
+    return a.renderbuffer === b.renderbuffer;
+  }
+  if (a.type === 'texture' && b.type === 'texture') {
+    return (
+      a.texture === b.texture &&
+      a.level === b.level &&
+      a.face === b.face &&
+      a.layer === b.layer
+    );
+  }
+  return false; // different attachment types
 }
 
 /** Sample count of one attachment (0 for single-sampled textures). */

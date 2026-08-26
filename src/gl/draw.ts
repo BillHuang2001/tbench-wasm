@@ -83,7 +83,7 @@ import type {
 import type { VertexExecCtx, AttribSource } from '../glsl/program';
 import type { WebGLProgram } from './objects';
 import type { ProgramModel } from './objects';
-import type { WebGLBuffer, WebGLQuery, WebGLTransformFeedback } from './objects';
+import type { WebGLBuffer, WebGLQuery, WebGLTexture, WebGLTransformFeedback } from './objects';
 
 /** A fully validated, assembled draw request (before rasterizer call). */
 export interface DrawRequest {
@@ -285,9 +285,9 @@ function decodeSurfaceTexel(surf: Surface, byteOffset: number, out: Float32Array
     info.decode(surf.data, byteOffset, out);
     return;
   }
-  const d = surf.data as { constructor: new (...a: never[]) => unknown };
+  const d = surf.data as unknown as { constructor: new (...a: never[]) => unknown };
   const f = surf.format;
-  const u8 = d as Uint8Array;
+  const u8 = d as unknown as Uint8Array;
   if (d instanceof Uint8Array) {
     switch (f) {
       case C1.RGBA4: {
@@ -367,7 +367,7 @@ function encodeSurfaceTexel(surf: Surface, byteOffset: number, r: number, g: num
     info.encode(surf.data, byteOffset, r, g, b, a);
     return;
   }
-  const d = surf.data as { constructor: new (...a: never[]) => unknown };
+  const d = surf.data as unknown as { constructor: new (...a: never[]) => unknown };
   const f = surf.format;
   const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
   if (d instanceof Uint8Array) {
@@ -459,7 +459,7 @@ function clearColorLocal(surf: Surface, r: number, g: number, b: number, a: numb
   const y1 = scissor ? Math.min(h, scissor.y + scissor.h) : h;
   const all = mask[0] && mask[1] && mask[2] && mask[3];
   const tmp = new Float32Array(4);
-  const data = surf.data as { constructor: new (...a: never[]) => unknown };
+  const data = surf.data as unknown as { constructor: new (...a: never[]) => unknown };
   for (let y = y0; y < y1; y++) {
     for (let x = x0; x < x1; x++) {
       const off = (y * w + x) * bpp;
@@ -748,7 +748,9 @@ function buildTextureEnv(
       if (unit < 0 || unit >= numUnits) continue;
       const key = samplerTargetKey(u.type);
       const unitState = s.textureUnits[unit];
-      const tex = unitState[key];
+      // state.ts texture-unit slots are typed with the DOM WebGLTexture
+      // interface; they always hold renderer WebGLTexture instances.
+      const tex = unitState[key] as unknown as WebGLTexture | null;
       if (!tex || !tex._image) continue;
       const img = tex._image as TextureImage;
       const st = effectiveSamplerState(tex, unitState.sampler);
@@ -1243,7 +1245,7 @@ function makeLocalPack(format: GLenum, type: GLenum): ((src: ArrayBufferView, sr
     case C1.UNSIGNED_BYTE: {
       const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
       return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as Surface, so, tmp);
+        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
         const d8 = dst as Uint8Array;
         if (comps === 4) { d8[d] = (u8(tmp[0]) * 255 + 0.5) | 0; d8[d + 1] = (u8(tmp[1]) * 255 + 0.5) | 0; d8[d + 2] = (u8(tmp[2]) * 255 + 0.5) | 0; d8[d + 3] = (u8(tmp[3]) * 255 + 0.5) | 0; }
         else if (comps === 3) { d8[d] = (u8(tmp[0]) * 255 + 0.5) | 0; d8[d + 1] = (u8(tmp[1]) * 255 + 0.5) | 0; d8[d + 2] = (u8(tmp[2]) * 255 + 0.5) | 0; }
@@ -1253,21 +1255,21 @@ function makeLocalPack(format: GLenum, type: GLenum): ((src: ArrayBufferView, sr
     }
     case C1.UNSIGNED_SHORT_5_6_5:
       return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as Surface, so, tmp);
+        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
         const v = ((u8(tmp[0]) * 31 + 0.5) | 0) << 11 | ((u8(tmp[1]) * 63 + 0.5) | 0) << 5 | (u8(tmp[2]) * 31 + 0.5) | 0;
         const d8 = dst as Uint8Array;
         d8[d] = v & 0xff; d8[d + 1] = (v >> 8) & 0xff;
       };
     case C1.UNSIGNED_SHORT_4_4_4_4:
       return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as Surface, so, tmp);
+        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
         const v = ((u8(tmp[0]) * 15 + 0.5) | 0) << 12 | ((u8(tmp[1]) * 15 + 0.5) | 0) << 8 | ((u8(tmp[2]) * 15 + 0.5) | 0) << 4 | (u8(tmp[3]) * 15 + 0.5) | 0;
         const d8 = dst as Uint8Array;
         d8[d] = v & 0xff; d8[d + 1] = (v >> 8) & 0xff;
       };
     case C1.UNSIGNED_SHORT_5_5_5_1:
       return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as Surface, so, tmp);
+        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
         const v = ((u8(tmp[0]) * 31 + 0.5) | 0) << 11 | ((u8(tmp[1]) * 31 + 0.5) | 0) << 6 | ((u8(tmp[2]) * 31 + 0.5) | 0) << 1 | (u8(tmp[3]) > 0.5 ? 1 : 0);
         const d8 = dst as Uint8Array;
         d8[d] = v & 0xff; d8[d + 1] = (v >> 8) & 0xff;
@@ -1275,7 +1277,7 @@ function makeLocalPack(format: GLenum, type: GLenum): ((src: ArrayBufferView, sr
     case C1.FLOAT: {
       const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
       return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as Surface, so, tmp);
+        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
         const df = dst as Float32Array;
         for (let c = 0; c < comps; c++) df[(d >> 2) + c] = tmp[c];
       };
@@ -1283,23 +1285,23 @@ function makeLocalPack(format: GLenum, type: GLenum): ((src: ArrayBufferView, sr
     case C1.UNSIGNED_INT: // DEPTH_COMPONENT / integer formats
       if (format === C1.DEPTH_COMPONENT) {
         return (src, so, dst, d) => {
-          decodeSurfaceTexel(src as Surface, so, tmp);
+          decodeSurfaceTexel(src as unknown as Surface, so, tmp);
           const dv = dst as DataView;
           dv.setUint32(d, Math.min(0xffffffff, Math.max(0, Math.round(tmp[0] * 0xffffffff))), true);
         };
       }
       return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as Surface, so, tmp);
+        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
         (dst as Uint32Array)[d >> 2] = tmp[0] >>> 0;
       };
     case C1.UNSIGNED_SHORT: // DEPTH_COMPONENT
       return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as Surface, so, tmp);
+        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
         (dst as Uint16Array)[d >> 1] = Math.min(0xffff, Math.max(0, Math.round(tmp[0] * 0xffff)));
       };
     case C2.UNSIGNED_INT_24_8:
       return (src, so, dst, d) => {
-        const surf = src as Surface;
+        const surf = src as unknown as Surface;
         decodeSurfaceTexel(surf, so, tmp);
         const st = surf.stencilData ? surf.stencilData[so / surfaceBytesPerPixel(surf)] : 0;
         (dst as Uint32Array)[d >> 2] = ((Math.min(0xffffff, Math.max(0, Math.round(tmp[0] * 0xffffff))) << 8) | (st & 0xff)) >>> 0;
@@ -1469,7 +1471,7 @@ function clearColorIntLocal(
   const y0 = scissor ? Math.max(0, scissor.y) : 0;
   const x1 = scissor ? Math.min(w, scissor.x + scissor.w) : w;
   const y1 = scissor ? Math.min(h, scissor.y + scissor.h) : h;
-  const d = surf.data as { constructor: new (...a: never[]) => unknown };
+  const d = surf.data as unknown as { constructor: new (...a: never[]) => unknown };
   for (let y = y0; y < y1; y++) {
     for (let x = x0; x < x1; x++) {
       const off = (y * w + x) * bpp;

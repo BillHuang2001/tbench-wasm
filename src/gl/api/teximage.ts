@@ -82,10 +82,12 @@ function is3DTarget(ctx: WebGLRenderingContext, target: GLenum): boolean {
 /** The texture bound to a (validated) target in the active unit — null when none. */
 function boundTextureForTarget(ctx: WebGLRenderingContext, target: GLenum): WebGLTexture | null {
   const unit = ctx._state.textureUnits[ctx._state.activeTexture];
-  if (target === C1.TEXTURE_2D) return unit.texture2D;
-  if (isCubeFace(target)) return unit.textureCube;
-  if (target === C2.TEXTURE_3D) return unit.texture3D;
-  if (target === C2.TEXTURE_2D_ARRAY) return unit.texture2DArray;
+  // state.ts texture-unit slots are typed with the DOM WebGLTexture interface;
+  // they always hold renderer WebGLTexture instances (bindTexture writes them).
+  if (target === C1.TEXTURE_2D) return unit.texture2D as unknown as WebGLTexture | null;
+  if (isCubeFace(target)) return unit.textureCube as unknown as WebGLTexture | null;
+  if (target === C2.TEXTURE_3D) return unit.texture3D as unknown as WebGLTexture | null;
+  if (target === C2.TEXTURE_2D_ARRAY) return unit.texture2DArray as unknown as WebGLTexture | null;
   return null;
 }
 
@@ -331,11 +333,11 @@ const W2_FORMATS: number[] = [
 
 const W2_TYPES: number[] = [
   C1.UNSIGNED_BYTE,
-  C2.BYTE,
+  C1.BYTE,
   C1.UNSIGNED_SHORT,
-  C2.SHORT,
+  C1.SHORT,
   C1.UNSIGNED_INT,
-  C2.INT,
+  C1.INT,
   C2.HALF_FLOAT,
   C1.FLOAT,
   C1.UNSIGNED_SHORT_5_6_5,
@@ -369,10 +371,10 @@ const W2_COMBOS: Record<number, { format: number; types: number[] }> = {
   [C2.RG8]: { format: C2.RG, types: [C1.UNSIGNED_BYTE] },
   [C2.RGB8]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE] },
   [C2.RGBA8]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE] },
-  [C2.R8_SNORM]: { format: C2.RED, types: [C2.BYTE] },
-  [C2.RG8_SNORM]: { format: C2.RG, types: [C2.BYTE] },
-  [C2.RGB8_SNORM]: { format: C1.RGB, types: [C2.BYTE] },
-  [C2.RGBA8_SNORM]: { format: C1.RGBA, types: [C2.BYTE] },
+  [C2.R8_SNORM]: { format: C2.RED, types: [C1.BYTE] },
+  [C2.RG8_SNORM]: { format: C2.RG, types: [C1.BYTE] },
+  [C2.RGB8_SNORM]: { format: C1.RGB, types: [C1.BYTE] },
+  [C2.RGBA8_SNORM]: { format: C1.RGBA, types: [C1.BYTE] },
   [C1.RGBA4]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_4_4_4_4] },
   [C1.RGB5_A1]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_5_5_1] },
   [C1.RGB565]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_6_5] },
@@ -392,39 +394,39 @@ const W2_COMBOS: Record<number, { format: number; types: number[] }> = {
   [C2.RGB9_E5]: { format: C1.RGB, types: [C2.UNSIGNED_INT_5_9_9_9_REV, C2.HALF_FLOAT, C1.FLOAT] },
   // ---- integers ----
   [C2.R8UI]: { format: C2.RED_INTEGER, types: [C1.UNSIGNED_BYTE] },
-  [C2.R8I]: { format: C2.RED_INTEGER, types: [C2.BYTE] },
+  [C2.R8I]: { format: C2.RED_INTEGER, types: [C1.BYTE] },
   [C2.R16UI]: { format: C2.RED_INTEGER, types: [C1.UNSIGNED_SHORT] },
-  [C2.R16I]: { format: C2.RED_INTEGER, types: [C2.SHORT] },
+  [C2.R16I]: { format: C2.RED_INTEGER, types: [C1.SHORT] },
   [C2.R32UI]: { format: C2.RED_INTEGER, types: [C1.UNSIGNED_INT] },
-  [C2.R32I]: { format: C2.RED_INTEGER, types: [C2.INT] },
+  [C2.R32I]: { format: C2.RED_INTEGER, types: [C1.INT] },
   [C2.RG8UI]: { format: C2.RG_INTEGER, types: [C1.UNSIGNED_BYTE] },
-  [C2.RG8I]: { format: C2.RG_INTEGER, types: [C2.BYTE] },
+  [C2.RG8I]: { format: C2.RG_INTEGER, types: [C1.BYTE] },
   [C2.RG16UI]: { format: C2.RG_INTEGER, types: [C1.UNSIGNED_SHORT] },
-  [C2.RG16I]: { format: C2.RG_INTEGER, types: [C2.SHORT] },
+  [C2.RG16I]: { format: C2.RG_INTEGER, types: [C1.SHORT] },
   [C2.RG32UI]: { format: C2.RG_INTEGER, types: [C1.UNSIGNED_INT] },
-  [C2.RG32I]: { format: C2.RG_INTEGER, types: [C2.INT] },
+  [C2.RG32I]: { format: C2.RG_INTEGER, types: [C1.INT] },
   [C2.RGB8UI]: { format: C2.RGB_INTEGER, types: [C1.UNSIGNED_BYTE] },
-  [C2.RGB8I]: { format: C2.RGB_INTEGER, types: [C2.BYTE] },
+  [C2.RGB8I]: { format: C2.RGB_INTEGER, types: [C1.BYTE] },
   [C2.RGB16UI]: { format: C2.RGB_INTEGER, types: [C1.UNSIGNED_SHORT] },
-  [C2.RGB16I]: { format: C2.RGB_INTEGER, types: [C2.SHORT] },
+  [C2.RGB16I]: { format: C2.RGB_INTEGER, types: [C1.SHORT] },
   [C2.RGB32UI]: { format: C2.RGB_INTEGER, types: [C1.UNSIGNED_INT] },
-  [C2.RGB32I]: { format: C2.RGB_INTEGER, types: [C2.INT] },
+  [C2.RGB32I]: { format: C2.RGB_INTEGER, types: [C1.INT] },
   [C2.RGBA8UI]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_BYTE] },
-  [C2.RGBA8I]: { format: C2.RGBA_INTEGER, types: [C2.BYTE] },
+  [C2.RGBA8I]: { format: C2.RGBA_INTEGER, types: [C1.BYTE] },
   [C2.RGBA16UI]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_SHORT] },
-  [C2.RGBA16I]: { format: C2.RGBA_INTEGER, types: [C2.SHORT] },
+  [C2.RGBA16I]: { format: C2.RGBA_INTEGER, types: [C1.SHORT] },
   [C2.RGBA32UI]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_INT] },
-  [C2.RGBA32I]: { format: C2.RGBA_INTEGER, types: [C2.INT] },
+  [C2.RGBA32I]: { format: C2.RGBA_INTEGER, types: [C1.INT] },
   [C2.RGB10_A2UI]: { format: C2.RGBA_INTEGER, types: [C2.UNSIGNED_INT_2_10_10_10_REV] },
   // ---- norm16 (EXT_texture_norm16) ----
   [CExt.R16_EXT]: { format: C2.RED, types: [C1.UNSIGNED_SHORT] },
   [CExt.RG16_EXT]: { format: C2.RG, types: [C1.UNSIGNED_SHORT] },
   [CExt.RGB16_EXT]: { format: C1.RGB, types: [C1.UNSIGNED_SHORT] },
   [CExt.RGBA16_EXT]: { format: C1.RGBA, types: [C1.UNSIGNED_SHORT] },
-  [CExt.R16_SNORM_EXT]: { format: C2.RED, types: [C2.SHORT] },
-  [CExt.RG16_SNORM_EXT]: { format: C2.RG, types: [C2.SHORT] },
-  [CExt.RGB16_SNORM_EXT]: { format: C1.RGB, types: [C2.SHORT] },
-  [CExt.RGBA16_SNORM_EXT]: { format: C1.RGBA, types: [C2.SHORT] },
+  [CExt.R16_SNORM_EXT]: { format: C2.RED, types: [C1.SHORT] },
+  [CExt.RG16_SNORM_EXT]: { format: C2.RG, types: [C1.SHORT] },
+  [CExt.RGB16_SNORM_EXT]: { format: C1.RGB, types: [C1.SHORT] },
+  [CExt.RGBA16_SNORM_EXT]: { format: C1.RGBA, types: [C1.SHORT] },
   // ---- depth ----
   [C2.DEPTH_COMPONENT16]: { format: C1.DEPTH_COMPONENT, types: [C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
   [C2.DEPTH_COMPONENT24]: { format: C1.DEPTH_COMPONENT, types: [C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
@@ -458,11 +460,11 @@ function w2InternalformatValid(ctx: WebGLRenderingContext, fmt: GLenum): boolean
 function w2TypeMatchesView(type: GLenum, pixels: ArrayBufferView): boolean {
   const v = pixels as unknown as { constructor: Function };
   switch (type) {
-    case C2.BYTE:
+    case C1.BYTE:
       return v instanceof Int8Array;
     case C1.UNSIGNED_BYTE:
       return v instanceof Uint8Array || v instanceof Uint8ClampedArray;
-    case C2.SHORT:
+    case C1.SHORT:
       return v instanceof Int16Array;
     case C1.UNSIGNED_SHORT:
     case C1.UNSIGNED_SHORT_5_6_5:
@@ -470,7 +472,7 @@ function w2TypeMatchesView(type: GLenum, pixels: ArrayBufferView): boolean {
     case C1.UNSIGNED_SHORT_5_5_5_1:
     case C2.HALF_FLOAT:
       return v instanceof Uint16Array;
-    case C2.INT:
+    case C1.INT:
       return v instanceof Int32Array;
     case C1.UNSIGNED_INT:
     case C2.UNSIGNED_INT_5_9_9_9_REV:
@@ -600,7 +602,7 @@ function bytesPerTexel(ctx: WebGLRenderingContext, format: GLenum, type: GLenum)
   switch (type) {
     case C1.UNSIGNED_BYTE:
       return comps;
-    case C2.BYTE:
+    case C1.BYTE:
       return ctx._version === 2 ? comps : 1;
     case C1.UNSIGNED_SHORT_5_6_5:
     case C1.UNSIGNED_SHORT_4_4_4_4:
@@ -608,11 +610,11 @@ function bytesPerTexel(ctx: WebGLRenderingContext, format: GLenum, type: GLenum)
       return 2; // packed
     case C1.UNSIGNED_SHORT:
       return comps * 2;
-    case C2.SHORT:
+    case C1.SHORT:
       return ctx._version === 2 ? comps * 2 : 2;
     case C1.UNSIGNED_INT:
       return comps * 4;
-    case C2.INT:
+    case C1.INT:
       return ctx._version === 2 ? comps * 4 : 4;
     case C2.HALF_FLOAT:
     case HALF_FLOAT_OES:
@@ -655,7 +657,7 @@ function validatePixelsSize(
     unpack.skipPixels * srcBpp;
   if (typeof pixels === 'number') {
     // WebGL2 PIXEL_UNPACK_BUFFER offset path (w2ValidatePbo checked the binding).
-    const buf = ctx._state.pixelUnpackBuffer as WebGLBuffer | null;
+    const buf = ctx._state.pixelUnpackBuffer;
     if (buf === null || buf._data === null || pixels + required > buf._size) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return false;
@@ -1595,7 +1597,10 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
   };
 
   if ('texImage3D' in proto) {
-    proto.texImage3D = function (
+    // `'texImage3D' in proto` narrows to WebGLRenderingContext & Record<'texImage3D', unknown>,
+    // which lacks the other WebGL2 methods — widen for the assignments below.
+    const p = proto as unknown as WebGLRenderingContext & Record<string, unknown>;
+    p.texImage3D = function (
       this: WebGLRenderingContext,
       target: GLenum,
       level: GLint,
@@ -1618,7 +1623,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       texImage3DBuffer(ctx, target, level, internalformat, width, height, depth, border, format, type, pixels ?? null);
     };
 
-    proto.texSubImage3D = function (
+    p.texSubImage3D = function (
       this: WebGLRenderingContext,
       target: GLenum,
       level: GLint,
@@ -1642,7 +1647,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       texSubImage3DBuffer(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels ?? null);
     };
 
-    proto.texStorage2D = function (
+    p.texStorage2D = function (
       this: WebGLRenderingContext,
       target: GLenum,
       levels: GLsizei,
@@ -1659,7 +1664,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       texStorage2DImpl(ctx, target, levels, internalformat, width, height);
     };
 
-    proto.texStorage3D = function (
+    p.texStorage3D = function (
       this: WebGLRenderingContext,
       target: GLenum,
       levels: GLsizei,
@@ -1677,7 +1682,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       texStorage3DImpl(ctx, target, levels, internalformat, width, height, depth);
     };
 
-    proto.compressedTexImage3D = function (
+    p.compressedTexImage3D = function (
       this: WebGLRenderingContext,
       target: GLenum,
       level: GLint,
@@ -1693,7 +1698,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       compressedTexImage3DImpl(ctx, target, level, internalformat, width, height, depth, border, data);
     };
 
-    proto.compressedTexSubImage3D = function (
+    p.compressedTexSubImage3D = function (
       this: WebGLRenderingContext,
       target: GLenum,
       level: GLint,
@@ -1711,7 +1716,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       compressedTexSubImage3DImpl(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, data);
     };
 
-    proto.copyTexSubImage3D = function (
+    p.copyTexSubImage3D = function (
       this: WebGLRenderingContext,
       target: GLenum,
       level: GLint,
