@@ -248,10 +248,11 @@ function parsePrecisionDecl(p: Parser): PrecisionDecl {
 function parseInvariantDecl(p: Parser): ExternalDecl {
   const start = p.next(); // 'invariant'
   const t = p.peek();
-  const t2 = p.peek(1);
-  const shortForm = t.kind === 'identifier' && t2.kind === 'op' && t2.text === ';';
+  // Short form: `invariant <identifier>;` (gl_Position or a varying name).
+  // Qualifier form: `invariant <keyword-type/qualifier> ...` (e.g.
+  // `invariant varying vec4 v;`). Anything else is reported and recovered.
   const declStart = t.kind === 'keyword' && t.name !== 'invariant' && DECL_KEYWORDS.has(t.name);
-  if (!shortForm && !declStart) {
+  if (!declStart) {
     const nameT = p.expectIdentifier();
     p.expectOp(';');
     return { kind: 'invariant-decl', name: nameT ? nameT.name : '', loc: locOf(start) };
@@ -755,7 +756,9 @@ function parseInterfaceBlock(p: Parser, type: TypeSpec): InterfaceBlockDecl {
   if (p.version === 100) {
     p.error(p.peek().line, 'interface blocks require GLSL ES 3.00');
     skipBalanced(p, '{', '}');
-    if (p.atOp(';')) p.next();
+    // Skip a trailing instance name / array dims up to the `;` so the next
+    // declaration parses cleanly (no cascading 'expected identifier' error).
+    recoverTopLevel(p);
     return {
       kind: 'interface-block',
       qualifiers: type.qualifiers,
