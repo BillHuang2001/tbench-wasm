@@ -236,14 +236,14 @@ expectErr('float f() { return; }', 100, 'VERTEX', undefined, /return/);
 /* 13. Builtin extension gating                                        */
 /* ------------------------------------------------------------------ */
 
-expectErr('void main() { float d = dFdx(1.0); }', 100, 'FRAGMENT', undefined, /extension/i);
+expectErr('precision mediump float;\nvoid main() { float d = dFdx(1.0); }', 100, 'FRAGMENT', undefined, /extension/i);
 expectOk(
-  '#extension GL_OES_standard_derivatives : enable\nvoid main() { float d = dFdx(1.0); }',
+  '#extension GL_OES_standard_derivatives : enable\nprecision mediump float;\nvoid main() { float d = dFdx(1.0); }',
   100,
   'FRAGMENT',
   new Set(['GL_OES_standard_derivatives']),
 );
-expectOk('#version 300 es\nvoid main() { float d = dFdx(1.0); }', 300, 'FRAGMENT'); // core in 3.00
+expectOk('#version 300 es\nprecision mediump float;\nvoid main() { float d = dFdx(1.0); }', 300, 'FRAGMENT'); // core in 3.00
 expectErr(
   '#extension GL_OES_standard_derivatives : enable\nvoid main() { float d = dFdx(1.0); }',
   100,

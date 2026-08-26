@@ -18,15 +18,17 @@
  *
  * Expression analysis lives in semantics-expr.ts (`analyzeExpr`), statement
  * analysis in semantics-stmt.ts (`analyzeStatement`); both are re-exported
- * here. Entry point for a whole shader: `analyzeProgram(ast, ctx)`.
+ * here. Core entry point for a whole shader: `analyzeProgram(ast, ctx)`.
+ * The full-shader entry `analyze(ast, opts)` (declaration rules + ShaderInfo
+ * assembly + ShaderUses) lives in semantics-decl.ts and is re-exported here.
  */
 import type {
   ExternalDecl, Expr, FunctionDefinition, FunctionPrototype, GlobalVarDecl,
   InterfaceBlockDecl, ParamDecl, StructDecl, StructDefinition, TranslationUnit,
   TypeName, TypeSpec, VarDeclarator,
 } from './ast.js';
-import type { GLSLType, SamplerKind, StorageClass, StructMember } from './types.js';
-import { typeEquals, typeName } from './types.js';
+import type { GLSLType, Precision, SamplerKind, StorageClass, StructMember } from './types.js';
+import { isFloat, typeEquals, typeName } from './types.js';
 import { analyzeExpr, convertible } from './semantics-expr.js';
 import { analyzeStatement } from './semantics-stmt.js';
 import {
@@ -64,6 +66,16 @@ export class SemContext {
   readonly enabledExtensions: Set<string>;
   errors: SemError[] = [];
 
+  /**
+   * Default precision per base-type key ('float' | 'int' | sampler kind),
+   * GLSL ES §4.5.3. `precision` statements update it from their point onward
+   * (last statement wins); the fragment float rule (§4.5.4 — every float
+   * declaration needs an explicit precision or a default) is checked against
+   * it. Function bodies see the state at their DEFINITION point (snapshot
+   * taken by analyzeProgram's pre-pass).
+   */
+  defaultPrecisions: Map<string, Precision> = new Map();
+
   /** Internal: nested loop depth (continue legality). */
   loopDepth = 0;
   /** Internal: nested loop+switch depth (break legality). */
@@ -79,6 +91,33 @@ export class SemContext {
     this.version = version;
     this.stage = stage;
     this.enabledExtensions = enabledExtensions;
+    this.initDefaultPrecisions();
+  }
+
+  /**
+   * Reset to the stage's PRE-DECLARED default precisions (§4.5.3): vertex
+   * defaults float to highp, int to mediump and the sampler kinds to lowp
+   * (1.00) / highp (3.00); fragment defaults ONLY int to mediump — float and
+   * samplers have no fragment default (float declarations then require a
+   * `precision` statement; sampler declarations are LENIENT by design — the
+   * WebGL specs do not require sampler precision and real-world shaders omit
+   * it).
+   */
+  initDefaultPrecisions(): void {
+    const m = new Map<string, Precision>();
+    if (this.stage === 'VERTEX') {
+      m.set('float', 'highp');
+      m.set('int', 'mediump');
+      if (this.version === 100) {
+        m.set('sampler2D', 'lowp');
+        m.set('samplerCube', 'lowp');
+      } else {
+        for (const s of SAMPLER_300) m.set(s, 'highp');
+      }
+    } else {
+      m.set('int', 'mediump');
+    }
+    this.defaultPrecisions = m;
   }
 
   /** Record an error (1-based line); stops collecting at MAX_ERRORS. */
@@ -344,6 +383,7 @@ function resolveStructDef(def: StructDefinition, scope: Scope, ctx: SemContext):
       ctx.error(m.loc.line, `'${def.name}' : recursive struct definition`);
       continue;
     }
+    if (m.type.qualifiers.precision === undefined) checkFloatPrecision(ctx, m.loc.line, mt, m.name === '' ? null : m.name);
     members.push({ name: m.name, type: mt });
   }
   return { kind: 'struct', name: def.name, members };
@@ -396,6 +436,22 @@ export function wrapArrayDims(
 /* ------------------------------------------------------------------ */
 
 /**
+ * GLSL ES §4.5.4: in FRAGMENT shaders, any float-typed declaration
+ * (variable, struct/block member, parameter, function return) with NO
+ * explicit precision qualifier requires a default float precision to have
+ * been declared earlier in the shader; the error is reported at the
+ * declaration's line. Vertex shaders default float to highp. Sampler
+ * declarations are deliberately NOT checked (lenient — see
+ * initDefaultPrecisions).
+ */
+function checkFloatPrecision(ctx: SemContext, line: number, t: GLSLType, name: string | null): void {
+  if (ctx.stage !== 'FRAGMENT' || !isFloat(t)) return;
+  if (ctx.defaultPrecisions.get('float') === undefined) {
+    ctx.error(line, name === null ? 'No precision specified for (float)' : `'${name}' : No precision specified for (float)`);
+  }
+}
+
+/**
  * Analyze an initializer + register each declarator as a VarSymbol.
  * Shared by global declarations and local decl-statements. Initializers are
  * analyzed as expressions and must convert (implicitly) to the declared
@@ -415,6 +471,7 @@ export function declareVariables(
   for (const d of declarators) {
     if (d.name === '') continue; // parser error-recovery placeholder
     const type = wrapArrayDims(baseType, d.arrayDims, scope, ctx, allowUnsized, d.loc.line);
+    if (spec.qualifiers.precision === undefined) checkFloatPrecision(ctx, d.loc.line, type, d.name === '' ? null : d.name);
     if (type.kind === 'void') {
       ctx.error(d.loc.line, "'void' : cannot declare a variable of type void");
       continue;
@@ -534,6 +591,7 @@ function resolveParams(params: ParamDecl[], scope: Scope, ctx: SemContext): Para
       continue;
     }
     const t = wrapArrayDims(base, p.arrayDims, scope, ctx, true, p.loc.line);
+    if (p.type.qualifiers.precision === undefined) checkFloatPrecision(ctx, p.loc.line, t, p.name === '' ? null : p.name);
     out.push({ name: p.name, type: t, storage: p.type.qualifiers.storage });
   }
   return out;
@@ -563,6 +621,7 @@ function sameParamType(a: GLSLType, b: GLSLType): boolean {
 function registerPrototype(d: FunctionPrototype, scope: Scope, ctx: SemContext): void {
   const retType = resolveTypeSpec(d.returnType, scope, ctx);
   if (retType === null) return;
+  if (d.returnType.qualifiers.precision === undefined) checkFloatPrecision(ctx, d.loc.line, retType, d.name);
   const params = resolveParams(d.params, scope, ctx);
   const existing = scope.lookupLocal(d.name);
   if (existing === undefined) {
@@ -596,6 +655,7 @@ function registerDefinition(d: FunctionDefinition, scope: Scope, ctx: SemContext
   const proto = d.prototype;
   const retType = resolveTypeSpec(proto.returnType, scope, ctx);
   if (retType === null) return null;
+  if (proto.returnType.qualifiers.precision === undefined) checkFloatPrecision(ctx, d.loc.line, retType, proto.name);
   const params = resolveParams(proto.params, scope, ctx);
   const existing = scope.lookupLocal(proto.name);
   if (existing === undefined) {
@@ -638,7 +698,10 @@ function registerInterfaceBlock(d: InterfaceBlockDecl, scope: Scope, ctx: SemCon
   const members: StructMember[] = [];
   for (const m of d.members) {
     const mt = resolveTypeSpec(m.type, scope, ctx);
-    if (mt !== null && mt.kind !== 'void') members.push({ name: m.name, type: mt });
+    if (mt !== null && mt.kind !== 'void') {
+      if (m.type.qualifiers.precision === undefined) checkFloatPrecision(ctx, m.loc.line, mt, m.name === '' ? null : m.name);
+      members.push({ name: m.name, type: mt });
+    }
   }
   const blockType: GLSLType = { kind: 'struct', name: d.blockName, members };
   scope.declare({ kind: 'struct', name: d.blockName, type: blockType }, ctx, d.loc.line);
@@ -732,6 +795,10 @@ export function analyzeProgram(ast: TranslationUnit, ctx: SemContext): void {
   registerBuiltins(global, ctx);
 
   const defToSig = new Map<FunctionDefinition, FnSymbol>();
+  // Precision-default state at each function definition site: function bodies
+  // are analyzed in a second pass, so the snapshot taken HERE (in source
+  // order with the precision statements) is restored per body.
+  const defPrecisions = new Map<FunctionDefinition, Map<string, Precision>>();
   for (const d of ast.declarations) {
     switch (d.kind) {
       case 'struct-decl':
@@ -746,20 +813,31 @@ export function analyzeProgram(ast: TranslationUnit, ctx: SemContext): void {
       case 'function-definition': {
         const sig = registerDefinition(d, global, ctx);
         if (sig !== null) defToSig.set(d, sig);
+        defPrecisions.set(d, new Map(ctx.defaultPrecisions));
         break;
       }
       case 'interface-block':
         registerInterfaceBlock(d, global, ctx);
         break;
+      case 'precision-decl':
+        // Default precision statements take effect from their point onward.
+        ctx.defaultPrecisions.set(d.base, d.precision);
+        break;
       default:
-        break; // precision-decl / extension-decl / invariant-decl: follow-up rules
+        break; // extension-decl / invariant-decl: no scope effect
     }
   }
 
   for (const d of ast.declarations) {
     if (d.kind !== 'function-definition') continue;
     const sig = defToSig.get(d);
-    if (sig !== null && sig !== undefined) analyzeFunctionBody(d, sig, global, ctx);
+    if (sig !== null && sig !== undefined) {
+      const saved = ctx.defaultPrecisions;
+      const snap = defPrecisions.get(d);
+      if (snap !== undefined) ctx.defaultPrecisions = snap;
+      analyzeFunctionBody(d, sig, global, ctx);
+      ctx.defaultPrecisions = saved;
+    }
   }
 
   detectRecursion(ctx);
@@ -767,3 +845,11 @@ export function analyzeProgram(ast: TranslationUnit, ctx: SemContext): void {
 
 /** Re-export helper needed by statement/declaration analysis (and follow-up). */
 export { typeEquals as _typeEquals };
+
+/**
+ * The full-shader entry point (the public contract compileShader wires):
+ * runs the CORE pass (analyzeProgram) then the declaration rules + ShaderInfo
+ * assembly + ShaderUses scan (semantics-decl.ts). Returns the resolved
+ * declaration summaries on success or the collected 1-based errors.
+ */
+export { analyze } from './semantics-decl.js';

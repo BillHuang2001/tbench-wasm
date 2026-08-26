@@ -141,7 +141,10 @@ export function analyzeStatement(s: Stmt, scope: Scope, ctx: SemContext, fn: { r
       return;
     }
     case 'discard':
-      // Stage legality (fragment-only) is the follow-up's declaration work.
+      // GLSL ES: discard is a fragment-stage statement only.
+      if (ctx.stage !== 'FRAGMENT') {
+        ctx.error(s.loc.line, "'discard' : only allowed in fragment shaders");
+      }
       return;
     case 'empty':
       return;
