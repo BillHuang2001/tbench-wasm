@@ -511,7 +511,7 @@ function rgb9e5ToFloat(v: number): [number, number, number] {
 /** Source component count for a (client-side) format. */
 function srcComponents(format: GLenum): number {
   switch (format) {
-    case C.RGBA: case C.RGBA_INTEGER: case C.BGRA: return 4;
+    case C.RGBA: case C.RGBA_INTEGER: case 0x80e1: return 4; // BGRA (EXT_texture_format_BGRA8888, null status)
     case C.RGB: case C.RGB_INTEGER: return 3;
     case C.LUMINANCE_ALPHA: case C.RG: case C.RG_INTEGER: return 2;
     case C.DEPTH_STENCIL: return 2; // depth + stencil (packed 32-bit texels)
@@ -597,7 +597,7 @@ function readSourceTexel(dv: DataView, byteOff: number, format: GLenum, type: GL
       out[0] = r; out[1] = g; out[2] = b; out[3] = 1;
       break;
     }
-    case C.UNSIGNED_INT_24_8: case CExt.UNSIGNED_INT_24_8_WEBGL: {
+    case C.UNSIGNED_INT_24_8: { // 0x84fa (same value as UNSIGNED_INT_24_8_WEBGL)
       const v = dv.getUint32(byteOff, true);
       out[0] = norm ? ((v >>> 8) & 0xffffff) / 0xffffff : (v >>> 8) & 0xffffff;
       out[1] = v & 0xff; // stencil (used only by depth-stencil destinations)
@@ -657,13 +657,14 @@ function copyRows(
   width: number,
   height: number,
   srcRow0: number,
+  dstZOffset: number,
 ): void {
   const out = new Float32Array(4);
   for (let r = 0; r < height; r++) {
     const srcRow = srcRow0 + (p.flipY ? height - 1 - r : r);
     const dstY = yoff + r;
     const srcBase = srcRow * p.srcRowBytes + p.srcSkipPixels * p.srcBpp;
-    const dstBase = (dstY * dstW + xoff) * p.dstBpp;
+    const dstBase = (dstZOffset + dstY * dstW + xoff) * p.dstBpp;
     for (let x = 0; x < width; x++) {
       readSourceTexel(p.src, srcBase + x * p.srcBpp, p.srcFormat, p.srcType, p.domain, out);
       if (p.premultiply) { out[0] *= out[3]; out[1] *= out[3]; out[2] *= out[3]; }
@@ -674,30 +675,6 @@ function copyRows(
         p.write(dst, dstBase + x * p.dstBpp, out[0], out[1], out[2], out[3]);
       }
     }
-  }
-}
-
-/** Copy `depth` slices (z) into a level view; cube faces copy into one face view. */
-function copySlices(
-  p: CopyParams,
-  dst: ArrayBufferView,
-  dstW: number,
-  dstH: number,
-  xoff: number,
-  yoff: number,
-  zoff: number,
-  width: number,
-  height: number,
-  depth: number,
-  srcRow0Base: number,
-  srcImageHeight: number,
-): void {
-  for (let z = 0; z < depth; z++) {
-    const dstZ = zoff + z;
-    const view = dstZ === 0 ? dst : dst; // 3D storage is one flat view; caller passes a slice window
-    const srcRow0 = srcRow0Base + (srcImageHeight > 0 ? z : 0) * srcImageHeight;
-    copyRows(p, view, dstW, xoff, yoff, width, height, srcRow0);
-    void dstH;
   }
 }
 
@@ -774,7 +751,7 @@ function updateCompleteness(texture: WebGLTexture, version: 1 | 2): void {
       if (!ok) break;
     }
   }
-  if (ok && texture._version === 1 && (!isPow2(baseLevel.width) || !isPow2(baseLevel.height))) {
+  if (ok && version === 1 && (!isPow2(baseLevel.width) || !isPow2(baseLevel.height))) {
     // WebGL1 NPOT: only NEAREST/LINEAR minification with CLAMP_TO_EDGE wrap.
     if (needsMips || texture._params[0x2802] !== C.CLAMP_TO_EDGE || texture._params[0x2803] !== C.CLAMP_TO_EDGE) {
       ok = false;
@@ -908,9 +885,9 @@ function copyPixelsIntoLevel(
   const srcImageHeight = s.imageHeight > 0 ? s.imageHeight : height;
   const srcSkipImages = s.skipImages;
   for (let z = 0; z < depth; z++) {
-    const view = views[z >= views.length ? views.length - 1 : z];
+    const view = views[0];
     const srcRow0 = s.skipRows + (srcSkipImages + z) * srcImageHeight;
-    copyRows(p, view, levelData.width, xoffset, yoffset, width, height, srcRow0);
+    copyRows(p, view, levelData.width, xoffset, yoffset, width, height, srcRow0, z * levelData.width * levelData.height);
   }
 }
 
@@ -936,7 +913,13 @@ export function uploadTexImage(
   if (!spec) return;
   const img = ensureImage(texture, target);
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
-  img.levels[level] = allocLevel(spec, width, height, depth, isCube);
+  const levelData = allocLevel(spec, width, height, depth, isCube);
+  if (isCube) {
+    // Only the uploaded face is defined (cube completeness needs all 6).
+    const face = cubeFaceIndex(target);
+    for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = undefined as unknown as ArrayBufferView;
+  }
+  img.levels[level] = levelData;
   texture._internalFormat = internalformat;
   texture._compressed = false;
   img.internalFormat = internalformat;
@@ -950,7 +933,7 @@ export function uploadTexImage(
   }
   recordLevelOrigin(texture, level, format, type);
   copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, 0, 0, 0);
-  updateCompleteness(texture);
+  updateCompleteness(texture, ctx._version);
 }
 
 /** texSubImage2D/3D partial update. */
@@ -972,7 +955,7 @@ export function uploadTexSubImage(
   const spec = resolveStorageSpec(img.internalFormat);
   if (!spec) return;
   copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset);
-  updateCompleteness(texture);
+  updateCompleteness(texture, ctx._version);
 }
 
 /** texStorage2D/3D: allocate immutable mip chain. */
@@ -1012,7 +995,7 @@ export function allocateImmutableStorage(
   img.width = width;
   img.height = height;
   img.depth = isCube ? 6 : depth;
-  updateCompleteness(texture);
+  updateCompleteness(texture, ctx._version);
 }
 
 /** Copy the read framebuffer rect (x, y, w, h) into a level (GL coords, y-up). */
@@ -1076,7 +1059,12 @@ export function copyTexImage(
   if (!spec) return;
   const img = ensureImage(texture, target);
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
-  img.levels[level] = allocLevel(spec, width, height, 1, isCube);
+  const levelData = allocLevel(spec, width, height, 1, isCube);
+  if (isCube) {
+    const face = cubeFaceIndex(target);
+    for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = undefined as unknown as ArrayBufferView;
+  }
+  img.levels[level] = levelData;
   texture._internalFormat = internalformat;
   texture._compressed = false;
   img.internalFormat = internalformat;
@@ -1088,7 +1076,7 @@ export function copyTexImage(
     img.depth = isCube ? 6 : 1;
   }
   copyFromReadSurface(ctx, img.levels[level], cubeFaceIndex(target), spec, x, y, width, height);
-  updateCompleteness(texture);
+  updateCompleteness(texture, ctx._version);
 }
 
 export function copyTexSubImage(
@@ -1113,13 +1101,13 @@ export function copyTexSubImage(
   const face = cubeFaceIndex(target);
   const view = levelData.data[face >= 0 ? face : 0];
   const srcView = tmp.data[0];
-  const bpp = spec.bytesPerPixel;
+  const elemsPerTexel = spec.bytesPerPixel / spec.bytesPerElement;
   for (let dy = 0; dy < height; dy++) {
     for (let dx = 0; dx < width; dx++) {
-      const srcOff = (dy * width + dx) * bpp;
-      const dstOff = ((yoffset + dy) * levelData.width + xoffset + dx) * bpp;
-      for (let b = 0; b < bpp; b++) {
-        (view as unknown as { [i: number]: number })[dstOff / spec.bytesPerElement + b] = (srcView as unknown as { [i: number]: number })[srcOff / spec.bytesPerElement + b];
+      const srcElem = ((dy * width + dx) * spec.bytesPerPixel) / spec.bytesPerElement;
+      const dstElem = (zoffset * levelData.width * levelData.height + (yoffset + dy) * levelData.width + xoffset + dx) * spec.bytesPerPixel / spec.bytesPerElement;
+      for (let e = 0; e < elemsPerTexel; e++) {
+        (view as unknown as { [i: number]: number })[dstElem + e] = (srcView as unknown as { [i: number]: number })[srcElem + e];
       }
     }
   }
