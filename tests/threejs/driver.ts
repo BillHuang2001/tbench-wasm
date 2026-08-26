@@ -490,6 +490,10 @@ async function runPage(
         await page.evaluate(CLEAN_PAGE_SOURCE);
         await page.waitForLoadState("networkidle");
         await page.waitForTimeout(2000);
+        // Byte-proportional parse delay (mirrors three.js e2e "network tax":
+        // 1 s per MB of loaded bytes) before the single deterministic frame.
+        const parseDelayMs = Math.min(30000, (bytes / 1048576) * 1000);
+        if (parseDelayMs > 0) await page.waitForTimeout(parseDelayMs);
         await page.evaluate(RENDER_WAIT_SOURCE);
       } catch (e) {
         attemptPageErrors.push("page setup failed: " + String(e));
