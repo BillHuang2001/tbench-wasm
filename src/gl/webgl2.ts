@@ -33,6 +33,7 @@ import { C2, installConstants } from './constants';
 import { createDefaultState } from './state';
 import { WebGLRenderingContext, CONTEXT_TOKEN } from './webgl1';
 import { installAll } from './api';
+import { DEFAULT_CONTEXT_ATTRIBUTES } from './types';
 import type {
   WebGLActiveInfo,
   WebGLBuffer,
@@ -69,9 +70,13 @@ export class WebGL2RenderingContext extends WebGLRenderingContext {
     this._version = 2;
     this._state = createDefaultState(2);
     // WebGL1 constructor normalized antialias to false (single-sampled buffer);
-    // WebGL2 must report the REQUESTED value exactly (CTS conformance2
-    // context-attributes-depth-stencil-antialias-obeyed.html).
-    if (attrs && typeof attrs.antialias === 'boolean') this._attrs.antialias = attrs.antialias;
+    // WebGL2 must report the REQUESTED-or-default value exactly (CTS conformance2
+    // context-attributes-depth-stencil-antialias-obeyed.html: requested values
+    // AND the default antialias:true must be reported as-is).
+    this._attrs.antialias =
+      attrs && typeof attrs.antialias === 'boolean'
+        ? attrs.antialias
+        : DEFAULT_CONTEXT_ATTRIBUTES.antialias;
     // Drawing-buffer resources are initialized by lifecycle.createContext via
     // initContextResources() AFTER this constructor returns, so the version-2
     // state (DEPTH_COMPONENT24 depth format, viewport sizing) is used.
