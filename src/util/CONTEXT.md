@@ -33,6 +33,13 @@ The bottom of the dependency DAG: pure, dependency-free helpers shared by every 
 - `findLSB`/`findMSB` return -1 when no bits are set; `findMSB` handles negative ints per GLSL spec (MSB of complement).
 - Bit-reinterpretation helpers share one DataView scratch — fine single-threaded, but never hold a result across a re-entrant call.
 
+## Notes for Agents
+- `math.ts` is ~985 lines (JSDoc-heavy by contract) — legitimately long; do NOT split it (the barrel `index.ts` re-exports the whole module).
+- pack*2x16 return the UNSIGNED uint32 as a JS number (e.g. `packHalf2x16([1,-2]) === 0xC0003C00`); when comparing against bit-shift expressions use `>>> 0` (JS `<<` yields int32).
+- `copyTypedArray`: integer destinations truncate toward zero + clamp to range, NaN→0 (documented contract — NOT native JS wrap-around); float destinations use float64→float32 rounding.
+- `findMSB`: per GLSL ES spec, negative JS numbers report the MSB of the bitwise complement (`findMSB(-1) === -1`); pass values ≥ 2^31 as unsigned numbers for the unsigned overload.
+- There is NO scalar `round` export — `vecRound` is the vector GLSL `round` (half away from zero); `misc.ts` has `roundEven` only. `glsl/` codegen maps scalar `round` via `vecRound`-style semantics.
+
 ## Test Strategy
 - Pure functions → easy vitest unit tests under `tests/unit/` (sibling — read-only from this node; escalate writes to parent). Priority coverage: GLSL-exact functions (mod/fract/mix/clamp/step/smoothstep/roundEven), matrix mul/inverse vs. known results, pack*/unpack* round-trips, half-float edge cases, bitfield ops.
 
