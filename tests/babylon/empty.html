@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Software WebGL — Babylon.js test page</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+  #wrapper { width: 100%; height: 100%; }
+  #babylon-canvas { width: 100%; height: 100%; display: block; }
+</style>
+</head>
+<body>
+<div id="wrapper"><canvas id="babylon-canvas"></canvas></div>
+<!-- Vendor UMD bundles served by server.ts from vendor/babylon-cdn/. Order matters:
+     core first, then the libraries that extend the BABYLON global. -->
+<script src="/vendor/babylon.js"></script>
+<script src="/vendor/babylon.gui.min.js"></script>
+<script src="/vendor/babylonjs.materials.min.js"></script>
+<script src="/vendor/babylonjs.loaders.min.js"></script>
+</body>
+</html>
