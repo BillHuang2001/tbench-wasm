@@ -29,57 +29,47 @@
  *
  * Behavior notes / decisions (implemented):
  *  - Query targets: ANY_SAMPLES_PASSED, ANY_SAMPLES_PASSED_CONSERVATIVE and
- *    TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN are legal (CTS query/query.html begins
- *    and ends TF-primitives queries; the objective's "INVALID_ENUM otherwise"
- *    list is expanded accordingly). All other targets → INVALID_ENUM.
- *  - Active-query storage: `state.activeQueries` is a plain object; the two typed
- *    fields (ANY_SAMPLES_PASSED / ANY_SAMPLES_PASSED_CONSERVATIVE) are what the
- *    draw engine reads for occlusion accumulation. TRANSFORM_FEEDBACK_PRIMITIVES_
- *    WRITTEN active queries are stored on the same object under an extra key
- *    (runtime object — no state.ts edit needed). getQuery/getQueryParameter read
- *    the same slots.
- *  - Occlusion queries MUST count real samples: the draw engine (draw.ts) sums
- *    rasterizer-reported passing fragments into the ACTIVE query object's _result
- *    during draw calls (via state.activeQueries). endQuery only finalizes
- *    availability; _result is 0 until the draw engine lands.
- *  - getQueryParameter: synchronous renderer ⇒ QUERY_RESULT returns _result
- *    immediately (0 for never-begun queries) and QUERY_RESULT_AVAILABLE returns
- *    true right after endQuery. CTS spin-loops that expect the result to become
- *    available only after a frame are a known gap (synchronous design).
- *  - Sync objects are signaled immediately (fenceSync → _signaled = true);
- *    clientWaitSync(…, 0) → ALREADY_SIGNALED; timeout > MAX_CLIENT_WAIT_TIMEOUT_
- *    WEBGL (0) → INVALID_OPERATION per sync-webgl-specific.html.
- *  - Samplers: samplerParameter validates the same pname/value table as
- *    texParameter (MIN_LOD/MAX_LOD accept any value; BASE_LEVEL/MAX_LEVEL are
- *    NOT sampler pnames → INVALID_ENUM per CTS samplers.html); TEXTURE_MAX_
- *    ANISOTROPY_EXT is gated on ctx.getExtension('EXT_texture_filter_anisotropic').
- *    isSampler is true as soon as the object exists (never needs a bind).
+ *    TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN are legal (CTS query/query.html; the
+ *    objective's "INVALID_ENUM otherwise" list is expanded accordingly).
+ *    Active queries live in state.activeQueries (plain object; the two typed
+ *    fields feed the draw engine's occlusion accumulation; the TF-primitives
+ *    slot is an extra key). Deleting an ACTIVE query clears its slot (CTS).
+ *    isQuery requires a prior beginQuery; endQuery sets _resultAvailable=true
+ *    (synchronous renderer) and _result holds whatever the draw engine
+ *    accumulated (0 until it lands — real sample counting is draw.ts's job).
+ *  - Sync: fenceSync signals immediately; clientWaitSync(…, 0) →
+ *    ALREADY_SIGNALED; timeout > MAX_CLIENT_WAIT_TIMEOUT_WEBGL (0) →
+ *    INVALID_OPERATION (sync-webgl-specific.html); waitSync validates only.
+ *    CTS spin-loops expecting frame-delayed availability are a known gap
+ *    (synchronous design).
+ *  - Samplers: pname/value table per CTS samplers.html (MIN/MAX_LOD any value;
+ *    BASE_LEVEL/MAX_LEVEL are NOT sampler pnames → INVALID_ENUM; MAG rejects
+ *    mipmap filters; CLAMP_TO_BORDER rejected; TEXTURE_MAX_ANISOTROPY_EXT gated
+ *    on ctx.getExtension('EXT_texture_filter_anisotropic')). isSampler true as
+ *    soon as the object exists.
  *  - VAOs: bindVertexArray(null) restores the default VAO (ctx._defaultVAO,
- *    created lazily — pinned field on the context, webgl1.ts untouched); deleting
- *    the BOUND VAO binds the default VAO (CTS vertex-array-object.html);
- *    isVertexArray requires at least one bind (module-level WeakSet).
- *  - Transform feedback: begin/end/pause/resume operate on the BOUND TF object
- *    (or the default TF when none is bound — tracked in a module-level WeakMap,
- *    NOT stored in state.transformFeedback so getParameter(TRANSFORM_FEEDBACK_
- *    BINDING) stays null per CTS). beginTransformFeedback fails with
- *    INVALID_OPERATION when the BOUND TF is already active (CTS switching-objects
- *    allows beginning a DIFFERENT TF while another is active-paused), when no
- *    linked program is in use, when the program has no TF varyings (CTS
- *    runNoOutputsTest), or when fewer buffers than needed are bound to the TF
- *    binding points (INTERLEAVED_ATTRIBS: ≥1; SEPARATE_ATTRIBS: one per varying —
- *    checked against the global indexed TF bindings, which bindBufferBase writes).
- *    bindTransformFeedback is rejected only while the BOUND TF is active AND not
- *    paused (CTS). The bound TF object's _buffers/_bufferRanges are re-synced
- *    from the global TF indexed bindings at bind/begin time (getters.ts reads
- *    `_buffers[0]` for TRANSFORM_FEEDBACK_BUFFER_BINDING; the draw engine
- *    captures via _buffers). TF indexed bindings are GLOBAL context state per the
- *    updated Khronos spec (switching-objects.html) — the buffers agent's
- *    _tfRangeBindings is the source of truth.
- *  - getInternalformatParameter: RENDERBUFFER + SAMPLES only (all CTS call sites
- *    use RENDERBUFFER); internalformat must be an ES3 renderable format (local
- *    list — raster/formats.ts isValidRenderbufferFormat is a throwing stub);
- *    returns Int32Array([4]) — consistent with MAX_SAMPLES=4 and the CTS
- *    multisample-with-full-sample-counts test (samples 1..array[0] must work).
+ *    lazily created — pinned field on the context, webgl1.ts untouched);
+ *    deleting the BOUND VAO rebinds the default (vertex-array-object.html);
+ *    isVertexArray requires a prior bind (WeakSet).
+ *  - Transform feedback: begin/end/pause/resume operate on the BOUND TF (or the
+ *    default TF when none bound — module-level WeakMap, NOT stored in
+ *    state.transformFeedback so TRANSFORM_FEEDBACK_BINDING stays null per CTS).
+ *    beginTransformFeedback → INVALID_OPERATION when the BOUND TF is active
+ *    (switching-objects.html allows beginning a DIFFERENT TF while another is
+ *    active-paused), no linked program in use, program has no TF varyings
+ *    (runNoOutputsTest), or fewer TF buffers bound than needed (INTERLEAVED ≥1;
+ *    SEPARATE one per varying — checked against the global indexed bindings).
+ *    bindTransformFeedback rejected only while BOUND TF active AND unpaused.
+ *    TF indexed bindings are GLOBAL state per the updated Khronos spec
+ *    (switching-objects.html); the bound TF's _buffers/_bufferRanges are
+ *    re-synced from the buffers agent's _tfRangeBindings at bind/begin time
+ *    (getters.ts TRANSFORM_FEEDBACK_BUFFER_BINDING and the draw engine read
+ *    _buffers). Delete of an active TF → INVALID_OPERATION (CTS).
+ *  - getInternalformatParameter: RENDERBUFFER + SAMPLES only; internalformat
+ *    must be an ES3 renderable format (local list — raster/formats.ts
+ *    isValidRenderbufferFormat is a throwing stub); returns Int32Array([4]),
+ *    consistent with MAX_SAMPLES=4 and multisample-with-full-sample-counts
+ *    (samples 1..array[0] must work).
  */
 
 import type { WebGL2RenderingContext } from '../webgl2';
@@ -108,8 +98,7 @@ function isLost(ctx: WebGLRenderingContext): boolean {
 
 /**
  * Constructor casts: WebGL object subclasses inherit WebGLObject's PROTECTED
- * constructor, so their `typeof` is not assignable to the generic helpers'
- * `new (...)` constructor params — cast once per class (mirrors buffers.ts).
+ * constructor, so cast once per class (mirrors buffers.ts).
  */
 function ctorPair<T extends WebGLObject>(C: { prototype: T }): {
   make: new (context: WebGLRenderingContext) => T;
@@ -228,9 +217,8 @@ function getDefaultTF(ctx: WebGLRenderingContext): WebGLTransformFeedback {
 
 /**
  * Indexed TRANSFORM_FEEDBACK_BUFFER binding at `index` (last bind wins).
- * MIRROR of buffers.ts's private helper: the source of truth is the buffer
- * objects' _tfRangeBindings entries (global per the updated Khronos spec —
- * switching-objects.html). Keep in sync with buffers.ts.
+ * MIRROR of buffers.ts's private helper — the source of truth is the buffer
+ * objects' _tfRangeBindings entries (global per the updated Khronos spec).
  */
 function tfBindingAtIndex(
   ctx: WebGLRenderingContext,
@@ -249,9 +237,8 @@ function tfBindingAtIndex(
 /**
  * Mirror the global indexed TF buffer bindings into the TF object's
  * _buffers/_bufferRanges (getters.ts TRANSFORM_FEEDBACK_BUFFER_BINDING reads
- * `_buffers[0]`; the draw engine captures via _buffers). Called at
- * bindTransformFeedback and beginTransformFeedback so late bindBufferBase calls
- * are picked up.
+ * `_buffers[0]`; the draw engine captures via _buffers). Called at bind and
+ * begin so late bindBufferBase calls are picked up.
  */
 function syncTfBuffers(ctx: WebGLRenderingContext, tf: WebGLTransformFeedback): void {
   const n = ctx._state.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
