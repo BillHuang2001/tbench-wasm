@@ -57,7 +57,7 @@ ${source}
   HTMLCanvasElement.prototype.getContext = function(type, attrs) {
     if ((type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') &&
         typeof window.__createSoftwareWebGLContext === 'function') {
-      return window.__createSoftwareWebGLContext(this, attrs);
+      return window.__createSoftwareWebGLContext(this, attrs, type);
     }
     return _orig.call(this, type, attrs);
   };
