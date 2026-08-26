@@ -78,6 +78,25 @@ import type {
   WEBGL_multi_draw,
 } from './extensions/types';
 import { DEFAULT_CONTEXT_ATTRIBUTES } from './types';
+import type { CanvasSurface } from '../present';
+import type { Surface, TextureImage } from '../raster';
+import type { VAOState } from './state';
+
+/**
+ * The default framebuffer (drawing buffer) of a context. `color.data` is the
+ * present surface's pixel buffer (zero-copy RGBA8; re-fetched after resize);
+ * `depth`/`stencil` are raster surfaces allocated per context attributes
+ * (DEPTH_COMPONENT16 on WebGL1 / DEPTH_COMPONENT24 on WebGL2 / STENCIL_INDEX8).
+ * Lifecycle (lifecycle.ts) owns allocation; the draw pipeline resolves it to a
+ * raster FramebufferTarget via framebuffer-util.ts.
+ */
+export interface DefaultFramebuffer {
+  color: Surface;
+  depth: Surface | null;
+  stencil: Surface | null;
+  width: number;
+  height: number;
+}
 
 /** Token gate for construction — only lifecycle.ts may create contexts. */
 export const CONTEXT_TOKEN: unique symbol = Symbol('software-webgl-context');
@@ -97,6 +116,12 @@ export class WebGLRenderingContext {
   _resources: Resources;
   /** Extension singleton cache (canonical name → object). */
   _extensions: Map<string, object> = new Map();
+  /** Present adapter (present/ contract §4) — set at construction; null before/after loss. */
+  _presentSurface: CanvasSurface | null = null;
+  /** The default framebuffer (drawing buffer) surfaces — owned by lifecycle.ts. */
+  _defaultFB: DefaultFramebuffer | null = null;
+  /** The persistent default VAO contents (WebGL2/OES_vertex_array_object rebind target). */
+  _defaultVAO: VAOState | null = null;
   /** Default framebuffer surface (present/ CanvasSurface-compatible). */
   _drawingBuffer: unknown = null;
   _drawingBufferWidth: GLsizei = 0;
