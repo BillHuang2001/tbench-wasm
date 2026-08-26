@@ -1,7 +1,7 @@
 # src/util/ — Shared Low-Level Foundation
 
 ## Intent
-The bottom of the dependency DAG: pure, dependency-free helpers shared by every other module (`glsl/`, `raster/`, `gl/`, `present/`). No WebGL logic, no GL state, no DOM — small, exact, fast primitives whose semantics are authoritative across the codebase (GLSL math, typed-array plumbing, bit/float conversions, logging). All public API is stubbed (`throw new Error('not implemented')`) — signatures are the contract; implementation is pending.
+The bottom of the dependency DAG: pure, dependency-free helpers shared by every other module (`glsl/`, `raster/`, `gl/`, `present/`). No WebGL logic, no GL state, no DOM — small, exact, fast primitives whose semantics are authoritative across the codebase (GLSL math, typed-array plumbing, bit/float conversions, logging). All public API is implemented (TS, zero deps); signatures and JSDoc are the contract.
 
 ## API Surface
 - `index.ts` — barrel: `export *` from the four modules below. All consumers import from `../util`.
