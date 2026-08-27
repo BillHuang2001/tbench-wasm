@@ -1,6 +1,19 @@
 /**
  * Debug: reproduce the "Cyclic __proto__ value" pageerror with a full stack.
  * Run: node scripts/debug-cyclic-proto.mjs [testPath]
+ *
+ * GOTCHA: buildInterceptScript() reads WEBGL_SOFTWARE_RENDERER first. The agent
+ * shell commonly exports WEBGL_SOFTWARE_RENDERER=/app/renderer.js (nonexistent
+ * in worktrees) -> the RENDERER_NOT_FOUND stub is injected instead of the real
+ * bundle (getContext throws, tests fail with "Unable to fetch WebGL rendering
+ * context", no cyclic error). Run with:
+ *   WEBGL_SOFTWARE_RENDERER=./renderer.js node scripts/debug-cyclic-proto.mjs <path>
+ * Root cause of the cyclic error (investigated): src/gl/objects/index.ts
+ * references WebGLUniformLocation/WebGLActiveInfo/WebGLShaderPrecisionFormat in
+ * value position without importing them; esbuild renames the classes to ...2 and
+ * leaves the barrel references as global lookups -> setPrototypeOf(nativeProto,
+ * nativeProto) -> TypeError at bundle load. Fix: value-import the 3 aux classes
+ * in index.ts (see src/gl/CONTEXT.md).
  */
 import { chromium } from 'playwright';
 import { startCtsServer } from '../tests/conformance/server.ts';
