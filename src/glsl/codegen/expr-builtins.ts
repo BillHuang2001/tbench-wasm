@@ -41,7 +41,7 @@ import { typeEquals } from '../types.js';
 import { matches, builtinSignatures, extensionFunctions } from '../builtins/index.js';
 import type { BuiltinSignature } from '../builtins/index.js';
 import type { CodegenEnv } from './env.js';
-import { scalarBaseOf, flatComponents, isBoolType, wrapInt, wrapUint, convertScalar, foldPre } from './env.js';
+import { scalarBaseOf, flatComponents, isBoolType, wrapInt, wrapUint, convertScalar, foldPre, hasFloatLeaves } from './env.js';
 import type { Value } from './index.js';
 import { emitExpr, materialize, emitLValue } from './expressions.js';
 import type { LValue } from './expressions.js';
@@ -114,6 +114,32 @@ export function emitBuiltinCall(e: CallExpr, env: CodegenEnv): Value[] {
 
 const DERIV_NAMES = new Set(['dFdx', 'dFdy', 'fwidth']);
 
+/**
+ * dFdx / dFdy / fwidth (dual mode only — the non-dual path throws a clear
+ * error instead of emitting garbage).
+ *   dFdx(x)  → { v: x.dx, dx: '0', dy: '0' }
+ *   dFdy(x)  → { v: x.dy, dx: '0', dy: '0' }
+ *   fwidth(x)→ { v: Math.abs(x.dx) + Math.abs(x.dy), dx: '0', dy: '0' }
+ * The RESULT is itself a float value whose own duals are 0 (second
+ * derivatives are not tracked). The operand's `pre` is attached (shared
+ * array — statement emitters dedupe by identity) so materialized temps the
+ * dx/dy strings reference are set before `v` evaluates.
+ */
+function emitDerivatives(name: string, sig: BuiltinSignature, argVals: Value[][], env: CodegenEnv): Value[] {
+  if (!env.dual) {
+    throw new Error(`codegen: '${name}' requires dual-number mode (C5); non-dual lowering is unsupported`);
+  }
+  const x = argVals[0];
+  const out: Value[] = [];
+  for (let c = 0; c < x.length; c++) {
+    const xv = x[c];
+    if (name === 'dFdx') out.push({ v: `(${xv.dx ?? '0'})`, dx: '0', dy: '0', pre: xv.pre });
+    else if (name === 'dFdy') out.push({ v: `(${xv.dy ?? '0'})`, dx: '0', dy: '0', pre: xv.pre });
+    else out.push({ v: `(Math.abs(${xv.dx ?? '0'}) + Math.abs(${xv.dy ?? '0'}))`, dx: '0', dy: '0', pre: xv.pre });
+  }
+  return out;
+}
+
 function lowerBuiltin(
   name: string,
   sig: BuiltinSignature,
@@ -123,7 +149,14 @@ function lowerBuiltin(
   env: CodegenEnv,
 ): Value[] {
   if (DERIV_NAMES.has(name)) {
-    throw new Error(`codegen: '${name}' requires dual-number mode (C5); non-dual lowering is unsupported`);
+    return emitDerivatives(name, sig, argVals, env);
+  }
+  // Dual mode: float-result builtins need dual lowering (per-builtin
+  // derivative templates — C5a2). Throw rather than silently dropping the
+  // duals. Int/uint/bool-result builtins (textureSize, bitfield ops,
+  // relationals, floatBitsToInt, ...) carry no duals and stay legal.
+  if (env.dual && hasFloatLeaves(sig.ret)) {
+    throw new Error(`codegen: dual-mode lowering of '${name}' requires the C5a2 builtin dual templates`);
   }
   const ret = sig.ret;
   const n = flatComponents(ret);

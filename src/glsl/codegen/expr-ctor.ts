@@ -28,7 +28,7 @@
 import type { Expr } from '../ast.js';
 import type { GLSLType } from '../types.js';
 import type { CodegenEnv } from './env.js';
-import { scalarBaseOf, foldPre, convertValue } from './env.js';
+import { scalarBaseOf, foldPre, convertValue, hasFloatLeaves } from './env.js';
 import type { Value } from './index.js';
 import { emitExpr, materialize } from './expressions.js';
 
@@ -62,6 +62,12 @@ const PAD_ONE: Record<string, string> = { float: '1.0', int: '1', uint: '1', boo
 
 /** Lower a constructor call (name is a builtin type name or a user struct). */
 export function emitConstructorCall(name: string, args: Expr[], retType: GLSLType, env: CodegenEnv): Value[] {
+  // Dual mode: float-typed constructors need the dual-aware argument
+  // concatenation/splat/pad lowering (C5a2) — a v-only flattening would
+  // silently zero the result derivatives. Int/uint/bool ctors stay legal.
+  if (env.dual && hasFloatLeaves(retType)) {
+    throw new Error(`codegen: dual-mode constructor '${name}' requires C5a2 (constructors)`);
+  }
   switch (retType.kind) {
     case 'scalar':
       return emitScalarCtor(name, args, retType, env);

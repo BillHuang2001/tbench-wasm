@@ -375,11 +375,16 @@ function reads(p: P, env: CodegenEnv): Value[] {
   const hasPre = p.pre.length > 0;
   for (let c = 0; c < n; c++) {
     const s = leafRead(p, env, c);
-    const v = hasPre ? `(${p.pre.join(', ')}, ${s})` : s;
     if (dual) {
+      // Dual mode: pre lines (dyn-index temps, spill copy-in) ATTACH to the
+      // Value instead of folding into the v string — the dx/dy plane strings
+      // reference the same temps, so folding into v only would strand them
+      // when a consumer reads just one plane (dFdx(x) consumes only x.dx).
       const d = leafDual(p, env, c);
-      out.push(d ? { v, dx: d[0], dy: d[1] } : { v });
+      const base = hasPre ? { v: s, pre: p.pre } : { v: s };
+      out.push(d ? { ...base, dx: d[0], dy: d[1] } : base);
     } else {
+      const v = hasPre ? `(${p.pre.join(', ')}, ${s})` : s;
       out.push({ v });
     }
   }
@@ -819,12 +824,22 @@ function copyBackComma(copyBack: string | undefined): string | null {
   return s.split('; ').join(', ');
 }
 
-/** Materialize values with pres into temps (for multi-use contexts). */
+/** Materialize values with pres into temps (for multi-use contexts). Dual
+ *  mode: a float value materializes as a TRIPLE of temps (v, dx, dy — the
+ *  pre lines run v first, then the planes, so plane reads that reference
+ *  temps from the v pre are assigned). */
 export function materialize(vals: Value[], env: CodegenEnv): Value[] {
   return vals.map((v) => {
     if (!v.pre || v.pre.length === 0) return v;
     const t = env.allocTemp();
-    return { v: t, pre: [`${t} = ${foldPre(v.pre, v.v)}`] };
+    const pre = [`${t} = ${foldPre(v.pre, v.v)}`];
+    if (env.dual && v.dx !== undefined) {
+      const tx = env.allocTemp();
+      const ty = env.allocTemp();
+      pre.push(`${tx} = ${v.dx}`, `${ty} = ${v.dy}`);
+      return { v: t, dx: tx, dy: ty, pre };
+    }
+    return { v: t, pre };
   });
 }
 
@@ -869,14 +884,17 @@ function emitUnary(e: Extract<Expr, { kind: 'unary' }>, env: CodegenEnv): Value[
     const x = v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v;
     switch (op) {
       case '+':
-        // Unary plus is the identity — duals pass through unchanged.
-        return env.dual && v.dx !== undefined ? { v: `(${x})`, dx: v.dx, dy: v.dy } : { v: `(${x})` };
+        // Unary plus is the identity — duals pass through unchanged. In dual
+        // mode the operand's pre attaches to the RESULT (folding it into v
+        // would strand the temps when only dx/dy are consumed — dFdx(-v)).
+        if (env.dual && v.dx !== undefined) return { v: `(${v.v})`, dx: v.dx, dy: v.dy, pre: v.pre };
+        return { v: `(${x})` };
       case '-':
         if (base === 'uint') return { v: `((0 - (${x})) >>> 0)` };
         if (base === 'int') return { v: `((-(${x})) | 0)` };
         // Float: negation is linear — negate the duals too.
         if (env.dual && v.dx !== undefined) {
-          return { v: `(-(${x}))`, dx: `(-(${v.dx}))`, dy: `(-(${v.dy}))` };
+          return { v: `(-(${v.v}))`, dx: `(-(${v.dx}))`, dy: `(-(${v.dy}))`, pre: v.pre };
         }
         return { v: `(-(${x}))` };
       case '!':
@@ -1235,11 +1253,14 @@ function emitComma(e: Extract<Expr, { kind: 'comma' }>, env: CodegenEnv): Value[
   }
   if (pre.length === 0) return last;
   const prelude = `(${pre.join(', ')}, `;
-  // Dual mode: the comma's value is the LAST expr — propagate its duals
-  // (they are pure reads/temps independent of the leading prelude terms).
+  // Dual mode: the comma's value is the LAST expr — propagate its duals.
+  // The prelude terms + the last expr's pre attach to the Value (embedding
+  // the prelude in the v string would strand side effects when only dx/dy
+  // are consumed).
   return last.map((v) => {
+    if (env.dual) return { v: `(${v.v})`, dx: v.dx, dy: v.dy, pre: [...pre, ...(v.pre ?? [])] };
     const s = `${prelude}${v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v})`;
-    return env.dual ? { v: s, dx: v.dx, dy: v.dy } : { v: s };
+    return { v: s };
   });
 }
 
