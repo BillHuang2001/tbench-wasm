@@ -78,7 +78,7 @@ The complete WebGL 1.0 (`WebGLRenderingContext`) and WebGL 2.0 (`WebGL2Rendering
 - `webgl1.ts` → WebGLRenderingContext class: signatures + arity + installConstants/installAll wiring
 - `webgl2.ts` → WebGL2RenderingContext class: WebGL2 additions + wiring
 - `api/context.ts` → getContextAttributes, isContextLost, getSupportedExtensions, getExtension, getError, getString, getParameter dispatch
-- `api/state.ts` → capability + simple state setters (enable/disable/blendFunc/depthFunc/viewport/scissor/colorMask/clearColor/clearDepth/clearStencil/hint/lineWidth/polygonOffset/sampleCoverage/frontFace/cullFace)
+- `api/state.ts` → capability + simple state setters (enable/disable/blendFunc/depthFunc/viewport/scissor/colorMask/clearColor/clearDepth/clearStencil/hint/lineWidth/polygonOffset/sampleCoverage/frontFace/cullFace/stencilFunc(separate)/stencilMask(separate)/stencilOp(separate))
 - `api/buffers.ts` → buffer object lifecycle, bufferData/SubData, bindBufferBase/Range, getIndexedParameter, getBufferSubData
 - `api/vertex-attrib.ts` → vertexAttribPointer/IPointer, enable/disableVertexAttribArray, vertexAttrib{1..4}{f,fv,I4i,I4iv,I4ui,I4uiv}, vertexAttribDivisor, getVertexAttrib(+Offset)
 - `api/textures.ts` → texture object lifecycle, bindTexture, activeTexture, texParameter[f|i], getTexParameter, pixelStorei, generateMipmap (delegates to teximage.ts)
