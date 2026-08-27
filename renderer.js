@@ -1024,7 +1024,6 @@
 
   // src/gl/extensions/util.ts
   function isLost(ctx) {
-    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
     return ctx._isLost;
   }
   function ctorOf(cls) {
@@ -1180,6 +1179,7 @@
   var REPEAT = 10497;
   var CLAMP_TO_EDGE = 33071;
   var MIRRORED_REPEAT = 33648;
+  var NONE = 0;
   var TEXTURE_2D = 3553;
   var TEXTURE_3D = 32879;
   var TEXTURE_CUBE_MAP = 34067;
@@ -1324,7 +1324,7 @@
     }
     return outCount;
   }
-  function clipPrimitive(buf, base, stride, count, scratch, out, outBase) {
+  function clipPrimitive(buf, base, stride, count, scratch2, out, outBase) {
     if (count === 2) {
       const outCap2 = (out.length - outBase) / stride;
       if (outCap2 < 2) return 0;
@@ -1351,7 +1351,7 @@
       interpRecord(buf, aIdx, bIdx, t1, stride, out, outBase + stride);
       return 2;
     }
-    const scratchCap = Math.floor(scratch.length / stride);
+    const scratchCap = Math.floor(scratch2.length / stride);
     const outCap = Math.floor(out.length / stride);
     const outBaseCap = Math.floor((out.length - outBase) / stride);
     let src = buf;
@@ -1366,7 +1366,7 @@
         dstBase = outBase;
         cap = outBaseCap;
       } else if (p % 2 === 0) {
-        dst = scratch;
+        dst = scratch2;
         dstBase = 0;
         cap = scratchCap;
       } else {
@@ -1735,7 +1735,7 @@
       if (INTEGER_PACK_FORMATS.has(packFormat) && isIntegerPackType(packType)) {
         convert2 = buildIntegerPack(info, packFormat, packType);
       }
-    } else if (!INTEGER_PACK_FORMATS.has(packFormat) && !isIntegerPackType(packType)) {
+    } else if (!INTEGER_PACK_FORMATS.has(packFormat)) {
       convert2 = buildColorPack(info, packFormat, packType);
     }
     return convert2 ? { convert: convert2 } : null;
@@ -4192,6 +4192,43 @@
   }
 
   // src/raster/rasterizer.ts
+  var MIN_SCRATCH = 64;
+  var scratch = new Float32Array(MIN_SCRATCH);
+  var intScratch = new Int32Array(MIN_SCRATCH);
+  var zeroStore = new Float32Array(0);
+  var zeroIntStore = new Int32Array(0);
+  var EMPTY_INT_STORE = new Int32Array(0);
+  var DEFAULT_STATE = {
+    minFilter: NEAREST_MIPMAP_LINEAR,
+    // 0x2702
+    magFilter: LINEAR,
+    // 0x2601
+    wrapS: REPEAT,
+    // 0x2901
+    wrapT: REPEAT,
+    // 0x2901
+    wrapR: REPEAT,
+    // 0x2901
+    minLod: -1e3,
+    maxLod: 1e3,
+    compareMode: NONE,
+    // 0
+    compareFunc: LEQUAL,
+    // 0x0203
+    maxAnisotropy: 1
+  };
+  function ensureScratch(n, intN) {
+    if (scratch.length < n) scratch = new Float32Array(Math.max(n, MIN_SCRATCH));
+    if (intScratch.length < intN) intScratch = new Int32Array(Math.max(intN, MIN_SCRATCH));
+  }
+  function getZeroStore(n) {
+    if (zeroStore.length < n) zeroStore = new Float32Array(n);
+    return zeroStore;
+  }
+  function getZeroIntStore(n) {
+    if (zeroIntStore.length < n) zeroIntStore = new Int32Array(n);
+    return zeroIntStore;
+  }
   function draw(dc) {
     if (dc.rasterizerDiscard) return;
     const rs = createRasterState(dc);
@@ -4288,6 +4325,7 @@
     }
   }
   function createRasterState(dc) {
+    var _a2, _b, _c, _d;
     const dcx = dc;
     const varyings = dc.program.varyings;
     let totalVaryComponents = 0;
@@ -4308,6 +4346,40 @@
     }
     const colorOuts = [];
     for (let i = 0; i <= maxLocation; i++) colorOuts.push(new Float32Array(4));
+    const pm = dc.program;
+    const intUniforms = (_a2 = pm.intStore) != null ? _a2 : EMPTY_INT_STORE;
+    const blocks = (_b = pm.uniformBlocks) != null ? _b : [];
+    const blockStores = new Array(blocks.length);
+    const blockIntStores = new Array(blocks.length);
+    const dcBlocks = dcx.uniformBlocks;
+    for (let bi = 0; bi < blocks.length; bi++) {
+      const view = dcBlocks ? dcBlocks[blocks[bi].name] : void 0;
+      if (view) {
+        const n = view.byteLength >>> 2;
+        if (view.byteOffset % 4 === 0) {
+          blockStores[bi] = view;
+          blockIntStores[bi] = new Int32Array(view.buffer, view.byteOffset, n);
+        } else {
+          const copy = new Float32Array(n);
+          copy.set(new Float32Array(view.buffer, view.byteOffset, n));
+          blockStores[bi] = copy;
+          blockIntStores[bi] = new Int32Array(copy.buffer);
+        }
+      } else {
+        const n = Math.max(Math.ceil(blocks[bi].size / 4), 4);
+        blockStores[bi] = getZeroStore(n);
+        blockIntStores[bi] = getZeroIntStore(n);
+      }
+    }
+    const texUnits = dc.textures;
+    const textures = new Array(texUnits.length);
+    const samplerStates = new Array(texUnits.length);
+    for (let i = 0; i < texUnits.length; i++) {
+      const t = texUnits[i];
+      textures[i] = t ? t.img : null;
+      samplerStates[i] = t ? t.state : DEFAULT_STATE;
+    }
+    ensureScratch(Math.max((_c = pm.scratchSize) != null ? _c : 0, MIN_SCRATCH), Math.max((_d = pm.intScratchSize) != null ? _d : 0, MIN_SCRATCH));
     const fragCtx = {
       varyings: fragVaryings,
       fragCoord: new Float32Array(4),
@@ -4315,7 +4387,13 @@
       // driver sets it per primitive
       pointCoord: new Float32Array(2),
       uniforms: dcx.uniforms,
-      uniformBlocks: dcx.uniformBlocks,
+      intUniforms,
+      blockStores,
+      blockIntStores,
+      textures,
+      samplerStates,
+      scratch,
+      intScratch,
       tex: createTextureEnv(dc.textures),
       out: { color: colorOuts, fragDepth: 0 },
       discarded: false
@@ -4396,7 +4474,7 @@
   var DEPTH_ATTACHMENT = 36096;
   var STENCIL_ATTACHMENT = 36128;
   var DEPTH_STENCIL_ATTACHMENT = 33306;
-  var NONE = 0;
+  var NONE2 = 0;
   var CUBE_POSITIVE_X = 34069;
   var CUBE_NEGATIVE_Z = 34074;
   var W1_COLOR_RENDERABLE = /* @__PURE__ */ new Set([
@@ -4628,7 +4706,7 @@
       return ctx._defaultFB ? ctx._defaultFB.color : null;
     }
     const rb = s.readBuffer;
-    if (rb === NONE) return null;
+    if (rb === NONE2) return null;
     const idx = rb - COLOR_ATTACHMENT0;
     if (idx < 0 || idx >= s.limits.MAX_COLOR_ATTACHMENTS) return null;
     return getAttachmentSurface(s.readFramebuffer, rb);
@@ -4736,7 +4814,7 @@
       const drawBuffers = ctx._state.drawBuffers;
       for (let i = 0; i < drawBuffers.length; i++) {
         const db = drawBuffers[i];
-        if (db === NONE) continue;
+        if (db === NONE2) continue;
         const idx = db - COLOR_ATTACHMENT0;
         if (idx < 0 || idx >= maxColor || !att.has(COLOR_ATTACHMENT0 + idx)) {
           return FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER;
@@ -4996,11 +5074,28 @@
 
   // src/gl/lost.ts
   var lostState = /* @__PURE__ */ new WeakMap();
+  var lostErrorState = /* @__PURE__ */ new WeakMap();
+  function getErrorWhileLost(ctx) {
+    let st = lostErrorState.get(ctx);
+    if (!st) {
+      st = { consumed: false };
+      lostErrorState.set(ctx, st);
+    }
+    if (!st.consumed) {
+      st.consumed = true;
+      return C1.CONTEXT_LOST_WEBGL;
+    }
+    return ctx._errors.get();
+  }
+  function resetLostErrorState(ctx) {
+    lostErrorState.delete(ctx);
+  }
   function loseContext(ctx) {
     if (ctx._isLost) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
+    resetLostErrorState(ctx);
     ctx._isLost = true;
     const tracked = ctx._resources.all;
     if (tracked) {
@@ -5035,6 +5130,7 @@
     ctx._errors.clear();
     initContextResources(ctx);
     ctx._isLost = false;
+    resetLostErrorState(ctx);
     for (const key of Array.from(ctx._extensions.keys())) {
       if (!/lose_context$/i.test(key)) ctx._extensions.delete(key);
     }
@@ -7232,6 +7328,7 @@
 
   // src/gl/extensions/vao.ts
   var VAOCtor = ctorOf(WebGLVertexArrayObject);
+  var everBoundVAOs = /* @__PURE__ */ new WeakSet();
   function defaultVAO(ctx) {
     if (!ctx._defaultVAO) {
       if (ctx._state.vaoBinding === null) {
@@ -7252,7 +7349,6 @@
       {
         createVertexArrayOES: () => {
           const gl = ctx;
-          if (isLost(gl)) return null;
           const vao = createObject(gl, VAOCtor);
           vao._vao = defaultVAOState(gl._state.limits.MAX_VERTEX_ATTRIBS);
           return vao;
@@ -7284,7 +7380,7 @@
             gl._errors.push(C1.INVALID_OPERATION);
             return false;
           }
-          return !vertexArray._deleted;
+          return !vertexArray._deleted && everBoundVAOs.has(vertexArray);
         },
         bindVertexArrayOES: (vertexArray) => {
           const gl = ctx;
@@ -7309,13 +7405,14 @@
           }
           gl._state.vaoBinding = vertexArray;
           gl._state.vao = vertexArray._vao;
+          everBoundVAOs.add(vertexArray);
         }
       }
     );
   }
 
   // src/gl/extensions/draw-buffers.ts
-  var NONE2 = 0;
+  var NONE3 = 0;
   var BACK2 = 1029;
   var COLOR_ATTACHMENT02 = 36064;
   function makeConstants() {
@@ -7356,7 +7453,7 @@
           return;
         }
         if (s.drawFramebuffer === null) {
-          if (arr2.length !== 1 || arr2[0] !== BACK2 && arr2[0] !== NONE2) {
+          if (arr2.length !== 1 || arr2[0] !== BACK2 && arr2[0] !== NONE3) {
             gl._errors.push(C1.INVALID_OPERATION);
             return;
           }
@@ -7365,7 +7462,7 @@
         }
         let last = -1;
         for (const b of arr2) {
-          if (b === NONE2) continue;
+          if (b === NONE3) continue;
           if (b === BACK2) {
             gl._errors.push(C1.INVALID_OPERATION);
             return;
@@ -7970,7 +8067,7 @@
   var DRAW_BUFFER0 = 34853;
   var DRAW_BUFFER15 = 34868;
   var BACK3 = 1029;
-  var NONE3 = 0;
+  var NONE4 = 0;
   var INTERLEAVED_ATTRIBS = 35980;
   function getParameter(ctx, pname) {
     var _a2, _b, _c;
@@ -7990,9 +8087,9 @@
       const i = pname - DRAW_BUFFER0;
       if (s.drawFramebuffer === null) {
         const db0 = s.drawBuffers[0];
-        return db0 === NONE3 ? NONE3 : BACK3;
+        return db0 === NONE4 ? NONE4 : BACK3;
       }
-      return (_a2 = s.drawBuffers[i]) != null ? _a2 : NONE3;
+      return (_a2 = s.drawBuffers[i]) != null ? _a2 : NONE4;
     }
     switch (pname) {
       // ---- Capabilities (isEnabled/getParameter parity) ----
@@ -8562,9 +8659,6 @@
   // src/gl/api/context.ts
   var INVALID_ENUM = 1280;
   var INVALID_OPERATION = 1282;
-  var NO_ERROR = 0;
-  var CONTEXT_LOST_WEBGL = 37442;
-  var lostErrorState = /* @__PURE__ */ new WeakMap();
   function installContextApi(proto) {
     proto.getContextAttributes = function() {
       if (this._isLost) return null;
@@ -8574,26 +8668,18 @@
       return this._isLost;
     };
     proto.getSupportedExtensions = function() {
+      if (this._isLost) return null;
       return getSupportedExtensionNames(this._version);
     };
     proto.getExtension = function(name) {
       const n = String(name);
+      if (this._isLost) return null;
       return getExtensionObject(this, n);
     };
     proto.getError = function() {
       if (this._isLost) {
-        let st = lostErrorState.get(this);
-        if (!st || !st.lostEpoch) {
-          st = { lostEpoch: true, consumed: false };
-          lostErrorState.set(this, st);
-        }
-        if (!st.consumed) {
-          st.consumed = true;
-          return CONTEXT_LOST_WEBGL;
-        }
-        return NO_ERROR;
+        return getErrorWhileLost(this);
       }
-      lostErrorState.delete(this);
       return this._errors.get();
     };
     proto.getString = function(name) {
@@ -8694,9 +8780,32 @@
     C1.GEQUAL,
     C1.ALWAYS
   ];
+  var STENCIL_FUNCS = DEPTH_FUNCS;
+  var STENCIL_OPS = [
+    C1.KEEP,
+    C1.ZERO,
+    C1.REPLACE,
+    C1.INCR,
+    C1.DECR,
+    C1.INVERT,
+    C1.INCR_WRAP,
+    C1.DECR_WRAP
+  ];
+  var STENCIL_FACES = [C1.FRONT, C1.BACK, C1.FRONT_AND_BACK];
+  function stencilFaceStates(ctx, face) {
+    switch (face) {
+      case C1.FRONT:
+        return [ctx._state.stencil.front];
+      case C1.BACK:
+        return [ctx._state.stencil.back];
+      case C1.FRONT_AND_BACK:
+        return [ctx._state.stencil.front, ctx._state.stencil.back];
+      default:
+        return null;
+    }
+  }
   var HINT_MODES = [C1.FASTEST, C1.NICEST, C1.DONT_CARE];
   function isLost2(ctx) {
-    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
     return ctx._isLost;
   }
   function clamp01(v2) {
@@ -9009,6 +9118,92 @@
       }
       ctx._state.scissor = { x: xv, y: yv, w: wv, h: hv };
     };
+    proto.stencilFunc = function(func, ref, mask) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      if (!STENCIL_FUNCS.includes(func)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const r = ref | 0;
+      const m = mask >>> 0;
+      ctx._state.stencil.front.func = func;
+      ctx._state.stencil.front.ref = r;
+      ctx._state.stencil.front.valueMask = m;
+      ctx._state.stencil.back.func = func;
+      ctx._state.stencil.back.ref = r;
+      ctx._state.stencil.back.valueMask = m;
+    };
+    proto.stencilFuncSeparate = function(face, func, ref, mask) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const states = stencilFaceStates(ctx, face);
+      if (states === null) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (!STENCIL_FUNCS.includes(func)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const r = ref | 0;
+      const m = mask >>> 0;
+      for (const st of states) {
+        st.func = func;
+        st.ref = r;
+        st.valueMask = m;
+      }
+    };
+    proto.stencilMask = function(mask) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const m = mask >>> 0;
+      ctx._state.stencil.front.writeMask = m;
+      ctx._state.stencil.back.writeMask = m;
+    };
+    proto.stencilMaskSeparate = function(face, mask) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const states = stencilFaceStates(ctx, face);
+      if (states === null) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const m = mask >>> 0;
+      for (const st of states) st.writeMask = m;
+    };
+    proto.stencilOp = function(fail, zfail, zpass) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      if (!STENCIL_OPS.includes(fail) || !STENCIL_OPS.includes(zfail) || !STENCIL_OPS.includes(zpass)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.stencil.front.fail = fail;
+      ctx._state.stencil.front.depthFail = zfail;
+      ctx._state.stencil.front.depthPass = zpass;
+      ctx._state.stencil.back.fail = fail;
+      ctx._state.stencil.back.depthFail = zfail;
+      ctx._state.stencil.back.depthPass = zpass;
+    };
+    proto.stencilOpSeparate = function(face, fail, zfail, zpass) {
+      const ctx = this;
+      if (isLost2(ctx)) return;
+      const states = stencilFaceStates(ctx, face);
+      if (states === null) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (!STENCIL_OPS.includes(fail) || !STENCIL_OPS.includes(zfail) || !STENCIL_OPS.includes(zpass)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      for (const st of states) {
+        st.fail = fail;
+        st.depthFail = zfail;
+        st.depthPass = zpass;
+      }
+    };
     proto.viewport = function(x, y, width, height) {
       const ctx = this;
       if (isLost2(ctx)) return;
@@ -9060,7 +9255,6 @@
   var GL_DYNAMIC_COPY = 35050;
   var GL_BUFFER_MAPPED = 35053;
   function isLost3(ctx) {
-    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
     return ctx._isLost;
   }
   var BufferCtor = WebGLBuffer;
@@ -9233,7 +9427,6 @@
   function installBuffersApi(proto) {
     proto.createBuffer = function() {
       const ctx = this;
-      if (isLost3(ctx)) return null;
       return createObject(ctx, BufferCtor);
     };
     proto.deleteBuffer = function(buffer) {
@@ -9652,7 +9845,6 @@
 
   // src/gl/api/vertex-attrib.ts
   function isLost4(ctx) {
-    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
     return ctx._isLost;
   }
   function attribIndex(ctx, index) {
@@ -11088,7 +11280,6 @@
   var TEXTURE_IMMUTABLE_LEVELS = 33503;
   var RGB9_E52 = 35901;
   function isLost5(ctx) {
-    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
     return ctx._isLost;
   }
   var TextureCtor = WebGLTexture;
@@ -11247,7 +11438,6 @@
   function installTexturesApi(proto) {
     proto.createTexture = function() {
       const ctx = this;
-      if (isLost5(ctx)) return null;
       return createObject(ctx, TextureCtor);
     };
     proto.deleteTexture = function(texture) {
@@ -11391,7 +11581,6 @@
   var SRGB_EXT = 35904;
   var SRGB_ALPHA_EXT = 35906;
   function isLost6(ctx) {
-    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
     return ctx._isLost;
   }
   var CUBE_FACES = [
@@ -18826,7 +19015,15 @@
     const out = [];
     for (let i = 0; i < args.length; i++) {
       const m = retType.members[i];
-      out.push(...convertValue(emitExpr(args[i], env), args[i].resolvedType, m.type));
+      const srcVals = emitExpr(args[i], env);
+      const conv = convertValue(srcVals, args[i].resolvedType, m.type);
+      for (let c = 0; c < srcVals.length; c++) {
+        const src = srcVals[c];
+        if (conv[c] !== src && src.pre && src.pre.length > 0) {
+          conv[c] = { ...conv[c], pre: src.pre };
+        }
+      }
+      out.push(...conv);
     }
     return out;
   }
@@ -19246,6 +19443,8 @@
         const x = materialize(argVals[0], env);
         const outLv = emitLValue(args[1], env);
         const pre = [];
+        const xPre = mergePre(x);
+        if (xPre) pre.push(...xPre);
         const ts = [];
         for (let c = 0; c < nc; c++) {
           const t = env.allocTemp();
@@ -19505,6 +19704,7 @@
     }
   }
   function lowerBuiltin(name, sig2, args, argVals, argTypes, env) {
+    var _a2;
     if (DERIV_NAMES.has(name)) {
       return emitDerivatives(name, sig2, argVals, env);
     }
@@ -19634,7 +19834,10 @@
           const d = `((${a[c].v}) - (${b[c].v}))`;
           parts.push(`(${d} * ${d})`);
         }
-        return [{ v: `Math.sqrt(${parts.join(" + ")})` }];
+        const res = { v: `Math.sqrt(${parts.join(" + ")})` };
+        const pre = mergePre([...a, ...b]);
+        if (pre) res.pre = pre;
+        return [res];
       }
       case "dot": {
         const parts = [];
@@ -19663,7 +19866,10 @@
         const t = env.allocTemp();
         const parts = [];
         for (let c = 0; c < argN[0]; c++) parts.push(`(${v2[c].v} * ${v2[c].v})`);
-        const pre = [`${t} = Math.sqrt(${parts.join(" + ")})`];
+        const pre = [];
+        const vPre = mergePre(v2);
+        if (vPre) pre.push(...vPre);
+        pre.push(`${t} = Math.sqrt(${parts.join(" + ")})`);
         const out = [];
         for (let c = 0; c < argN[0]; c++) out.push({ v: `((${v2[c].v}) / ${t})`, pre });
         return out;
@@ -19675,7 +19881,8 @@
         for (let c = 0; c < argN[0]; c++) {
           parts.push(`(${use2(argVals[1][c])} * ${use2(argVals[2][c])})`);
         }
-        const pre = [`${t} = (${parts.join(" + ")})`];
+        const pre = (_a2 = mergePre(N)) != null ? _a2 : [];
+        pre.unshift(`${t} = (${parts.join(" + ")})`);
         const out = [];
         for (let c = 0; c < argN[0]; c++) out.push({ v: `((${t}) < 0 ? (${N[c].v}) : (-(${N[c].v})))`, pre });
         return out;
@@ -19701,10 +19908,13 @@
         for (let c = 0; c < argN[0]; c++) {
           parts.push(`(${use2(argVals[1][c])} * ${use2(argVals[0][c])})`);
         }
-        const pre = [
+        const pre = [];
+        const etaPre = mergePre([eta]);
+        if (etaPre) pre.push(...etaPre);
+        pre.push(
           `${td} = (${parts.join(" + ")})`,
           `${tk} = (1 - (${eta.v}) * (${eta.v}) * (1 - (${td}) * (${td})))`
-        ];
+        );
         const out = [];
         for (let c = 0; c < argN[0]; c++) {
           out.push({
@@ -19725,6 +19935,8 @@
         for (let c = 0; c < ret.cols; c++) {
           for (let r = 0; r < ret.rows; r++) out.push({ v: `(${cv[c].v} * ${rv[r].v})` });
         }
+        const pre = mergePre([...cv, ...rv]);
+        if (pre) for (const o of out) o.pre = pre;
         return out;
       }
       case "transpose": {
@@ -19742,13 +19954,18 @@
         if (argTypes[0].kind !== "matrix") throw new Error("codegen: determinant requires a matrix");
         const m = materialize(argVals[0], env);
         const cols = argTypes[0].cols;
+        let v2;
         if (cols === 2) {
-          return [{ v: `((${m[0].v}) * (${m[3].v}) - (${m[1].v}) * (${m[2].v}))` }];
+          v2 = `((${m[0].v}) * (${m[3].v}) - (${m[1].v}) * (${m[2].v}))`;
+        } else if (cols === 3) {
+          v2 = det3s(m[0].v, m[1].v, m[2].v, m[3].v, m[4].v, m[5].v, m[6].v, m[7].v, m[8].v);
+        } else {
+          v2 = det4s(m);
         }
-        if (cols === 3) {
-          return [{ v: det3s(m[0].v, m[1].v, m[2].v, m[3].v, m[4].v, m[5].v, m[6].v, m[7].v, m[8].v) }];
-        }
-        return [{ v: det4s(m) }];
+        const res = { v: v2 };
+        const pre = mergePre(m);
+        if (pre) res.pre = pre;
+        return [res];
       }
       case "inverse": {
         if (argTypes[0].kind !== "matrix") throw new Error("codegen: inverse requires a matrix");
@@ -19838,6 +20055,8 @@
         const outLv = emitLValue(args[2], env);
         const b = env.allocIntScratch(2 * nc);
         const pre = [];
+        const argPre = mergePre([...x, ...y]);
+        if (argPre) pre.push(...argPre);
         for (let c = 0; c < nc; c++) {
           pre.push(`R.${name}(${x[c].v}, ${y[c].v}, ctx.intScratch, ${b + 2 * c})`);
           pre.push(lvWrite(outLv, c, `ctx.intScratch[${b + 2 * c + 1}]`));
@@ -19856,6 +20075,8 @@
         const o2 = emitLValue(args[3], env);
         const b = env.allocIntScratch(2 * nc);
         const parts = [];
+        const argPre = mergePre([...x, ...y]);
+        if (argPre) parts.push(...argPre);
         for (let c = 0; c < nc; c++) {
           parts.push(`R.${name}(${x[c].v}, ${y[c].v}, ctx.intScratch, ${b + 2 * c})`);
           parts.push(lvWrite(o1, c, isU ? wrapUint(`ctx.intScratch[${b + 2 * c}]`) : `ctx.intScratch[${b + 2 * c}]`));
@@ -19868,6 +20089,8 @@
         const x = materialize(argVals[0], env);
         const outLv = emitLValue(args[1], env);
         const pre = [];
+        const xPre = mergePre(x);
+        if (xPre) pre.push(...xPre);
         const ts = [];
         for (let c = 0; c < nc; c++) {
           const t = env.allocTemp();
@@ -21094,7 +21317,9 @@
         const a = materialize(emitExpr(e.left, env), env)[0];
         const b = emitExpr(e.right, env)[0];
         const bv = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-        return [{ v: op === "&&" ? `(${a.v} && (${bv}))` : `(${a.v} || (${bv}))` }];
+        const out = { v: op === "&&" ? `(${a.v} && (${bv}))` : `(${a.v} || (${bv}))` };
+        if (a.pre && a.pre.length > 0) out.pre = a.pre;
+        return [out];
       }
       case "^^": {
         const a = emitExpr(e.left, env)[0];
@@ -21108,8 +21333,20 @@
         const cb = commonBase2(lb, rb);
         if (!cb) throw new Error(`codegen: cannot compare ${typeName(lt)} and ${typeName(rt)}`);
         const ct = shapeOf(lt, cb);
-        const av = convertValue(emitExpr(e.left, env), lt, ct);
-        const bv = convertValue(emitExpr(e.right, env), rt, ct);
+        const avSrc = emitExpr(e.left, env);
+        const bvSrc = emitExpr(e.right, env);
+        const av = convertValue(avSrc, lt, ct);
+        const bv = convertValue(bvSrc, rt, ct);
+        for (let c = 0; c < flatComponents(lt); c++) {
+          const as = avSrc[c];
+          const bs = bvSrc[c];
+          if (av[c] !== as && as.pre && as.pre.length > 0) {
+            av[c] = { ...av[c], pre: as.pre };
+          }
+          if (bv[c] !== bs && bs.pre && bs.pre.length > 0) {
+            bv[c] = { ...bv[c], pre: bs.pre };
+          }
+        }
         const parts = [];
         for (let c = 0; c < flatComponents(lt); c++) {
           const ap = av[c].pre;
@@ -21127,8 +21364,18 @@
         const cb = commonBase2(lb, rb);
         if (!cb) throw new Error(`codegen: cannot compare ${typeName(lt)} and ${typeName(rt)}`);
         const ct = shapeOf(lt, cb);
-        const a = convertValue(emitExpr(e.left, env), lt, ct)[0];
-        const b = convertValue(emitExpr(e.right, env), rt, ct)[0];
+        const aSrc = emitExpr(e.left, env);
+        const bSrc = emitExpr(e.right, env);
+        const ac = convertValue(aSrc, lt, ct);
+        const bc = convertValue(bSrc, rt, ct);
+        if (ac[0] !== aSrc[0] && aSrc[0].pre && aSrc[0].pre.length > 0) {
+          ac[0] = { ...ac[0], pre: aSrc[0].pre };
+        }
+        if (bc[0] !== bSrc[0] && bSrc[0].pre && bSrc[0].pre.length > 0) {
+          bc[0] = { ...bc[0], pre: bSrc[0].pre };
+        }
+        const a = ac[0];
+        const b = bc[0];
         const av = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
         const bv = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
         return [{ v: `(${av} ${op} (${bv}))` }];
@@ -21152,8 +21399,20 @@
         const cb = commonBase2(lb, rb);
         if (!cb) throw new Error(`codegen: incompatible bitwise operands`);
         const ct = shapeOf(lt, cb);
-        const av = convertValue(emitExpr(e.left, env), lt, ct);
-        const bv = convertValue(emitExpr(e.right, env), rt, ct);
+        const avSrc = emitExpr(e.left, env);
+        const bvSrc = emitExpr(e.right, env);
+        const av = convertValue(avSrc, lt, ct);
+        const bv = convertValue(bvSrc, rt, ct);
+        for (let c = 0; c < flatComponents(lt); c++) {
+          const as = avSrc[c];
+          const bs = bvSrc[c];
+          if (av[c] !== as && as.pre && as.pre.length > 0) {
+            av[c] = { ...av[c], pre: as.pre };
+          }
+          if (bv[c] !== bs && bs.pre && bs.pre.length > 0) {
+            bv[c] = { ...bv[c], pre: bs.pre };
+          }
+        }
         const isU = cb === "uint";
         return av.map((a, c) => {
           const x = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
@@ -21430,7 +21689,13 @@
     }
     const base = scalarBaseOf(t);
     if (!base) throw new Error("codegen: cannot compound-assign a non-scalar-shaped value");
-    const conv = convertValue(rhs, e.value.resolvedType, t);
+    let conv = convertValue(rhs, e.value.resolvedType, t);
+    for (let c = 0; c < n; c++) {
+      const src = rhs[c];
+      if (conv[c] !== src && src.pre && src.pre.length > 0) {
+        conv = conv.map((v2, i) => i === c ? { ...v2, pre: src.pre } : v2);
+      }
+    }
     const cop = e.op.slice(0, -1);
     if (env.dual && lv.dualTargets && base === "float") {
       const pre = [];
@@ -21493,7 +21758,16 @@
         if (pre.length > 0) val.pre = pre;
         out.push(val);
       } else {
-        out.push({ v: `(${cond.v} ? (${a[c].v}) : (${b[c].v}))` });
+        const pre = [];
+        const cp = cond.pre;
+        if (cp) pre.push(...cp);
+        const ap = a[c].pre;
+        if (ap) pre.push(...ap);
+        const bp = b[c].pre;
+        if (bp && bp !== ap) pre.push(...bp);
+        const val = { v: `(${cond.v} ? (${a[c].v}) : (${b[c].v}))` };
+        if (pre.length > 0) val.pre = pre;
+        out.push(val);
       }
     }
     return out;
@@ -21544,7 +21818,14 @@
     for (let k = 0; k < n; k++) {
       const a = args[k];
       if (!a) throw new Error("codegen: array constructor arity mismatch");
-      const vals = convertValue(emitExpr(a, env), a.resolvedType, elem);
+      const srcVals = emitExpr(a, env);
+      const vals = convertValue(srcVals, a.resolvedType, elem);
+      for (let c = 0; c < srcVals.length; c++) {
+        const src = srcVals[c];
+        if (vals[c] !== src && src.pre && src.pre.length > 0) {
+          vals[c] = { ...vals[c], pre: src.pre };
+        }
+      }
       out.push(...vals);
     }
     return out;
@@ -21700,7 +21981,7 @@
         }
         continue;
       }
-      const vals = convertValue(emitExpr(d.init, env), d.init.resolvedType, type);
+      const vals = convertPreserving(emitExpr(d.init, env), d.init.resolvedType, type);
       emitPres(out, vals);
       if (lv.kind === "scratch") {
         const store = lv.int ? "ctx.intScratch" : "ctx.scratch";
@@ -23927,7 +24208,6 @@ ${inner.map((l) => "  " + l).join("\n")}
   var blockReferenced = /* @__PURE__ */ new WeakMap();
   var fragDataMaps = /* @__PURE__ */ new WeakMap();
   function isLost7(ctx) {
-    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
     return ctx._isLost;
   }
   var ShaderCtor = WebGLShader;
@@ -24941,7 +25221,6 @@ ${inner.map((l) => "  " + l).join("\n")}
   var FLOAT_MAT4x2 = 35689;
   var FLOAT_MAT4x3 = 35690;
   function isLost8(ctx) {
-    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
     return ctx._isLost;
   }
   function toFloat32List2(v2) {
@@ -25133,7 +25412,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       else writeIntAt(t, 0, c, v2, "uint");
     }
   }
-  function uniformVector(ctx, location, k, family, values) {
+  function uniformVector(ctx, location, k, family, values, srcOffset, srcLength) {
     if (isLost8(ctx)) return;
     const t = prepareUniform(ctx, location);
     if (t === null) return;
@@ -25142,33 +25421,47 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
-    if (values.length < k || values.length % k !== 0) {
+    let off = 0;
+    let count = values.length;
+    if (ctx._version === 2) {
+      off = srcOffset >>> 0;
+      const len = srcLength >>> 0;
+      if (off > values.length || len > 0 && off + len > values.length) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      count = len === 0 ? values.length - off : len;
+      if (count === 0 || count % k !== 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+    } else if (values.length < k || values.length % k !== 0) {
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
     if (family === "i" && isSamplerType2(t.uniform.type)) {
-      for (let i = 0; i < values.length; i++) {
-        if ((values[i] | 0) >= ctx._state.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS) {
+      for (let i = 0; i < count; i++) {
+        if ((values[off + i] | 0) >= ctx._state.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS) {
           ctx._errors.push(C1.INVALID_VALUE);
           return;
         }
       }
     }
     const isBool = isBoolType2(t.uniform.type);
-    const total = Math.min(values.length, t.uniform.size * k);
+    const total = Math.min(count, t.uniform.size * k);
     for (let i = 0; i < total; i++) {
       const element = Math.floor(i / k);
       const comp2 = i % k;
-      const v2 = values[i];
-      const off = element * t.slots;
+      const v2 = values[off + i];
+      const slotOff = element * t.slots;
       if (family === "f") {
-        if (isBool) writeIntAt(t, off, comp2, v2, "boolf");
-        else writeFloatAt(t, off, comp2, v2);
-      } else if (family === "i") writeIntAt(t, off, comp2, v2, isBool ? "bool" : "int");
-      else writeIntAt(t, off, comp2, v2, "uint");
+        if (isBool) writeIntAt(t, slotOff, comp2, v2, "boolf");
+        else writeFloatAt(t, slotOff, comp2, v2);
+      } else if (family === "i") writeIntAt(t, slotOff, comp2, v2, isBool ? "bool" : "int");
+      else writeIntAt(t, slotOff, comp2, v2, "uint");
     }
   }
-  function uniformMatrix(ctx, location, transpose, value, cols, rows, typeConst) {
+  function uniformMatrix(ctx, location, transpose, value, cols, rows, typeConst, srcOffset, srcLength) {
     if (isLost8(ctx)) return;
     const t = prepareUniform(ctx, location);
     if (t === null) return;
@@ -25182,16 +25475,30 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
     const values = toFloat32List2(value);
     const n = cols * rows;
-    if (values.length < n || values.length % n !== 0) {
+    let off = 0;
+    let count = values.length;
+    if (ctx._version === 2) {
+      off = srcOffset >>> 0;
+      const len = srcLength >>> 0;
+      if (off > values.length || len > 0 && off + len > values.length) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      count = len === 0 ? values.length - off : len;
+      if (count === 0 || count % n !== 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+    } else if (values.length < n || values.length % n !== 0) {
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
-    const total = Math.min(values.length, t.uniform.size * n);
+    const total = Math.min(count, t.uniform.size * n);
     for (let i = 0; i < total; i++) {
       const element = Math.floor(i / n);
       const col = Math.floor(i % n / rows);
       const row = i % rows;
-      writeFloatAt(t, element * t.slots + col * 4, row, values[i]);
+      writeFloatAt(t, element * t.slots + col * 4, row, values[off + i]);
     }
   }
   function installUniformsApi(proto) {
@@ -25219,38 +25526,38 @@ ${inner.map((l) => "  " + l).join("\n")}
     proto.uniform4i = function(location, x, y, z, w) {
       uniformScalar(this, location, 4, "i", [x, y, z, w]);
     };
-    proto.uniform1fv = function(location, v2) {
-      uniformVector(this, location, 1, "f", toFloat32List2(v2));
+    proto.uniform1fv = function(location, v2, srcOffset = 0, srcLength = 0) {
+      uniformVector(this, location, 1, "f", toFloat32List2(v2), srcOffset, srcLength);
     };
-    proto.uniform2fv = function(location, v2) {
-      uniformVector(this, location, 2, "f", toFloat32List2(v2));
+    proto.uniform2fv = function(location, v2, srcOffset = 0, srcLength = 0) {
+      uniformVector(this, location, 2, "f", toFloat32List2(v2), srcOffset, srcLength);
     };
-    proto.uniform3fv = function(location, v2) {
-      uniformVector(this, location, 3, "f", toFloat32List2(v2));
+    proto.uniform3fv = function(location, v2, srcOffset = 0, srcLength = 0) {
+      uniformVector(this, location, 3, "f", toFloat32List2(v2), srcOffset, srcLength);
     };
-    proto.uniform4fv = function(location, v2) {
-      uniformVector(this, location, 4, "f", toFloat32List2(v2));
+    proto.uniform4fv = function(location, v2, srcOffset = 0, srcLength = 0) {
+      uniformVector(this, location, 4, "f", toFloat32List2(v2), srcOffset, srcLength);
     };
-    proto.uniform1iv = function(location, v2) {
-      uniformVector(this, location, 1, "i", toInt32List2(v2));
+    proto.uniform1iv = function(location, v2, srcOffset = 0, srcLength = 0) {
+      uniformVector(this, location, 1, "i", toInt32List2(v2), srcOffset, srcLength);
     };
-    proto.uniform2iv = function(location, v2) {
-      uniformVector(this, location, 2, "i", toInt32List2(v2));
+    proto.uniform2iv = function(location, v2, srcOffset = 0, srcLength = 0) {
+      uniformVector(this, location, 2, "i", toInt32List2(v2), srcOffset, srcLength);
     };
-    proto.uniform3iv = function(location, v2) {
-      uniformVector(this, location, 3, "i", toInt32List2(v2));
+    proto.uniform3iv = function(location, v2, srcOffset = 0, srcLength = 0) {
+      uniformVector(this, location, 3, "i", toInt32List2(v2), srcOffset, srcLength);
     };
-    proto.uniform4iv = function(location, v2) {
-      uniformVector(this, location, 4, "i", toInt32List2(v2));
+    proto.uniform4iv = function(location, v2, srcOffset = 0, srcLength = 0) {
+      uniformVector(this, location, 4, "i", toInt32List2(v2), srcOffset, srcLength);
     };
-    proto.uniformMatrix2fv = function(location, transpose, value) {
-      uniformMatrix(this, location, transpose, value, 2, 2, C1.FLOAT_MAT2);
+    proto.uniformMatrix2fv = function(location, transpose, value, srcOffset = 0, srcLength = 0) {
+      uniformMatrix(this, location, transpose, value, 2, 2, C1.FLOAT_MAT2, srcOffset, srcLength);
     };
-    proto.uniformMatrix3fv = function(location, transpose, value) {
-      uniformMatrix(this, location, transpose, value, 3, 3, C1.FLOAT_MAT3);
+    proto.uniformMatrix3fv = function(location, transpose, value, srcOffset = 0, srcLength = 0) {
+      uniformMatrix(this, location, transpose, value, 3, 3, C1.FLOAT_MAT3, srcOffset, srcLength);
     };
-    proto.uniformMatrix4fv = function(location, transpose, value) {
-      uniformMatrix(this, location, transpose, value, 4, 4, C1.FLOAT_MAT4);
+    proto.uniformMatrix4fv = function(location, transpose, value, srcOffset = 0, srcLength = 0) {
+      uniformMatrix(this, location, transpose, value, 4, 4, C1.FLOAT_MAT4, srcOffset, srcLength);
     };
     if ("uniform1ui" in proto) {
       const p2 = proto;
@@ -25266,35 +25573,35 @@ ${inner.map((l) => "  " + l).join("\n")}
       p2.uniform4ui = function(location, x, y, z, w) {
         uniformScalar(this, location, 4, "ui", [x, y, z, w]);
       };
-      p2.uniform1uiv = function(location, v2) {
-        uniformVector(this, location, 1, "ui", toUint32List2(v2));
+      p2.uniform1uiv = function(location, v2, srcOffset = 0, srcLength = 0) {
+        uniformVector(this, location, 1, "ui", toUint32List2(v2), srcOffset, srcLength);
       };
-      p2.uniform2uiv = function(location, v2) {
-        uniformVector(this, location, 2, "ui", toUint32List2(v2));
+      p2.uniform2uiv = function(location, v2, srcOffset = 0, srcLength = 0) {
+        uniformVector(this, location, 2, "ui", toUint32List2(v2), srcOffset, srcLength);
       };
-      p2.uniform3uiv = function(location, v2) {
-        uniformVector(this, location, 3, "ui", toUint32List2(v2));
+      p2.uniform3uiv = function(location, v2, srcOffset = 0, srcLength = 0) {
+        uniformVector(this, location, 3, "ui", toUint32List2(v2), srcOffset, srcLength);
       };
-      p2.uniform4uiv = function(location, v2) {
-        uniformVector(this, location, 4, "ui", toUint32List2(v2));
+      p2.uniform4uiv = function(location, v2, srcOffset = 0, srcLength = 0) {
+        uniformVector(this, location, 4, "ui", toUint32List2(v2), srcOffset, srcLength);
       };
-      p2.uniformMatrix2x3fv = function(location, transpose, value) {
-        uniformMatrix(this, location, transpose, value, 2, 3, FLOAT_MAT2x3);
+      p2.uniformMatrix2x3fv = function(location, transpose, value, srcOffset = 0, srcLength = 0) {
+        uniformMatrix(this, location, transpose, value, 2, 3, FLOAT_MAT2x3, srcOffset, srcLength);
       };
-      p2.uniformMatrix2x4fv = function(location, transpose, value) {
-        uniformMatrix(this, location, transpose, value, 2, 4, FLOAT_MAT2x4);
+      p2.uniformMatrix2x4fv = function(location, transpose, value, srcOffset = 0, srcLength = 0) {
+        uniformMatrix(this, location, transpose, value, 2, 4, FLOAT_MAT2x4, srcOffset, srcLength);
       };
-      p2.uniformMatrix3x2fv = function(location, transpose, value) {
-        uniformMatrix(this, location, transpose, value, 3, 2, FLOAT_MAT3x2);
+      p2.uniformMatrix3x2fv = function(location, transpose, value, srcOffset = 0, srcLength = 0) {
+        uniformMatrix(this, location, transpose, value, 3, 2, FLOAT_MAT3x2, srcOffset, srcLength);
       };
-      p2.uniformMatrix3x4fv = function(location, transpose, value) {
-        uniformMatrix(this, location, transpose, value, 3, 4, FLOAT_MAT3x4);
+      p2.uniformMatrix3x4fv = function(location, transpose, value, srcOffset = 0, srcLength = 0) {
+        uniformMatrix(this, location, transpose, value, 3, 4, FLOAT_MAT3x4, srcOffset, srcLength);
       };
-      p2.uniformMatrix4x2fv = function(location, transpose, value) {
-        uniformMatrix(this, location, transpose, value, 4, 2, FLOAT_MAT4x2);
+      p2.uniformMatrix4x2fv = function(location, transpose, value, srcOffset = 0, srcLength = 0) {
+        uniformMatrix(this, location, transpose, value, 4, 2, FLOAT_MAT4x2, srcOffset, srcLength);
       };
-      p2.uniformMatrix4x3fv = function(location, transpose, value) {
-        uniformMatrix(this, location, transpose, value, 4, 3, FLOAT_MAT4x3);
+      p2.uniformMatrix4x3fv = function(location, transpose, value, srcOffset = 0, srcLength = 0) {
+        uniformMatrix(this, location, transpose, value, 4, 3, FLOAT_MAT4x3, srcOffset, srcLength);
       };
     }
   }
@@ -25306,7 +25613,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   var DEPTH_ATTACHMENT3 = 36096;
   var STENCIL_ATTACHMENT3 = 36128;
   var DEPTH_STENCIL_ATTACHMENT2 = 33306;
-  var NONE4 = 0;
+  var NONE5 = 0;
   var BACK4 = 1029;
   var TEXTURE = 5890;
   var LINEAR2 = 9729;
@@ -25319,7 +25626,6 @@ ${inner.map((l) => "  " + l).join("\n")}
   var CUBE_POSITIVE_X3 = 34069;
   var CUBE_NEGATIVE_Z3 = 34074;
   function isLost9(ctx) {
-    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
     return ctx._isLost;
   }
   var FboCtor = WebGLFramebuffer;
@@ -25863,7 +26169,6 @@ ${inner.map((l) => "  " + l).join("\n")}
   function installFramebuffersApi(proto) {
     proto.createFramebuffer = function() {
       const ctx = this;
-      if (isLost9(ctx)) return null;
       return createObject(ctx, FboCtor);
     };
     proto.deleteFramebuffer = function(framebuffer) {
@@ -26042,7 +26347,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       if (ctx._version === 1) {
         switch (pname) {
           case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
-            return rec === null ? NONE4 : rec.type === "renderbuffer" ? C1.RENDERBUFFER : TEXTURE;
+            return rec === null ? NONE5 : rec.type === "renderbuffer" ? C1.RENDERBUFFER : TEXTURE;
           case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
             if (rec === null) {
               ctx._errors.push(C1.INVALID_ENUM);
@@ -26068,7 +26373,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
       switch (pname) {
         case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
-          return rec === null ? NONE4 : rec.type === "renderbuffer" ? C1.RENDERBUFFER : TEXTURE;
+          return rec === null ? NONE5 : rec.type === "renderbuffer" ? C1.RENDERBUFFER : TEXTURE;
         case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
           if (rec === null) return null;
           return rec.type === "renderbuffer" ? rec.renderbuffer : rec.texture;
@@ -26108,7 +26413,6 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.createRenderbuffer = function() {
       const ctx = this;
-      if (isLost9(ctx)) return null;
       return createObject(ctx, RboCtor);
     };
     proto.deleteRenderbuffer = function(renderbuffer) {
@@ -26331,7 +26635,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           return;
         }
         if (s.drawFramebuffer === null) {
-          if (arr2.length !== 1 || arr2[0] !== BACK4 && arr2[0] !== NONE4) {
+          if (arr2.length !== 1 || arr2[0] !== BACK4 && arr2[0] !== NONE5) {
             ctx._errors.push(C1.INVALID_OPERATION);
             return;
           }
@@ -26340,7 +26644,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         }
         let last = -1;
         for (const b of arr2) {
-          if (b === NONE4) continue;
+          if (b === NONE5) continue;
           if (b === BACK4) {
             ctx._errors.push(C1.INVALID_OPERATION);
             return;
@@ -26364,7 +26668,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         const ctx = this;
         if (isLost9(ctx)) return;
         const s = ctx._state;
-        if (src === NONE4) {
+        if (src === NONE5) {
           s.readBuffer = src;
           return;
         }
@@ -26457,7 +26761,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           if (readKey !== null) {
             const dbList = drawFbo === null ? [BACK4] : s.drawBuffers;
             for (const db of dbList) {
-              if (db === NONE4) continue;
+              if (db === NONE5) continue;
               if (sameImage2(readKey, attachmentImageKey(drawFbo, db))) {
                 ctx._errors.push(C1.INVALID_OPERATION);
                 return;
@@ -26569,7 +26873,6 @@ ${inner.map((l) => "  " + l).join("\n")}
 
   // src/gl/api/draw.ts
   function isLost10(ctx) {
-    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
     return ctx._isLost;
   }
   var GL_COLOR_INT = 35727;
@@ -27063,7 +27366,6 @@ ${inner.map((l) => "  " + l).join("\n")}
 
   // src/gl/api/webgl2.ts
   function isLost11(ctx) {
-    if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
     return ctx._isLost;
   }
   function ctorPair(C3) {
@@ -27114,7 +27416,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   function anisotropyEnabled(ctx) {
     return ctx.getExtension("EXT_texture_filter_anisotropic") !== null;
   }
-  var everBoundVAOs = /* @__PURE__ */ new WeakSet();
+  var everBoundVAOs2 = /* @__PURE__ */ new WeakSet();
   function defaultVAO2(ctx) {
     if (!ctx._defaultVAO) ctx._defaultVAO = defaultVAOState(ctx._state.limits.MAX_VERTEX_ATTRIBS);
     return ctx._defaultVAO;
@@ -27255,7 +27557,6 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("createQuery" in proto) {
       proto.createQuery = function() {
         const ctx = this;
-        if (isLost11(ctx)) return null;
         return createObject(ctx, Query.make);
       };
     }
@@ -27435,7 +27736,6 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("createSampler" in proto) {
       proto.createSampler = function() {
         const ctx = this;
-        if (isLost11(ctx)) return null;
         return createObject(ctx, Sampler.make);
       };
     }
@@ -27546,7 +27846,6 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("createVertexArray" in proto) {
       proto.createVertexArray = function() {
         const ctx = this;
-        if (isLost11(ctx)) return null;
         const vao = createObject(ctx, Vao.make);
         vao._vao = defaultVAOState(ctx._state.limits.MAX_VERTEX_ATTRIBS);
         return vao;
@@ -27585,7 +27884,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           ctx._errors.push(C1.INVALID_OPERATION);
           return false;
         }
-        return !vertexArray._deleted && everBoundVAOs.has(vertexArray);
+        return !vertexArray._deleted && everBoundVAOs2.has(vertexArray);
       };
     }
     if ("bindVertexArray" in proto) {
@@ -27602,13 +27901,12 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (vao === null) return;
         s.vaoBinding = vao;
         s.vao = vao._vao;
-        everBoundVAOs.add(vao);
+        everBoundVAOs2.add(vao);
       };
     }
     if ("createTransformFeedback" in proto) {
       proto.createTransformFeedback = function() {
         const ctx = this;
-        if (isLost11(ctx)) return null;
         const tf = createObject(ctx, Tf.make);
         const n = ctx._state.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
         tf._buffers = new Array(n).fill(null);
@@ -28028,6 +28326,24 @@ ${inner.map((l) => "  " + l).join("\n")}
       throw new Error("GL stub");
     }
     scissor(x, y, width, height) {
+      throw new Error("GL stub");
+    }
+    stencilFunc(func, ref, mask) {
+      throw new Error("GL stub");
+    }
+    stencilFuncSeparate(face, func, ref, mask) {
+      throw new Error("GL stub");
+    }
+    stencilMask(mask) {
+      throw new Error("GL stub");
+    }
+    stencilMaskSeparate(face, mask) {
+      throw new Error("GL stub");
+    }
+    stencilOp(fail, zfail, zpass) {
+      throw new Error("GL stub");
+    }
+    stencilOpSeparate(face, fail, zfail, zpass) {
       throw new Error("GL stub");
     }
     viewport(x, y, width, height) {
