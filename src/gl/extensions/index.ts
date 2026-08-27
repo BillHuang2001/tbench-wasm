@@ -28,6 +28,44 @@
 
 import type { WebGLRenderingContext } from '../webgl1';
 import type { WebGL2RenderingContext } from '../webgl2';
+import { buildExtension } from './util';
+import {
+  createOESTextureFloat,
+  createOESTextureHalfFloat,
+  createOESTextureFloatLinear,
+  createOESTextureHalfFloatLinear,
+  createOESElementIndexUint,
+  createOESStandardDerivatives,
+  createOESFboRenderMipmap,
+  createEXTFragDepth,
+  createEXTShaderTextureLod,
+  createEXTSRGB,
+  createEXTBlendMinmax,
+  createEXTTextureFilterAnisotropic,
+  createWEBGLDepthTexture,
+  createWEBGLBlendFuncExtended,
+  createWEBGLDebugRendererInfo,
+} from './core-webgl1';
+import { createANGLEInstancedArrays } from './instancing';
+import { createOESVertexArrayObject } from './vao';
+import { createWEBGLDrawBuffers } from './draw-buffers';
+import {
+  createEXTColorBufferFloat,
+  createEXTColorBufferHalfFloat,
+  createEXTFloatBlend,
+  createEXTTextureNorm16,
+  createKHRParallelShaderCompile,
+  createWEBGLRenderSharedExponent,
+} from './webgl2';
+import {
+  createWEBGLLoseContext,
+  createWEBGLDebugShaders,
+  createEXTClipControl,
+  createWEBGLClipCullDistance,
+  createWEBGLMultiDraw,
+} from './misc';
+import { createWEBGLMultisampledRenderToTexture } from './multisampled';
+import { createOESDrawBuffersIndexed } from './draw-buffers-indexed';
 
 export type ExtensionContextVersion = 1 | 2;
 
@@ -147,18 +185,61 @@ export function getExtensionObject(ctx: WebGLRenderingContext | WebGL2RenderingC
   const cache = ctx._extensions;
   const existing = cache.get(spec.name);
   if (existing !== undefined) return existing;
-  // Phase 2: factories live in extensions/*.ts — see CONTEXT.md Routing Table.
   const ext = createExtension(ctx, spec);
   cache.set(spec.name, ext);
   return ext;
 }
 
-/** Phase 2 hook: build the extension object (constants + methods) per spec. */
+type ExtensionFactory = (ctx: WebGLRenderingContext | WebGL2RenderingContext) => object;
+
+/** Factory dispatch — one entry per 'implement' spec (name → factory). */
+const FACTORIES: Record<string, ExtensionFactory> = {
+  // ---- WebGL1 classic ----
+  ANGLE_instanced_arrays: createANGLEInstancedArrays,
+  EXT_blend_minmax: createEXTBlendMinmax,
+  EXT_frag_depth: createEXTFragDepth,
+  EXT_shader_texture_lod: createEXTShaderTextureLod,
+  EXT_sRGB: createEXTSRGB,
+  OES_element_index_uint: createOESElementIndexUint,
+  OES_fbo_render_mipmap: createOESFboRenderMipmap,
+  OES_standard_derivatives: createOESStandardDerivatives,
+  OES_texture_float: createOESTextureFloat,
+  OES_texture_float_linear: createOESTextureFloatLinear,
+  OES_texture_half_float: createOESTextureHalfFloat,
+  OES_texture_half_float_linear: createOESTextureHalfFloatLinear,
+  OES_vertex_array_object: createOESVertexArrayObject,
+  WEBGL_depth_texture: createWEBGLDepthTexture,
+  WEBGL_draw_buffers: createWEBGLDrawBuffers,
+  WEBGL_blend_func_extended: createWEBGLBlendFuncExtended,
+  WEBGL_lose_context: createWEBGLLoseContext,
+  WEBGL_debug_renderer_info: createWEBGLDebugRendererInfo,
+  WEBGL_debug_shaders: createWEBGLDebugShaders,
+  EXT_texture_filter_anisotropic: createEXTTextureFilterAnisotropic,
+  // ---- WebGL2-side ----
+  EXT_clip_control: createEXTClipControl,
+  EXT_color_buffer_float: createEXTColorBufferFloat,
+  EXT_color_buffer_half_float: createEXTColorBufferHalfFloat,
+  EXT_float_blend: createEXTFloatBlend,
+  EXT_texture_norm16: createEXTTextureNorm16,
+  KHR_parallel_shader_compile: createKHRParallelShaderCompile,
+  OES_draw_buffers_indexed: createOESDrawBuffersIndexed,
+  WEBGL_clip_cull_distance: createWEBGLClipCullDistance,
+  WEBGL_multi_draw: createWEBGLMultiDraw,
+  WEBGL_multisampled_render_to_texture: createWEBGLMultisampledRenderToTexture,
+  WEBGL_render_shared_exponent: createWEBGLRenderSharedExponent,
+};
+
+/**
+ * Build the extension object (constants + methods) per spec. Every 'implement'
+ * spec in EXTENSION_SPECS must have a factory here; an unexpected 'implement'
+ * name falls back to an empty object (keeps getExtension honest rather than
+ * throwing to the page — the registry is the source of truth).
+ */
 function createExtension(
   ctx: WebGLRenderingContext | WebGL2RenderingContext,
   spec: ExtensionSpec,
 ): object {
-  throw new Error(
-    `GL extension factory not implemented yet: ${spec.name} (Phase 2 — see src/gl/CONTEXT.md)`,
-  );
+  const factory = FACTORIES[spec.name];
+  if (factory) return factory(ctx);
+  return buildExtension({});
 }

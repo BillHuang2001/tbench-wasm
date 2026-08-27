@@ -68,15 +68,69 @@ export class BrowserCanvasSurface implements CanvasSurface {
   }
 
   getPixels(): Uint8Array {
-    throw new Error('not implemented: present/canvas.ts BrowserCanvasSurface.getPixels');
+    return this._pixels;
   }
 
   present(): void {
-    throw new Error('not implemented: present/canvas.ts BrowserCanvasSurface.present');
+    try {
+      // Lazily acquire the native 2D context on the first present. A null or
+      // throwing getContext means the canvas already has a non-2D context (or
+      // no 2D support) — record the failure permanently and degrade to no-op.
+      if (this._ctx2d === null && !this._ctxFailed) {
+        let ctx: CanvasRenderingContext2D | null = null;
+        try {
+          ctx = this.canvas.getContext('2d') as CanvasRenderingContext2D | null;
+        } catch {
+          ctx = null;
+        }
+        if (ctx === null) {
+          this._ctxFailed = true;
+        } else {
+          this._ctx2d = ctx;
+        }
+      }
+      if (this._ctx2d === null) {
+        return;
+      }
+      // Auto-resize safety net: the page may have resized the canvas bitmap
+      // between draws; match it so putImageData never clips or misaligns.
+      if (this.canvas.width !== this._width || this.canvas.height !== this._height) {
+        this.resize(this.canvas.width, this.canvas.height);
+      }
+      if (this._imageData === null) {
+        return;
+      }
+      this._ctx2d.putImageData(this._imageData, 0, 0);
+    } catch {
+      // present() never throws — adapter failures degrade to a silent no-op
+      // (the GL error queue is the only error channel to the page).
+    }
   }
 
   resize(width: number, height: number): void {
-    throw new Error('not implemented: present/canvas.ts BrowserCanvasSurface.resize');
+    this._width = width;
+    this._height = height;
+    this._pixels = new Uint8Array(width * height * 4);
+    this._imageData = null;
+    // ImageData is a DOM global — absent in Node. Guard by feature detection;
+    // if unavailable (or the constructor throws), present() silently no-ops.
+    if (typeof ImageData === 'undefined') {
+      return;
+    }
+    try {
+      // View over the SAME memory: the ImageData constructor does not copy
+      // (spec: "does not set this's data to a copy"), so the cached ImageData
+      // always reflects the current buffer contents; putImageData copies at
+      // blit time only.
+      const view = new Uint8ClampedArray(
+        this._pixels.buffer,
+        this._pixels.byteOffset,
+        this._pixels.byteLength
+      );
+      this._imageData = new ImageData(view, width, height);
+    } catch {
+      this._imageData = null;
+    }
   }
 }
 
@@ -95,7 +149,7 @@ export class NodeCanvasSurface implements CanvasSurface {
   }
 
   getPixels(): Uint8Array {
-    throw new Error('not implemented: present/canvas.ts NodeCanvasSurface.getPixels');
+    return this._pixels;
   }
 
   /** Node has no canvas to blit to — intentional no-op. */
@@ -104,7 +158,9 @@ export class NodeCanvasSurface implements CanvasSurface {
   }
 
   resize(width: number, height: number): void {
-    throw new Error('not implemented: present/canvas.ts NodeCanvasSurface.resize');
+    this._width = width;
+    this._height = height;
+    this._pixels = new Uint8Array(width * height * 4);
   }
 }
 
@@ -115,5 +171,12 @@ export class NodeCanvasSurface implements CanvasSurface {
  * structural, so no DOM globals are touched.
  */
 export function createCanvasSurface(canvas: unknown): CanvasSurface {
-  throw new Error('not implemented: present/canvas.ts createCanvasSurface');
+  if (
+    canvas !== null &&
+    typeof canvas === 'object' &&
+    typeof (canvas as { getContext?: unknown }).getContext === 'function'
+  ) {
+    return new BrowserCanvasSurface(canvas as HTMLCanvasElement);
+  }
+  return new NodeCanvasSurface();
 }

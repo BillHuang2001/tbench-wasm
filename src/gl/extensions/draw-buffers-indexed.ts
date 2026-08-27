@@ -1,0 +1,205 @@
+/**
+ * src/gl/extensions/draw-buffers-indexed.ts — OES_draw_buffers_indexed (WebGL2).
+ *
+ * Per-drawbuffer blend state + color masks. Storage (pinned in state.ts):
+ *  - `state.blendPerDrawBuffer: Map<buf, {srcRGB,dstRGB,srcAlpha,dstAlpha,eqRGB,eqAlpha}>`
+ *    — written by blendFunciOES/blendFuncSeparateiOES/blendEquationiOES/
+ *    blendEquationSeparateiOES (entries created lazily, seeded from the base
+ *    blend state).
+ *  - `state.colorMaskPerDrawBuffer: Map<buf, [r,g,b,a]>` — written by
+ *    colorMaskiOES.
+ * The draw engine agent consumes both maps when assembling per-drawbuffer
+ * state (its objective covers the DrawCall integration; the base `blend`/
+ * `colorMask` remain the drawbuffer-0 default).
+ *
+ * enableiOES/disableiOES validate (target BLEND, index < MAX_DRAW_BUFFERS) and
+ * are otherwise no-ops: the pinned State has no per-drawbuffer blend-enable
+ * storage — a non-empty blendPerDrawBuffer entry is treated by the draw agent
+ * as "per-drawbuffer blending active". Documented known gap (parallel agent).
+ *
+ * Validation mirrors the WebGL2 parent methods (OES_draw_buffers_indexed is a
+ * WebGL2 extension): buf < MAX_DRAW_BUFFERS → INVALID_VALUE; blend factors from
+ * the WebGL2 factor set (SRC_ALPHA_SATURATE legal on the dst side in WebGL2)
+ * plus SRC1_* when WEBGL_blend_func_extended is enabled; equations FUNC_ADD/
+ * FUNC_SUBTRACT/FUNC_REVERSE_SUBTRACT/MIN/MAX.
+ */
+
+import type { WebGLRenderingContext } from '../webgl1';
+import { C1, C2 } from '../constants';
+import { buildExtension, isLost } from './util';
+
+const BLEND = 0x0be2;
+const ZERO = 0x0000;
+const ONE = 0x0001;
+const CONSTANT_COLOR = 0x8001;
+const ONE_MINUS_CONSTANT_COLOR = 0x8002;
+const CONSTANT_ALPHA = 0x8003;
+const ONE_MINUS_CONSTANT_ALPHA = 0x8004;
+
+/** WebGL2 blend factors (src set — SRC_ALPHA_SATURATE is legal on the dst side in WebGL2). */
+const BLEND_FACTORS: number[] = [
+  ZERO,
+  ONE,
+  C1.SRC_COLOR,
+  C1.ONE_MINUS_SRC_COLOR,
+  C1.SRC_ALPHA,
+  C1.ONE_MINUS_SRC_ALPHA,
+  C1.DST_ALPHA,
+  C1.ONE_MINUS_DST_ALPHA,
+  C1.DST_COLOR,
+  C1.ONE_MINUS_DST_COLOR,
+  C1.SRC_ALPHA_SATURATE,
+  CONSTANT_COLOR,
+  ONE_MINUS_CONSTANT_COLOR,
+  CONSTANT_ALPHA,
+  ONE_MINUS_CONSTANT_ALPHA,
+];
+
+const BLEND_EQUATIONS: number[] = [
+  C1.FUNC_ADD,
+  C1.FUNC_SUBTRACT,
+  C1.FUNC_REVERSE_SUBTRACT,
+  C2.MIN,
+  C2.MAX,
+];
+
+/** Per-drawbuffer blend entry (lazily seeded from the base blend state). */
+function blendEntry(ctx: WebGLRenderingContext, buf: number): {
+  srcRGB: number; dstRGB: number; srcAlpha: number; dstAlpha: number; eqRGB: number; eqAlpha: number;
+} {
+  const s = ctx._state;
+  let entry = s.blendPerDrawBuffer.get(buf);
+  if (!entry) {
+    entry = {
+      srcRGB: s.blend.srcRGB,
+      dstRGB: s.blend.dstRGB,
+      srcAlpha: s.blend.srcAlpha,
+      dstAlpha: s.blend.dstAlpha,
+      eqRGB: s.blend.eqRGB,
+      eqAlpha: s.blend.eqAlpha,
+    };
+    s.blendPerDrawBuffer.set(buf, entry);
+  }
+  return entry;
+}
+
+/** Validate buf < MAX_DRAW_BUFFERS (INVALID_VALUE). Returns -1 on failure. */
+function bufIndex(ctx: WebGLRenderingContext, buf: number): number {
+  const b = buf >>> 0; // WebIDL unsigned long
+  if (b >= ctx._state.limits.MAX_DRAW_BUFFERS) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return -1;
+  }
+  return b;
+}
+
+/** Factor accepted for this context (SRC1_* gated on WEBGL_blend_func_extended). */
+function factorOk(ctx: WebGLRenderingContext, f: number): boolean {
+  if (BLEND_FACTORS.includes(f)) return true;
+  if (ctx._extensions.has('WEBGL_blend_func_extended')) {
+    return (
+      f === 0x88f9 /* SRC1_COLOR_WEBGL */ ||
+      f === 0x8589 /* SRC1_ALPHA_WEBGL */ ||
+      f === 0x88fa /* ONE_MINUS_SRC1_COLOR_WEBGL */ ||
+      f === 0x88fb /* ONE_MINUS_SRC1_ALPHA_WEBGL */
+    );
+  }
+  return false;
+}
+
+/** OES_draw_buffers_indexed factory (WebGL2 — registry versions: [2]). */
+export function createOESDrawBuffersIndexed(ctx: WebGLRenderingContext): object {
+  return buildExtension({}, {
+    enableiOES: (target: number, index: number): void => {
+      const gl = ctx;
+      if (isLost(gl)) return;
+      if (target !== BLEND) {
+        gl._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (bufIndex(gl, index) < 0) return;
+      // No per-drawbuffer blend-enable storage in the pinned State — the
+      // presence of a blendPerDrawBuffer entry implies per-drawbuffer blending.
+      // (documented known gap; draw agent treats entries as active)
+    },
+
+    disableiOES: (target: number, index: number): void => {
+      const gl = ctx;
+      if (isLost(gl)) return;
+      if (target !== BLEND) {
+        gl._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (bufIndex(gl, index) < 0) return;
+      // No-op — see enableiOES.
+    },
+
+    blendEquationiOES: (buf: number, mode: number): void => {
+      const gl = ctx;
+      if (isLost(gl)) return;
+      const b = bufIndex(gl, buf);
+      if (b < 0) return;
+      if (!BLEND_EQUATIONS.includes(mode)) {
+        gl._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const e = blendEntry(gl, b);
+      e.eqRGB = mode;
+      e.eqAlpha = mode;
+    },
+
+    blendEquationSeparateiOES: (buf: number, modeRGB: number, modeAlpha: number): void => {
+      const gl = ctx;
+      if (isLost(gl)) return;
+      const b = bufIndex(gl, buf);
+      if (b < 0) return;
+      if (!BLEND_EQUATIONS.includes(modeRGB) || !BLEND_EQUATIONS.includes(modeAlpha)) {
+        gl._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const e = blendEntry(gl, b);
+      e.eqRGB = modeRGB;
+      e.eqAlpha = modeAlpha;
+    },
+
+    blendFunciOES: (buf: number, src: number, dst: number): void => {
+      const gl = ctx;
+      if (isLost(gl)) return;
+      const b = bufIndex(gl, buf);
+      if (b < 0) return;
+      if (!factorOk(gl, src) || !factorOk(gl, dst)) {
+        gl._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const e = blendEntry(gl, b);
+      e.srcRGB = src;
+      e.dstRGB = dst;
+      e.srcAlpha = src;
+      e.dstAlpha = dst;
+    },
+
+    blendFuncSeparateiOES: (buf: number, srcRGB: number, dstRGB: number, srcAlpha: number, dstAlpha: number): void => {
+      const gl = ctx;
+      if (isLost(gl)) return;
+      const b = bufIndex(gl, buf);
+      if (b < 0) return;
+      if (!factorOk(gl, srcRGB) || !factorOk(gl, dstRGB) || !factorOk(gl, srcAlpha) || !factorOk(gl, dstAlpha)) {
+        gl._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const e = blendEntry(gl, b);
+      e.srcRGB = srcRGB;
+      e.dstRGB = dstRGB;
+      e.srcAlpha = srcAlpha;
+      e.dstAlpha = dstAlpha;
+    },
+
+    colorMaskiOES: (buf: number, r: boolean, g: boolean, b: boolean, a: boolean): void => {
+      const gl = ctx;
+      if (isLost(gl)) return;
+      const bi = bufIndex(gl, buf);
+      if (bi < 0) return;
+      gl._state.colorMaskPerDrawBuffer.set(bi, [!!r, !!g, !!b, !!a]);
+    },
+  });
+}

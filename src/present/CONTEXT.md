@@ -45,11 +45,11 @@ Exact names (gl/ and entry.ts import from `./present`):
 - Cross-origin images taint the scratch canvas → getImageData throws → mapped to `{ok:false}` (INVALID_VALUE). Setting `crossOrigin` is the page's job.
 
 ## Test Strategy
-- `tests/unit/` (Node, vitest): NodeCanvasSurface resize/getPixels; decodeImageData (pure copy); decodeImageSource failure modes with duck-typed fakes (incomplete image, unsupported source); createCanvasSurface dispatch (fake canvas-like vs plain object).
+- `tests/unit/` (Node, vitest): NodeCanvasSurface resize/getPixels; decodeImageData (pure copy); decodeImageSource failure modes with duck-typed fakes (incomplete image, unsupported source); createCanvasSurface dispatch (fake canvas-like vs plain object). NOTE: `tests/unit/present.test.ts` currently imports `createNodeSurface` — an API name that never existed in this module's contract (stale drift from an earlier phase; the real API is `createCanvasSurface`/`NodeCanvasSurface`). It lives in the sibling `tests/unit/` node — fix/escalate via parent.
 - Browser paths are verified by the CTS (`conformance/textures/`, `canvas/` tests) and the three.js/Babylon screenshot suites (frames visible to `toHaveScreenshot`).
 
 ## Status
-Phase 1 (architecture) complete: CONTEXT.md + public API stubs. All non-trivial function bodies `throw new Error('not implemented')` — implementation is delegated to a Manager (Phase 2). No tests yet.
+Implementation complete: `canvas.ts` (BrowserCanvasSurface/NodeCanvasSurface/createCanvasSurface) and `image.ts` (decodeImageSource/decodeImageData/isDecodableImageSource) implemented per the design above; validated with `npx tsc --noEmit` (zero errors in src/present) and Node smoke checks. Browser 2D-blit path awaits end-to-end validation by the CTS/screenshot suites.
 
 ## Routing Table
 - No child directories (leaf node).

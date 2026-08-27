@@ -315,6 +315,24 @@ export interface DrawCall {
    * from ctx.out.color[l].
    */
   drawBuffers: readonly number[];
+  /**
+   * Default-block fragment uniform store (same layout as
+   * FragmentExecCtx.uniforms). The rasterizer wires it into the fragment exec
+   * ctx. Required — gl/ always provides it for draws with a program.
+   */
+  uniforms: Float32Array;
+  /**
+   * WebGL2 uniform block stores keyed by block name. Optional: undefined for
+   * WebGL1 draws (no UBOs).
+   */
+  uniformBlocks?: Record<string, ArrayBufferView>;
+  /**
+   * Optional WebGL2 occlusion-query counter (SAMPLES_PASSED). Out-param
+   * REFERENCE owned by gl/: raster increments `sampleCountRef.value` in place,
+   * exactly once per sample that passes the stencil AND depth tests (see
+   * FragmentOps). Absent → no counting.
+   */
+  sampleCountRef?: { value: number };
 }
 
 /* ================================================================== */
@@ -409,6 +427,16 @@ export interface TextureImage {
  *    dither + sRGB conversion + colorMask + color write, using the
  *    shader-computed depth (which equals the interpolated depth for
  *    non-fragDepth shaders). Called only for passed, non-discarded fragments.
+ *
+ * Occlusion counting: when `DrawCall.sampleCountRef` is present, the ops
+ * engine increments it exactly once per sample that passes the stencil AND
+ * depth tests (WebGL2 SAMPLES_PASSED semantics). For shaders that do NOT write
+ * gl_FragDepth this happens in test() right after the depth read passes; for
+ * gl_FragDepth shaders the depth test is deferred to finalize(), so the
+ * increment happens there after the post-shader depth test passes. Fragments
+ * discarded by the shader are counted when the depth test already passed
+ * before the shader ran. Helper invocations (outside-pixel quad lanes) never
+ * count.
  */
 export interface FragmentOps {
   test(x: number, y: number, frontFacing: boolean, depth: number): boolean;

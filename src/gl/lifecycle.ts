@@ -1,28 +1,53 @@
 /**
- * src/gl/lifecycle.ts — context creation, canvas registry, drawing-buffer lifecycle,
- * WEBGL_lose_context semantics.
+ * src/gl/lifecycle.ts — context creation, canvas registry, drawing-buffer lifecycle.
  *
  * OWNED BY: api/context.ts + entry.ts (entry.ts wires `window.__createSoftwareWebGLContext`
- * to createContext). This module is the ONLY place that constructs context instances.
+ * to createContext). This module is the ONLY place that constructs context instances
+ * (CONTEXT_TOKEN gate). Construction runs `initContextResources` (from ./lost) right
+ * after `new` returns — it allocates the drawing buffer, default VAO and initial
+ * viewport/scissor, using the FINAL context version (WebGL2's constructor rebuilds
+ * state before init runs).
+ *
+ * WEBGL_lose_context semantics (loseContext/restoreContext/isContextLost/
+ * ensureNotLost) live in ./lost.ts — the SHARED loss engine used by both this
+ * module and the WEBGL_lose_context extension factory. Lifecycle cannot own them
+ * inline: the extension cannot import this module (webgl1 → api → extensions →
+ * misc → lifecycle → webgl1 is an ESM cycle that breaks evaluation with a TDZ
+ * ReferenceError), so the engine was extracted into the cycle-free ./lost.ts and
+ * is re-exported here for backward compatibility.
  *
  * Registry semantics (WebGL spec §"Context Creation"):
  *  - One context per canvas per type-slot. 'webgl' and 'experimental-webgl' share
  *    the WebGL1 slot; 'webgl2' has its own slot. A second getContext on an
- *    occupied slot returns null.
+ *    occupied slot returns null; a same-slot getContext returns the EXISTING
+ *    context (attrs are ignored).
  *  - Changing canvas.width/height resizes the drawing buffer and CLEARS it
- *    (contents become (0,0,0,0) + depth/stencil cleared); other GL state is NOT
- *    reset on resize (only context creation resets state). Exact expectations
- *    verified against CTS `canvas/` and `context/context-attribute-preserve-drawing-buffer.html`
- *    during Phase 2.
- *  - WEBGL_lose_context: loseContext() → isContextLost() true, all API calls
- *    become no-ops that push CONTEXT_LOST_WEBGL, and a `webglcontextlost` event
- *    fires on the canvas (not cancelable here → no auto-restore). restoreContext()
- *    re-initializes the drawing buffer + state and fires `webglcontextrestored`.
+ *    (color → (0,0,0,0), depth → 1.0, stencil → 0); other GL state (viewport,
+ *    scissor, clear color, masks, bindings) is NOT reset on resize — verified
+ *    against CTS `conformance/canvas/canvas-test.html` (viewport/clearColor/
+ *    colorMask unchanged; content cleared) and `viewport-unchanged-upon-resize.html`.
+ *    drawingBufferWidth/Height are LIVE (max(1, canvas.width)) — CTS
+ *    `context/zero-sized-canvas.html` requires immediate tracking (and a 0-size
+ *    canvas yields a 1×1 drawing buffer); `canvas/drawingbuffer-test.html`
+ *    requires drawingBufferWidth === canvas.width.
  */
 
 import type { CanvasLike, ContextType, WebGLContextAttributesInit } from './types';
 import { WebGLRenderingContext, CONTEXT_TOKEN } from './webgl1';
 import { WebGL2RenderingContext } from './webgl2';
+import { initContextResources, installMockEventShim } from './lost';
+
+// Re-export the shared loss/restore engine + drawing-buffer machinery (single
+// home: ./lost.ts — this module only delegates). Keeps existing importers
+// (`import { handleCanvasResize } from './lifecycle'`, gl/index.ts) working.
+export {
+  loseContext,
+  restoreContext,
+  isContextLost,
+  ensureNotLost,
+  initContextResources,
+  handleCanvasResize,
+} from './lost';
 
 interface CanvasSlot {
   webgl: WebGLRenderingContext | null; // 'webgl' + 'experimental-webgl' share this slot
@@ -50,6 +75,11 @@ function slotKey(type: ContextType): 'webgl' | 'webgl2' {
  * Create (or fetch) a context for a canvas. Mirrors `canvas.getContext(type, attrs)`:
  * returns the existing context when the slot matches, null on slot conflict.
  * attrs are only applied at creation; subsequent calls return the existing context.
+ * Construction runs initContextResources() AFTER the constructor returns — the
+ * final version (WebGL2 rebuilds state in its constructor) determines the depth
+ * format and viewport sizing. (The constructors themselves cannot call it:
+ * lifecycle → webgl2 → webgl1 → lifecycle would be an ESM cycle that breaks
+ * webgl2's class definition.)
  */
 export function createContext(
   canvas: CanvasLike,
@@ -58,15 +88,20 @@ export function createContext(
 ): WebGLRenderingContext | null {
   const slot = slotFor(canvas);
   const key = slotKey(type);
+  // Non-DOM canvases (Node mocks) without dispatchEvent get our event-listener
+  // shim so webglcontextlost/restored can be delivered headlessly.
+  installMockEventShim(canvas);
   if (key === 'webgl2') {
     if (slot.webgl2) return slot.webgl2;
     if (slot.webgl) return null; // WebGL1 context already on this canvas
     slot.webgl2 = new WebGL2RenderingContext(canvas, attrs, type, CONTEXT_TOKEN);
+    initContextResources(slot.webgl2);
     return slot.webgl2;
   }
   if (slot.webgl) return slot.webgl;
   if (slot.webgl2) return null; // WebGL2 context already on this canvas
   slot.webgl = new WebGLRenderingContext(canvas, attrs, type, CONTEXT_TOKEN);
+  initContextResources(slot.webgl);
   return slot.webgl;
 }
 
@@ -82,30 +117,4 @@ export function releaseContext(canvas: CanvasLike, type: ContextType): void {
   const slot = registry.get(canvas as object);
   if (!slot) return;
   slot[slotKey(type)] = null;
-}
-
-/**
- * Resize the drawing buffer after canvas.width/height changed (called by the
- * present/ adapter or entry.ts on canvas resize observation). Reallocates the
- * default framebuffer surface and clears it. State is preserved.
- * @internal engine
- */
-export function handleCanvasResize(ctx: WebGLRenderingContext): void {
-  // Phase 2: realloc surface via raster/formats, clear, update _drawingBufferWidth/Height.
-  void ctx;
-}
-
-/**
- * loseContext()/restoreContext() — WEBGL_lose_context extension implementation
- * (api/context.ts delegates here).
- * @internal engine
- */
-export function loseContext(ctx: WebGLRenderingContext): void {
-  ctx._isLost = true;
-  // Phase 2: fire 'webglcontextlost' on canvas; mark resources invalidated.
-}
-
-export function restoreContext(ctx: WebGLRenderingContext): void {
-  // Phase 2: re-create state + drawing buffer; fire 'webglcontextrestored'.
-  void ctx;
 }

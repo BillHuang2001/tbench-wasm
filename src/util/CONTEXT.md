@@ -1,7 +1,7 @@
 # src/util/ — Shared Low-Level Foundation
 
 ## Intent
-The bottom of the dependency DAG: pure, dependency-free helpers shared by every other module (`glsl/`, `raster/`, `gl/`, `present/`). No WebGL logic, no GL state, no DOM — small, exact, fast primitives whose semantics are authoritative across the codebase (GLSL math, typed-array plumbing, bit/float conversions, logging). All public API is stubbed (`throw new Error('not implemented')`) — signatures are the contract; implementation is pending.
+The bottom of the dependency DAG: pure, dependency-free helpers shared by every other module (`glsl/`, `raster/`, `gl/`, `present/`). No WebGL logic, no GL state, no DOM — small, exact, fast primitives whose semantics are authoritative across the codebase (GLSL math, typed-array plumbing, bit/float conversions, logging). All public API is implemented (TS, zero deps); signatures and JSDoc are the contract.
 
 ## API Surface
 - `index.ts` — barrel: `export *` from the four modules below. All consumers import from `../util`.
@@ -23,7 +23,7 @@ The bottom of the dependency DAG: pure, dependency-free helpers shared by every 
 - **GLSL-named functions centralized in util** rather than inlined in codegen: one correct, unit-testable implementation (CTS shader tests are strict about e.g. mod/fract/roundEven semantics).
 - **Generic vecMap/vecMap2** for the long tail of componentwise builtins (sin/cos/tanh/exp2…) instead of dozens of near-identical functions; dedicated functions only for hot or semantically tricky ops.
 - **TypedArrayKind strings, not GL enums**: util must not know GL; gl/ maps GLenum ↔ kind.
-- **Stub bodies now**: files define the complete public API contract (signatures + JSDoc with exact semantics); implementation is delegated to the Manager phase.
+- **Half-float canonical in misc.ts**: `toHalfFloat`/`fromHalfFloat` (IEEE 754 binary16, round-to-nearest-even, full subnormal support, ±Inf, NaN) are the single source of truth; `math.ts` `packHalf2x16`/`unpackHalf2x16` import them — never re-implement (a private mirror once diverged on a subnormal boundary: returned −0 where the canonical gives 0x8001).
 
 ## Known Issues
 - `smoothstep` with edge0 == edge1 is undefined in GLSL; our implementation returns 0 (no NaN).
@@ -32,6 +32,13 @@ The bottom of the dependency DAG: pure, dependency-free helpers shared by every 
 - `toHalfFloat`/`fromHalfFloat` follow IEEE 754 binary16 (round-to-nearest-even, subnormals, ±Inf, NaN).
 - `findLSB`/`findMSB` return -1 when no bits are set; `findMSB` handles negative ints per GLSL spec (MSB of complement).
 - Bit-reinterpretation helpers share one DataView scratch — fine single-threaded, but never hold a result across a re-entrant call.
+
+## Notes for Agents
+- `math.ts` is ~985 lines (JSDoc-heavy by contract) — legitimately long; do NOT split it (the barrel `index.ts` re-exports the whole module).
+- pack*2x16 return the UNSIGNED uint32 as a JS number (e.g. `packHalf2x16([1,-2]) === 0xC0003C00`); when comparing against bit-shift expressions use `>>> 0` (JS `<<` yields int32).
+- `copyTypedArray`: integer destinations truncate toward zero + clamp to range, NaN→0 (documented contract — NOT native JS wrap-around); float destinations use float64→float32 rounding.
+- `findMSB`: per GLSL ES spec, negative JS numbers report the MSB of the bitwise complement (`findMSB(-1) === -1`); pass values ≥ 2^31 as unsigned numbers for the unsigned overload.
+- There is NO scalar `round` export — `vecRound` is the vector GLSL `round` (half away from zero); `misc.ts` has `roundEven` only. `glsl/` codegen maps scalar `round` via `vecRound`-style semantics.
 
 ## Test Strategy
 - Pure functions → easy vitest unit tests under `tests/unit/` (sibling — read-only from this node; escalate writes to parent). Priority coverage: GLSL-exact functions (mod/fract/mix/clamp/step/smoothstep/roundEven), matrix mul/inverse vs. known results, pack*/unpack* round-trips, half-float edge cases, bitfield ops.

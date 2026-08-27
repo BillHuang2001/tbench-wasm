@@ -39,6 +39,24 @@ export type TypedArray =
 /** Constructor signature used by the registry (length-constructed). */
 export type TypedArrayCtor = new (length: number) => TypedArray;
 
+/** Signature of the native (buffer, byteOffset?, length?) constructors. */
+type ViewCtor = new (
+  buffer: ArrayBuffer,
+  byteOffset?: number,
+  length?: number
+) => TypedArray;
+
+/** Inclusive value ranges of the integer kinds (for clamp conversion). */
+const INT_RANGES: Record<string, [number, number]> = {
+  int8: [-128, 127],
+  uint8: [0, 255],
+  uint8clamped: [0, 255],
+  int16: [-32768, 32767],
+  uint16: [0, 65535],
+  int32: [-2147483648, 2147483647],
+  uint32: [0, 4294967295],
+};
+
 /**
  * Map of `TypedArrayKind` → constructor. Shared table; do not mutate.
  */
@@ -58,14 +76,14 @@ export const TYPED_ARRAY_CTORS: Record<TypedArrayKind, TypedArrayCtor> = {
  * Returns the constructor for `kind` (same as TYPED_ARRAY_CTORS lookup).
  */
 export function typedArrayCtor(kind: TypedArrayKind): TypedArrayCtor {
-  throw new Error('not implemented');
+  return TYPED_ARRAY_CTORS[kind];
 }
 
 /**
  * Allocates a new typed array of `kind` with `length` elements, zero-filled.
  */
 export function makeTypedArray(kind: TypedArrayKind, length: number): TypedArray {
-  throw new Error('not implemented');
+  return new TYPED_ARRAY_CTORS[kind](length);
 }
 
 /**
@@ -80,7 +98,8 @@ export function viewOf(
   byteOffset = 0,
   length?: number
 ): TypedArray {
-  throw new Error('not implemented');
+  const Ctor = TYPED_ARRAY_CTORS[kind] as unknown as ViewCtor;
+  return length === undefined ? new Ctor(buffer, byteOffset) : new Ctor(buffer, byteOffset, length);
 }
 
 /**
@@ -97,7 +116,25 @@ export function copyTypedArray(
   srcOffset = 0,
   length?: number
 ): void {
-  throw new Error('not implemented');
+  const n = length === undefined ? src.length - srcOffset : length;
+  if (n <= 0) return;
+  const kind = typedArrayKindOf(dst);
+  if (kind === 'float32' || kind === 'float64') {
+    // Float destinations: plain assignment (float64 → float32 rounding).
+    for (let i = 0; i < n; i++) {
+      dst[dstOffset + i] = src[srcOffset + i];
+    }
+    return;
+  }
+  // Integer destinations per the JSDoc contract: NaN → 0, values truncate
+  // toward zero and out-of-range values clamp to the destination range
+  // (deliberately NOT native wrap-around, which would turn -1 into 255 for
+  // Uint8Array; GL format conversion needs clamp semantics).
+  const [min, max] = INT_RANGES[kind];
+  for (let i = 0; i < n; i++) {
+    const v = src[srcOffset + i];
+    dst[dstOffset + i] = v !== v ? 0 : v < min ? min : v > max ? max : Math.trunc(v);
+  }
 }
 
 /**
@@ -112,35 +149,44 @@ export function copyBytes(
   srcByteOffset: number,
   byteLength: number
 ): void {
-  throw new Error('not implemented');
+  if (byteLength <= 0) return;
+  const dstIsView = dst instanceof Uint8Array;
+  const srcIsView = src instanceof Uint8Array;
+  const dstBuf = dstIsView ? dst.buffer : dst;
+  const dstOff = dstIsView ? dst.byteOffset + dstByteOffset : dstByteOffset;
+  const srcBuf = srcIsView ? src.buffer : src;
+  const srcOff = srcIsView ? src.byteOffset + srcByteOffset : srcByteOffset;
+  // Uint8Array.prototype.set has memmove semantics for overlapping regions
+  // (the copy behaves as if routed through a temporary).
+  new Uint8Array(dstBuf, dstOff, byteLength).set(new Uint8Array(srcBuf, srcOff, byteLength));
 }
 
 /**
  * Sets every element of `arr` to `value`.
  */
 export function fillTypedArray(arr: TypedArray, value: number): void {
-  throw new Error('not implemented');
+  arr.fill(value);
 }
 
 /**
  * Zero-fills `arr` (optimized path: fill(0)).
  */
 export function zeroTypedArray(arr: TypedArray): void {
-  throw new Error('not implemented');
+  arr.fill(0);
 }
 
 /**
  * Bytes per element of `arr` (arr.BYTES_PER_ELEMENT).
  */
 export function bytesPerElement(arr: TypedArray): number {
-  throw new Error('not implemented');
+  return arr.BYTES_PER_ELEMENT;
 }
 
 /**
  * Total byte length of the viewed region (arr.byteLength).
  */
 export function byteLengthOf(arr: TypedArray): number {
-  throw new Error('not implemented');
+  return arr.byteLength;
 }
 
 /**
@@ -149,14 +195,14 @@ export function byteLengthOf(arr: TypedArray): number {
  * surface blits, and presenting pixels.
  */
 export function typedArrayToBytes(arr: TypedArray): Uint8Array {
-  throw new Error('not implemented');
+  return new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
 }
 
 /**
  * Deep-copies `arr` into a new typed array of the same kind and length.
  */
 export function cloneTypedArray<T extends TypedArray>(arr: T): T {
-  throw new Error('not implemented');
+  return arr.slice() as T;
 }
 
 /**
@@ -165,7 +211,24 @@ export function cloneTypedArray<T extends TypedArray>(arr: T): T {
  * kind; throws TypeError otherwise.
  */
 export function concatTypedArrays<T extends TypedArray>(...arrays: T[]): T {
-  throw new Error('not implemented');
+  if (arrays.length === 0) {
+    throw new TypeError('concatTypedArrays: at least one array is required');
+  }
+  const Ctor = arrays[0].constructor as new (length: number) => T;
+  let total = 0;
+  for (const arr of arrays) {
+    if (arr.constructor !== Ctor) {
+      throw new TypeError('concatTypedArrays: all arrays must be of the same kind');
+    }
+    total += arr.length;
+  }
+  const out = new Ctor(total);
+  let offset = 0;
+  for (const arr of arrays) {
+    out.set(arr, offset);
+    offset += arr.length;
+  }
+  return out;
 }
 
 /**
@@ -174,7 +237,7 @@ export function concatTypedArrays<T extends TypedArray>(...arrays: T[]): T {
  * argument checks) and by the harness.
  */
 export function isTypedArray(v: unknown): v is TypedArray {
-  throw new Error('not implemented');
+  return ArrayBuffer.isView(v) && !(v instanceof DataView);
 }
 
 /**
@@ -182,5 +245,9 @@ export function isTypedArray(v: unknown): v is TypedArray {
  * throws TypeError for unknown kinds (should be impossible for TypedArray).
  */
 export function typedArrayKindOf(arr: TypedArray): TypedArrayKind {
-  throw new Error('not implemented');
+  const Ctor = arr.constructor;
+  for (const kind of Object.keys(TYPED_ARRAY_CTORS) as TypedArrayKind[]) {
+    if (TYPED_ARRAY_CTORS[kind] === Ctor) return kind;
+  }
+  throw new TypeError('typedArrayKindOf: unknown typed-array kind');
 }

@@ -1,0 +1,1269 @@
+/**
+ * linker.ts — the program linker (cross-module contract §1: linker phase).
+ *
+ * `linkProgram(vs, fs, opts)` validates the shader pair and produces the
+ * `Program` object gl/ and raster/ consume:
+ *
+ *   1. version compatibility + deferred-feature rejection (transform
+ *      feedback, varying interface blocks — later tasks);
+ *   2. uniform merge (same name in both stages must be type-identical) and
+ *      default-block layout (conservative vec4-slot packing);
+ *   3. uniform-block layout (WebGL2, std140): per-stage member offsets,
+ *      shared-index merge for same-named blocks, blockIndices for codegen;
+ *   4. varying matching (name / element type / array size / flat) and dense
+ *      packing in VERTEX declaration order;
+ *   5. attribute location assignment (explicit layout(location=) →
+ *      bindAttribLocation → first-free automatic);
+ *   6. fragment output location assignment;
+ *   7. limit checks; JS codegen for both stages; Program assembly.
+ *
+ * UNIFORM STORE LAYOUT (must match codegen/env.ts exactly):
+ * - ONE unified vec4-slot cursor for the whole default block. Each uniform
+ *   occupies `slotCount` vec4 slots; `UniformSlot.slot` / `UniformInfo.location`
+ *   = cursor*4 — a FLOAT index into the store (NOT vec4×4). A vec4 at location
+ *   L occupies floats [L..L+3]; a matC occupies C*4 consecutive floats with
+ *   column `col` at L + col*4 + row (column stride 4 — GLSL memory order).
+ * - slotCount: scalar/vector/sampler → 1 slot; matC → C slots; struct → Σ
+ *   member slots; array → element slots × size, EXCEPT scalar/sampler arrays
+ *   which pack DENSELY (elements at consecutive floats, stride 1, footprint
+ *   ceil(size/4) slots).
+ * - int/uint/bool/sampler leaves live in the INT store (ctx.intUniforms) with
+ *   the same slot numbering (1 int per component, stride 1). Both stores share
+ *   the numeric slot space; each store is sized only to its own high-water
+ *   mark (floatMax / intMax).
+ * - Dynamic array indexing resolves through the '[0]' prefix key whose
+ *   `stride` = FLOAT elements per element of the LAST dimension: scalar/
+ *   sampler → 1, vector → 4, matrix → cols*4, struct → whole-struct slots,
+ *   nested array → inner footprint.
+ * - uniformSlots contains EVERY reachable path: all leaves ('u', 'u[0]',
+ *   'u.m', 'u[0].m', 'u[2].m', 'u[0].m[1]') plus all ancestor prefixes
+ *   ('u', 'u[0]') — codegen throws on missing entries.
+ *
+ * VARYING PACKING: dense flat components, cumulative offsets in vertex
+ * declaration order (matched fs inputs read the same offsets). Struct varyings
+ * flatten to per-member leaves ('v.m'), each with its own (index, offset).
+ */
+import type { TranslationUnit } from './ast.js';
+import type { LinkLimits, LinkOptions, LinkResult, Shader, ShaderUses, TransformFeedbackSpec, UniformBlockDecl, UniformDecl } from './compiler.js';
+import type { AttribInfo, FragmentExecCtx, Program, TransformFeedbackVarying, UniformBlockInfo, UniformBlockMemberInfo, UniformInfo, VaryingInfo, VertexExecCtx } from './program.js';
+import { generateFragmentStage, generateVertexStage, R } from './codegen/index.js';
+import type { BlockMemberLayout, CodegenLayout, StageCodegenResult, UniformSlot, VaryingLayout } from './codegen/index.js';
+import { flatComponents, isIntegralFamily } from './codegen/env.js';
+import { isIntegral, isSampler, toGLenum, typeComponents, typeEquals, typeName } from './types.js';
+import type { GLSLType } from './types.js';
+
+/* ------------------------------------------------------------------ */
+/* Limits (WebGL minimums per version; gl/ passes its own via opts)    */
+/* ------------------------------------------------------------------ */
+
+const LIMITS_100: LinkLimits = {
+  maxVertexAttribs: 16,
+  maxVertexUniformVectors: 128,
+  maxFragmentUniformVectors: 16,
+  maxVaryingVectors: 8,
+  maxVertexTextureImageUnits: 0,
+  maxTextureImageUnits: 8,
+  maxCombinedTextureImageUnits: 8,
+  maxDrawBuffers: 1,
+  maxUniformBufferBindings: 0,
+  maxUniformBlockSize: 0,
+  maxVertexUniformBlocks: 0,
+  maxFragmentUniformBlocks: 0,
+  maxCombinedUniformBlocks: 0,
+  maxTransformFeedbackSeparateAttribs: 0,
+  maxTransformFeedbackInterleavedComponents: 0,
+  maxTransformFeedbackSeparateComponents: 0,
+};
+
+const LIMITS_300: LinkLimits = {
+  maxVertexAttribs: 16,
+  maxVertexUniformVectors: 256,
+  maxFragmentUniformVectors: 224,
+  maxVaryingVectors: 15,
+  maxVertexTextureImageUnits: 16,
+  maxTextureImageUnits: 16,
+  maxCombinedTextureImageUnits: 32,
+  maxDrawBuffers: 4,
+  maxUniformBufferBindings: 24,
+  maxUniformBlockSize: 16384,
+  maxVertexUniformBlocks: 12,
+  maxFragmentUniformBlocks: 12,
+  maxCombinedUniformBlocks: 24,
+  maxTransformFeedbackSeparateAttribs: 4,
+  maxTransformFeedbackInterleavedComponents: 64,
+  maxTransformFeedbackSeparateComponents: 4,
+};
+
+function resolveLimits(version: 100 | 300, opts?: LinkOptions): LinkLimits {
+  return { ...(version === 100 ? LIMITS_100 : LIMITS_300), ...opts?.limits };
+}
+
+/* ------------------------------------------------------------------ */
+/* Uniform layout helpers                                              */
+/* ------------------------------------------------------------------ */
+
+/** vec4 slots occupied by a type in the default-block store (conservative
+ *  vec4-slot packing — never shares slots between uniforms). */
+function slotCount(t: GLSLType): number {
+  switch (t.kind) {
+    case 'scalar':
+    case 'vector':
+    case 'sampler':
+      return 1;
+    case 'matrix':
+      return t.cols;
+    case 'struct':
+      return t.members.reduce((n, m) => n + slotCount(m.type), 0);
+    case 'array': {
+      const n = t.size ?? 0;
+      const e = t.element;
+      // Scalar/sampler elements pack densely (stride 1 float); other elements
+      // occupy whole vec4 slots each.
+      if (e.kind === 'scalar' || e.kind === 'sampler') return Math.ceil(n / 4);
+      return slotCount(e) * n;
+    }
+    case 'void':
+      return 0;
+  }
+}
+
+/** FLOAT elements between consecutive elements of the LAST array dimension
+ *  (the `stride` codegen applies for dynamic indices). Nested arrays align
+ *  each outer element to its vec4-slot footprint (slotCount*4) so the dynamic
+ *  stride agrees with the const-index leaf positions. */
+function elemFloatStride(e: GLSLType): number {
+  switch (e.kind) {
+    case 'scalar':
+    case 'sampler':
+      return 1;
+    case 'vector':
+      return 4;
+    case 'matrix':
+      return e.cols * 4;
+    case 'struct':
+      return slotCount(e) * 4;
+    case 'array':
+      return slotCount(e) * 4;
+    case 'void':
+      return 0;
+  }
+}
+
+/** True when the type lives in the INT store (int/uint/bool/sampler — the
+ *  codegen's isIntegralFamily || sampler rule). */
+function isIntStoreType(t: GLSLType): boolean {
+  return isIntegralFamily(t) || isSampler(t);
+}
+
+/** Mutable allocation state shared by the flatten walk. */
+interface AllocState {
+  slots: Map<string, UniformSlot>;
+  floatMax: number; // high-water float index (+1) in floatStore
+  intMax: number; // high-water int index (+1) in intStore
+}
+
+/** Emit uniformSlots entries for `t` at `path`, starting at vec4-slot `cursor`.
+ *  Returns the advance (vec4 slots) or an error. */
+function emitType(path: string, t: GLSLType, cursor: number, st: AllocState): { advance: number } | { error: string } {
+  switch (t.kind) {
+    case 'scalar':
+    case 'vector':
+    case 'sampler':
+    case 'matrix': {
+      const slot = cursor * 4;
+      const int = isIntStoreType(t);
+      st.slots.set(path, { store: int ? 'int' : 'float', slot, stride: 0 });
+      const comps = t.kind === 'matrix' ? t.cols * t.rows : t.kind === 'vector' ? t.size : 1;
+      if (int) st.intMax = Math.max(st.intMax, slot + comps);
+      else st.floatMax = Math.max(st.floatMax, slot + comps);
+      return { advance: slotCount(t) };
+    }
+    case 'array': {
+      const n = t.size ?? 0;
+      const e = t.element;
+      if (n === 0) return { advance: 0 };
+      const dense = e.kind === 'scalar' || e.kind === 'sampler';
+      const stride = elemFloatStride(e);
+      const int = isIntStoreType(e);
+      const base = cursor * 4;
+      // '[0]' prefix: dynamic-index resolution (codegen reads its stride).
+      st.slots.set(`${path}[0]`, { store: int ? 'int' : 'float', slot: base, stride });
+      if (dense) {
+        // Scalar/sampler arrays pack densely: element k at base + k floats.
+        for (let k = 0; k < n; k++) {
+          const slot = base + k;
+          st.slots.set(`${path}[${k}]`, { store: int ? 'int' : 'float', slot, stride: 0 });
+          if (int) st.intMax = Math.max(st.intMax, slot + 1);
+          else st.floatMax = Math.max(st.floatMax, slot + 1);
+        }
+        return { advance: Math.ceil(n / 4) };
+      }
+      // Non-scalar elements (vector/matrix/struct/nested array): one whole
+      // (aligned) element block per index; recursion places the inner leaves.
+      let adv = 0;
+      for (let k = 0; k < n; k++) {
+        const r = emitType(`${path}[${k}]`, e, (base + k * stride) / 4, st);
+        if ('error' in r) return r;
+        adv += r.advance;
+      }
+      return { advance: adv };
+    }
+    case 'struct': {
+      // Members are laid out sequentially (each at its own slot advance);
+      // the struct itself gets an ancestor-prefix entry ('u', 'u[0]').
+      let c = cursor;
+      for (const m of t.members) {
+        const r = emitType(`${path}.${m.name}`, m.type, c, st);
+        if ('error' in r) return r;
+        c += r.advance;
+      }
+      st.slots.set(path, { store: isIntStoreType(t) ? 'int' : 'float', slot: cursor * 4, stride: elemFloatStride(t) });
+      return { advance: c - cursor };
+    }
+    case 'void':
+      return { advance: 0 };
+  }
+}
+
+/** One merged default-block uniform (same name in both stages). */
+interface MergedUniform {
+  decl: UniformDecl;
+  inVs: boolean;
+  inFs: boolean;
+}
+
+/** Combine vs + fs default-block uniforms by name; same name must be
+ *  type-identical in both stages (GLSL link rule). */
+function mergeUniforms(vs: Shader, fs: Shader): MergedUniform[] | { error: string } {
+  const byName = new Map<string, MergedUniform>();
+  const order: string[] = [];
+  const add = (decl: UniformDecl, stage: 'vs' | 'fs'): string | null => {
+    const ex = byName.get(decl.name);
+    if (ex) {
+      if (!typeEquals(ex.decl.type, decl.type)) {
+        return `linker: uniform '${decl.name}' type conflict (${typeName(ex.decl.type)} vs ${typeName(decl.type)})`;
+      }
+      if (stage === 'vs') ex.inVs = true;
+      else ex.inFs = true;
+      return null;
+    }
+    byName.set(decl.name, { decl, inVs: stage === 'vs', inFs: stage === 'fs' });
+    order.push(decl.name);
+    return null;
+  };
+  for (const d of vs.info.uniforms) {
+    const e = add(d, 'vs');
+    if (e !== null) return { error: e };
+  }
+  for (const d of fs.info.uniforms) {
+    const e = add(d, 'fs');
+    if (e !== null) return { error: e };
+  }
+  return order.map((n) => byName.get(n)!);
+}
+
+/** Visit every flattened LEAF path of a type in allocation order (struct
+ *  members recurse; array elements expand per index — matching emitType's
+ *  uniformSlots keys). */
+function walkLeaves(path: string, t: GLSLType, cb: (path: string, leaf: GLSLType) => void): void {
+  switch (t.kind) {
+    case 'scalar':
+    case 'vector':
+    case 'sampler':
+    case 'matrix':
+      cb(path, t);
+      return;
+    case 'struct':
+      for (const m of t.members) walkLeaves(`${path}.${m.name}`, m.type, cb);
+      return;
+    case 'array': {
+      const n = t.size ?? 0;
+      for (let k = 0; k < n; k++) walkLeaves(`${path}[${k}]`, t.element, cb);
+      return;
+    }
+    case 'void':
+      return;
+  }
+}
+
+interface UniformLayoutResult {
+  slots: Map<string, UniformSlot>;
+  uniforms: UniformInfo[];
+  uniformMap: Map<string, UniformInfo>;
+  floatMax: number;
+  intMax: number;
+}
+
+/** Allocate the default-block stores for the merged uniform set (vs order
+ *  first, then fs-only), building uniformSlots + Program.uniforms +
+ *  Program.uniformMap, and checking the per-stage uniform-vector limits. */
+function layoutUniforms(merged: MergedUniform[], limits: LinkLimits): UniformLayoutResult | { error: string } {
+  const st: AllocState = { slots: new Map(), floatMax: 0, intMax: 0 };
+  const uniforms: UniformInfo[] = [];
+  const uniformMap = new Map<string, UniformInfo>();
+  let cursor = 0;
+  let vertexSlots = 0;
+  let fragmentSlots = 0;
+  for (const u of merged) {
+    const t = u.decl.type;
+    const slots = slotCount(t);
+    if (u.inVs) vertexSlots += slots;
+    if (u.inFs) fragmentSlots += slots;
+    const r = emitType(u.decl.name, t, cursor, st);
+    if ('error' in r) return { error: r.error };
+    // Ancestor prefix for the root name (arrays/structs; leaves already keyed it).
+    if (!st.slots.has(u.decl.name)) {
+      st.slots.set(u.decl.name, { store: isIntStoreType(t) ? 'int' : 'float', slot: cursor * 4, stride: 0 });
+    }
+    const leaves: { path: string; type: GLSLType }[] = [];
+    walkLeaves(u.decl.name, t, (p, lt) => leaves.push({ path: p, type: lt }));
+    const leafInfo = (path: string, type: GLSLType, size: number): UniformInfo => ({
+      name: path,
+      location: st.slots.get(path)!.slot,
+      type: toGLenum(type),
+      size,
+      components: typeComponents(type),
+      integral: isIntegral(type),
+      blockIndex: -1,
+      sampler: isSampler(type),
+    });
+    const isStructRoot = t.kind === 'struct' || (t.kind === 'array' && t.element.kind === 'struct');
+    if (!isStructRoot) {
+      // Plain (non-struct) uniform: ONE getActiveUniform entry — non-arrays
+      // 'u', arrays 'u[0]' with size = array length. uniformMap holds
+      // per-element infos + the bare name → first element.
+      const e = t.kind === 'array' ? t.element : t;
+      uniforms.push(
+        leafInfo(t.kind === 'array' ? `${u.decl.name}[0]` : u.decl.name, e, t.kind === 'array' ? t.size ?? 1 : 1),
+      );
+      for (const l of leaves) uniformMap.set(l.path, leafInfo(l.path, l.type, 1));
+      uniformMap.set(u.decl.name, uniformMap.get(leaves[0].path)!);
+    } else {
+      // Struct / struct-array: getActiveUniform entries per flattened leaf
+      // ('u.m', 'u[0].m', 'u[2].m'; size 1 each). uniformMap: leaf paths +
+      // bare name → first leaf; struct arrays also key 'u[0]' → first leaf.
+      for (const l of leaves) {
+        const info = leafInfo(l.path, l.type, 1);
+        uniforms.push(info);
+        uniformMap.set(l.path, info);
+      }
+      const first = uniformMap.get(leaves[0].path)!;
+      uniformMap.set(u.decl.name, first);
+      if (t.kind === 'array') uniformMap.set(`${u.decl.name}[0]`, first);
+    }
+    cursor += r.advance;
+  }
+  if (vertexSlots > limits.maxVertexUniformVectors) {
+    return {
+      error: `linker: too many vertex uniform vectors (${vertexSlots}, max ${limits.maxVertexUniformVectors})`,
+    };
+  }
+  if (fragmentSlots > limits.maxFragmentUniformVectors) {
+    return {
+      error: `linker: too many fragment uniform vectors (${fragmentSlots}, max ${limits.maxFragmentUniformVectors})`,
+    };
+  }
+  return { slots: st.slots, uniforms, uniformMap, floatMax: st.floatMax, intMax: st.intMax };
+}
+
+/* ------------------------------------------------------------------ */
+/* Uniform blocks (WebGL2, std140)                                     */
+/* ------------------------------------------------------------------ */
+
+/** roundUp(x, align) — std140 alignment rounding (align is a power of two). */
+function roundUp(x: number, align: number): number {
+  if (align <= 0) return x;
+  const r = x % align;
+  return r === 0 ? x : x + align - r;
+}
+
+/** std140 base alignment (bytes): scalar 4, vec2 8, vec3/vec4 16, matrix 16,
+ *  array = element alignment, struct = max member alignment. */
+function std140Align(t: GLSLType): number {
+  switch (t.kind) {
+    case 'scalar':
+    case 'sampler':
+      return 4;
+    case 'vector':
+      return t.size === 2 ? 8 : 16;
+    case 'matrix':
+      return 16;
+    case 'array':
+      return std140Align(t.element);
+    case 'struct': {
+      let a = 0;
+      for (const m of t.members) a = Math.max(a, std140Align(m.type));
+      return a === 0 ? 4 : a;
+    }
+    case 'void':
+      return 4;
+  }
+}
+
+/** std140 size of a type: scalar 4, vector 4×n (vec3 = 12), matrix 16×cols
+ *  (column stride 16 — column-major is mandatory), array = count × element
+ *  stride, struct = members at aligned offsets, rounded to the struct align. */
+function std140Size(t: GLSLType): number {
+  switch (t.kind) {
+    case 'scalar':
+    case 'sampler':
+      return 4;
+    case 'vector':
+      return 4 * t.size;
+    case 'matrix':
+      return 16 * t.cols;
+    case 'array': {
+      const n = t.size ?? 0;
+      return n * std140ArrayStride(t.element);
+    }
+    case 'struct': {
+      let off = 0;
+      for (const m of t.members) {
+        off = roundUp(off, std140Align(m.type));
+        off += std140Size(m.type);
+      }
+      return roundUp(off, std140Align(t));
+    }
+    case 'void':
+      return 0;
+  }
+}
+
+/** std140 stride between consecutive array elements: roundUp(element size,
+ *  element alignment). */
+function std140ArrayStride(t: GLSLType): number {
+  return roundUp(std140Size(t), std140Align(t));
+}
+
+/** Emit BlockMemberLayout entries for type `t` at `byteOffset`, keyed by
+ *  `path`. Emits the path root, every nested member leaf, every const-indexed
+ *  array element, and the '[0]' dynamic-index prefix (arrayStride set).
+ *  When `blockStride` is set (arrayed block) it is stamped on EVERY entry —
+ *  codegen resolves any dynamic index inside an arrayed block through it. */
+function emitBlockLayout(
+  path: string,
+  t: GLSLType,
+  byteOffset: number,
+  out: Map<string, BlockMemberLayout>,
+  blockStride: number | undefined,
+): void {
+  const mk = (offset: number, arrayStride: number, matrixStride: number): BlockMemberLayout =>
+    blockStride === undefined
+      ? { offset, arrayStride, matrixStride, rowMajor: false }
+      : { offset, arrayStride, matrixStride, rowMajor: false, blockStride };
+  switch (t.kind) {
+    case 'scalar':
+    case 'vector':
+    case 'sampler':
+      out.set(path, mk(byteOffset, 0, 0));
+      return;
+    case 'matrix':
+      out.set(path, mk(byteOffset, 0, 16));
+      return;
+    case 'array': {
+      const n = t.size ?? 0;
+      const stride = std140ArrayStride(t.element);
+      out.set(path, mk(byteOffset, stride, 0));
+      if (n > 0) {
+        out.set(`${path}[0]`, mk(byteOffset, stride, 0));
+        for (let k = 0; k < n; k++) {
+          emitBlockLayout(`${path}[${k}]`, t.element, byteOffset + k * stride, out, blockStride);
+        }
+      }
+      return;
+    }
+    case 'struct': {
+      out.set(path, mk(byteOffset, 0, 0));
+      let off = 0;
+      for (const m of t.members) {
+        off = roundUp(off, std140Align(m.type));
+        emitBlockLayout(`${path}.${m.name}`, m.type, byteOffset + off, out, blockStride);
+        off += std140Size(m.type);
+      }
+      return;
+    }
+    case 'void':
+      return;
+  }
+}
+
+/** One flattened block leaf (getActiveUniform semantics: structs descend,
+ *  arrays stop as ONE entry with size = array length, name '[0]'-suffixed). */
+interface BlockLeaf {
+  path: string;
+  type: GLSLType;
+  offset: number;
+  arrayStride: number;
+  matrixStride: number;
+  size: number;
+}
+
+/** Collect the flattened leaves of member type `t` at `path`/`byteOffset`. */
+function collectBlockLeaves(
+  path: string,
+  t: GLSLType,
+  byteOffset: number,
+  out: BlockLeaf[],
+): void {
+  if (t.kind === 'struct') {
+    let off = 0;
+    for (const m of t.members) {
+      off = roundUp(off, std140Align(m.type));
+      collectBlockLeaves(`${path}.${m.name}`, m.type, byteOffset + off, out);
+      off += std140Size(m.type);
+    }
+    return;
+  }
+  if (t.kind === 'array') {
+    out.push({
+      path: `${path}[0]`,
+      type: t.element,
+      offset: byteOffset,
+      arrayStride: std140ArrayStride(t.element),
+      matrixStride: 0,
+      size: t.size ?? 0,
+    });
+    return;
+  }
+  out.push({
+    path,
+    type: t,
+    offset: byteOffset,
+    arrayStride: 0,
+    matrixStride: t.kind === 'matrix' ? 16 : 0,
+    size: 1,
+  });
+}
+
+/** The full std140 layout of ONE block declaration. */
+interface BlockLayout {
+  blockName: string;
+  instanceName: string | null;
+  arraySize: number;
+  /** std140 byte size of ONE block instance (rounded up to 16). */
+  size: number;
+  /** Member path → byte layout (codegen's `blocks.get(index)` map). */
+  members: Map<string, BlockMemberLayout>;
+  /** Flattened leaves per block instance element (one group for non-arrayed). */
+  leafGroups: BlockLeaf[][];
+  /** The declaration's members (for the type-identity check on shared blocks). */
+  declMembers: UniformBlockDecl['members'];
+}
+
+/**
+ * Compute the std140 layout of one `UniformBlockDecl`. Member paths follow
+ * the codegen contract (codegen/index.ts):
+ * - instance-less blocks: bare member names ('m', 'm[0]', 'm.s.x');
+ * - named non-arrayed blocks: instance name + member ('b.m');
+ * - arrayed blocks (arraySize > 1): per-element paths ('b[0].m', 'b[1].m')
+ *   with every entry stamped blockStride = block size, plus the 'b[0]'
+ *   PREFIX entry {offset 0, blockStride} for dynamic instance indexing.
+ */
+function layoutBlock(decl: UniformBlockDecl): BlockLayout {
+  const memberOffsets: number[] = [];
+  let off = 0;
+  for (const m of decl.members) {
+    off = roundUp(off, std140Align(m.type));
+    memberOffsets.push(off);
+    off += std140Size(m.type);
+  }
+  const blockSize = roundUp(off, 16);
+  const members = new Map<string, BlockMemberLayout>();
+  const leafGroups: BlockLeaf[][] = [];
+  const isArrayed = decl.arraySize > 1;
+  const emitMember = (prefix: string, baseOffset: number, blockStride: number | undefined, leaves: BlockLeaf[]): void => {
+    for (let i = 0; i < decl.members.length; i++) {
+      const m = decl.members[i];
+      const path = `${prefix}${m.name}`;
+      emitBlockLayout(path, m.type, baseOffset + memberOffsets[i], members, blockStride);
+      collectBlockLeaves(path, m.type, baseOffset + memberOffsets[i], leaves);
+    }
+  };
+  if (isArrayed) {
+    members.set(`${decl.instanceName}[0]`, {
+      offset: 0,
+      arrayStride: 0,
+      matrixStride: 0,
+      rowMajor: false,
+      blockStride: blockSize,
+    });
+    for (let k = 0; k < decl.arraySize; k++) {
+      const leaves: BlockLeaf[] = [];
+      emitMember(`${decl.instanceName}[${k}].`, k * blockSize, blockSize, leaves);
+      leafGroups.push(leaves);
+    }
+  } else if (decl.instanceName !== null) {
+    const leaves: BlockLeaf[] = [];
+    emitMember(`${decl.instanceName}.`, 0, undefined, leaves);
+    leafGroups.push(leaves);
+  } else {
+    const leaves: BlockLeaf[] = [];
+    emitMember('', 0, undefined, leaves);
+    leafGroups.push(leaves);
+  }
+  return {
+    blockName: decl.name,
+    instanceName: decl.instanceName,
+    arraySize: decl.arraySize,
+    size: blockSize,
+    members,
+    leafGroups,
+    declMembers: decl.members,
+  };
+}
+
+/** Two blocks with the same name must have IDENTICAL layouts (member path
+ *  sets, every byte offset/stride AND the member types — a float member vs a
+ *  vec2 member at the same offset is still a mismatch) to share an index. */
+function blockLayoutsEqual(a: BlockLayout, b: BlockLayout): boolean {
+  if (a.size !== b.size || a.members.size !== b.members.size) return false;
+  if (a.declMembers.length !== b.declMembers.length) return false;
+  for (let i = 0; i < a.declMembers.length; i++) {
+    if (a.declMembers[i].name !== b.declMembers[i].name || !typeEquals(a.declMembers[i].type, b.declMembers[i].type)) {
+      return false;
+    }
+  }
+  for (const [k, ea] of a.members) {
+    const eb = b.members.get(k);
+    if (
+      eb === undefined ||
+      ea.offset !== eb.offset ||
+      ea.arrayStride !== eb.arrayStride ||
+      ea.matrixStride !== eb.matrixStride ||
+      ea.rowMajor !== eb.rowMajor ||
+      (ea.blockStride ?? 0) !== (eb.blockStride ?? 0)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+interface BlockLayoutResult {
+  blocks: Map<number, Map<string, BlockMemberLayout>>;
+  blockIndices: Map<string, number>;
+  infos: UniformBlockInfo[];
+  /** Block members as Program.uniforms entries (location -1, blockIndex ≥ 0). */
+  uniformInfos: UniformInfo[];
+}
+
+/**
+ * Compute the program's uniform-block layout: vs blocks first (declaration
+ * order), then fs-only blocks; same-named blocks must have identical layouts
+ * and SHARE one index. Checks per-stage block counts, block sizes and the
+ * combined count against the limits. Block members are kept out of
+ * uniformSlots/uniformMap (getUniformLocation returns null for them — spec).
+ */
+function layoutBlocks(vs: Shader, fs: Shader, limits: LinkLimits): BlockLayoutResult | { error: string } {
+  const byName = new Map<string, BlockLayout>();
+  const order: string[] = [];
+  let vsCount = 0;
+  let fsCount = 0;
+  let combined = 0;
+  const addStage = (shader: Shader, stage: 'vs' | 'fs'): string | null => {
+    for (const decl of shader.info.uniformBlocks) {
+      const lay = layoutBlock(decl);
+      if (stage === 'vs') vsCount++;
+      else fsCount++;
+      if (lay.size > limits.maxUniformBlockSize) {
+        return `linker: uniform block '${decl.name}' exceeds maxUniformBlockSize (${lay.size}, max ${limits.maxUniformBlockSize})`;
+      }
+      const ex = byName.get(decl.name);
+      if (ex !== undefined) {
+        if (!blockLayoutsEqual(ex, lay)) {
+          return `linker: uniform block '${decl.name}' layout mismatch`;
+        }
+      } else {
+        byName.set(decl.name, lay);
+        order.push(decl.name);
+        combined++;
+      }
+    }
+    return null;
+  };
+  const ev = addStage(vs, 'vs');
+  if (ev !== null) return { error: ev };
+  const ef = addStage(fs, 'fs');
+  if (ef !== null) return { error: ef };
+  if (vsCount > limits.maxVertexUniformBlocks) {
+    return { error: `linker: too many vertex uniform blocks (${vsCount}, max ${limits.maxVertexUniformBlocks})` };
+  }
+  if (fsCount > limits.maxFragmentUniformBlocks) {
+    return { error: `linker: too many fragment uniform blocks (${fsCount}, max ${limits.maxFragmentUniformBlocks})` };
+  }
+  if (combined > limits.maxCombinedUniformBlocks) {
+    return { error: `linker: too many uniform blocks (${combined}, max ${limits.maxCombinedUniformBlocks})` };
+  }
+
+  const blocks = new Map<number, Map<string, BlockMemberLayout>>();
+  const blockIndices = new Map<string, number>();
+  const infos: UniformBlockInfo[] = [];
+  const uniformInfos: UniformInfo[] = [];
+  for (let idx = 0; idx < order.length; idx++) {
+    const lay = byName.get(order[idx])!;
+    blocks.set(idx, lay.members);
+    if (lay.instanceName !== null) {
+      // Named blocks (arrayed or not): the instance name resolves the block.
+      blockIndices.set(lay.instanceName, idx);
+    } else {
+      // Instance-less blocks: every member ROOT name resolves the block.
+      for (const m of lay.members.keys()) {
+        const root = m.split('.')[0].split('[')[0];
+        blockIndices.set(root, idx);
+      }
+    }
+    const memberInfo = (l: BlockLeaf): UniformBlockMemberInfo => ({
+      name: l.path,
+      offset: l.offset,
+      type: toGLenum(l.type),
+      size: l.size,
+      arrayStride: l.arrayStride,
+      matrixStride: l.matrixStride,
+      rowMajor: false,
+    });
+    const leafInfos = (group: BlockLeaf[]): UniformBlockMemberInfo[] => group.map(memberInfo);
+    if (lay.arraySize > 1) {
+      // Arrayed blocks: one UniformBlockInfo PER ELEMENT ('b[0]', 'b[1]'...).
+      for (let k = 0; k < lay.arraySize; k++) {
+        infos.push({ name: `${lay.instanceName}[${k}]`, index: idx, size: lay.size, activeUniforms: leafInfos(lay.leafGroups[k]) });
+      }
+      for (const group of lay.leafGroups) {
+        for (const l of group) {
+          uniformInfos.push({
+            name: l.path,
+            location: -1,
+            type: toGLenum(l.type),
+            size: l.size,
+            components: typeComponents(l.type),
+            integral: isIntegral(l.type),
+            blockIndex: idx,
+            sampler: false,
+          });
+        }
+      }
+    } else {
+      // Non-arrayed blocks: one UniformBlockInfo named by the BLOCK name
+      // (getUniformBlockIndex/getActiveUniformBlockName query block names).
+      infos.push({ name: lay.blockName, index: idx, size: lay.size, activeUniforms: leafInfos(lay.leafGroups[0]) });
+      for (const l of lay.leafGroups[0]) {
+        uniformInfos.push({
+          name: l.path,
+          location: -1,
+          type: toGLenum(l.type),
+          size: l.size,
+          components: typeComponents(l.type),
+          integral: isIntegral(l.type),
+          blockIndex: idx,
+          sampler: false,
+        });
+      }
+    }
+  }
+  return { blocks, blockIndices, infos, uniformInfos };
+}
+
+/* ------------------------------------------------------------------ */
+/* Varying matching + packing                                          */
+/* ------------------------------------------------------------------ */
+
+/** One packed varying leaf (plain varyings are one leaf; struct varyings
+ *  flatten to one leaf per member). `type` is the element type (arrays carry
+ *  their size in `arraySize` for plain varyings and inside `type` for struct
+ *  members). */
+interface VaryingLeaf {
+  key: string;
+  type: GLSLType;
+  arraySize: number;
+}
+
+/** Flatten a struct varying into per-member leaves ('v.m'; nested structs
+ *  recurse; member arrays keep their array structure inside the type). */
+function flattenVaryingStruct(prefix: string, t: GLSLType, out: VaryingLeaf[]): void {
+  if (t.kind !== 'struct') {
+    out.push({ key: prefix, type: t, arraySize: 1 });
+    return;
+  }
+  for (const m of t.members) flattenVaryingStruct(`${prefix}.${m.name}`, m.type, out);
+}
+
+interface VaryingLayoutResult {
+  map: Map<string, VaryingLayout>;
+  infos: VaryingInfo[];
+}
+
+/** The linker-side match identity of one varying: plain varyings match by
+ *  NAME; varying-interface-block members match by (blockName, memberName) —
+ *  instance names may differ between stages (`out VS_OUT { vec4 c; } a;` vs
+ *  `in VS_OUT { vec4 c; } b;`). ':' cannot appear in GLSL identifiers, so the
+ *  composite keys never collide. */
+function varyingMatchKey(v: { blockName: string | null; name: string }): string {
+  if (v.blockName === null) return `v:${v.name}`;
+  const idx = v.name.lastIndexOf('.');
+  const member = idx >= 0 ? v.name.slice(idx + 1) : v.name;
+  return `b:${v.blockName}:${member}`;
+}
+
+/** Match every fragment input against a vertex output (name / element type /
+ *  array size / flat; block members by (blockName, memberName)) and pack in
+ *  VERTEX declaration order (dense flat components, cumulative offsets).
+ *  Extra vertex outputs are packed too — they are active varyings (raster
+ *  interpolates the whole record). Struct varyings flatten to per-member
+ *  leaves, each with its own (index, offset).
+ *
+ *  VaryingLayout keys: plain varyings + instance-less block members use their
+ *  bare name; named block members use the FULL '<instance>.<member>' path.
+ *  Because block instance names may differ between stages, every matched block
+ *  member emits layout entries for BOTH the vertex key (write side) and the
+ *  fragment key (read side), sharing one (index, offset) — Program.varyings
+ *  keeps ONE entry per vertex leaf. */
+function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayoutResult | { error: string } {
+  const vsByKey = new Map<string, typeof vs.info.varyings[number]>();
+  for (const v of vs.info.varyings) vsByKey.set(varyingMatchKey(v), v);
+  const fsByKey = new Map<string, typeof fs.info.varyings[number]>();
+  for (const f of fs.info.varyings) {
+    const key = varyingMatchKey(f);
+    fsByKey.set(key, f);
+    const v = vsByKey.get(key);
+    if (!v) return { error: `linker: varying '${f.name}' not matched` };
+    if (!typeEquals(f.type, v.type) || f.arraySize !== v.arraySize) {
+      return { error: `linker: varying '${f.name}' type mismatch (${typeName(v.type)} vs ${typeName(f.type)})` };
+    }
+    if (f.flat !== v.flat) {
+      return { error: `linker: varying '${f.name}' flat qualifier mismatch` };
+    }
+  }
+  const map = new Map<string, VaryingLayout>();
+  const infos: VaryingInfo[] = [];
+  let offset = 0;
+  let vectors = 0;
+  for (const v of vs.info.varyings) {
+    let leaves: VaryingLeaf[];
+    if (v.type.kind === 'struct') {
+      if (v.arraySize > 1) {
+        // Struct-array varyings need a codegen-side element-offset channel
+        // (subP resets the const-index flatOff on member descent) — the
+        // codegen walker cannot resolve them today.
+        return { error: `linker: struct-array varying '${v.name}' not supported` };
+      }
+      leaves = [];
+      flattenVaryingStruct(v.name, v.type, leaves);
+    } else {
+      leaves = [{ key: v.name, type: v.type, arraySize: v.arraySize }];
+    }
+    // Fragment-side twin leaves (block members only — the fs instance name may
+    // differ; the matched decl's types equal the vertex's, so the leaf shapes
+    // agree).
+    let fsLeaves: VaryingLeaf[] | null = null;
+    if (v.blockName !== null) {
+      const f = fsByKey.get(varyingMatchKey(v));
+      if (f !== undefined) {
+        fsLeaves = [];
+        if (f.type.kind === 'struct') flattenVaryingStruct(f.name, f.type, fsLeaves);
+        else fsLeaves.push({ key: f.name, type: f.type, arraySize: f.arraySize });
+        if (fsLeaves.length !== leaves.length) {
+          // Struct type equality is BY NAME — same-named structs with
+          // different members would flatten differently; treat as a mismatch.
+          return { error: `linker: varying '${v.name}' struct layout mismatch` };
+        }
+      }
+    }
+    for (let li = 0; li < leaves.length; li++) {
+      const leaf = leaves[li];
+      const elemComps = leaf.type.kind === 'array' ? flatComponents(leaf.type.element) : flatComponents(leaf.type);
+      const comps = flatComponents(leaf.type) * leaf.arraySize;
+      const layout: VaryingLayout = { index: infos.length, offset, components: comps, elemComponents: elemComps, flat: v.flat };
+      map.set(leaf.key, layout);
+      if (fsLeaves !== null) map.set(fsLeaves[li].key, layout);
+      infos.push({ name: leaf.key, type: toGLenum(leaf.type), components: comps, flat: v.flat });
+      offset += comps;
+      vectors += Math.ceil(comps / 4);
+    }
+  }
+  if (vectors > limits.maxVaryingVectors) {
+    return { error: `linker: too many varying vectors (${vectors}, max ${limits.maxVaryingVectors})` };
+  }
+  return { map, infos };
+}
+
+/* ------------------------------------------------------------------ */
+/* Transform feedback (WebGL2, opts.transformFeedback)                 */
+/* ------------------------------------------------------------------ */
+
+const GL_FLOAT_VEC4 = 0x8b52;
+
+/**
+ * Validate the transform-feedback capture spec and compute
+ * `Program.transformFeedbackVaryings`. Every name must be an ACTIVE vertex
+ * varying (block members accept the full '<instance>.<member>' path or the
+ * bare member name — the instance prefix is stripped; arrays capture the
+ * whole array) or 'gl_Position'. SEPARATE_ATTRIBS: count ≤
+ * maxTransformFeedbackSeparateAttribs and each varying's total components ≤
+ * maxTransformFeedbackSeparateComponents. INTERLEAVED_ATTRIBS: total
+ * components ≤ maxTransformFeedbackInterleavedComponents.
+ */
+function layoutTransformFeedback(
+  vs: Shader,
+  spec: TransformFeedbackSpec | undefined,
+  limits: LinkLimits,
+): { varyings: TransformFeedbackVarying[] } | { error: string } {
+  if (spec === undefined) return { varyings: [] };
+  if (vs.version !== 300) {
+    return { error: 'linker: transform feedback requires GLSL ES 3.00' };
+  }
+  const captured: TransformFeedbackVarying[] = [];
+  let totalComponents = 0;
+  for (const name of spec.varyings) {
+    // Arrays may be specified with or without the '[0]' suffix (GL practice).
+    const base = name.endsWith('[0]') ? name.slice(0, -3) : name;
+    let found: (typeof vs.info.varyings)[number] | 'gl_Position' | null = null;
+    if (base === 'gl_Position') {
+      found = 'gl_Position';
+    } else {
+      for (const v of vs.info.varyings) {
+        if (v.blockName === null) {
+          if (v.name === base) {
+            found = v;
+            break;
+          }
+        } else {
+          // Block member: accept the full '<instance>.<member>' key or the
+          // bare member name (instance prefix stripped).
+          const idx = v.name.lastIndexOf('.');
+          const member = idx >= 0 ? v.name.slice(idx + 1) : v.name;
+          if (v.name === base || member === base) {
+            found = v;
+            break;
+          }
+        }
+      }
+    }
+    if (found === null) {
+      return { error: `linker: transform feedback varying '${name}' is not an active vertex varying` };
+    }
+    const type = found === 'gl_Position' ? GL_FLOAT_VEC4 : toGLenum(found.type);
+    const size = found === 'gl_Position' ? 1 : found.arraySize;
+    const components = found === 'gl_Position' ? 4 : flatComponents(found.type) * found.arraySize;
+    if (spec.bufferMode === 'SEPARATE_ATTRIBS') {
+      if (captured.length >= limits.maxTransformFeedbackSeparateAttribs) {
+        return {
+          error: `linker: transform feedback separate attribs exceed maxTransformFeedbackSeparateAttribs (${limits.maxTransformFeedbackSeparateAttribs})`,
+        };
+      }
+      if (components > limits.maxTransformFeedbackSeparateComponents) {
+        return {
+          error: `linker: transform feedback varying '${name}' exceeds maxTransformFeedbackSeparateComponents (${components}, max ${limits.maxTransformFeedbackSeparateComponents})`,
+        };
+      }
+    }
+    totalComponents += components;
+    captured.push({ name, type, size });
+  }
+  if (spec.bufferMode === 'INTERLEAVED_ATTRIBS' && totalComponents > limits.maxTransformFeedbackInterleavedComponents) {
+    return {
+      error: `linker: transform feedback interleaved components exceed maxTransformFeedbackInterleavedComponents (${totalComponents}, max ${limits.maxTransformFeedbackInterleavedComponents})`,
+    };
+  }
+  return { varyings: captured };
+}
+
+/* ------------------------------------------------------------------ */
+/* Sampler explicit-binding conflicts (ES 3.00 layout(binding=))       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Two ACTIVE samplers of DIFFERENT types with the SAME EXPLICIT binding
+ * (`UniformDecl.binding` non-null) are a link error (a texture unit cannot
+ * serve two sampler kinds). Samplers WITHOUT an explicit binding default to
+ * unit 0 — the strict GLSL ES 3.00 rule would flag two such samplers as
+ * conflicting too, but WebGL practice (and the CTS) only rejects EXPLICIT
+ * binding conflicts, so default-0 samplers link fine here. Also enforces
+ * maxCombinedTextureImageUnits (arrays occupy `size` units).
+ * "Active" is approximated as "declared" — no usage analysis exists.
+ */
+function checkSamplerBindings(merged: MergedUniform[], limits: LinkLimits): string | null {
+  const byBinding = new Map<number, { type: GLSLType; name: string }>();
+  let totalUnits = 0;
+  for (const u of merged) {
+    if (!isSampler(u.decl.type)) continue;
+    const t = u.decl.type;
+    const elem = t.kind === 'array' ? t.element : t;
+    totalUnits += t.kind === 'array' ? (t.size ?? 1) : 1;
+    const binding = u.decl.binding;
+    if (binding !== null) {
+      const ex = byBinding.get(binding);
+      if (ex !== undefined && !typeEquals(ex.type, elem)) {
+        return `linker: sampler binding conflict: units ${binding} (${ex.name} vs ${u.decl.name})`;
+      }
+      if (ex === undefined) byBinding.set(binding, { type: elem, name: u.decl.name });
+    }
+  }
+  if (totalUnits > limits.maxCombinedTextureImageUnits) {
+    return `linker: too many texture units (${totalUnits}, max ${limits.maxCombinedTextureImageUnits})`;
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Attributes                                                          */
+/* ------------------------------------------------------------------ */
+
+interface AttribLayoutResult {
+  map: Map<string, number>;
+  infos: AttribInfo[];
+}
+
+/** Assign attribute locations: explicit layout(location=) first, then
+ *  bindAttribLocation (names WITHOUT explicit locations only), then first-free
+ *  in declaration order. A matC attribute occupies C consecutive locations;
+ *  an array of N elements occupies N × elemLocations. */
+function layoutAttributes(vs: Shader, opts: LinkOptions, limits: LinkLimits): AttribLayoutResult | { error: string } {
+  const occupied: { start: number; end: number; name: string }[] = [];
+  const map = new Map<string, number>();
+  const infos: AttribInfo[] = [];
+  const bindings = opts.attribBindings;
+
+  const claim = (name: string, start: number, end: number): string | null => {
+    for (const o of occupied) {
+      if (start < o.end && o.start < end) {
+        return `linker: attribute '${name}' location ${start} conflicts with '${o.name}'`;
+      }
+    }
+    occupied.push({ start, end, name });
+    return null;
+  };
+  const firstFree = (need: number): number => {
+    let loc = 0;
+    for (;;) {
+      let ok = true;
+      for (const o of occupied) {
+        if (loc < o.end && o.start < loc + need) {
+          loc = o.end;
+          ok = false;
+          break;
+        }
+      }
+      if (ok) return loc;
+    }
+  };
+
+  for (const a of vs.info.attributes) {
+    const elemLocations = a.type.kind === 'matrix' ? a.type.cols : 1;
+    const need = elemLocations * a.arraySize;
+    let loc: number;
+    if (a.location !== null) loc = a.location;
+    else if (bindings !== undefined && bindings.has(a.name)) loc = bindings.get(a.name)!;
+    else loc = firstFree(need);
+    if (loc < 0) return { error: `linker: attribute '${a.name}' has a negative location` };
+    if (loc + need > limits.maxVertexAttribs) {
+      return { error: `linker: attribute '${a.name}' exceeds maxVertexAttribs (${limits.maxVertexAttribs})` };
+    }
+    const err = claim(a.name, loc, loc + need);
+    if (err !== null) return { error: err };
+    map.set(a.name, loc);
+    infos.push({
+      name: a.name,
+      location: loc,
+      type: toGLenum(a.type),
+      size: a.arraySize,
+      components: typeComponents(a.type),
+      integral: isIntegral(a.type),
+    });
+  }
+  return { map, infos };
+}
+
+/* ------------------------------------------------------------------ */
+/* Fragment outputs                                                    */
+/* ------------------------------------------------------------------ */
+
+interface OutputLayoutResult {
+  map: Map<string, number>;
+  outputs: { location: number; type: number }[];
+}
+
+/** Fragment output locations. ES 1.00: gl_FragColor → 0, gl_FragData[i] → i
+ *  (layout key 'gl_FragData' → base 0; codegen adds the index). ES 3.00: user
+ *  outs with explicit layout(location=) or auto-assigned 0,1,2,... */
+function layoutOutputs(fs: Shader, limits: LinkLimits): OutputLayoutResult | { error: string } {
+  const map = new Map<string, number>();
+  const outputs: { location: number; type: number }[] = [];
+  if (fs.version === 100) {
+    for (const o of fs.info.outputs) {
+      if (o.name === 'gl_FragColor') {
+        map.set('gl_FragColor', 0);
+        outputs.push({ location: 0, type: toGLenum(o.type) });
+      } else if (o.name.startsWith('gl_FragData')) {
+        const idx = o.index ?? 0;
+        if (idx >= limits.maxDrawBuffers) {
+          return { error: `linker: gl_FragData[${idx}] exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
+        }
+        map.set('gl_FragData', 0);
+        outputs.push({ location: idx, type: toGLenum(o.type) });
+      }
+    }
+  } else {
+    const occupied = new Set<number>();
+    let next = 0;
+    for (const o of fs.info.outputs) {
+      let loc = o.location;
+      if (loc === null) {
+        while (occupied.has(next)) next++;
+        loc = next;
+      }
+      if (loc >= limits.maxDrawBuffers) {
+        return { error: `linker: output '${o.name}' location ${loc} exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
+      }
+      if (occupied.has(loc)) {
+        return { error: `linker: output '${o.name}' location ${loc} conflicts with another output` };
+      }
+      occupied.add(loc);
+      map.set(o.name, loc);
+      outputs.push({ location: loc, type: toGLenum(o.type) });
+    }
+  }
+  return { map, outputs };
+}
+
+/* ------------------------------------------------------------------ */
+/* Capability merge + deferred-feature rejection                       */
+/* ------------------------------------------------------------------ */
+
+function mergeUses(vs: Shader, fs: Shader): ShaderUses {
+  return {
+    pointSize: vs.info.uses.pointSize || fs.info.uses.pointSize,
+    fragCoord: vs.info.uses.fragCoord || fs.info.uses.fragCoord,
+    frontFacing: vs.info.uses.frontFacing || fs.info.uses.frontFacing,
+    pointCoord: vs.info.uses.pointCoord || fs.info.uses.pointCoord,
+    fragDepth: vs.info.uses.fragDepth || fs.info.uses.fragDepth,
+    vertexId: vs.info.uses.vertexId || fs.info.uses.vertexId,
+    instanceId: vs.info.uses.instanceId || fs.info.uses.instanceId,
+    derivatives: vs.info.uses.derivatives || fs.info.uses.derivatives,
+  };
+}
+
+/** Varying interface blocks (ES 3.00 `out`/`in`): reject the combos the
+ *  packer/codegen do not support — vertex `in` blocks, fragment `out` blocks,
+ *  and ARRAYED blocks (block arrays: the codegen walker loses const element
+ *  indices on member descent (subP resets flatOff), so `a[i].c` cannot be
+ *  packed correctly without codegen changes). Plain (non-arrayed) vertex
+ *  `out` / fragment `in` blocks are fully supported. */
+function varyingBlockError(vs: Shader, fs: Shader): string | null {
+  const stages: [Shader, 'VERTEX' | 'FRAGMENT'][] = [
+    [vs, 'VERTEX'],
+    [fs, 'FRAGMENT'],
+  ];
+  for (const [shader, stage] of stages) {
+    for (const d of shader.ast.declarations) {
+      if (d.kind !== 'interface-block') continue;
+      const storage = d.qualifiers.storage;
+      if (storage !== 'out' && storage !== 'in') continue;
+      const valid = (stage === 'VERTEX' && storage === 'out') || (stage === 'FRAGMENT' && storage === 'in');
+      if (!valid) {
+        return `linker: ${stage === 'VERTEX' ? 'vertex input' : 'fragment output'} interface blocks not supported`;
+      }
+      if (d.arrayDims.length > 0) {
+        return `linker: arrayed varying interface blocks not supported`;
+      }
+    }
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* linkProgram                                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Link a vertex+fragment shader pair. See the file header for the layout
+ * conventions. On success the returned Program is fully executable:
+ * `program.vertex.run(ctx)` / `program.fragment.run(ctx)` evaluate one
+ * vertex / one fragment with the stores, scratch and out buffers provided in
+ * the exec ctx (see program.ts).
+ */
+export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkResult {
+  if (vs.version !== fs.version) {
+    return { ok: false, log: 'linker: vertex and fragment shader versions differ' };
+  }
+  const vbe = varyingBlockError(vs, fs);
+  if (vbe !== null) return { ok: false, log: vbe };
+
+  const limits = resolveLimits(vs.version, opts);
+
+  const merged = mergeUniforms(vs, fs);
+  if ('error' in merged) return { ok: false, log: merged.error };
+  const sb = checkSamplerBindings(merged, limits);
+  if (sb !== null) return { ok: false, log: sb };
+  const ul = layoutUniforms(merged, limits);
+  if ('error' in ul) return { ok: false, log: ul.error };
+
+  const bl = layoutBlocks(vs, fs, limits);
+  if ('error' in bl) return { ok: false, log: bl.error };
+
+  const vl = layoutVaryings(vs, fs, limits);
+  if ('error' in vl) return { ok: false, log: vl.error };
+
+  const tf = layoutTransformFeedback(vs, opts?.transformFeedback, limits);
+  if ('error' in tf) return { ok: false, log: tf.error };
+
+  const al = layoutAttributes(vs, opts ?? {}, limits);
+  if ('error' in al) return { ok: false, log: al.error };
+
+  const ol = layoutOutputs(fs, limits);
+  if ('error' in ol) return { ok: false, log: ol.error };
+
+  const uses = mergeUses(vs, fs);
+  const layout: CodegenLayout = {
+    version: vs.version,
+    uniformSlots: ul.slots,
+    blocks: bl.blocks,
+    blockIndices: bl.blockIndices,
+    varyings: vl.map,
+    attribLocations: al.map,
+    outputLocations: ol.map,
+    uses,
+  };
+
+  let vsRes: StageCodegenResult;
+  let fsRes: StageCodegenResult;
+  try {
+    vsRes = generateVertexStage(vs.ast, layout);
+    fsRes = generateFragmentStage(fs.ast, layout);
+  } catch (e) {
+    return { ok: false, log: `linker: codegen failed: ${(e as Error).message}` };
+  }
+  let vertexFn: (ctx: VertexExecCtx, R: unknown) => void;
+  let fragmentFn: (ctx: FragmentExecCtx, R: unknown) => void;
+  try {
+    vertexFn = new Function('ctx', 'R', vsRes.body) as (ctx: VertexExecCtx, R: unknown) => void;
+    fragmentFn = new Function('ctx', 'R', fsRes.body) as (ctx: FragmentExecCtx, R: unknown) => void;
+  } catch (e) {
+    return { ok: false, log: `linker: generated code failed to compile: ${(e as Error).message}` };
+  }
+
+  return {
+    ok: true,
+    program: {
+      attributes: al.infos,
+      uniforms: [...ul.uniforms, ...bl.uniformInfos],
+      uniformBlocks: bl.infos,
+      varyings: vl.infos,
+      vertex: { run: (ctx) => vertexFn(ctx, R) },
+      fragment: {
+        run: (ctx) => fragmentFn(ctx, R),
+        usesDerivatives: uses.derivatives,
+        usesFragDepth: uses.fragDepth,
+        outputs: ol.outputs,
+      },
+      usesPointSize: uses.pointSize,
+      usesGLPointCoord: uses.pointCoord,
+      usesFragCoord: uses.fragCoord,
+      usesFrontFacing: uses.frontFacing,
+      uniformMap: ul.uniformMap,
+      floatStore: new Float32Array(ul.floatMax),
+      intStore: new Int32Array(ul.intMax),
+      scratchSize: Math.max(vsRes.scratchSize, fsRes.scratchSize),
+      intScratchSize: Math.max(vsRes.intScratchSize, fsRes.intScratchSize),
+      transformFeedbackVaryings: tf.varyings,
+    },
+  };
+}

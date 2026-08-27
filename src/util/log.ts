@@ -41,25 +41,28 @@ export interface Logger {
   error(...args: unknown[]): void;
 }
 
+/** Current global level; consulted at call time by every logger. */
+let currentLevel: LogLevel = DEFAULT_LOG_LEVEL;
+
 /**
  * Sets the global log level. Affects all existing and future loggers.
  */
 export function setLogLevel(level: LogLevel): void {
-  throw new Error('not implemented');
+  currentLevel = level;
 }
 
 /**
  * Returns the current global log level.
  */
 export function getLogLevel(): LogLevel {
-  throw new Error('not implemented');
+  return currentLevel;
 }
 
 /**
  * True iff messages at `level` are currently emitted.
  */
 export function isLogEnabled(level: LogLevel): boolean {
-  throw new Error('not implemented');
+  return LOG_LEVEL_RANK[level] >= LOG_LEVEL_RANK[currentLevel];
 }
 
 /**
@@ -68,5 +71,16 @@ export function isLogEnabled(level: LogLevel): boolean {
  * level. Cheap to call; create once per module at module scope.
  */
 export function createLogger(namespace: string): Logger {
-  throw new Error('not implemented');
+  const emit = (method: 'debug' | 'info' | 'warn' | 'error', level: LogLevel, args: unknown[]): void => {
+    // Read `currentLevel` at call time so setLogLevel affects existing loggers.
+    if (LOG_LEVEL_RANK[level] >= LOG_LEVEL_RANK[currentLevel]) {
+      (console[method] as (...a: unknown[]) => void)(`[${namespace}]`, ...args);
+    }
+  };
+  return {
+    debug: (...args: unknown[]) => emit('debug', 'debug', args),
+    info: (...args: unknown[]) => emit('info', 'info', args),
+    warn: (...args: unknown[]) => emit('warn', 'warn', args),
+    error: (...args: unknown[]) => emit('error', 'error', args),
+  };
 }

@@ -1,0 +1,1194 @@
+/**
+ * semantics-expr.ts — expression semantic analysis for GLSL ES 1.00 / 3.00.
+ *
+ * `analyzeExpr` annotates every expression node in place:
+ * - `resolvedType` — the GLSLType of the expression (undefined on error).
+ * - `constValue` — folded scalar constant (number for numeric, boolean for
+ *   bool; undefined when not constant). Only SCALAR constants are folded
+ *   (vectors/matrices/arrays/structs have no constValue representation).
+ * - `lvalue` — true when the expression can be an assignment/++/-- target.
+ *
+ * Covers: literals, identifier resolution (locals → globals → builtin
+ * variables → gl_Max* constants, with stage filtering and writability),
+ * unary/binary operators (with ES 1.00 int→float / ES 3.00 int→uint→float
+ * implicit conversions), assignment (incl. compound), ternary, indexing,
+ * struct member access + vector swizzles, and calls (constructors, builtin
+ * overload resolution with per-argument scoring, user functions with
+ * recursion edges recorded on `ctx.currentFunction.calls`).
+ *
+ * The runtime dependency on `builtinType` from semantics.js is a benign
+ * import cycle (function declarations only — never called at module init).
+ */
+import type {
+  AssignExpr, BinaryExpr, BinaryOp, CallExpr, CommaExpr, Expr, IdentifierExpr,
+  IndexExpr, MemberExpr, TernaryExpr, UnaryExpr,
+} from './ast.js';
+import type { BaseScalar, GLSLType } from './types.js';
+import { typeEquals, typeName } from './types.js';
+import type { BuiltinSignature } from './builtins/index.js';
+import { builtinSignatures, extensionFunctions, matches } from './builtins/index.js';
+import type { FnSymbol, Scope, SemContext, StructSymbol } from './semantics.js';
+import { builtinType } from './semantics.js';
+
+/* ------------------------------------------------------------------ */
+/* Implicit conversions (shared with declaration/statement analysis)   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The common base of two scalar bases after implicit conversion, or null.
+ * ES 1.00: int→float only. ES 3.00: int→uint, int→float, uint→float.
+ * bool NEVER converts implicitly.
+ */
+function commonBase(a: BaseScalar, b: BaseScalar, version: 100 | 300): BaseScalar | null {
+  if (a === b) return a;
+  if (version === 100) {
+    if ((a === 'int' && b === 'float') || (a === 'float' && b === 'int')) return 'float';
+    return null;
+  }
+  if (a === 'float' || b === 'float') return 'float';
+  if ((a === 'int' && b === 'uint') || (a === 'uint' && b === 'int')) return 'uint';
+  return null;
+}
+
+/**
+ * True when `from` can be implicitly converted to `to` in `version`
+ * (exact match, or scalar/vector of same size with a legal base promotion).
+ */
+export function convertible(from: GLSLType, to: GLSLType, version: 100 | 300): boolean {
+  if (typeEquals(from, to)) return true;
+  if (from.kind === 'scalar' && to.kind === 'scalar') return commonBase(from.base, to.base, version) === to.base;
+  if (from.kind === 'vector' && to.kind === 'vector' && from.size === to.size) {
+    return commonBase(from.base, to.base, version) === to.base;
+  }
+  return false;
+}
+
+/** Convert a folded scalar constant from one base to another (constructor + implicit conversions). */
+function convertConst(v: number | boolean, from: BaseScalar, to: BaseScalar): number | boolean {
+  if (typeof v === 'boolean') {
+    return to === 'bool' ? v : v ? 1 : 0;
+  }
+  if (from === to) return v;
+  switch (from) {
+    case 'int':
+      switch (to) {
+        case 'float': return v;
+        case 'uint': return v >>> 0;
+        case 'bool': return v !== 0;
+      }
+      break;
+    case 'uint':
+      switch (to) {
+        case 'float': return v;
+        case 'int': return v | 0;
+        case 'bool': return v !== 0;
+      }
+      break;
+    case 'float':
+      switch (to) {
+        case 'int': return Math.trunc(v) | 0;
+        case 'uint': return Math.trunc(v) >>> 0;
+        case 'bool': return v !== 0;
+      }
+      break;
+    case 'bool':
+      break; // handled above
+  }
+  return v;
+}
+
+/* ------------------------------------------------------------------ */
+/* Small type predicates                                               */
+/* ------------------------------------------------------------------ */
+
+function isNumericScalarOrVector(t: GLSLType): boolean {
+  return (t.kind === 'scalar' || t.kind === 'vector') && t.base !== 'bool';
+}
+
+function isIntScalarOrVector(t: GLSLType): boolean {
+  return (t.kind === 'scalar' || t.kind === 'vector') && (t.base === 'int' || t.base === 'uint');
+}
+
+/** The base of a scalar/vector (fold paths only ever see scalars); float otherwise. */
+function scalarBase(t: GLSLType): BaseScalar {
+  return t.kind === 'scalar' || t.kind === 'vector' ? t.base : 'float';
+}
+
+/** Common type of two numeric scalars/vectors (shape must match), or null. */
+function sameShapeType(lt: GLSLType, rt: GLSLType, version: 100 | 300): GLSLType | null {
+  if (!isNumericScalarOrVector(lt) || !isNumericScalarOrVector(rt)) return null;
+  if (lt.kind === 'scalar' && rt.kind === 'scalar') {
+    const b = commonBase(lt.base, rt.base, version);
+    return b === null ? null : { kind: 'scalar', base: b };
+  }
+  if (lt.kind === 'vector' && rt.kind === 'vector') {
+    if (lt.size !== rt.size) return null;
+    const b = commonBase(lt.base, rt.base, version);
+    return b === null ? null : { kind: 'vector', base: b, size: lt.size };
+  }
+  // scalar + vector (component-wise application)
+  if (lt.kind === 'vector' && rt.kind === 'scalar') {
+    const b = commonBase(lt.base, rt.base, version);
+    return b === null ? null : { kind: 'vector', base: b, size: lt.size };
+  }
+  if (lt.kind === 'scalar' && rt.kind === 'vector') {
+    const b = commonBase(rt.base, lt.base, version);
+    return b === null ? null : { kind: 'vector', base: b, size: rt.size };
+  }
+  return null;
+}
+
+/**
+ * Result type of the arithmetic binary operators (+ - * /). Returns null when
+ * the operand combination is not legal; the caller reports the error.
+ * Matrix rules: scalar applied component-wise; matrix±matrix same dims;
+ * matrix*matrix: (matC2xR2)*(matC1xR1) legal iff R1==C2 → matC2xR1
+ * (ES 1.00 has only square matrices, so this reduces to same-dims);
+ * matrix*vector: matCxR * vecR → vecC; vector*matrix: vecC * matCxR → vecR.
+ */
+function arithmeticType(op: BinaryOp, lt: GLSLType, rt: GLSLType, version: 100 | 300): GLSLType | null {
+  const ss = sameShapeType(lt, rt, version);
+  if (ss !== null) return ss;
+  if (lt.kind === 'matrix' || rt.kind === 'matrix') {
+    if (op === '*') {
+      if (lt.kind === 'scalar' && rt.kind === 'matrix') return rt;
+      if (lt.kind === 'matrix' && rt.kind === 'scalar') return lt;
+      if (lt.kind === 'matrix' && rt.kind === 'matrix') {
+        if (lt.rows !== rt.cols) return null;
+        return { kind: 'matrix', cols: rt.cols, rows: lt.rows };
+      }
+      if (lt.kind === 'matrix' && rt.kind === 'vector') {
+        if (rt.base !== 'float' || rt.size !== lt.rows) return null;
+        return { kind: 'vector', base: 'float', size: lt.cols };
+      }
+      if (lt.kind === 'vector' && rt.kind === 'matrix') {
+        if (lt.base !== 'float' || lt.size !== rt.cols) return null;
+        return { kind: 'vector', base: 'float', size: rt.rows };
+      }
+      return null;
+    }
+    // + - / with matrices: same dims, or scalar applied component-wise
+    if (lt.kind === 'matrix' && rt.kind === 'matrix') {
+      if (lt.cols !== rt.cols || lt.rows !== rt.rows) return null;
+      return lt;
+    }
+    if (lt.kind === 'matrix' && rt.kind === 'scalar') return rt.base === 'bool' ? null : lt;
+    if (lt.kind === 'scalar' && rt.kind === 'matrix') return lt.base === 'bool' ? null : rt;
+    return null;
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Constant folding                                                    */
+/* ------------------------------------------------------------------ */
+
+/** Round half to even (GLSL roundEven). */
+function roundEven(x: number): number {
+  const f = Math.floor(x);
+  const d = x - f;
+  if (d < 0.5) return f;
+  if (d > 0.5) return f + 1;
+  return f % 2 === 0 ? f : f + 1;
+}
+
+function smoothstep(e0: number, e1: number, x: number): number {
+  const t = Math.min(Math.max((x - e0) / (e1 - e0), 0), 1);
+  return t * t * (3 - 2 * t);
+}
+
+/** Fold a binary operator with constant scalar operands; undefined when not foldable. */
+function foldBinary(
+  op: BinaryOp,
+  lt: GLSLType,
+  rt: GLSLType,
+  lv: number | boolean,
+  rv: number | boolean,
+  version: 100 | 300,
+): number | boolean | undefined {
+  switch (op) {
+    case '&&': return typeof lv === 'boolean' && typeof rv === 'boolean' ? lv && rv : undefined;
+    case '||': return typeof lv === 'boolean' && typeof rv === 'boolean' ? lv || rv : undefined;
+    case '^^': return typeof lv === 'boolean' && typeof rv === 'boolean' ? lv !== rv : undefined;
+    case '<':
+    case '>':
+    case '<=':
+    case '>=':
+    case '==':
+    case '!=': {
+      if (typeof lv !== 'number' || typeof rv !== 'number') {
+        if ((op === '==' || op === '!=') && typeof lv === 'boolean' && typeof rv === 'boolean') {
+          return op === '==' ? lv === rv : lv !== rv;
+        }
+        return undefined;
+      }
+      const b = commonBase(scalarBase(lt), scalarBase(rt), version);
+      if (b === null) return undefined;
+      const a = convertConst(lv, scalarBase(lt), b) as number;
+      const c = convertConst(rv, scalarBase(rt), b) as number;
+      switch (op) {
+        case '<': return a < c;
+        case '>': return a > c;
+        case '<=': return a <= c;
+        case '>=': return a >= c;
+        default: return a === c;
+      }
+    }
+    default: {
+      if (typeof lv !== 'number' || typeof rv !== 'number') return undefined;
+      let base: BaseScalar;
+      if (op === '<<' || op === '>>') base = scalarBase(lt);
+      else {
+        const b = commonBase(scalarBase(lt), scalarBase(rt), version);
+        if (b === null) return undefined;
+        base = b;
+      }
+      const a = convertConst(lv, scalarBase(lt), base) as number;
+      const c = convertConst(rv, scalarBase(rt), base) as number;
+      switch (op) {
+        case '+': return base === 'float' ? a + c : base === 'uint' ? (a + c) >>> 0 : (a + c) | 0;
+        case '-': return base === 'float' ? a - c : base === 'uint' ? (a - c) >>> 0 : (a - c) | 0;
+        case '*': return base === 'float' ? a * c : base === 'uint' ? (a * c) >>> 0 : (a * c) | 0;
+        case '/': return base === 'float' ? a / c : base === 'uint' ? Math.trunc(a / c) >>> 0 : Math.trunc(a / c) | 0;
+        case '%': return base === 'uint' ? (a % c) >>> 0 : (a % c) | 0;
+        case '<<': return base === 'uint' ? (a << c) >>> 0 : (a << c) | 0;
+        case '>>': return base === 'uint' ? a >>> c : a >> c;
+        case '&': return base === 'uint' ? (a & c) >>> 0 : (a & c) | 0;
+        case '|': return base === 'uint' ? (a | c) >>> 0 : (a | c) | 0;
+        case '^': return base === 'uint' ? (a ^ c) >>> 0 : (a ^ c) | 0;
+      }
+    }
+  }
+}
+
+/**
+ * Fold a builtin function call with all-const arguments (SCALAR path only —
+ * the practical const-eval subset). Returns undefined when the call is not in
+ * the subset or an argument is not constant. Skip: pack/unpack, floatBitsTo*,
+ * vector-typed folds.
+ */
+function foldBuiltin(name: string, ret: GLSLType, args: Expr[]): number | boolean | undefined {
+  if (ret.kind !== 'scalar') return undefined;
+  const vals = args.map((a) => a.constValue);
+  if (vals.some((v) => v === undefined)) return undefined;
+  const x = vals[0] as number;
+  const y = vals[1] as number;
+  const z = vals[2] as number;
+  const w = vals[3] as number;
+  switch (name) {
+    case 'abs': return ret.base === 'int' ? Math.abs(x) | 0 : Math.abs(x);
+    case 'sign': return Math.sign(x);
+    case 'floor': return Math.floor(x);
+    case 'ceil': return Math.ceil(x);
+    case 'trunc': return Math.trunc(x);
+    case 'round': return Math.sign(x) * Math.floor(Math.abs(x) + 0.5);
+    case 'roundEven': return roundEven(x);
+    case 'fract': return x - Math.floor(x);
+    case 'mod': return x - y * Math.floor(x / y);
+    case 'min': return Math.min(x, y);
+    case 'max': return Math.max(x, y);
+    case 'clamp': return Math.min(Math.max(x, y), z);
+    case 'mix': return x * (1 - z) + y * z;
+    case 'step': return x < y ? 1 : 0; // step(edge, x)
+    case 'smoothstep': return smoothstep(x, y, z);
+    case 'sin': return Math.sin(x);
+    case 'cos': return Math.cos(x);
+    case 'tan': return Math.tan(x);
+    case 'asin': return Math.asin(x);
+    case 'acos': return Math.acos(x);
+    case 'atan': return vals.length === 2 ? Math.atan2(x, y) : Math.atan(x);
+    case 'pow': return Math.pow(x, y);
+    case 'exp': return Math.exp(x);
+    case 'log': return Math.log(x);
+    case 'exp2': return Math.pow(2, x);
+    case 'log2': return Math.log2(x);
+    case 'sqrt': return Math.sqrt(x);
+    case 'inversesqrt': return 1 / Math.sqrt(x);
+    case 'radians': return (x * Math.PI) / 180;
+    case 'degrees': return (x * 180) / Math.PI;
+    case 'isnan': return Number.isNaN(x);
+    case 'isinf': return !Number.isFinite(x);
+    // scalar-path vector functions (a scalar IS a 1-component vector)
+    case 'length': return Math.abs(x);
+    case 'distance': return Math.abs(x - y);
+    case 'dot': return x * y;
+    case 'normalize': return x / Math.abs(x);
+    // bitfield helpers (ES 3.00) — signedness follows the RESULT type
+    case 'bitCount': {
+      const v = x >>> 0;
+      let c = 0;
+      for (let i = 0; i < 32; i++) c += (v >>> i) & 1;
+      return c;
+    }
+    case 'findLSB': {
+      const v = x >>> 0;
+      if (v === 0) return -1;
+      for (let i = 0; i < 32; i++) if ((v >>> i) & 1) return i;
+      return -1;
+    }
+    case 'findMSB': {
+      const at = args[0].resolvedType;
+      if (at !== undefined && at.kind === 'scalar' && at.base === 'int') {
+        const v = x | 0;
+        if (v === 0) return -1;
+        if (v < 0) return 31; // sign bit
+        return 31 - Math.clz32(v);
+      }
+      const v = x >>> 0;
+      if (v === 0) return -1;
+      return 31 - Math.clz32(v);
+    }
+    case 'bitfieldExtract': {
+      const offset = y | 0;
+      const bits = z | 0;
+      if (bits <= 0) return 0;
+      const isInt = ret.base === 'int';
+      const v = isInt ? x | 0 : x >>> 0;
+      const mask = bits >= 32 ? 0xffffffff : ((1 << bits) - 1) >>> 0;
+      let r = (v >>> offset) & mask;
+      if (isInt && bits < 32 && (r & (1 << (bits - 1))) !== 0) r = (r | ~mask) >>> 0;
+      return isInt ? r | 0 : r >>> 0;
+    }
+    case 'bitfieldInsert': {
+      const offset = z | 0;
+      const bits = w | 0;
+      const isInt = ret.base === 'int';
+      const b = isInt ? x | 0 : x >>> 0;
+      const ins = isInt ? y | 0 : y >>> 0;
+      const mask = bits >= 32 ? 0xffffffff : ((1 << bits) - 1) >>> 0;
+      const r = ((b & ~((mask << offset) >>> 0)) | ((ins & mask) << offset)) >>> 0;
+      return isInt ? r | 0 : r >>> 0;
+    }
+  }
+  return undefined;
+}
+
+/* ------------------------------------------------------------------ */
+/* Expression analysis                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Analyze one expression in place. Annotates `resolvedType` on every node,
+ * `constValue` on foldable scalar constants and `lvalue` on assignables.
+ * Errors are pushed onto ctx (capped); analysis continues with best effort.
+ */
+export function analyzeExpr(e: Expr, scope: Scope, ctx: SemContext): void {
+  if (e.resolvedType !== undefined) return; // already analyzed
+  switch (e.kind) {
+    case 'literal': {
+      e.resolvedType = { kind: 'scalar', base: e.literalType };
+      e.constValue = e.value;
+      e.lvalue = false;
+      return;
+    }
+    case 'identifier':
+      analyzeIdentifier(e, scope, ctx);
+      return;
+    case 'unary':
+      analyzeUnary(e, scope, ctx);
+      return;
+    case 'binary':
+      analyzeBinary(e, scope, ctx);
+      return;
+    case 'assign':
+      analyzeAssign(e, scope, ctx);
+      return;
+    case 'ternary':
+      analyzeTernary(e, scope, ctx);
+      return;
+    case 'index':
+      analyzeIndex(e, scope, ctx);
+      return;
+    case 'member':
+      analyzeMember(e, scope, ctx);
+      return;
+    case 'call':
+      analyzeCall(e, scope, ctx);
+      return;
+    case 'comma': {
+      for (const x of e.exprs) analyzeExpr(x, scope, ctx);
+      const last = e.exprs[e.exprs.length - 1];
+      if (last !== undefined && last.resolvedType !== undefined) {
+        e.resolvedType = last.resolvedType;
+        e.constValue = last.constValue;
+      }
+      e.lvalue = false; // comma result is never an lvalue
+      return;
+    }
+  }
+}
+
+function analyzeIdentifier(e: IdentifierExpr, scope: Scope, ctx: SemContext): void {
+  const sym = scope.lookup(e.name);
+  if (sym === undefined) {
+    if (builtinType(e.name, ctx.version) !== undefined) {
+      ctx.error(e.loc.line, `'${e.name}' : type name used as a value`);
+    } else {
+      ctx.error(e.loc.line, `'${e.name}' : undeclared identifier`);
+    }
+    return;
+  }
+  switch (sym.kind) {
+    case 'var':
+      e.resolvedType = sym.type;
+      e.lvalue = sym.storage !== 'const';
+      if (sym.constValue !== undefined) e.constValue = sym.constValue;
+      return;
+    case 'builtin-var':
+      if (sym.stage !== 'BOTH' && sym.stage !== ctx.stage) {
+        ctx.error(e.loc.line, `'${e.name}' : not available in ${ctx.stage === 'VERTEX' ? 'fragment' : 'vertex'} shaders`);
+        return;
+      }
+      e.resolvedType = sym.type;
+      e.lvalue = sym.writable;
+      return;
+    case 'builtin-const':
+      e.resolvedType = sym.type;
+      e.constValue = sym.value;
+      e.lvalue = false;
+      return;
+    case 'fn':
+      ctx.error(e.loc.line, `'${e.name}' : function name used as a value`);
+      return;
+    case 'struct':
+      ctx.error(e.loc.line, `'${e.name}' : type name used as a value`);
+      return;
+  }
+}
+
+function analyzeUnary(e: UnaryExpr, scope: Scope, ctx: SemContext): void {
+  analyzeExpr(e.operand, scope, ctx);
+  const t = e.operand.resolvedType;
+  if (t === undefined) return;
+  if (t.kind === 'void') {
+    ctx.error(e.operand.loc.line, `'${e.op}' : cannot apply a unary operator to a void expression`);
+    return;
+  }
+  switch (e.op) {
+    case '+':
+    case '-': {
+      if (!isNumericScalarOrVector(t) && t.kind !== 'matrix') {
+        ctx.error(e.loc.line, `'${e.op}' : operand must be a numeric scalar, vector or matrix`);
+        return;
+      }
+      e.resolvedType = t;
+      if (typeof e.operand.constValue === 'number') {
+        const v = e.operand.constValue;
+        e.constValue = e.op === '-' ? (t.kind === 'scalar' && t.base === 'uint' ? (-v) >>> 0 : -v) : v;
+      }
+      return;
+    }
+    case '!': {
+      if (!(t.kind === 'scalar' && t.base === 'bool')) {
+        ctx.error(e.loc.line, `'!' : operand must be a boolean scalar`);
+        return;
+      }
+      e.resolvedType = t;
+      if (typeof e.operand.constValue === 'boolean') e.constValue = !e.operand.constValue;
+      return;
+    }
+    case '~': {
+      if (!isIntScalarOrVector(t)) {
+        ctx.error(e.loc.line, `'~' : operand must be an integer scalar or vector`);
+        return;
+      }
+      e.resolvedType = t;
+      if (typeof e.operand.constValue === 'number') {
+        e.constValue = t.kind === 'scalar' && t.base === 'uint' ? (~e.operand.constValue) >>> 0 : (~e.operand.constValue) | 0;
+      }
+      return;
+    }
+    case '++':
+    case '--': {
+      if (e.operand.lvalue !== true) {
+        ctx.error(e.loc.line, `'${e.op}' : operand must be an lvalue`);
+        return;
+      }
+      if (!isNumericScalarOrVector(t)) {
+        ctx.error(e.loc.line, `'${e.op}' : operand must be a numeric scalar or vector`);
+        return;
+      }
+      e.resolvedType = t;
+      e.lvalue = false; // ++/-- results are rvalues
+      return;
+    }
+  }
+}
+
+function analyzeBinary(e: BinaryExpr, scope: Scope, ctx: SemContext): void {
+  analyzeExpr(e.left, scope, ctx);
+  analyzeExpr(e.right, scope, ctx);
+  const lt = e.left.resolvedType;
+  const rt = e.right.resolvedType;
+  if (lt === undefined || rt === undefined) return;
+  if (lt.kind === 'void' || rt.kind === 'void') {
+    ctx.error(e.loc.line, `'${e.op}' : cannot apply operator to a void expression`);
+    return;
+  }
+  switch (e.op) {
+    case '+':
+    case '-':
+    case '*':
+    case '/': {
+      const t = arithmeticType(e.op, lt, rt, ctx.version);
+      if (t === null) {
+        ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(lt)}' and '${typeName(rt)}' are incompatible`);
+        return;
+      }
+      e.resolvedType = t;
+      if (e.left.constValue !== undefined && e.right.constValue !== undefined) {
+        e.constValue = foldBinary(e.op, lt, rt, e.left.constValue, e.right.constValue, ctx.version);
+      }
+      return;
+    }
+    case '%': {
+      if (!isIntScalarOrVector(lt) || !isIntScalarOrVector(rt)) {
+        ctx.error(e.loc.line, `'%' : operands must be integers`);
+        return;
+      }
+      const t = sameShapeType(lt, rt, ctx.version);
+      if (t === null) {
+        ctx.error(e.loc.line, `'%' : operands of type '${typeName(lt)}' and '${typeName(rt)}' are incompatible`);
+        return;
+      }
+      e.resolvedType = t;
+      if (e.left.constValue !== undefined && e.right.constValue !== undefined) {
+        e.constValue = foldBinary(e.op, lt, rt, e.left.constValue, e.right.constValue, ctx.version);
+      }
+      return;
+    }
+    case '<':
+    case '>':
+    case '<=':
+    case '>=': {
+      if (!(lt.kind === 'scalar' && rt.kind === 'scalar') || lt.base === 'bool' || rt.base === 'bool') {
+        ctx.error(e.loc.line, `'${e.op}' : relational operators require scalar numeric operands`);
+        return;
+      }
+      const b = commonBase(lt.base, rt.base, ctx.version);
+      if (b === null) {
+        ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(lt)}' and '${typeName(rt)}' are incompatible`);
+        return;
+      }
+      e.resolvedType = { kind: 'scalar', base: 'bool' };
+      if (e.left.constValue !== undefined && e.right.constValue !== undefined) {
+        e.constValue = foldBinary(e.op, lt, rt, e.left.constValue, e.right.constValue, ctx.version);
+      }
+      return;
+    }
+    case '==':
+    case '!=': {
+      let ok = false;
+      if (lt.kind === 'scalar' && rt.kind === 'scalar') ok = commonBase(lt.base, rt.base, ctx.version) !== null;
+      else if (lt.kind === 'vector' && rt.kind === 'vector' && lt.size === rt.size) {
+        ok = commonBase(lt.base, rt.base, ctx.version) !== null;
+      } else if (lt.kind === 'matrix' && rt.kind === 'matrix' && lt.cols === rt.cols && lt.rows === rt.rows) ok = true;
+      if (!ok) {
+        ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(lt)}' and '${typeName(rt)}' cannot be compared`);
+        return;
+      }
+      e.resolvedType = { kind: 'scalar', base: 'bool' };
+      if (e.left.constValue !== undefined && e.right.constValue !== undefined) {
+        e.constValue = foldBinary(e.op, lt, rt, e.left.constValue, e.right.constValue, ctx.version);
+      }
+      return;
+    }
+    case '&&':
+    case '||':
+    case '^^': {
+      if (!(lt.kind === 'scalar' && lt.base === 'bool' && rt.kind === 'scalar' && rt.base === 'bool')) {
+        ctx.error(e.loc.line, `'${e.op}' : logical operators require boolean scalar operands`);
+        return;
+      }
+      e.resolvedType = { kind: 'scalar', base: 'bool' };
+      if (e.left.constValue !== undefined && e.right.constValue !== undefined) {
+        e.constValue = foldBinary(e.op, lt, rt, e.left.constValue, e.right.constValue, ctx.version);
+      }
+      return;
+    }
+    case '&':
+    case '|':
+    case '^': {
+      if (!isIntScalarOrVector(lt) || !isIntScalarOrVector(rt)) {
+        ctx.error(e.loc.line, `'${e.op}' : bitwise operators require integer operands`);
+        return;
+      }
+      const t = sameShapeType(lt, rt, ctx.version);
+      if (t === null) {
+        ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(lt)}' and '${typeName(rt)}' are incompatible`);
+        return;
+      }
+      e.resolvedType = t;
+      if (e.left.constValue !== undefined && e.right.constValue !== undefined) {
+        e.constValue = foldBinary(e.op, lt, rt, e.left.constValue, e.right.constValue, ctx.version);
+      }
+      return;
+    }
+    case '<<':
+    case '>>': {
+      if (!isIntScalarOrVector(lt) || !(rt.kind === 'scalar' && (rt.base === 'int' || rt.base === 'uint'))) {
+        ctx.error(e.loc.line, `'${e.op}' : left operand must be an integer scalar/vector and right operand an integer scalar`);
+        return;
+      }
+      e.resolvedType = lt; // result is the LEFT operand's type
+      if (e.left.constValue !== undefined && e.right.constValue !== undefined) {
+        e.constValue = foldBinary(e.op, lt, rt, e.left.constValue, e.right.constValue, ctx.version);
+      }
+      return;
+    }
+  }
+}
+
+function analyzeAssign(e: AssignExpr, scope: Scope, ctx: SemContext): void {
+  analyzeExpr(e.target, scope, ctx);
+  analyzeExpr(e.value, scope, ctx);
+  const tt = e.target.resolvedType;
+  const vt = e.value.resolvedType;
+  if (tt === undefined || vt === undefined) return;
+  if (e.target.lvalue !== true) {
+    ctx.error(e.loc.line, `'${e.op}' : lvalue required`);
+    return;
+  }
+  if (e.op === '=') {
+    if (!convertible(vt, tt, ctx.version)) {
+      ctx.error(e.value.loc.line, `cannot convert from '${typeName(vt)}' to '${typeName(tt)}'`);
+      return;
+    }
+    e.resolvedType = tt;
+    if (e.target.constValue !== undefined && e.value.constValue !== undefined) {
+      e.constValue = convertConst(e.value.constValue, scalarBase(vt), scalarBase(tt));
+    }
+  } else {
+    const core = e.op.slice(0, -1) as BinaryOp;
+    const t = arithmeticType(core, tt, vt, ctx.version);
+    if (t === null) {
+      ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(tt)}' and '${typeName(vt)}' are incompatible`);
+      return;
+    }
+    if (!typeEquals(t, tt)) {
+      ctx.error(e.loc.line, `cannot convert from '${typeName(t)}' to '${typeName(tt)}'`);
+      return;
+    }
+    e.resolvedType = tt;
+    if (e.target.constValue !== undefined && e.value.constValue !== undefined) {
+      e.constValue = foldBinary(core, tt, vt, e.target.constValue, e.value.constValue, ctx.version);
+    }
+  }
+  e.lvalue = false;
+}
+
+function analyzeTernary(e: TernaryExpr, scope: Scope, ctx: SemContext): void {
+  analyzeExpr(e.cond, scope, ctx);
+  analyzeExpr(e.whenTrue, scope, ctx);
+  analyzeExpr(e.whenFalse, scope, ctx);
+  const ct = e.cond.resolvedType;
+  const tt = e.whenTrue.resolvedType;
+  const ft = e.whenFalse.resolvedType;
+  if (ct === undefined || tt === undefined || ft === undefined) return;
+  if (!(ct.kind === 'scalar' && ct.base === 'bool')) {
+    ctx.error(e.cond.loc.line, `'?:' : condition must be a boolean expression`);
+    return;
+  }
+  if (tt.kind === 'void' || ft.kind === 'void') {
+    ctx.error(e.loc.line, `'?:' : cannot use a void expression as a ternary operand`);
+    return;
+  }
+  // GLSL ES: arms must be scalars or vectors of a common type
+  let t: GLSLType | null = null;
+  if (tt.kind === 'scalar' && ft.kind === 'scalar') {
+    const b = commonBase(tt.base, ft.base, ctx.version);
+    if (b !== null) t = { kind: 'scalar', base: b };
+  } else if (tt.kind === 'vector' && ft.kind === 'vector' && tt.size === ft.size) {
+    const b = commonBase(tt.base, ft.base, ctx.version);
+    if (b !== null) t = { kind: 'vector', base: b, size: tt.size };
+  }
+  if (t === null) {
+    ctx.error(e.loc.line, `'?:' : operands of type '${typeName(tt)}' and '${typeName(ft)}' are incompatible`);
+    return;
+  }
+  e.resolvedType = t;
+  if (typeof e.cond.constValue === 'boolean') {
+    const arm = e.cond.constValue ? e.whenTrue : e.whenFalse;
+    if (arm.constValue !== undefined) e.constValue = arm.constValue;
+  }
+  e.lvalue = false;
+}
+
+function analyzeIndex(e: IndexExpr, scope: Scope, ctx: SemContext): void {
+  analyzeExpr(e.object, scope, ctx);
+  analyzeExpr(e.index, scope, ctx);
+  const ot = e.object.resolvedType;
+  const it = e.index.resolvedType;
+  if (ot === undefined || it === undefined) return;
+  if (!(it.kind === 'scalar' && (it.base === 'int' || it.base === 'uint'))) {
+    ctx.error(e.index.loc.line, `'[' : index must be an integer`);
+    return;
+  }
+  const cv = e.index.constValue;
+  const constIdx = typeof cv === 'number' && Number.isInteger(cv) ? cv : null;
+  switch (ot.kind) {
+    case 'array': {
+      if (constIdx !== null && ot.size !== null && (constIdx < 0 || constIdx >= ot.size)) {
+        ctx.error(e.index.loc.line, `'[' : array index ${constIdx} out of range [0, ${ot.size - 1}]`);
+        return;
+      }
+      e.resolvedType = ot.element;
+      e.lvalue = e.object.lvalue === true;
+      return;
+    }
+    case 'vector': {
+      if (constIdx !== null && (constIdx < 0 || constIdx >= ot.size)) {
+        ctx.error(e.index.loc.line, `'[' : component index ${constIdx} out of range [0, ${ot.size - 1}]`);
+        return;
+      }
+      e.resolvedType = { kind: 'scalar', base: ot.base };
+      e.lvalue = e.object.lvalue === true;
+      return;
+    }
+    case 'matrix': {
+      if (constIdx !== null && (constIdx < 0 || constIdx >= ot.cols)) {
+        ctx.error(e.index.loc.line, `'[' : column index ${constIdx} out of range [0, ${ot.cols - 1}]`);
+        return;
+      }
+      e.resolvedType = { kind: 'vector', base: 'float', size: ot.rows };
+      e.lvalue = e.object.lvalue === true;
+      return;
+    }
+    default:
+      ctx.error(e.loc.line, `'[' : cannot index a value of type '${typeName(ot)}'`);
+  }
+}
+
+const SWIZZLE_SETS: readonly string[] = ['xyzw', 'rgba', 'stpq'];
+
+/** Swizzle result for a vector: { type, noDupes } or { error }. */
+function swizzleInfo(base: BaseScalar, size: number, name: string):
+  | { type: GLSLType; noDupes: boolean }
+  | { error: string } {
+  if (name.length > 4) return { error: `swizzle '${name}' has more than 4 components` };
+  let set: string | null = null;
+  const indices: number[] = [];
+  for (const ch of name) {
+    let found = false;
+    for (const s of SWIZZLE_SETS) {
+      const i = s.indexOf(ch);
+      if (i >= 0) {
+        if (set !== null && set !== s) return { error: `swizzle '${name}' mixes component sets` };
+        set = s;
+        indices.push(i);
+        found = true;
+        break;
+      }
+    }
+    if (!found) return { error: `'${ch}' : invalid swizzle component` };
+  }
+  for (const i of indices) {
+    if (i >= size) return { error: `swizzle component out of range for a ${size}-component vector` };
+  }
+  const noDupes = new Set(indices).size === indices.length;
+  if (indices.length === 1) return { type: { kind: 'scalar', base }, noDupes: true };
+  return { type: { kind: 'vector', base, size: indices.length as 2 | 3 | 4 }, noDupes };
+}
+
+function analyzeMember(e: MemberExpr, scope: Scope, ctx: SemContext): void {
+  analyzeExpr(e.object, scope, ctx);
+  const ot = e.object.resolvedType;
+  if (ot === undefined) return;
+  if (ot.kind === 'void') {
+    ctx.error(e.loc.line, `'.' : cannot access a member of a void expression`);
+    return;
+  }
+  if (ot.kind === 'struct') {
+    const m = ot.members.find((mm) => mm.name === e.name);
+    if (m === undefined) {
+      ctx.error(e.loc.line, `'${e.name}' : no member named '${e.name}' in struct '${ot.name}'`);
+      return;
+    }
+    e.resolvedType = m.type;
+    e.lvalue = e.object.lvalue === true;
+    return;
+  }
+  if (ot.kind === 'vector') {
+    const r = swizzleInfo(ot.base, ot.size, e.name);
+    if ('error' in r) {
+      ctx.error(e.loc.line, r.error);
+      return;
+    }
+    e.resolvedType = r.type;
+    e.lvalue = r.noDupes && e.object.lvalue === true;
+    return;
+  }
+  ctx.error(e.loc.line, `'.' : cannot access a member of type '${typeName(ot)}'`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Calls: constructors, builtins, user functions                       */
+/* ------------------------------------------------------------------ */
+
+/** Is `name` a type name here (builtin type or user struct)? */
+function isTypeName(name: string, scope: Scope, ctx: SemContext): boolean {
+  if (builtinType(name, ctx.version) !== undefined) return true;
+  const s = scope.lookup(name);
+  return s !== undefined && s.kind === 'struct';
+}
+
+function structTypeOf(name: string, scope: Scope): GLSLType | null {
+  const s = scope.lookup(name);
+  return s !== undefined && s.kind === 'struct' ? (s as StructSymbol).type : null;
+}
+
+/** Base convertibility in CONSTRUCTORS (explicit conversion — bool participates). */
+function ctorBaseConvertible(a: BaseScalar, b: BaseScalar, version: 100 | 300): boolean {
+  if (a === b) return true;
+  if (version === 100) {
+    // ES 1.00: int(float), int(bool), float(int), float(bool), bool(int), bool(float)
+    if (a === 'uint' || b === 'uint') return false;
+    return true;
+  }
+  // ES 3.00: all 12 conversions among int/uint/float/bool
+  return true;
+}
+
+function analyzeCall(e: CallExpr, scope: Scope, ctx: SemContext): void {
+  for (const a of e.args) {
+    analyzeExpr(a, scope, ctx);
+    if (a.resolvedType !== undefined && a.resolvedType.kind === 'void') {
+      ctx.error(a.loc.line, `'void' : cannot use a void expression as a function argument`);
+    }
+  }
+  const callee = e.callee;
+  if (callee.kind === 'identifier') {
+    const name = callee.name;
+    if (isTypeName(name, scope, ctx)) {
+      analyzeConstructor(e, name, scope, ctx);
+      return;
+    }
+    const sym = scope.lookup(name);
+    if (sym !== undefined && sym.kind === 'fn' && !sym.builtin) {
+      analyzeUserCall(e, sym, ctx);
+      return;
+    }
+    if (matches(name, builtinSignatures(ctx.version)).length > 0 || extensionFunctions.some((s) => s.name === name)) {
+      analyzeBuiltinCall(e, name, ctx);
+      return;
+    }
+    ctx.error(e.loc.line, `'${name}' : no matching function`);
+    return;
+  }
+  if (callee.kind === 'index' && callee.object.kind === 'identifier' && isTypeName(callee.object.name, scope, ctx)) {
+    analyzeArrayConstructor(e, callee, scope, ctx);
+    return;
+  }
+  ctx.error(e.loc.line, `'(' : invalid function or constructor call`);
+}
+
+/** Score one signature against the analyzed arguments: Σ(0 exact | 1 implicit conversion), or null if no match. */
+function scoreSignature(params: GLSLType[], args: Expr[], ctx: SemContext): number | null {
+  if (params.length !== args.length) return null;
+  let score = 0;
+  for (let i = 0; i < params.length; i++) {
+    const at = args[i].resolvedType;
+    if (at === undefined) return null;
+    if (typeEquals(at, params[i])) continue;
+    if (convertible(at, params[i], ctx.version)) {
+      score += 1;
+      continue;
+    }
+    return null;
+  }
+  return score;
+}
+
+/** Select the best-scoring signature among `candidates`; reports ambiguity. */
+function pickBest(
+  candidates: { params: GLSLType[]; ret: GLSLType }[],
+  args: Expr[],
+  ctx: SemContext,
+  name: string,
+  line: number,
+): { params: GLSLType[]; ret: GLSLType } | null {
+  let best: { params: GLSLType[]; ret: GLSLType } | null = null;
+  let bestScore = Infinity;
+  for (const c of candidates) {
+    const sc = scoreSignature(c.params, args, ctx);
+    if (sc === null) continue;
+    if (sc < bestScore) {
+      bestScore = sc;
+      best = c;
+    }
+  }
+  if (best === null) return null;
+  for (const c of candidates) {
+    if (c === best) continue;
+    if (scoreSignature(c.params, args, ctx) === bestScore) {
+      ctx.error(line, `'${name}' : ambiguous call (multiple matching signatures)`);
+      return null;
+    }
+  }
+  return best;
+}
+
+function analyzeUserCall(e: CallExpr, sym: FnSymbol, ctx: SemContext): void {
+  const sigs = sym.siblings.map((s) => ({ params: s.params.map((p) => p.type), ret: s.retType }));
+  const best = pickBest(sigs, e.args, ctx, sym.name, e.loc.line);
+  if (best === null) {
+    if (ctx.errors.length === 0 || !ctx.errors[ctx.errors.length - 1].message.includes('ambiguous')) {
+      ctx.error(e.loc.line, `'${sym.name}' : no matching function`);
+    }
+    return;
+  }
+  e.resolvedType = best.ret;
+  ctx.currentFunction?.calls.add(sym.name); // recursion-detection edge
+}
+
+function analyzeBuiltinCall(e: CallExpr, name: string, ctx: SemContext): void {
+  const all: BuiltinSignature[] = [...matches(name, builtinSignatures(ctx.version))];
+  for (const s of extensionFunctions) {
+    if (s.name !== name) continue;
+    // Skip extension entries duplicating a core signature exactly (e.g. dFdx
+    // is core in 3.00 AND listed for GL_OES_standard_derivatives).
+    const dup = all.some(
+      (c) =>
+        c.params.length === s.params.length &&
+        c.params.every((p, i) => typeEquals(p, s.params[i])) &&
+        typeEquals(c.ret, s.ret) &&
+        c.stage === s.stage,
+    );
+    if (!dup) all.push(s);
+  }
+  if (all.length === 0) {
+    ctx.error(e.loc.line, `'${name}' : no matching function`);
+    return;
+  }
+  // GL_OES_standard_derivatives functions (dFdx/dFdy/fwidth) are CORE in
+  // GLSL ES 3.00 — their extension gate applies to 1.00 shaders only.
+  const coreIn300 = (s: BuiltinSignature): boolean =>
+    ctx.version === 300 && s.extension === 'GL_OES_standard_derivatives';
+  const enabled = all.filter((s) => s.extension === undefined || coreIn300(s) || ctx.enabledExtensions.has(s.extension));
+  if (enabled.length === 0) {
+    ctx.error(e.loc.line, `'${name}' : requires extension '${all[0].extension}' which is not enabled`);
+    return;
+  }
+  const staged = enabled.filter((s) => s.stage === undefined || s.stage === ctx.stage);
+  if (staged.length === 0) {
+    ctx.error(e.loc.line, `'${name}' : not available in ${ctx.stage === 'VERTEX' ? 'fragment' : 'vertex'} shaders`);
+    return;
+  }
+  const best = pickBest(staged, e.args, ctx, name, e.loc.line);
+  if (best === null) {
+    if (ctx.errors.length === 0 || !ctx.errors[ctx.errors.length - 1].message.includes('ambiguous')) {
+      ctx.error(e.loc.line, `'${name}' : no matching function`);
+    }
+    return;
+  }
+  e.resolvedType = best.ret;
+  e.constValue = foldBuiltin(name, best.ret, e.args);
+}
+
+/* ------------------------------------------------------------------ */
+/* Constructors                                                        */
+/* ------------------------------------------------------------------ */
+
+function analyzeConstructor(e: CallExpr, name: string, scope: Scope, ctx: SemContext): void {
+  const bt = builtinType(name, ctx.version);
+  const t = bt !== undefined ? bt : structTypeOf(name, scope);
+  if (t === null) {
+    ctx.error(e.loc.line, `'${name}' : not a type`);
+    return;
+  }
+  switch (t.kind) {
+    case 'void':
+      ctx.error(e.loc.line, `'${name}' : cannot construct void`);
+      return;
+    case 'scalar': {
+      if (e.args.length !== 1) {
+        ctx.error(e.loc.line, `'${name}' : constructor requires exactly one argument`);
+        return;
+      }
+      const at = e.args[0].resolvedType;
+      if (at === undefined) return;
+      if (at.kind !== 'scalar') {
+        ctx.error(e.args[0].loc.line, `'${name}' : cannot construct from '${typeName(at)}'`);
+        return;
+      }
+      e.resolvedType = t;
+      if (e.args[0].constValue !== undefined) e.constValue = convertConst(e.args[0].constValue, at.base, t.base);
+      return;
+    }
+    case 'vector':
+      analyzeVectorConstructor(e, t, ctx);
+      return;
+    case 'matrix':
+      analyzeMatrixConstructor(e, t, ctx);
+      return;
+    case 'struct': {
+      if (e.args.length !== t.members.length) {
+        ctx.error(e.loc.line, `'${t.name}' : constructor requires ${t.members.length} argument(s)`);
+        return;
+      }
+      for (let i = 0; i < e.args.length; i++) {
+        const at = e.args[i].resolvedType;
+        if (at === undefined) return;
+        if (!convertible(at, t.members[i].type, ctx.version)) {
+          ctx.error(e.args[i].loc.line, `cannot convert from '${typeName(at)}' to '${typeName(t.members[i].type)}'`);
+          return;
+        }
+      }
+      e.resolvedType = t;
+      return;
+    }
+    case 'sampler':
+      ctx.error(e.loc.line, `'${name}' : samplers cannot be constructed`);
+      return;
+    case 'array':
+      return; // unreachable via a bare type name
+  }
+}
+
+function analyzeVectorConstructor(
+  e: CallExpr,
+  t: Extract<GLSLType, { kind: 'vector' }>,
+  ctx: SemContext,
+): void {
+  const args = e.args;
+  const targetName = typeName(t);
+  if (args.length === 1) {
+    const at = args[0].resolvedType;
+    if (at === undefined) return;
+    if (at.kind === 'scalar') {
+      if (!ctorBaseConvertible(at.base, t.base, ctx.version)) {
+        ctx.error(args[0].loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
+        return;
+      }
+      e.resolvedType = t; // splat
+      return;
+    }
+    if (at.kind === 'vector' && at.size === t.size) {
+      if (!ctorBaseConvertible(at.base, t.base, ctx.version)) {
+        ctx.error(args[0].loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
+        return;
+      }
+      e.resolvedType = t;
+      return;
+    }
+    ctx.error(args[0].loc.line, `'${targetName}' : cannot construct from '${typeName(at)}'`);
+    return;
+  }
+  // N args: scalars and/or smaller vectors; total components must equal size
+  let total = 0;
+  for (const a of args) {
+    const at = a.resolvedType;
+    if (at === undefined) return;
+    if (at.kind === 'scalar') total += 1;
+    else if (at.kind === 'vector') total += at.size;
+    else {
+      ctx.error(a.loc.line, `'${targetName}' : invalid constructor argument of type '${typeName(at)}'`);
+      return;
+    }
+  }
+  if (total !== t.size) {
+    ctx.error(e.loc.line, `'${targetName}' : constructor requires ${t.size} components`);
+    return;
+  }
+  for (const a of args) {
+    const at = a.resolvedType;
+    if (at === undefined) return;
+    if (at.kind !== 'scalar' && at.kind !== 'vector') return;
+    if (!ctorBaseConvertible(at.base, t.base, ctx.version)) {
+      ctx.error(a.loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
+      return;
+    }
+  }
+  e.resolvedType = t;
+}
+
+function analyzeMatrixConstructor(
+  e: CallExpr,
+  t: Extract<GLSLType, { kind: 'matrix' }>,
+  ctx: SemContext,
+): void {
+  const args = e.args;
+  const targetName = typeName(t);
+  if (args.length === 1) {
+    const at = args[0].resolvedType;
+    if (at === undefined) return;
+    if (at.kind === 'scalar' && at.base !== 'bool') {
+      e.resolvedType = t; // diagonal
+      return;
+    }
+    if (at.kind === 'matrix' && at.cols === t.cols && at.rows === t.rows) {
+      e.resolvedType = t; // same-dims conversion
+      return;
+    }
+    ctx.error(args[0].loc.line, `'${targetName}' : cannot construct from '${typeName(at)}'`);
+    return;
+  }
+  if (args.length === t.cols) {
+    // C vectors of size R (columns)
+    let allVecs = true;
+    for (const a of args) {
+      const at = a.resolvedType;
+      if (at === undefined) return;
+      if (!(at.kind === 'vector' && at.size === t.rows && at.base !== 'bool')) {
+        allVecs = false;
+        break;
+      }
+    }
+    if (allVecs) {
+      e.resolvedType = t;
+      return;
+    }
+  }
+  if (args.length === t.cols * t.rows) {
+    // C*R scalars, column-major
+    let allScalars = true;
+    for (const a of args) {
+      const at = a.resolvedType;
+      if (at === undefined) return;
+      if (!(at.kind === 'scalar' && at.base !== 'bool')) {
+        allScalars = false;
+        break;
+      }
+    }
+    if (allScalars) {
+      e.resolvedType = t;
+      return;
+    }
+  }
+  ctx.error(e.loc.line, `'${targetName}' : wrong number of arguments for matrix constructor`);
+}
+
+/** `T[size](...)` array constructor (ES 3.00 only). `callee` is the IndexExpr. */
+function analyzeArrayConstructor(e: CallExpr, callee: IndexExpr, scope: Scope, ctx: SemContext): void {
+  if (ctx.version === 100) {
+    ctx.error(e.loc.line, `'[' : array constructors require GLSL ES 3.00`);
+    return;
+  }
+  const inner = callee.object;
+  if (inner.kind !== 'identifier') return;
+  const bt = builtinType(inner.name, ctx.version);
+  const elem = bt !== undefined ? bt : structTypeOf(inner.name, scope);
+  if (elem === null || elem.kind === 'void' || elem.kind === 'sampler') {
+    ctx.error(e.loc.line, `'${inner.name}' : cannot construct an array of this type`);
+    return;
+  }
+  analyzeExpr(callee.index, scope, ctx);
+  const sz = callee.index.constValue;
+  if (typeof sz !== 'number' || !Number.isInteger(sz) || sz <= 0) {
+    ctx.error(callee.index.loc.line, `'[' : array constructor size must be a constant positive integer`);
+    return;
+  }
+  if (e.args.length !== sz) {
+    ctx.error(e.loc.line, `'${inner.name}[${sz}]' : constructor requires ${sz} argument(s)`);
+    return;
+  }
+  for (const a of e.args) {
+    const at = a.resolvedType;
+    if (at === undefined) return;
+    if (!convertible(at, elem, ctx.version)) {
+      ctx.error(a.loc.line, `cannot convert from '${typeName(at)}' to '${typeName(elem)}'`);
+      return;
+    }
+  }
+  e.resolvedType = { kind: 'array', element: elem, size: sz };
+}

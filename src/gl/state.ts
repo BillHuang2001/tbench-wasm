@@ -56,8 +56,8 @@ export interface Limits {
   MAX_VERTEX_UNIFORM_BLOCKS: number; // 12
   MAX_FRAGMENT_UNIFORM_BLOCKS: number; // 12
   MAX_COMBINED_UNIFORM_BLOCKS: number; // 36
-  MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS: number; // 65536
-  MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS: number; // 65536
+  MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS: number; // 262144 (≥ 12 blocks × 65536/4 + 4096×4, ES 3.0 minimum)
+  MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS: number; // 262144
   UNIFORM_BUFFER_OFFSET_ALIGNMENT: number; // 256
   MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS: number; // 4
   MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS: number; // 4
@@ -108,8 +108,8 @@ export function defaultLimits(): Limits {
     MAX_VERTEX_UNIFORM_BLOCKS: 12,
     MAX_FRAGMENT_UNIFORM_BLOCKS: 12,
     MAX_COMBINED_UNIFORM_BLOCKS: 36,
-    MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS: 65536,
-    MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS: 65536,
+    MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS: 262144,
+    MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS: 262144,
     UNIFORM_BUFFER_OFFSET_ALIGNMENT: 256,
     MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS: 4,
     MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS: 4,
@@ -261,6 +261,12 @@ export interface State {
   colorMask: [boolean, boolean, boolean, boolean];
   /** Per-drawbuffer color masks (WebGL2 + OES_draw_buffers_indexed); base masks in colorMask. */
   colorMaskPerDrawBuffer: Map<number, [boolean, boolean, boolean, boolean]>;
+  /**
+   * Per-drawbuffer blend state (OES_draw_buffers_indexed). The raster DrawCall
+   * carries a single blend state — the draw pipeline uses drawbuffer 0's entry
+   * when this map is non-empty (documented known gap for per-drawbuffer blend).
+   */
+  blendPerDrawBuffer: Map<number, { srcRGB: GLenum; dstRGB: GLenum; srcAlpha: GLenum; dstAlpha: GLenum; eqRGB: GLenum; eqAlpha: GLenum }>;
 
   viewport: { x: GLint; y: GLint; w: GLsizei; h: GLsizei };
   scissor: { x: GLint; y: GLint; w: GLsizei; h: GLsizei };
@@ -350,6 +356,7 @@ export function createDefaultState(version: 1 | 2): State {
     clearStencil: 0,
     colorMask: [true, true, true, true],
     colorMaskPerDrawBuffer: new Map(),
+    blendPerDrawBuffer: new Map(),
     viewport: { x: 0, y: 0, w: 0, h: 0 }, // sized at context creation
     scissor: { x: 0, y: 0, w: 0, h: 0 },
     cullFace: 0x0405 /* BACK */,
@@ -397,3 +404,6 @@ export function createDefaultState(version: 1 | 2): State {
 
 /** 0x1E00 = KEEP (stencil op). */
 export const KEEP = 0x1e00;
+
+/** Alias kept for tests/unit/state.test.ts (createState === createDefaultState). */
+export const createState = createDefaultState;

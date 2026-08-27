@@ -38,6 +38,7 @@ import type {
 import { C1, installConstants } from './constants';
 import { ErrorQueue } from './errors';
 import { createDefaultState, type State } from './state';
+import { installAll } from './api';
 import { Resources } from './objects';
 import type {
   WebGLActiveInfo,
@@ -78,11 +79,35 @@ import type {
   WEBGL_multi_draw,
 } from './extensions/types';
 import { DEFAULT_CONTEXT_ATTRIBUTES } from './types';
+import type { CanvasSurface } from '../present';
+import type { Surface, TextureImage } from '../raster';
+import type { VAOState } from './state';
+
+/**
+ * The default framebuffer (drawing buffer) of a context. `color.data` is the
+ * present surface's pixel buffer (zero-copy RGBA8; re-fetched after resize);
+ * `depth`/`stencil` are raster surfaces allocated per context attributes
+ * (DEPTH_COMPONENT16 on WebGL1 / DEPTH_COMPONENT24 on WebGL2 / STENCIL_INDEX8).
+ * Lifecycle (lifecycle.ts) owns allocation; the draw pipeline resolves it to a
+ * raster FramebufferTarget via framebuffer-util.ts.
+ */
+export interface DefaultFramebuffer {
+  color: Surface;
+  depth: Surface | null;
+  stencil: Surface | null;
+  width: number;
+  height: number;
+}
 
 /** Token gate for construction — only lifecycle.ts may create contexts. */
 export const CONTEXT_TOKEN: unique symbol = Symbol('software-webgl-context');
 
 let nextContextId = 1;
+
+/** Drawing-buffer dimension: max(1, canvas.width/height); 0 when absent (mocks). */
+function drawingBufferDim(v: unknown): GLsizei {
+  return typeof v === 'number' ? Math.max(1, v) : 0;
+}
 
 export class WebGLRenderingContext {
   // ---- internal engine state (underscore-prefixed; not part of the public API) ----
@@ -97,6 +122,12 @@ export class WebGLRenderingContext {
   _resources: Resources;
   /** Extension singleton cache (canonical name → object). */
   _extensions: Map<string, object> = new Map();
+  /** Present adapter (present/ contract §4) — set at construction; null before/after loss. */
+  _presentSurface: CanvasSurface | null = null;
+  /** The default framebuffer (drawing buffer) surfaces — owned by lifecycle.ts. */
+  _defaultFB: DefaultFramebuffer | null = null;
+  /** The persistent default VAO contents (WebGL2/OES_vertex_array_object rebind target). */
+  _defaultVAO: VAOState | null = null;
   /** Default framebuffer surface (present/ CanvasSurface-compatible). */
   _drawingBuffer: unknown = null;
   _drawingBufferWidth: GLsizei = 0;
@@ -120,24 +151,42 @@ export class WebGLRenderingContext {
     }
     this._canvas = canvas;
     this._type = type;
-    this._attrs = { ...DEFAULT_CONTEXT_ATTRIBUTES, ...(attrs ?? {}) };
+    // antialias is normalized to false for WebGL1: the drawing buffer is
+    // single-sampled, and CTS context-attributes-alpha-depth-stencil-antialias.html
+    // REQUIRES real antialiased edges when antialias is reported true (WebGL1
+    // tolerates reporting false when true was requested). WebGL2 must report the
+    // requested value exactly (conformance2 context-attributes-depth-stencil-
+    // antialias-obeyed.html) — webgl2.ts restores it after super().
+    this._attrs = { ...DEFAULT_CONTEXT_ATTRIBUTES, ...(attrs ?? {}), antialias: false };
     this._contextId = nextContextId++;
     this._state = createDefaultState(1);
     this._errors = new ErrorQueue();
     this._resources = new Resources(this);
-    this._drawingBufferWidth = typeof canvas.width === 'number' ? canvas.width : 0;
-    this._drawingBufferHeight = typeof canvas.height === 'number' ? canvas.height : 0;
+    // Drawing-buffer dimensions: max(1, canvas.width/height) — a 0-size canvas
+    // yields a 1×1 buffer (CTS context/zero-sized-canvas.html); stored value is
+    // the fallback for width-less mocks (the getters are live, see below).
+    this._drawingBufferWidth = drawingBufferDim(canvas.width);
+    this._drawingBufferHeight = drawingBufferDim(canvas.height);
+    // Present adapter + default framebuffer + default VAO + initial viewport are
+    // initialized by lifecycle.createContext via initContextResources() — the
+    // ONLY construction site (CONTEXT_TOKEN gate), called AFTER the final
+    // version is known (WebGL2 rebuilds state in its constructor).
   }
 
   // ---- Properties (spec: getters on the prototype) ----
   get canvas(): CanvasLike {
     return this._canvas;
   }
+  /**
+   * Live drawing-buffer size: tracks canvas.width/height immediately (CTS
+   * canvas/drawingbuffer-test.html: drawingBufferWidth === canvas.width;
+   * context/zero-sized-canvas.html: immediate update after width set, 0 → 1).
+   */
   get drawingBufferWidth(): GLsizei {
-    return this._drawingBufferWidth;
+    return drawingBufferDim(this._canvas.width);
   }
   get drawingBufferHeight(): GLsizei {
-    return this._drawingBufferHeight;
+    return drawingBufferDim(this._canvas.height);
   }
 
   // ---- Context attributes & lifecycle ----
@@ -333,3 +382,5 @@ export interface WebGLRenderingContext {
 
 // Install WebGL1 constants on the prototype (gl.COLOR_BUFFER_BIT etc.).
 installConstants(WebGLRenderingContext.prototype, C1);
+// Wire the api/ prototype mixins (idempotent — entry.ts also calls installAll).
+installAll(WebGLRenderingContext.prototype);

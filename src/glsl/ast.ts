@@ -77,6 +77,8 @@ export interface StructMemberDecl extends Node {
   kind: 'struct-member';
   name: string;
   type: TypeSpec;
+  /** Array dimensions (struct/interface-block member arrays); `[null]` = unsized. */
+  arrayDims: Expr[];
 }
 
 /* ------------------------------------------------------------------ */

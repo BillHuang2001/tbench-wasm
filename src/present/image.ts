@@ -32,6 +32,67 @@ export type DecodeResult =
   | { ok: false; reason: string };
 
 /**
+ * Shared scratch canvas + 2D context, created lazily on first use and reused
+ * across decodes (no per-call DOM allocation). Guarded by feature detection so
+ * the bundle runs in Node without any DOM globals. Null when unavailable.
+ */
+let scratchCanvas: HTMLCanvasElement | null = null;
+let scratchCtx: CanvasRenderingContext2D | null = null;
+
+/**
+ * Returns the module-level scratch 2D context, creating it on first use.
+ * Returns null (and never throws) when no DOM / 2D support is available.
+ */
+function getScratchContext(): CanvasRenderingContext2D | null {
+  if (scratchCtx !== null) {
+    return scratchCtx;
+  }
+  if (typeof document === 'undefined') {
+    return null;
+  }
+  try {
+    if (scratchCanvas === null) {
+      scratchCanvas = document.createElement('canvas');
+    }
+    scratchCtx = scratchCanvas.getContext('2d');
+  } catch {
+    scratchCtx = null;
+  }
+  return scratchCtx;
+}
+
+/**
+ * Decodes a DOM-drawable source (image/video/canvas/bitmap) by drawing it at
+ * its intrinsic size onto the scratch canvas and reading back via getImageData
+ * (already straight RGBA8). Every failure — no 2D support, drawImage errors,
+ * SecurityError from a tainted source — is mapped to {ok:false}; never throws.
+ */
+function decodeViaScratch(source: unknown, width: number, height: number): DecodeResult {
+  if (!(width > 0) || !(height > 0) || !Number.isInteger(width) || !Number.isInteger(height)) {
+    return { ok: false, reason: `invalid source dimensions ${width}x${height}` };
+  }
+  const ctx = getScratchContext();
+  if (ctx === null) {
+    return { ok: false, reason: 'no 2D context available for image decode' };
+  }
+  try {
+    // Size the scratch canvas to the source's intrinsic size (setting
+    // width/height resets the 2D context state, which is fine — we draw
+    // immediately after). Only reallocates when the size actually changes.
+    if (scratchCanvas !== null && (scratchCanvas.width !== width || scratchCanvas.height !== height)) {
+      scratchCanvas.width = width;
+      scratchCanvas.height = height;
+    }
+    ctx.drawImage(source as CanvasImageSource, 0, 0);
+    const imageData = ctx.getImageData(0, 0, width, height);
+    return { ok: true, image: { width, height, data: imageData.data } };
+  } catch (e) {
+    // SecurityError (tainted source), broken image, invalid state, etc.
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
  * Decodes any supported DOM image source to straight-alpha RGBA8.
  * ImageData sources take the direct-copy path (no DOM needed); everything
  * else is drawn onto a lazily created scratch 2D canvas and read back via
@@ -40,7 +101,56 @@ export type DecodeResult =
  * (SecurityError from getImageData), and unsupported or null sources.
  */
 export function decodeImageSource(source: ImageSource): DecodeResult {
-  throw new Error('not implemented: present/image.ts decodeImageSource');
+  if (source === null || typeof source !== 'object') {
+    return { ok: false, reason: 'source is not an object' };
+  }
+  const v = source as unknown as Record<string, unknown>;
+
+  // (a) ImageData duck-type → direct copy path (no DOM, Node-testable).
+  if (v.data instanceof Uint8ClampedArray || v.data instanceof Uint8Array) {
+    return decodeImageData(source as ImageData);
+  }
+
+  // (b) HTMLImageElement duck-type — always use naturalWidth/naturalHeight
+  // (intrinsic size), never clientWidth/offsetWidth (CSS size).
+  if (typeof v.naturalWidth === 'number') {
+    if (
+      typeof v.naturalHeight !== 'number' ||
+      v.naturalWidth <= 0 ||
+      v.naturalHeight <= 0 ||
+      v.complete !== true
+    ) {
+      return { ok: false, reason: 'image is not loaded or has no intrinsic size' };
+    }
+    return decodeViaScratch(source, v.naturalWidth, v.naturalHeight);
+  }
+
+  // (c) HTMLVideoElement duck-type — require current frame data (readyState
+  // >= HAVE_CURRENT_DATA) and a nonzero intrinsic size.
+  if (typeof v.videoWidth === 'number' && typeof v.readyState === 'number') {
+    if (
+      typeof v.videoHeight !== 'number' ||
+      v.readyState < 2 ||
+      v.videoWidth <= 0 ||
+      v.videoHeight <= 0
+    ) {
+      return { ok: false, reason: 'video has no current frame data' };
+    }
+    return decodeViaScratch(source, v.videoWidth, v.videoHeight);
+  }
+
+  // (d) Canvas-like (HTMLCanvasElement / OffscreenCanvas).
+  if (typeof v.getContext === 'function') {
+    return decodeViaScratch(source, v.width as number, v.height as number);
+  }
+
+  // (e) ImageBitmap duck-type.
+  if (typeof v.width === 'number' && typeof v.height === 'number') {
+    return decodeViaScratch(source, v.width, v.height);
+  }
+
+  // (f) Anything else.
+  return { ok: false, reason: 'unsupported image source' };
 }
 
 /**
@@ -49,7 +159,27 @@ export function decodeImageSource(source: ImageSource): DecodeResult {
  * duck-typed { width, height, data: Uint8ClampedArray } in tests.
  */
 export function decodeImageData(source: ImageData): DecodeResult {
-  throw new Error('not implemented: present/image.ts decodeImageData');
+  if (source === null || typeof source !== 'object') {
+    return { ok: false, reason: 'source is not an object' };
+  }
+  const v = source as unknown as Record<string, unknown>;
+  const { width, height, data } = v;
+  if (typeof width !== 'number' || typeof height !== 'number') {
+    return { ok: false, reason: 'source must have numeric width and height' };
+  }
+  if (!(data instanceof Uint8ClampedArray) && !(data instanceof Uint8Array)) {
+    return { ok: false, reason: 'source data must be a Uint8ClampedArray (or Uint8Array view)' };
+  }
+  const expected = width * height * 4;
+  if (data.length !== expected) {
+    return {
+      ok: false,
+      reason: `data length ${data.length} does not match ${width}x${height} RGBA8 (expected ${expected})`,
+    };
+  }
+  // Fresh copy: the caller keeps ownership of its buffer; mutating the input
+  // after decode must not affect the result.
+  return { ok: true, image: { width, height, data: new Uint8ClampedArray(data) } };
 }
 
 /**
@@ -58,5 +188,33 @@ export function decodeImageData(source: ImageData): DecodeResult {
  * isDecodableImageSource → decode path; anything else → INVALID_VALUE.
  */
 export function isDecodableImageSource(value: unknown): boolean {
-  throw new Error('not implemented: present/image.ts isDecodableImageSource');
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+  // ArrayBuffer / ArrayBufferView belong to the buffer-upload path, not here.
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  // ImageData duck-type.
+  if (v.data instanceof Uint8ClampedArray || v.data instanceof Uint8Array) {
+    return true;
+  }
+  // HTMLImageElement duck-type.
+  if (typeof v.naturalWidth === 'number') {
+    return true;
+  }
+  // HTMLVideoElement duck-type.
+  if (typeof v.videoWidth === 'number' && typeof v.readyState === 'number') {
+    return true;
+  }
+  // Canvas-like (HTMLCanvasElement / OffscreenCanvas).
+  if (typeof v.getContext === 'function') {
+    return true;
+  }
+  // ImageBitmap duck-type.
+  if (typeof v.width === 'number' && typeof v.height === 'number') {
+    return true;
+  }
+  return false;
 }
