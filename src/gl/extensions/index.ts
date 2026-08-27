@@ -72,10 +72,8 @@ export type ExtensionContextVersion = 1 | 2;
 export type ExtensionStatus = 'implement' | 'null';
 
 export interface ExtensionSpec {
-  /** Canonical name (getExtension case-sensitive). */
+  /** Canonical name (reported by getSupportedExtensions). */
   name: string;
-  /** Legacy prefixed aliases (WEBKIT_* / MOZ_*) accepted by getExtension. */
-  aliases?: string[];
   /** Context versions exposing this extension. */
   versions: ExtensionContextVersion[];
   /** 'implement' → factory must exist in extensions/<group>.ts; 'null' → not available. */
@@ -110,7 +108,7 @@ export const EXTENSION_SPECS: ExtensionSpec[] = [
   { name: 'WEBGL_lose_context', versions: [1, 2], status: 'implement' },
   { name: 'WEBGL_debug_renderer_info', versions: [1, 2], status: 'implement' },
   { name: 'WEBGL_debug_shaders', versions: [1, 2], status: 'implement' },
-  { name: 'EXT_texture_filter_anisotropic', aliases: ['WEBKIT_EXT_texture_filter_anisotropic', 'MOZ_EXT_texture_filter_anisotropic'], versions: [1, 2], status: 'implement' },
+  { name: 'EXT_texture_filter_anisotropic', versions: [1, 2], status: 'implement' },
 
   // ---- WebGL2-side (implement — mandated by objective) ----
   { name: 'EXT_clip_control', versions: [1, 2], status: 'implement' },
@@ -152,10 +150,13 @@ export const EXTENSION_SPECS: ExtensionSpec[] = [
   { name: 'WEBGL_webcodecs_video_frame', versions: [1, 2], status: 'null' },
 ];
 
+// Case-insensitive lookup per WebGL spec (getExtension name matching): keys are
+// lowercased, so `getExtension('wEbGl_deBuG_rEnDeReR_iNfO')` resolves. Aliases
+// (WEBKIT_*/MOZ_* prefixed names) are intentionally NOT registered — the CTS
+// get-extension.html test asserts prefixed names never resolve.
 const SPEC_BY_NAME = new Map<string, ExtensionSpec>();
 for (const spec of EXTENSION_SPECS) {
-  SPEC_BY_NAME.set(spec.name, spec);
-  for (const alias of spec.aliases ?? []) SPEC_BY_NAME.set(alias, spec);
+  SPEC_BY_NAME.set(spec.name.toLowerCase(), spec);
 }
 
 /** Names reported by getSupportedExtensions() for a context version (canonical only). */
@@ -171,11 +172,13 @@ export function getSupportedExtensionNames(version: ExtensionContextVersion): st
 
 /**
  * Resolve getExtension(name): returns the singleton extension object (cached on
- * the context) or null. Case-sensitive; aliases resolve to their canonical spec.
- * `status: 'null'` specs return null — their factories do not exist yet.
+ * the context) or null. Case-insensitive per spec (name is lowercased before
+ * lookup; the singleton is keyed by the canonical spec name, so mixed-case and
+ * canonical calls return the same object). `status: 'null'` specs return null —
+ * their factories do not exist yet.
  */
 export function getExtensionObject(ctx: WebGLRenderingContext | WebGL2RenderingContext, name: string): object | null {
-  const spec = SPEC_BY_NAME.get(name);
+  const spec = SPEC_BY_NAME.get(name.toLowerCase());
   if (!spec) return null;
   const version: ExtensionContextVersion = ctx._version;
   if (!spec.versions.includes(version)) return null;
