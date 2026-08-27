@@ -129,6 +129,45 @@ export function isIntegralFamily(t: GLSLType): boolean {
   }
 }
 
+/** True for a float LEAF shape (float scalar/vector or matrix) — the only
+ *  shapes that carry duals at the leaf level (structs/arrays recurse before
+ *  the leaf in reads()/writes()). */
+export function isFloatLeaf(t: GLSLType): boolean {
+  return (
+    t.kind === 'matrix' ||
+    ((t.kind === 'scalar' || t.kind === 'vector') && t.base === 'float')
+  );
+}
+
+/** Per-flat-component float-ness of a type (column-major for matrices,
+ *  structs/arrays recurse in flat order). Dual mode allocates the dx/dy
+ *  names/planes exactly for the TRUE entries. */
+export function flatFloatness(type: GLSLType): boolean[] {
+  switch (type.kind) {
+    case 'scalar':
+      return [type.base === 'float'];
+    case 'sampler':
+      return [false];
+    case 'vector':
+      return Array.from({ length: type.size }, () => type.base === 'float');
+    case 'matrix':
+      return Array.from({ length: type.cols * type.rows }, () => true);
+    case 'struct':
+      return type.members.flatMap((m) => flatFloatness(m.type));
+    case 'array':
+      return Array.from({ length: type.size ?? 0 }, () => flatFloatness(type.element)).flat();
+    default:
+      return [];
+  }
+}
+
+/** True when the type contains any float leaf — the C5a2 guard predicate
+ *  (dual-mode constructs whose result carries duals but whose lowering is not
+ *  yet implemented must throw rather than silently drop the duals). */
+export function hasFloatLeaves(type: GLSLType): boolean {
+  return flatFloatness(type).some(Boolean);
+}
+
 /** Wrap an expression string to int32 range (int-typed results). The result
  *  is SELF-PARENTHESIZED — wrapped values are embedded in larger expressions
  *  (`(a + (x) | 0)` would parse as `(a + x) | 0`; `|` binds looser than `+`). */
@@ -173,6 +212,18 @@ export function convertValue(vals: Value[], from: GLSLType, to: GLSLType): Value
  * `scratchBase`; `elemSlots` = flat components per array element; struct
  * elements carry member → relative flat offset in `members` (recursive via
  * the member's own type). `int` = integral family → ctx.intScratch.
+ *
+ * DUAL MODE (env.dual — fragment stages with layout.uses.derivatives):
+ * every FLOAT component carries a (v, dx, dy) triple.
+ * - FLAT locals: the v JS name stays `compNames[c]`; the derivative names are
+ *   `compNames[c] + '_dx'` / `compNames[c] + '_dy'` (registered in
+ *   usedJsNames_ at declaration). `dxNames[c]` = the dx name (null for
+ *   non-float components; dy is always derivable as `compNames[c] + '_dy'`).
+ * - SCRATCH locals (float blocks): the block occupies THREE planes of
+ *   `blockSize` elements each — v at `scratchBase`, dx at
+ *   `scratchBase + blockSize`, dy at `scratchBase + 2*blockSize`
+ *   (`allocScratch` charges 3× in dual mode, so scratchSize reflects the
+ *   planes). Int/uint/bool locals never carry duals.
  */
 export interface LocalVar {
   name: string;
@@ -183,6 +234,10 @@ export interface LocalVar {
   int?: boolean;
   compNames?: string[];
   members?: Map<string, number>;
+  /** Dual-mode dx JS name per flat component (null = non-float); absent for scratch. */
+  dxNames?: (string | null)[];
+  /** Scratch block size in elements (v-plane length; dual planes sit after). */
+  blockSize?: number;
   /**
    * Dynamic-index spill backing for FLAT vector/matrix locals (set on first
    * dynamic index; see ensureDynScratch). The flat vars stay the source of
@@ -586,6 +641,7 @@ export class CodegenEnv {
         type,
         kind: 'scratch',
         scratchBase: base,
+        blockSize: n,
         elemSlots: flatComponents(elem),
         int,
         members: elem.kind === 'struct' ? structMemberOffsets(elem) : undefined,
@@ -598,11 +654,14 @@ export class CodegenEnv {
       }
       this.usedJsNames_.add(js);
     }
+    // Dual mode: register the dx/dy names of every FLOAT component.
+    const dxNames = this.dual ? this.dualNamesFor(compNames, type) : undefined;
     return {
       name,
       type,
       kind: 'flat',
       compNames,
+      dxNames,
       members: type.kind === 'struct' ? structMemberOffsets(type) : undefined,
     };
   }
@@ -658,6 +717,7 @@ export class CodegenEnv {
         type,
         kind: 'scratch',
         scratchBase: base,
+        blockSize: n,
         elemSlots: flatComponents(elem),
         int,
         members: elem.kind === 'struct' ? structMemberOffsets(elem) : undefined,
@@ -674,13 +734,41 @@ export class CodegenEnv {
       }
       this.usedJsNames_.add(js);
     }
+    const dxNames = this.dual ? this.dualNamesFor(compNames, type) : undefined;
     this.locals_.set(name, {
       name,
       type,
       kind: 'flat',
       compNames,
+      dxNames,
       members: type.kind === 'struct' ? structMemberOffsets(type) : undefined,
     });
+  }
+
+  /** Dual-mode: derive + register the `_dx`/`_dy` JS names for every FLOAT
+   *  flat component of `type` (parallel to `compNames`; null = non-float).
+   *  Convention: dx = `compNames[c] + '_dx'`, dy = `compNames[c] + '_dy'` —
+   *  every reader (leafRead/leafWrite dual paths, statements, the inliner)
+   *  derives the same names, so nothing else needs to store them. */
+  private dualNamesFor(compNames: string[], type: GLSLType): (string | null)[] {
+    const floatness = flatFloatness(type);
+    const dxNames: (string | null)[] = compNames.map((n, c) =>
+      floatness[c] ? `${n}_dx` : null,
+    );
+    for (let c = 0; c < compNames.length; c++) {
+      if (!floatness[c]) continue;
+      const dx = dxNames[c]!;
+      const dy = `${compNames[c]}_dy`;
+      if (this.usedJsNames_.has(dx)) {
+        throw new Error(`codegen: local '${compNames[c]}' collides with JS name '${dx}' (rename the GLSL variable)`);
+      }
+      if (this.usedJsNames_.has(dy)) {
+        throw new Error(`codegen: local '${compNames[c]}' collides with JS name '${dy}' (rename the GLSL variable)`);
+      }
+      this.usedJsNames_.add(dx);
+      this.usedJsNames_.add(dy);
+    }
+    return dxNames;
   }
 
   /** Look up a declared local (null = not a local; try globalInfo next). */
@@ -723,11 +811,21 @@ export class CodegenEnv {
     const base = int ? this.allocIntScratch(n) : this.allocScratch(n);
     const store = int ? 'ctx.intScratch' : 'ctx.scratch';
     const wrap = lv.type.kind === 'vector' && lv.type.base === 'uint' ? ' >>> 0' : '';
+    const dual = this.dual && !int;
     const copyIn: string[] = [];
     const copyOut: string[] = [];
     for (let k = 0; k < n; k++) {
       copyIn.push(`${store}[${base} + ${k}] = ${lv.compNames![k]}`);
       copyOut.push(`${lv.compNames![k]} = (${store}[${base} + ${k}])${wrap}`);
+      if (dual) {
+        // Dual planes: dx at base+n, dy at base+2n (allocScratch charged 3n).
+        const dx = `${lv.compNames![k]}_dx`;
+        const dy = `${lv.compNames![k]}_dy`;
+        copyIn.push(`${store}[${base} + ${n} + ${k}] = ${dx}`);
+        copyIn.push(`${store}[${base} + ${2 * n} + ${k}] = ${dy}`);
+        copyOut.push(`${dx} = (${store}[${base} + ${n} + ${k}])`);
+        copyOut.push(`${dy} = (${store}[${base} + ${2 * n} + ${k}])`);
+      }
     }
     lv.dynScratch = { base, int, copyIn, copyOut };
     return lv.dynScratch;
@@ -735,10 +833,13 @@ export class CodegenEnv {
 
   /* ---------------- scratch ---------------- */
 
-  /** Allocate `n` float scratch elements; returns the base offset. */
+  /** Allocate `n` float scratch elements; returns the base offset. In dual
+   *  mode every float block is THREE planes (v, dx, dy) — the allocation
+   *  charges 3×n and `scratchSize` reflects the planes (the caller's base
+   *  stays the v-plane start). */
   allocScratch(n: number): number {
     const base = this.scratchTop_;
-    this.scratchTop_ += n;
+    this.scratchTop_ += n * (this.dual ? 3 : 1);
     if (this.scratchTop_ > this.scratchSize) this.scratchSize = this.scratchTop_;
     return base;
   }
@@ -822,9 +923,59 @@ export class CodegenEnv {
   }
 
   /** Fragment varying read hook (C5's dual mode overrides for .ddx/.ddy).
-   *  `c` is a component EXPRESSION (may include a dynamic-index term). */
+   *  `c` is a component EXPRESSION (may include a dynamic-index term).
+   *  This is the v-plane read; the dual planes go through varyingReadDual. */
   varyingRead(index: number, c: string): string {
     return `ctx.varyings[${index}].v[${c}]`;
+  }
+
+  /**
+   * Fragment varying DUAL read hook (C5): the [dx, dy] plane reads for one
+   * component expression `c`. FLAT varyings are constant across the fragment
+   * (dx=dy=0); non-flat float varyings read the raster-supplied derivative
+   * arrays. The raster provides `ctx.varyings[i].ddx/ddy` whenever the
+   * program usesDerivatives (contract §1: "derivative arrays valid only when
+   * usesDerivatives") — the generated code reads them DIRECTLY, no guards
+   * (gl/ must always supply the arrays in dual mode).
+   */
+  varyingReadDual(index: number, c: string, flat: boolean): [string, string] {
+    if (flat) return ['0', '0'];
+    return [`ctx.varyings[${index}].ddx[${c}]`, `ctx.varyings[${index}].ddy[${c}]`];
+  }
+
+  /**
+   * Dual-mode write expression for ONE float component.
+   * `target` = the v-plane lvalue string; `dual` = [dx, dy] lvalue strings
+   * (null when the target has no dual planes — outputs, gl_FragDepth — or
+   * the component is not float); `val` = the RHS Value (dx/dy absent = the
+   * constant 0 — covers int→float conversions and literals). With `op`
+   * ('+'|'-') emits a compound update — the derivative of a LINEAR op is the
+   * op applied to the derivatives — any other op throws (needs the C5a2
+   * arithmetic dual templates: product/quotient rule). Returns a comma
+   * expression ENDING WITH THE v READ:
+   *   '='      : (vslot = vv, dxslot = dxv, dyslot = dyv, vslot)
+   *   '+='/'-=': (vslot = vslot op vv, dxslot = dxslot op dxv, dyslot = dyslot op dyv, vslot)
+   * so both `target = <result>` statement emitters and expression contexts
+   * stay correct. Non-dual mode / no-dual-plane targets degrade to a plain
+   * `(target = val.v)` — byte-identical to the pre-dual emitters.
+   */
+  dualWrite(target: string, dual: [string, string] | null, val: Value, op?: string): string {
+    if (!this.dual) return `(${target} = ${val.v})`;
+    if (!dual) {
+      if (op !== undefined) {
+        throw new Error(`codegen: dual-mode compound-assign '${op}=' on a target without dual planes`);
+      }
+      return `(${target} = ${val.v})`;
+    }
+    const dxv = val.dx ?? '0';
+    const dyv = val.dy ?? '0';
+    if (op === '+' || op === '-') {
+      return `(${target} = ${target} ${op} ${val.v}, ${dual[0]} = ${dual[0]} ${op} ${dxv}, ${dual[1]} = ${dual[1]} ${op} ${dyv}, ${target})`;
+    }
+    if (op !== undefined) {
+      throw new Error(`codegen: dual-mode compound-assign '${op}=' requires arithmetic dual templates (C5a2)`);
+    }
+    return `(${target} = ${val.v}, ${dual[0]} = ${dxv}, ${dual[1]} = ${dyv}, ${target})`;
   }
 
   /**

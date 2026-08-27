@@ -34,10 +34,10 @@ function findMain(ast: TranslationUnit): FunctionDefinition {
 /** Generate the fragment stage body (writes ctx.out.color[loc], ctx.out.fragDepth, ctx.discarded). */
 export function generateFragmentStage(ast: TranslationUnit, layout: CodegenLayout): StageCodegenResult {
   const env = new CodegenEnv('FRAGMENT', layout);
-  // TODO(dual): set env.dual = layout.uses.derivatives once the dual-number
-  // codegen (C5) lands. Until then derivative-using shaders compile in
-  // non-dual mode (implicit-LOD texturing falls back to LOD 0; explicit
-  // dFdx/dFdy/fwidth are not yet lowered with screen-space derivatives).
+  // Dual-number mode: every FLOAT value carries (v, dx, dy) screen-space
+  // derivatives (see env.ts DUAL MODE + the dualWrite/varyingReadDual hooks).
+  // The raster supplies ctx.varyings[i].ddx/ddy whenever usesDerivatives.
+  env.dual = layout.uses.derivatives;
   installUserFunctions(ast, env); // BEFORE main emission — calls must inline
   const main = findMain(ast);
   const lines = emitStatements(main.body.body, env);
