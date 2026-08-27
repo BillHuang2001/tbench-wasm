@@ -105,4 +105,4 @@ linkProgram:    uniform merge → attrib locations → varying match/pack → un
 - `../gl/` → consumer of Program/Shader (sibling — read-only)
 
 ## Status
-COMPLETE: front-end (preprocessor/lexer/parser/semantics), builtins tables, linker (all features), and JS codegen (non-dual + dual-number modes) implemented; 2,058 selftest checks green; `npx tsc --noEmit` clean for src/glsl. Remaining work: CTS/three.js/Babylon verification (needs the test harnesses + gl/ integration), the known gaps listed above, and reconciling the texture approximations against CTS.
+COMPLETE: front-end (preprocessor/lexer/parser/semantics), builtins tables, linker (all features), and JS codegen (non-dual + dual-number modes) implemented; 2,117 selftest checks green; `npx tsc --noEmit` clean for src/glsl. Remaining work: CTS/three.js/Babylon verification (needs the test harnesses + gl/ integration), the known gaps listed above, and reconciling the texture approximations against CTS.
