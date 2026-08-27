@@ -1,8 +1,8 @@
 /**
  * src/gl/extensions/util.ts — shared helpers for extension factories.
  *
- *  - `isLost`: context-loss guard mirroring the api/ modules (no-op + one
- *    CONTEXT_LOST_WEBGL error per call while lost).
+ *  - `isLost`: context-loss guard mirroring the api/ modules (silent no-op
+ *    while lost — NO error, per CTS context-lost.html).
  *  - `ctorOf`: cast an object class with a protected constructor so it can be
  *    passed to validateObject/createObject (same pattern as api/buffers.ts).
  *  - `buildExtension`: assemble an extension object from a constant table
@@ -11,12 +11,16 @@
  */
 
 import type { WebGLRenderingContext } from '../webgl1';
-import { C1, installConstants } from '../constants';
+import { installConstants } from '../constants';
 import type { WebGLObject } from '../objects';
 
-/** Context-loss guard: no-op + one CONTEXT_LOST_WEBGL per call. */
+/**
+ * Context-loss guard: no-op while lost WITHOUT generating an error (CTS
+ * context-lost.html asserts NO_ERROR after every void/extension call while
+ * lost — the single CONTEXT_LOST_WEBGL is delivered via getError's lost-epoch,
+ * lost.ts).
+ */
 export function isLost(ctx: WebGLRenderingContext): boolean {
-  if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
   return ctx._isLost;
 }
 

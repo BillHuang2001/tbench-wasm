@@ -121,9 +121,8 @@ const UNSIGNED_INT = 0x1405;
 const CUBE_POSITIVE_X = 0x8515;
 const CUBE_NEGATIVE_Z = 0x851a;
 
-/** Context-loss guard: no-op + one CONTEXT_LOST_WEBGL per call (buffers.ts pattern). */
+/** Context-loss guard: no-op while lost WITHOUT generating an error (buffers.ts pattern; CTS context-lost.html asserts NO_ERROR after every void call while lost). */
 function isLost(ctx: WebGLRenderingContext): boolean {
-  if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
   return ctx._isLost;
 }
 
@@ -572,7 +571,9 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
   // ---- Framebuffer objects ----
   proto.createFramebuffer = function (this: WebGLRenderingContext): WebGLFramebuffer | null {
     const ctx = this;
-    if (isLost(ctx)) return null;
+    // No [WebGLHandlesContextLoss]: while lost it still creates an object
+    // (CTS context-lost.html nonNullTests) with NO error; isFramebuffer on it
+    // → false while lost (isLost guard).
     return createObject(ctx, FboCtor);
   };
 
@@ -849,7 +850,9 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
   // ---- Renderbuffer objects ----
   proto.createRenderbuffer = function (this: WebGLRenderingContext): WebGLRenderbuffer | null {
     const ctx = this;
-    if (isLost(ctx)) return null;
+    // No [WebGLHandlesContextLoss]: while lost it still creates an object
+    // (CTS context-lost.html nonNullTests) with NO error; isRenderbuffer on it
+    // → false while lost (isLost guard).
     return createObject(ctx, RboCtor);
   };
 

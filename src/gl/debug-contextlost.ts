@@ -20,7 +20,7 @@ const urls = process.argv.slice(2).length
     ];
 
 const server = await startCtsServer({ root: ctsDir, host: "127.0.0.1", port: 0 });
-process.env.WEBGL_SOFTWARE_RENDERER = "./renderer.js";
+process.env.WEBGL_SOFTWARE_RENDERER ??= "./renderer.js";
 const intercept = buildInterceptScript();
 
 const browser = await chromium.launch({
