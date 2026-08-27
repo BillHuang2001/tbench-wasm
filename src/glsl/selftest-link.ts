@@ -1112,6 +1112,231 @@ const INT = 0x1404; // 5124
 }
 
 /* ------------------------------------------------------------------ */
+/* 16. Transform feedback (E5b2)                                       */
+/* ------------------------------------------------------------------ */
+
+{
+  // Valid SEPARATE_ATTRIBS: two varyings captured with metadata.
+  const vs = compile(
+    `#version 300 es
+     out vec4 vColor;
+     out float vScale;
+     in vec4 aPos;
+     void main() { vColor = aPos; vScale = aPos.x; gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision mediump float;
+     in vec4 vColor;
+     in float vScale;
+     out vec4 o;
+     void main() { o = vColor + vec4(vScale); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs, { transformFeedback: { varyings: ['vColor', 'vScale'], bufferMode: 'SEPARATE_ATTRIBS' } });
+  check(l.ok, `TF SEPARATE_ATTRIBS links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    check(
+      p.transformFeedbackVaryings.length === 2 && p.transformFeedbackVaryings[0].name === 'vColor' &&
+        p.transformFeedbackVaryings[0].type === FLOAT_VEC4 && p.transformFeedbackVaryings[0].size === 1 &&
+        p.transformFeedbackVaryings[1].name === 'vScale' && p.transformFeedbackVaryings[1].type === FLOAT,
+      `TF varyings metadata (got ${JSON.stringify(p.transformFeedbackVaryings)})`,
+    );
+  }
+
+  // 'gl_Position' is capturable.
+  const vs2 = compile(
+    `#version 300 es
+     in vec4 aPos;
+     void main() { gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs2 = compile(`#version 300 es
+     precision mediump float; out vec4 o; void main() { o = vec4(1.0); }`, 'FRAGMENT', 300);
+  const l2 = linkProgram(vs2, fs2, { transformFeedback: { varyings: ['gl_Position'], bufferMode: 'SEPARATE_ATTRIBS' } });
+  check(l2.ok && l2.program.transformFeedbackVaryings.length === 1 && l2.program.transformFeedbackVaryings[0].name === 'gl_Position',
+    `TF gl_Position capturable (${l2.ok ? '' : l2.log})`);
+
+  // Unknown varying name → link error.
+  const l3 = linkProgram(vs2, fs2, { transformFeedback: { varyings: ['nope'], bufferMode: 'SEPARATE_ATTRIBS' } });
+  check(!l3.ok && l3.log.includes(`transform feedback varying 'nope'`), `TF invalid name error (${logOf(l3)})`);
+
+  // INTERLEAVED limit: vec4 varying = 4 components > 2.
+  const vs4 = compile(
+    `#version 300 es
+     out vec4 vColor;
+     in vec4 aPos;
+     void main() { vColor = aPos; gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs4 = compile(`#version 300 es
+     precision mediump float;
+     in vec4 vColor;
+     out vec4 o;
+     void main() { o = vColor; }`, 'FRAGMENT', 300);
+  const l4 = linkProgram(vs4, fs4, {
+    transformFeedback: { varyings: ['vColor'], bufferMode: 'INTERLEAVED_ATTRIBS' },
+    limits: { maxTransformFeedbackInterleavedComponents: 2 },
+  });
+  check(!l4.ok && l4.log.includes('maxTransformFeedbackInterleavedComponents'),
+    `TF interleaved limit error (${logOf(l4)})`);
+
+  // SEPARATE count limit: 2 varyings, max 1 attrib.
+  const vs5 = compile(
+    `#version 300 es
+     out vec4 vColor;
+     out float vScale;
+     in vec4 aPos;
+     void main() { vColor = aPos; vScale = aPos.x; gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs5 = compile(`#version 300 es
+     precision mediump float;
+     in vec4 vColor;
+     in float vScale;
+     out vec4 o;
+     void main() { o = vColor + vec4(vScale); }`, 'FRAGMENT', 300);
+  const l5 = linkProgram(vs5, fs5, {
+    transformFeedback: { varyings: ['vColor', 'vScale'], bufferMode: 'SEPARATE_ATTRIBS' },
+    limits: { maxTransformFeedbackSeparateAttribs: 1 },
+  });
+  check(!l5.ok && l5.log.includes('maxTransformFeedbackSeparateAttribs'), `TF separate count limit error (${logOf(l5)})`);
+
+  // SEPARATE components limit: vec4 = 4 components > 2.
+  const l6 = linkProgram(vs4, fs4, {
+    transformFeedback: { varyings: ['vColor'], bufferMode: 'SEPARATE_ATTRIBS' },
+    limits: { maxTransformFeedbackSeparateComponents: 2 },
+  });
+  check(!l6.ok && l6.log.includes('maxTransformFeedbackSeparateComponents'),
+    `TF separate components limit error (${logOf(l6)})`);
+
+  // TF on an ES 1.00 program → link error.
+  const vs7 = compile(`attribute vec4 aPos; varying vec4 vC; void main(){ vC = aPos; gl_Position = aPos; }`, 'VERTEX', 100);
+  const fs7 = compile(`precision mediump float; varying vec4 vC; void main(){ gl_FragColor = vC; }`, 'FRAGMENT', 100);
+  const l7 = linkProgram(vs7, fs7, { transformFeedback: { varyings: ['vC'], bufferMode: 'SEPARATE_ATTRIBS' } });
+  check(!l7.ok && l7.log.includes('requires GLSL ES 3.00'), `TF on ES 1.00 error (${logOf(l7)})`);
+
+  // Block member by bare member name and by full instance path.
+  const vs8 = compile(
+    `#version 300 es
+     out VS_OUT { vec4 c; } a;
+     in vec4 aPos;
+     void main() { a.c = aPos; gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs8 = compile(`#version 300 es
+     precision mediump float;
+     in VS_OUT { vec4 c; } b;
+     out vec4 o;
+     void main() { o = b.c; }`, 'FRAGMENT', 300);
+  const l8 = linkProgram(vs8, fs8, { transformFeedback: { varyings: ['c'], bufferMode: 'SEPARATE_ATTRIBS' } });
+  check(l8.ok && l8.program.transformFeedbackVaryings.length === 1 && l8.program.transformFeedbackVaryings[0].name === 'c',
+    `TF block member by bare name (${l8.ok ? '' : l8.log})`);
+  const l8b = linkProgram(vs8, fs8, { transformFeedback: { varyings: ['a.c'], bufferMode: 'SEPARATE_ATTRIBS' } });
+  check(l8b.ok && l8b.program.transformFeedbackVaryings.length === 1 && l8b.program.transformFeedbackVaryings[0].name === 'a.c',
+    `TF block member by full path (${l8b.ok ? '' : l8b.log})`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 17. Sampler explicit-binding conflicts (E5b2)                       */
+/* ------------------------------------------------------------------ */
+
+{
+  // Two ACTIVE samplers of DIFFERENT types with the SAME explicit binding.
+  const vs = compile(
+    `#version 300 es
+     layout(binding = 0) uniform sampler2D a;
+     in vec4 aPos;
+     void main() { gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision mediump float;
+     layout(binding = 0) uniform samplerCube b;
+     out vec4 o;
+     void main() { o = texture(b, vec3(0.0)); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(!l.ok && l.log.includes(`sampler binding conflict: units 0`), `sampler binding conflict error (${logOf(l)})`);
+
+  // Different explicit bindings → links fine.
+  const vs2 = compile(
+    `#version 300 es
+     layout(binding = 0) uniform sampler2D a;
+     in vec4 aPos;
+     void main() { gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs2 = compile(
+    `#version 300 es
+     precision mediump float;
+     layout(binding = 1) uniform samplerCube b;
+     out vec4 o;
+     void main() { o = texture(b, vec3(0.0)); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l2 = linkProgram(vs2, fs2);
+  check(l2.ok, `different sampler bindings link (${l2.ok ? '' : l2.log})`);
+
+  // Active sampler count > maxCombinedTextureImageUnits → link error.
+  const vs3 = compile(
+    `#version 300 es
+     uniform sampler2D a;
+     in vec4 aPos;
+     void main() { gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs3 = compile(
+    `#version 300 es
+     precision mediump float;
+     uniform sampler2D b;
+     out vec4 o;
+     void main() { o = texture(b, vec2(0.0)); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l3 = linkProgram(vs3, fs3, { limits: { maxCombinedTextureImageUnits: 1 } });
+  check(!l3.ok && l3.log.includes('too many texture units'), `sampler count limit error (${logOf(l3)})`);
+
+  // Default-0 samplers (no explicit binding) of different types → NO error
+  // (WebGL practice; only explicit bindings are conflict-checked).
+  const vs4 = compile(
+    `#version 300 es
+     uniform sampler2D a;
+     in vec4 aPos;
+     void main() { gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs4 = compile(
+    `#version 300 es
+     precision mediump float;
+     uniform samplerCube b;
+     out vec4 o;
+     void main() { o = texture(b, vec3(0.0)); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l4 = linkProgram(vs4, fs4);
+  check(l4.ok, `default-0 samplers of different types link (${l4.ok ? '' : l4.log})`);
+}
+
+/* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
 
