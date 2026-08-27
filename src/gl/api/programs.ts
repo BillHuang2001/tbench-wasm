@@ -30,13 +30,19 @@
  *
  * UNIFORM STORE LAYOUT (single source of truth, matches src/glsl/program.ts):
  * glsl Program.floatStore (Float32Array) / intStore (Int32Array) hold the
- * default-block uniforms with vec4-slot packing: a uniform occupies
- * `elementSlots()` consecutive slots per array element (1 for scalars/vectors,
- * `cols` for matrices — column-major, 4 floats per slot); UniformInfo.location
- * is the START slot. gl/ writes via:
+ * default-block uniforms; UniformInfo.location is a FLOAT index into the store
+ * (NOT a vec4 slot — see src/glsl/linker.ts "UNIFORM STORE LAYOUT"). A
+ * scalar/sampler occupies 1 float at L; a vecN occupies floats [L..L+N-1]; a
+ * matCxR occupies C*4 consecutive floats with column `col` at L + col*4 + row
+ * (column stride 4 — GLSL memory order). Arrays: scalar/sampler elements pack
+ * DENSELY (element k at L+k, stride 1); vector elements stride 4 floats;
+ * matrix elements stride cols*4 (`elementSlots()` below returns this float
+ * stride, matching the linker's elemFloatStride / codegen's dynamic stride).
+ * gl/ writes via:
  *  - floats: `_uniformStore` = DataView over floatStore's ArrayBuffer
- *    (byte offset = slot*16 + component*4, little-endian);
- *  - ints/uints/bools/samplers: `programModels.get(p).intStore[slot*4+c]`.
+ *    (byte offset = floatIndex*4, little-endian);
+ *  - ints/uints/bools/samplers: `programModels.get(p).intStore[floatIndex]`
+ *    (uint stored as raw int32 bits; the generated code reinterprets via >>> 0).
  * The draw engine passes the SAME arrays as ctx.uniforms / ctx.intUniforms,
  * so writes land in the memory the generated shaders read.
  *
@@ -291,11 +297,15 @@ export function matrixRows(type: number): number {
 }
 
 /**
- * Consecutive store slots per array element: 1 for scalars/vectors
- * (ceil(components/4)), `cols` for matrices (column-major, 4 floats per slot).
+ * FLOAT stride between consecutive array elements in the default-block store
+ * (the linker's elemFloatStride — also codegen's dynamic-index stride):
+ * scalar/sampler → 1 (dense packing), vector → 4, matrix → cols*4
+ * (column-major). With UniformInfo.location being a FLOAT index, element k of
+ * an array starts at float `location + k * elementSlots(uniform)`.
  */
 export function elementSlots(uniform: { type: number; components: number }): number {
-  return isMatrixType(uniform.type) ? matrixCols(uniform.type) : Math.ceil(uniform.components / 4);
+  if (isMatrixType(uniform.type)) return matrixCols(uniform.type) * 4;
+  return uniform.components > 1 ? 4 : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -441,7 +451,12 @@ function doLinkProgram(ctx: WebGLRenderingContext, p: WebGLProgram): void {
 /** Read one component of one array element from the store (float-indexed). */
 function readStoreValue(pm: GlslProgram, uniform: GlslProgram['uniforms'][number], elementIdx: number, comp: number, asUint: boolean): number {
   const base = uniform.location + elementIdx * elementSlots(uniform);
-  if (isMatrixType(uniform.type)) return pm.floatStore[base + comp];
+  if (isMatrixType(uniform.type)) {
+    // comp is the flat column-major index (col*rows+row); the store lays
+    // columns at stride 4 floats.
+    const r = matrixRows(uniform.type);
+    return pm.floatStore[base + Math.floor(comp / r) * 4 + (comp % r)];
+  }
   if (isFloatType(uniform.type)) return pm.floatStore[base + comp];
   const v = pm.intStore[base + comp];
   return asUint ? v >>> 0 : v;
@@ -501,9 +516,10 @@ function readUniform(pm: GlslProgram, uniform: GlslProgram['uniforms'][number], 
     const c = matrixCols(uniform.type);
     const r = matrixRows(uniform.type);
     const out = new Float32Array(count * c * r);
+    // slots = float stride per element (cols*4); column col at +col*4 floats.
     for (let e = 0; e < count; e++)
       for (let col = 0; col < c; col++)
-        for (let row = 0; row < r; row++) out[e * c * r + col * r + row] = pm.floatStore[(uniform.location + (elem + e) * slots + col) * 4 + row];
+        for (let row = 0; row < r; row++) out[e * c * r + col * r + row] = pm.floatStore[uniform.location + (elem + e) * slots + col * 4 + row];
     return out;
   }
   if (isFloatType(uniform.type) || uniform.type === C1.BOOL_VEC2) {
@@ -1008,7 +1024,11 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       return null;
     }
     const info = uniformLocInfo.get(location) ?? { elem: 0, whole: true };
-    return readUniform(pm, uniform, info.elem, info.whole);
+    try {
+      return readUniform(pm, uniform, info.elem, info.whole);
+    } catch {
+      return null; // internal read failure must never escape to the page
+    }
   };
 
   // ---- WebGL2 additions (gated: only present on the WebGL2 prototype) ----

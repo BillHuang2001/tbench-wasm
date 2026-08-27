@@ -5,11 +5,13 @@
  * (WebGL1: f/i + 2x2/3x3/4x4; WebGL2 adds ui + non-square matrices).
  *
  * Store contract (with glsl/, see api/programs.ts header "UNIFORM STORE LAYOUT"):
- * each glsl Program.uniforms[i] has a `location` (start vec4-slot) and type.
- * Float/matrix writes go through WebGLProgram._uniformStore (a DataView over
- * the glsl floatStore's ArrayBuffer): byte offset = (location + element*slots
- * + col) * 16 + row*4, little-endian. Int/uint/bool/sampler writes go to the
- * glsl Program.intStore (Int32Array) at index (location + element*slots)*4 + c
+ * each glsl Program.uniforms[i] has a `location` — a FLOAT index into the
+ * store (NOT a vec4 slot). Float/matrix writes go through
+ * WebGLProgram._uniformStore (a DataView over the glsl floatStore's
+ * ArrayBuffer): byte offset = floatIndex*4, little-endian, where floatIndex =
+ * location + element*stride + comp (stride = elementSlots(): scalar/sampler 1,
+ * vector 4, matrix cols*4; matrix comp = col*4 + row). Int/uint/bool/sampler
+ * writes go to the glsl Program.intStore (Int32Array) at the SAME float index
  * (uint stored as raw int32 bits; the generated code reinterprets via >>> 0).
  * The draw engine passes the same floatStore/intStore as ctx.uniforms /
  * ctx.intUniforms, so these writes are what the shaders read.
@@ -214,30 +216,42 @@ function prepareUniform(ctx: WebGLRenderingContext, loc: unknown): WriteTarget |
   return { program, pm, uniform, slots: elementSlots(uniform) };
 }
 
-/** Float write at absolute slot offset (matrices: slotOffset = element*slots + col). */
+/**
+ * Float write at float-index offset: store index = location + slotOffset + comp
+ * (matrices pass slotOffset = element*stride + col*4, comp = row). Wrapped so
+ * an internal addressing bug can never throw to the page.
+ */
 function writeFloatAt(t: WriteTarget, slotOffset: number, comp: number, v: number): void {
   const dv = t.program._uniformStore;
   if (dv === null) return; // linked program always has a store; defensive
-  dv.setFloat32((t.uniform.location + slotOffset) * 16 + comp * 4, v, true);
+  try {
+    dv.setFloat32((t.uniform.location + slotOffset + comp) * 4, v, true);
+  } catch {
+    /* internal store write must never escape to the page */
+  }
 }
 
 /** Int-family write: 'int' ToInt32, 'uint' ToUint32, 'bool' ToInt32≠0, 'boolf' float≠0. */
 function writeIntAt(t: WriteTarget, slotOffset: number, comp: number, v: number, mode: 'int' | 'uint' | 'bool' | 'boolf'): void {
   const store = t.pm.intStore;
-  const idx = (t.uniform.location + slotOffset) * 4 + comp;
-  switch (mode) {
-    case 'int':
-      store[idx] = v | 0;
-      break;
-    case 'uint':
-      store[idx] = v >>> 0;
-      break;
-    case 'bool':
-      store[idx] = (v | 0) !== 0 ? 1 : 0;
-      break;
-    case 'boolf':
-      store[idx] = v !== 0 ? 1 : 0;
-      break;
+  const idx = t.uniform.location + slotOffset + comp;
+  try {
+    switch (mode) {
+      case 'int':
+        store[idx] = v | 0;
+        break;
+      case 'uint':
+        store[idx] = v >>> 0;
+        break;
+      case 'bool':
+        store[idx] = (v | 0) !== 0 ? 1 : 0;
+        break;
+      case 'boolf':
+        store[idx] = v !== 0 ? 1 : 0;
+        break;
+    }
+  } catch {
+    /* internal store write must never escape to the page */
   }
 }
 
@@ -306,11 +320,14 @@ function uniformVector(ctx: WebGLRenderingContext, location: WebGLUniformLocatio
     const element = Math.floor(i / k);
     const comp = i % k;
     const v = values[i];
+    // element offset = element * elementSlots() (float stride: scalar 1,
+    // vector 4, matrix cols*4 — see api/programs.ts elementSlots).
+    const off = element * t.slots;
     if (family === 'f') {
-      if (isBool) writeIntAt(t, element, comp, v, 'boolf');
-      else writeFloatAt(t, element, comp, v);
-    } else if (family === 'i') writeIntAt(t, element, comp, v, isBool ? 'bool' : 'int');
-    else writeIntAt(t, element, comp, v, 'uint');
+      if (isBool) writeIntAt(t, off, comp, v, 'boolf');
+      else writeFloatAt(t, off, comp, v);
+    } else if (family === 'i') writeIntAt(t, off, comp, v, isBool ? 'bool' : 'int');
+    else writeIntAt(t, off, comp, v, 'uint');
   }
 }
 
