@@ -5002,22 +5002,18 @@
       return;
     }
     ctx._isLost = true;
+    const tracked = ctx._resources.all;
+    if (tracked) {
+      for (const obj of tracked) obj._invalidated = true;
+    }
     ctx._resources.invalidateAll();
     lostState.set(ctx, { restoreAllowed: false, restorePending: false });
     const canvas = ctx._canvas;
     schedule(() => {
-      let prevented = false;
-      const event = {
-        type: "webglcontextlost",
-        statusMessage: "",
-        cancelable: true,
-        preventDefault() {
-          prevented = true;
-        }
-      };
+      const event = makeContextEvent("webglcontextlost", "", true);
       dispatchCanvasEvent(canvas, event);
       const st = lostState.get(ctx);
-      if (st) st.restoreAllowed = prevented;
+      if (st) st.restoreAllowed = event.defaultPrevented === true;
     });
   }
   function restoreContext(ctx) {
@@ -5043,7 +5039,7 @@
       if (!/lose_context$/i.test(key)) ctx._extensions.delete(key);
     }
     lostState.delete(ctx);
-    dispatchCanvasEvent(ctx._canvas, { type: "webglcontextrestored", statusMessage: "" });
+    dispatchCanvasEvent(ctx._canvas, makeContextEvent("webglcontextrestored", "", false));
   }
   function initContextResources(ctx) {
     try {
@@ -5054,6 +5050,13 @@
     ctx._defaultVAO = defaultVAOState(ctx._state.limits.MAX_VERTEX_ATTRIBS);
     const w = Math.max(1, ctx._drawingBufferWidth);
     const h = Math.max(1, ctx._drawingBufferHeight);
+    if (ctx._presentSurface) {
+      try {
+        const ps = ctx._presentSurface;
+        if (typeof ps.resize === "function") ps.resize(w, h);
+      } catch {
+      }
+    }
     ctx._defaultFB = allocateDefaultFramebuffer(ctx, w, h);
     ctx._state.viewport = { x: 0, y: 0, w, h };
     ctx._state.scissor = { x: 0, y: 0, w, h };
@@ -5245,6 +5248,24 @@
     }
     fn();
   }
+  function makeContextEvent(type, statusMessage, cancelable) {
+    const evtCtor = globalThis.Event;
+    if (typeof evtCtor === "function") {
+      const ev2 = new evtCtor(type, { cancelable });
+      ev2.statusMessage = statusMessage;
+      return ev2;
+    }
+    const ev = {
+      type,
+      statusMessage,
+      cancelable,
+      defaultPrevented: false,
+      preventDefault() {
+        if (cancelable) ev.defaultPrevented = true;
+      }
+    };
+    return ev;
+  }
   function dispatchCanvasEvent(canvas, event) {
     const c = canvas;
     if (typeof c.dispatchEvent === "function") {
@@ -5323,7 +5344,7 @@
     ctx._errors.push(err);
   }
   function alignUp(n, align2) {
-    return (n + align2 - 1) / align2 | 0 * align2;
+    return ((n + align2 - 1) / align2 | 0) * align2;
   }
   function extSupported(ctx, name) {
     try {
@@ -5717,8 +5738,8 @@
         const l = loc + col;
         if (l >= maxAttribs) break;
         const a = vao.attribs[l];
-        plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: true };
         if (!a.enabled || !a.buffer || !a.buffer._data) {
+          plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: true, constant: true };
           if (pa.integral) {
             attribs[l] = (_b = a.constantI) != null ? _b : sc.emptyInt;
           } else {
@@ -5726,6 +5747,7 @@
           }
           continue;
         }
+        plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: true, constant: false };
         const buf = a.buffer;
         const data = buf._data;
         const typeSize = attribTypeSize(a.type);
@@ -5774,7 +5796,7 @@
     for (let l = 0; l < maxAttribs; l++) {
       if (!plans[l]) {
         const a = vao.attribs[l];
-        plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: false };
+        plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: false, constant: true };
         attribs[l] = a.constantF;
       }
     }
@@ -6161,9 +6183,10 @@
     if (req.count === 0 || req.instanceCount === 0) return;
     const sc = getScratch(ctx);
     const { attribs, plans } = buildAttribs(ctx, pm, req, indices);
-    const ai = sc.attribIndices;
-    if (ai.length < maxAttribs) {
+    if (sc.attribIndices.length < maxAttribs) {
+      sc.attribIndices = new Int32Array(maxAttribs);
     }
+    const ai = sc.attribIndices;
     const stride = computeVertexStride((_a2 = pm.varyings) != null ? _a2 : []);
     const totalVary = stride - RECORD_HEADER_FLOATS;
     const totalVerts = req.count * req.instanceCount;
@@ -6216,12 +6239,15 @@
     };
     const vertexLocs = [];
     const instancedLocs = [];
+    const constantLocs = [];
     for (let l = 0; l < maxAttribs; l++) {
       const p = plans[l];
       if (!p.present) continue;
-      if (p.instanced) instancedLocs.push({ loc: l, divisor: p.divisor });
+      if (p.constant) constantLocs.push(l);
+      else if (p.instanced) instancedLocs.push({ loc: l, divisor: p.divisor });
       else vertexLocs.push(l);
     }
+    for (let k = 0; k < constantLocs.length; k++) ai[constantLocs[k]] = 0;
     const records = sc.records;
     const pos = sc.outPosition;
     const first = req.indexed ? 0 : req.firstOrOffset;
@@ -6343,14 +6369,14 @@
         return comps * 4;
     }
   }
-  function makeLocalPack(format, type) {
+  function makeLocalPack(surf, format, type) {
     const tmp = new Float32Array(4);
     const u8 = (v2) => v2 < 0 ? 0 : v2 > 1 ? 1 : v2;
     switch (type) {
       case C1.UNSIGNED_BYTE: {
         const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
-        return (src, so, dst, d) => {
-          decodeSurfaceTexel(src, so, tmp);
+        return (_src, so, dst, d) => {
+          decodeSurfaceTexel(surf, so, tmp);
           const d8 = dst;
           if (comps === 4) {
             d8[d] = u8(tmp[0]) * 255 + 0.5 | 0;
@@ -6370,24 +6396,24 @@
         };
       }
       case C1.UNSIGNED_SHORT_5_6_5:
-        return (src, so, dst, d) => {
-          decodeSurfaceTexel(src, so, tmp);
+        return (_src, so, dst, d) => {
+          decodeSurfaceTexel(surf, so, tmp);
           const v2 = (u8(tmp[0]) * 31 + 0.5 | 0) << 11 | (u8(tmp[1]) * 63 + 0.5 | 0) << 5 | u8(tmp[2]) * 31 + 0.5 | 0;
           const d8 = dst;
           d8[d] = v2 & 255;
           d8[d + 1] = v2 >> 8 & 255;
         };
       case C1.UNSIGNED_SHORT_4_4_4_4:
-        return (src, so, dst, d) => {
-          decodeSurfaceTexel(src, so, tmp);
+        return (_src, so, dst, d) => {
+          decodeSurfaceTexel(surf, so, tmp);
           const v2 = (u8(tmp[0]) * 15 + 0.5 | 0) << 12 | (u8(tmp[1]) * 15 + 0.5 | 0) << 8 | (u8(tmp[2]) * 15 + 0.5 | 0) << 4 | u8(tmp[3]) * 15 + 0.5 | 0;
           const d8 = dst;
           d8[d] = v2 & 255;
           d8[d + 1] = v2 >> 8 & 255;
         };
       case C1.UNSIGNED_SHORT_5_5_5_1:
-        return (src, so, dst, d) => {
-          decodeSurfaceTexel(src, so, tmp);
+        return (_src, so, dst, d) => {
+          decodeSurfaceTexel(surf, so, tmp);
           const v2 = (u8(tmp[0]) * 31 + 0.5 | 0) << 11 | (u8(tmp[1]) * 31 + 0.5 | 0) << 6 | (u8(tmp[2]) * 31 + 0.5 | 0) << 1 | (u8(tmp[3]) > 0.5 ? 1 : 0);
           const d8 = dst;
           d8[d] = v2 & 255;
@@ -6395,32 +6421,31 @@
         };
       case C1.FLOAT: {
         const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
-        return (src, so, dst, d) => {
-          decodeSurfaceTexel(src, so, tmp);
+        return (_src, so, dst, d) => {
+          decodeSurfaceTexel(surf, so, tmp);
           const df = dst;
           for (let c = 0; c < comps; c++) df[(d >> 2) + c] = tmp[c];
         };
       }
       case C1.UNSIGNED_INT:
         if (format === C1.DEPTH_COMPONENT) {
-          return (src, so, dst, d) => {
-            decodeSurfaceTexel(src, so, tmp);
+          return (_src, so, dst, d) => {
+            decodeSurfaceTexel(surf, so, tmp);
             const dv = dst;
             dv.setUint32(d, Math.min(4294967295, Math.max(0, Math.round(tmp[0] * 4294967295))), true);
           };
         }
-        return (src, so, dst, d) => {
-          decodeSurfaceTexel(src, so, tmp);
+        return (_src, so, dst, d) => {
+          decodeSurfaceTexel(surf, so, tmp);
           dst[d >> 2] = tmp[0] >>> 0;
         };
       case C1.UNSIGNED_SHORT:
-        return (src, so, dst, d) => {
-          decodeSurfaceTexel(src, so, tmp);
+        return (_src, so, dst, d) => {
+          decodeSurfaceTexel(surf, so, tmp);
           dst[d >> 1] = Math.min(65535, Math.max(0, Math.round(tmp[0] * 65535)));
         };
       case C2.UNSIGNED_INT_24_8:
-        return (src, so, dst, d) => {
-          const surf = src;
+        return (_src, so, dst, d) => {
           decodeSurfaceTexel(surf, so, tmp);
           const st = surf.stencilData ? surf.stencilData[so / surfaceBytesPerPixel(surf)] : 0;
           dst[d >> 2] = (Math.min(16777215, Math.max(0, Math.round(tmp[0] * 16777215))) << 8 | st & 255) >>> 0;
@@ -6447,7 +6472,7 @@
       conv = null;
     }
     if (!conv) {
-      conv = makeLocalPack(format, type);
+      conv = makeLocalPack(surf, format, type);
       if (!conv) {
         pushError(ctx, C1.INVALID_OPERATION);
         return;
@@ -9656,14 +9681,31 @@
         return false;
     }
   }
-  function validateStrideOffset(ctx, stride, offset) {
+  var TYPE_BYTE_SIZE = {
+    [C1.BYTE]: 1,
+    [C1.UNSIGNED_BYTE]: 1,
+    [C1.SHORT]: 2,
+    [C1.UNSIGNED_SHORT]: 2,
+    [C1.FLOAT]: 4,
+    [C1.INT]: 4,
+    [C1.UNSIGNED_INT]: 4,
+    [C2.HALF_FLOAT]: 2,
+    [C2.INT_2_10_10_10_REV]: 4,
+    [C2.UNSIGNED_INT_2_10_10_10_REV]: 4
+  };
+  var MAX_VERTEX_ATTRIB_STRIDE_BYTES = 255;
+  function validateStrideOffset(ctx, stride, offset, typeSize) {
     const st = stride | 0;
-    if (st < 0 || st > ctx._state.limits.MAX_VERTEX_ATTRIB_STRIDE) {
+    if (st < 0 || st > MAX_VERTEX_ATTRIB_STRIDE_BYTES) {
       ctx._errors.push(C1.INVALID_VALUE);
       return null;
     }
     if (offset < 0 || offset >= 2147483648) {
       ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    if (st % typeSize !== 0 || offset % typeSize !== 0) {
+      ctx._errors.push(C1.INVALID_OPERATION);
       return null;
     }
     return [st, offset | 0];
@@ -9731,10 +9773,10 @@
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
-      const so = validateStrideOffset(ctx, stride, offset);
+      const so = validateStrideOffset(ctx, stride, offset, TYPE_BYTE_SIZE[type]);
       if (so === null) return;
       const bound = ctx._state.arrayBuffer;
-      if (bound === null) {
+      if (bound === null && so[1] !== 0) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
@@ -9911,10 +9953,10 @@
             ctx._errors.push(C1.INVALID_ENUM);
             return;
         }
-        const so = validateStrideOffset(ctx, stride, offset);
+        const so = validateStrideOffset(ctx, stride, offset, TYPE_BYTE_SIZE[type]);
         if (so === null) return;
         const bound = ctx._state.arrayBuffer;
-        if (bound === null) {
+        if (bound === null && so[1] !== 0) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
@@ -23909,6 +23951,10 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_VALUE);
       return null;
     }
+    if (shader._invalidated) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
     return shader;
   }
   function validateProgramQuery(ctx, program) {
@@ -23921,12 +23967,56 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_VALUE);
       return null;
     }
+    if (program._invalidated) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
     return program;
   }
   function hasBadNameChars(name) {
     for (let i = 0; i < name.length; i++) {
       const c = name.charCodeAt(i);
-      if (c === 34 || c === 36 || c === 96 || c === 64 || c === 92 || c === 39) return true;
+      if (c === 9 || c === 10 || c === 11 || c === 12 || c === 13 || c === 32) {
+        continue;
+      }
+      if (c < 33 || c >= 127) return true;
+      if (c >= 48 && c <= 57 || // 0-9
+      c >= 65 && c <= 90 || // A-Z
+      c >= 97 && c <= 122 || // a-z
+      c === 95) {
+        continue;
+      }
+      switch (c) {
+        // GLSL symbols: . + - / * % < > [ ] ( ) { } ^ | & ~ = ! : ; , ? #
+        case 46:
+        case 43:
+        case 45:
+        case 47:
+        case 42:
+        case 37:
+        case 60:
+        case 62:
+        case 91:
+        case 93:
+        case 40:
+        case 41:
+        case 123:
+        case 125:
+        case 94:
+        case 124:
+        case 38:
+        case 126:
+        case 61:
+        case 33:
+        case 58:
+        case 59:
+        case 44:
+        case 63:
+        case 35:
+          continue;
+        default:
+          return true;
+      }
     }
     return false;
   }
@@ -24111,10 +24201,10 @@ ${inner.map((l) => "  " + l).join("\n")}
     fragDataMaps.set(p, fmap);
   }
   function readStoreValue(pm, uniform, elementIdx, comp2, asUint) {
-    const slot = uniform.location + elementIdx * elementSlots(uniform);
-    if (isMatrixType(uniform.type)) return pm.floatStore[slot * 4 + comp2];
-    if (isFloatType2(uniform.type)) return pm.floatStore[slot * 4 + comp2];
-    const v2 = pm.intStore[slot * 4 + comp2];
+    const base = uniform.location + elementIdx * elementSlots(uniform);
+    if (isMatrixType(uniform.type)) return pm.floatStore[base + comp2];
+    if (isFloatType2(uniform.type)) return pm.floatStore[base + comp2];
+    const v2 = pm.intStore[base + comp2];
     return asUint ? v2 >>> 0 : v2;
   }
   function isFloatType2(type) {
@@ -24196,9 +24286,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       return out;
     }
     if (isSamplerType(uniform.type)) {
-      if (count === 1) return pm.intStore[(uniform.location + elem) * 4];
+      if (count === 1) return pm.intStore[uniform.location + elem];
       const out = new Int32Array(count);
-      for (let e = 0; e < count; e++) out[e] = pm.intStore[(uniform.location + elem + e) * 4];
+      for (let e = 0; e < count; e++) out[e] = pm.intStore[uniform.location + elem + e];
       return out;
     }
     return null;
@@ -24206,7 +24296,10 @@ ${inner.map((l) => "  " + l).join("\n")}
   function installProgramsApi(proto) {
     proto.createShader = function(type) {
       const ctx = this;
-      if (isLost7(ctx)) return null;
+      if (ctx._isLost) {
+        if (type !== C1.VERTEX_SHADER && type !== C1.FRAGMENT_SHADER) return null;
+        return createObject(ctx, ShaderCtor);
+      }
       if (type !== C1.VERTEX_SHADER && type !== C1.FRAGMENT_SHADER) {
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
@@ -24317,7 +24410,6 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.createProgram = function() {
       const ctx = this;
-      if (isLost7(ctx)) return null;
       return createObject(ctx, ProgramCtor);
     };
     proto.deleteProgram = function(program) {
@@ -24346,6 +24438,13 @@ ${inner.map((l) => "  " + l).join("\n")}
         return false;
       }
       return !program._deleted;
+    };
+    proto.getAttachedShaders = function(program) {
+      const ctx = this;
+      if (isLost7(ctx)) return null;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return null;
+      return Array.from(p._attachedShaders);
     };
     proto.useProgram = function(program) {
       const ctx = this;
@@ -24509,16 +24608,22 @@ ${inner.map((l) => "  " + l).join("\n")}
       if (pm === void 0) return null;
       const u = pm.uniformMap.get(nm);
       if (u === void 0) return null;
+      let entry = pm.uniforms.find((x) => x.name === u.name);
+      if (entry === void 0) entry = pm.uniforms.find((x) => x.name === u.name.replace(/\[\d+\]/, "[0]"));
+      if (entry === void 0) return null;
       let elem = 0;
       let whole = false;
-      if (u.size > 1) {
+      if (entry.size > 1) {
         const m = /\[(\d+)\]$/.exec(nm);
-        if (m !== null) elem = parseInt(m[1], 10);
-        else whole = true;
-        if (elem >= u.size) return null;
+        if (m !== null) {
+          elem = parseInt(m[1], 10);
+          if (elem >= entry.size) return null;
+        } else {
+          whole = true;
+        }
       }
-      const idx = pm.uniforms.indexOf(u);
-      const loc = new WebGLUniformLocation(p, idx, u.name);
+      const idx = pm.uniforms.indexOf(entry);
+      const loc = new WebGLUniformLocation(p, idx, entry.name);
       locGen.set(loc, (_a2 = linkGen.get(p)) != null ? _a2 : 0);
       uniformLocInfo.set(loc, { elem, whole });
       return loc;
@@ -24722,7 +24827,13 @@ ${inner.map((l) => "  " + l).join("\n")}
         }
         const out = [];
         for (const n of names) {
-          const u = (_a2 = pm.uniformMap.get(n)) != null ? _a2 : pm.uniforms.find((un) => un.name === n);
+          let u = pm.uniformMap.get(n);
+          if (u !== void 0) {
+            const entry = (_a2 = pm.uniforms.find((x) => x.name === u.name)) != null ? _a2 : pm.uniforms.find((x) => x.name === u.name.replace(/\[\d+\]/, "[0]"));
+            if (entry !== void 0) u = entry;
+            else u = void 0;
+          }
+          if (u === void 0) u = pm.uniforms.find((un) => un.name === n);
           out.push(u === void 0 ? C2.INVALID_INDEX : pm.uniforms.indexOf(u));
         }
         return out;
@@ -25065,7 +25176,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       const element = Math.floor(i / n);
       const col = Math.floor(i % n / rows);
       const row = i % rows;
-      writeFloatAt(t, element * t.slots + col, row, values[i]);
+      writeFloatAt(t, element * t.slots + col * 4, row, values[i]);
     }
   }
   function installUniformsApi(proto) {
