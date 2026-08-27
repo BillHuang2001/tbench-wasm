@@ -13,11 +13,12 @@
  *
  * Prints "OK" and exits 0 on success.
  */
-import type { Expr, LiteralExpr, TranslationUnit, ExternalDecl } from './ast.js';
+import type { Expr, LiteralExpr, TranslationUnit, ExternalDecl, FunctionDefinition } from './ast.js';
 import type { GLSLType } from './types.js';
 import { compileShader } from './compiler.js';
 import { CodegenEnv } from './codegen/env.js';
 import { emitExpr, emitLValue } from './codegen/expressions.js';
+import { emitStatements } from './codegen/statements.js';
 import type { Value } from './codegen/index.js';
 import type { CodegenLayout } from './codegen/index.js';
 import { R } from './codegen/runtime.js';
@@ -105,7 +106,7 @@ function baseLayout(version: 100 | 300, extraUniforms?: [string, { store: 'float
     blockIndices: new Map(),
     varyings: new Map(),
     attribLocations: new Map([['a_pos', 0]]),
-    outputLocations: new Map(),
+    outputLocations: new Map([['gl_FragColor', 0]]),
     uses: {
       pointSize: false,
       fragCoord: false,
@@ -769,6 +770,380 @@ function firstAssignExpr(tu: TranslationUnit): Expr | null {
       );
     }
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 6. Compound assign & ++/-- in EXPRESSION contexts (regression)      */
+/*    expressions.ts emitAssign/emitUnary used to fold LValue.prelude/ */
+/*    copyBack ('; '-joined statements) inside parens — invalid JS —   */
+/*    and the compound path received the parser's '+=' spelling.       */
+/*    Every case below compiles a REAL shader, emits its main (or an   */
+/*    inliner-style helper body) and RUNS the generated JS.            */
+/* ------------------------------------------------------------------ */
+
+function findFn(tu: TranslationUnit, name: string): FunctionDefinition {
+  for (const d of tu.declarations) {
+    if (d.kind === 'function-definition' && d.prototype.name === name) return d;
+  }
+  throw new Error(`no function '${name}' in shader`);
+}
+
+/** Compile + emit + run a main body; returns the JS body + mutated ctx. */
+function runMainE(src: string, stage: 'VERTEX' | 'FRAGMENT', version: 100 | 300 = 100): { body: string; ctx: Record<string, any> } {
+  const r = compileShader(src, { type: stage, version });
+  if (!r.ok) throw new Error(`compile failed: ${JSON.stringify(r.errors)}`);
+  const mainFn = findFn(r.shader.ast, 'main');
+  const env = new CodegenEnv(stage, baseLayout(version));
+  const stmts = emitStatements(mainFn.body.body, env);
+  const body = [...(env.temps.length ? [`var ${env.temps.join(', ')};`] : []), ...stmts].join('\n');
+  const fn = new Function('ctx', 'R', body);
+  const ctx: Record<string, any> = {
+    discarded: false,
+    out: stage === 'VERTEX' ? { position: [0, 0, 0, 0], pointSize: 0 } : { color: [[0, 0, 0, 0]] },
+    scratch: new Float32Array(Math.max(env.scratchSize, 16)),
+    intScratch: new Int32Array(Math.max(env.intScratchSize, 16)),
+  };
+  fn(ctx, R);
+  return { body, ctx };
+}
+
+/** Compile + emit + run an inliner-style helper body (retTemps + epilogue
+ *  label, wrapped in the labeled block the inliner provides). */
+function runFnE(src: string, fnName: string, stage: 'VERTEX' | 'FRAGMENT', version: 100 | 300): { body: string; ret: number } {
+  const r = compileShader(src, { type: stage, version });
+  if (!r.ok) throw new Error(`compile failed: ${JSON.stringify(r.errors)}`);
+  const fn = findFn(r.shader.ast, fnName);
+  const env = new CodegenEnv(stage, baseLayout(version));
+  const lines = emitStatements(fn.body.body, env, {
+    retTemps: ['r0'],
+    epilogueLabel: 'EP_0',
+    retType: { kind: 'scalar', base: 'float' },
+  });
+  const body = [...(env.temps.length ? [`var ${env.temps.join(', ')};`] : []), 'EP_0: {', ...lines.map((l) => '  ' + l), '}'].join('\n');
+  const f = new Function('ctx', 'R', `${body}\nreturn r0;`);
+  const ret = f(
+    { out: { color: [[0, 0, 0, 0]] }, scratch: new Float32Array(16), intScratch: new Int32Array(16) },
+    R,
+  ) as number;
+  return { body, ret };
+}
+
+{
+  // `return x += 1.0;` inside a helper used by a FRAGMENT main writing
+  // gl_FragColor (return-value context → statements.ts emitReturn → emitExpr).
+  const { body, ret } = runFnE(
+    `precision mediump float;
+float bump() { float x = 1.0; return x += 1.0; }
+void main() { gl_FragColor = vec4(bump(), 0.0, 0.0, 1.0); }`,
+    'bump',
+    'FRAGMENT',
+    100,
+  );
+  check(ret === 2, `return x += 1.0; → 2.0 (got ${ret})`);
+  check(
+    body.includes('r0 = (x = x + 1.0);'),
+    `return lowers to a clean 'r0 = (x = x + 1.0);' line (got:\n${body})`,
+  );
+}
+
+{
+  // Compound assign as a CALL ARG in a fragment main (gl_FragColor output).
+  const { ctx } = runMainE(
+    `precision mediump float;
+void main() {
+  float x = 1.0;
+  gl_FragColor = vec4(x += 1.0, 0.0, 0.0, 1.0);
+}`,
+    'FRAGMENT',
+  );
+  check(
+    ctx.out.color[0][0] === 2 && ctx.out.color[0][3] === 1,
+    `gl_FragColor = vec4(x += 1.0, ...) → [2,0,0,1] (got [${ctx.out.color[0].join(', ')}])`,
+  );
+}
+
+{
+  // `a = b += c;` — the RHS (compound assign) is an EXPRESSION here.
+  const { ctx, body } = runMainE(
+    `void main() {
+  float a = 1.0, b = 1.0, c = 2.0;
+  a = b += c;
+  gl_Position.x = a + b;
+}`,
+    'VERTEX',
+  );
+  check(ctx.out.position[0] === 6, `a = b += c; → a === b === 3 (got ${ctx.out.position[0]})`);
+  check(body.includes('a = (b = b + c);'), `chain emits 'a = (b = b + c);' (got:\n${body})`);
+}
+{
+  // Compound assign nested in a binary operand.
+  const { ctx } = runMainE(
+    `void main() {
+  float a = 1.0, b = 1.0, c = 2.0;
+  a = (b += c) * 2.0;
+  gl_Position.x = a;
+}`,
+    'VERTEX',
+  );
+  check(ctx.out.position[0] === 6, `a = (b += c) * 2.0; → a === 6 (got ${ctx.out.position[0]})`);
+}
+{
+  // Plain `=` chain (nested plain assigns through emitExpr).
+  const { ctx } = runMainE(
+    `void main() {
+  float a = 1.0, b = 1.0, c = 2.0;
+  a = b = c;
+  gl_Position.x = a + b + c;
+}`,
+    'VERTEX',
+  );
+  check(ctx.out.position[0] === 6, `a = b = c; → all 2 (got ${ctx.out.position[0]})`);
+}
+
+{
+  // Compound assign inside an if CONDITION.
+  const { ctx } = runMainE(
+    `void main() {
+  float x = 1.0;
+  float r = 0.0;
+  if ((x += 1.0) > 2.0) { r = 10.0; } else { r = 20.0; }
+  gl_Position.x = r + x;
+}`,
+    'VERTEX',
+  );
+  check(ctx.out.position[0] === 22, `if ((x += 1.0) > 2.0): x → 2.0, false branch → 22 (got ${ctx.out.position[0]})`);
+}
+
+{
+  // ALL 10 compound ops in expression contexts (ES 3.00 int accumulator).
+  const { ctx } = runMainE(
+    `#version 300 es
+void main() {
+  int x = 0;
+  int r = 0;
+  r = (x += 5) + (x -= 2) + (x *= 3) + (x /= 2) + (x %= 4) + (x <<= 2) + (x >>= 1) + (x &= 7) + (x ^= 3) + (x |= 8);
+  gl_Position.x = float(r);
+  gl_Position.y = float(x);
+}`,
+    'VERTEX',
+    300,
+  );
+  check(
+    ctx.out.position[0] === 35 && ctx.out.position[1] === 11,
+    `+= -= *= /= %= <<= >>= &= ^= |= → r === 35, x === 11 (got [${ctx.out.position[0]}, ${ctx.out.position[1]}])`,
+  );
+}
+
+{
+  // Dynamic-index compound on a LOCAL ARRAY in expression position — the
+  // index temp is a PRELUDE that must fold as comma terms, not statements.
+  const { ctx, body } = runMainE(
+    `void main() {
+  float a[4];
+  a[0] = 2.0;
+  int i = 0;
+  gl_Position.x = (a[i] += 3.0) * 2.0;
+}`,
+    'VERTEX',
+  );
+  check(ctx.out.position[0] === 10, `(a[i] += 3.0) * 2.0 with a[0] = 2.0 → 10 (got ${ctx.out.position[0]})`);
+  check(
+    /\(t\d+ = i, \(ctx\.scratch/.test(body),
+    `dyn-index prelude folds as '(tN = i, (...))' comma terms (got:\n${body})`,
+  );
+}
+
+{
+  // Prefix ++ / -- on a dynamic-index target (same prelude folding).
+  const { ctx } = runMainE(
+    `void main() {
+  float a[4];
+  a[0] = 1.0;
+  int i = 0;
+  gl_Position.x = ++a[i];
+}`,
+    'VERTEX',
+  );
+  check(ctx.out.position[0] === 2, `gl_Position.x = ++a[i]; → 2 (got ${ctx.out.position[0]})`);
+}
+{
+  // uint ++ wraps (0xFFFFFFFF → 0).
+  const { ctx } = runMainE(
+    `#version 300 es
+void main() {
+  uint u = 4294967295u;
+  gl_Position.x = float(++u);
+}`,
+    'VERTEX',
+    300,
+  );
+  check(ctx.out.position[0] === 0, `uint ++u wraps 0xFFFFFFFF → 0 (got ${ctx.out.position[0]})`);
+}
+
+{
+  // COPY-BACK: dynamic component of a FLAT vec4 local (ES 3.00) — compound,
+  // plain `=` and prefix ++ all in expression position.
+  const { ctx, body } = runMainE(
+    `#version 300 es
+void main() {
+  vec4 v = vec4(1.0, 2.0, 3.0, 4.0);
+  int i = 0;
+  gl_Position.x = (v[i] += 10.0) * 2.0;
+  gl_Position.y = v[0];
+}`,
+    'VERTEX',
+    300,
+  );
+  check(
+    ctx.out.position[0] === 22 && ctx.out.position[1] === 11,
+    `(v[i] += 10.0) * 2.0 with readback → [22, 11] (got [${ctx.out.position[0]}, ${ctx.out.position[1]}])`,
+  );
+  check(
+    /\(t\d+ = \(ctx\.scratch/.test(body) && /v__0 = \(ctx\.scratch/.test(body),
+    `copy-back folds as comma terms after a value-preserving temp (got:\n${body})`,
+  );
+}
+{
+  const { ctx } = runMainE(
+    `#version 300 es
+void main() {
+  vec4 v = vec4(1.0, 2.0, 3.0, 4.0);
+  int i = 0;
+  gl_Position.x = (v[i] = 7.0) * 3.0;
+  gl_Position.y = ++v[i];
+}`,
+    'VERTEX',
+    300,
+  );
+  check(
+    ctx.out.position[0] === 21 && ctx.out.position[1] === 8,
+    `(v[i] = 7.0) * 3.0 then ++v[i] → [21, 8] (got [${ctx.out.position[0]}, ${ctx.out.position[1]}])`,
+  );
+}
+
+{
+  // uint wrap on a dynamic-index compound (prelude + >>> 0 invariant).
+  const { ctx } = runMainE(
+    `#version 300 es
+void main() {
+  uint a[2];
+  a[0] = 4294967295u;
+  int i = 0;
+  gl_Position.x = float((a[i] += 1u) == 0u ? 1.0 : 0.0);
+}`,
+    'VERTEX',
+    300,
+  );
+  check(ctx.out.position[0] === 1, `uint (a[i] += 1u) wraps 0xFFFFFFFF → 0 (got ${ctx.out.position[0]})`);
+}
+
+{
+  // Ternary arm and comma-expression contexts.
+  const { ctx } = runMainE(
+    `void main() {
+  float x = 1.0;
+  float y = 2.0;
+  bool c = true;
+  gl_Position.x = c ? (x += 10.0) : (y += 20.0);
+  gl_Position.y = x;
+}`,
+    'VERTEX',
+  );
+  check(
+    ctx.out.position[0] === 11 && ctx.out.position[1] === 11,
+    `ternary arm (x += 10.0) → [11, 11] (got [${ctx.out.position[0]}, ${ctx.out.position[1]}])`,
+  );
+}
+{
+  const { ctx } = runMainE(
+    `void main() {
+  float x = 1.0;
+  gl_Position.x = (x += 2.0, x) * 3.0;
+}`,
+    'VERTEX',
+  );
+  check(ctx.out.position[0] === 9, `(x += 2.0, x) * 3.0 → 9 (got ${ctx.out.position[0]})`);
+}
+
+{
+  // Direct emitExpr checks (pure expressions layer, no statements).
+  const e = env('VERTEX', 100);
+  e.declareLocal('x', fT());
+  const v = emitExpr(
+    bin('*', { kind: 'assign', op: '+=', target: ident('x', fT()), value: lit(1.0, fT()), resolvedType: fT() } as never, lit(2.0, fT()), fT()),
+    e,
+  )[0];
+  check(v.v === '((x = x + 1.0) * 2.0)', `compound in binary operand → '((x = x + 1.0) * 2.0)' (got '${v.v}')`);
+  check(evalParams(v, e, ['x'], [1]) === 4, `(x += 1.0) * 2.0 evaluates to 4`);
+}
+{
+  // Direct emitExpr: dyn-index compound — prelude lands in Value.pre.
+  const e = env('VERTEX', 100);
+  e.declareLocal('a', { kind: 'array', element: fT(), size: 4 });
+  e.declareLocal('i', iT());
+  const arrT: GLSLType = { kind: 'array', element: fT(), size: 4 };
+  const v = emitExpr(
+    {
+      kind: 'assign',
+      op: '+=',
+      target: { kind: 'index', object: ident('a', arrT), index: ident('i', iT()), resolvedType: fT() },
+      value: lit(3.0, fT()),
+      resolvedType: fT(),
+    } as never,
+    e,
+  )[0];
+  check(
+    v.pre !== undefined && /^t\d+ = i$/.test(v.pre[0]),
+    `dyn-index compound prelude → Value.pre (got ${JSON.stringify(v.pre)})`,
+  );
+  const decl = e.temps.length ? `var ${e.temps.join(', ')}; ` : '';
+  const pres = v.pre!.join('; ') + '; ';
+  const res = new Function('ctx', 'R', 'i', `${decl}${pres}return ${v.v};`)({ scratch: new Float32Array([2, 0, 0, 0]), intScratch: new Int32Array(4) }, R, 0) as number;
+  check(res === 5, `a[0] += 3.0 with a[0] = 2.0 → 5 (got ${res})`);
+}
+
+{
+  // Return-context prelude: dynamic local array in `return a[i] += 3.0;`.
+  const { body, ret } = runFnE(
+    `precision mediump float;
+float bump() {
+  float a[4];
+  a[0] = 2.0;
+  int i = 0;
+  return a[i] += 3.0;
+}
+void main() { gl_FragColor = vec4(bump(), 0.0, 0.0, 1.0); }`,
+    'bump',
+    'FRAGMENT',
+    100,
+  );
+  check(ret === 5, `return a[i] += 3.0; (a[0] = 2.0) → 5 (got ${ret})`);
+  check(
+    /^\s*t\d+ = i;$/m.test(body) && !/\(t\d+ = i;/.test(body),
+    `return-context prelude emits as a LINE before the value (got:\n${body})`,
+  );
+}
+
+{
+  // Return-context copy-back: dynamic component of a flat vec4 (ES 3.00).
+  const { body, ret } = runFnE(
+    `#version 300 es
+precision mediump float;
+float bump() {
+  vec4 v = vec4(1.0, 2.0, 3.0, 4.0);
+  int i = 0;
+  return v[i] += 10.0;
+}
+void main() { }`,
+    'bump',
+    'FRAGMENT',
+    300,
+  );
+  check(ret === 11, `return v[i] += 10.0; (v[0] = 1.0) → 11 (got ${ret})`);
+  check(
+    body.includes('v__0 = (ctx.scratch[0 + 0])'),
+    `return-context copy-back folds as comma terms (got:\n${body})`,
+  );
 }
 
 /* ------------------------------------------------------------------ */

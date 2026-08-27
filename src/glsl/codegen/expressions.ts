@@ -629,6 +629,24 @@ export function emitLValue(e: Expr, env: CodegenEnv): LValue {
   };
 }
 
+/** Split an LValue.prelude ('; '-joined statements, trailing ';') into
+ *  individual statement strings (trailing ';' stripped) — emit as Value.pre
+ *  so the statement/expression emitters run them BEFORE the value. */
+function preludeLines(prelude: string | undefined): string[] {
+  if (!prelude) return [];
+  const s = prelude.endsWith(';') ? prelude.slice(0, -1) : prelude;
+  return s.split('; ');
+}
+
+/** Convert an LValue.copyBack ('; '-joined statements, trailing ';') into a
+ *  comma-joined expression fragment (no trailing comma) — semicolons are
+ *  invalid inside parens, so the copy-back must fold as comma terms. */
+function copyBackComma(copyBack: string | undefined): string | null {
+  if (!copyBack) return null;
+  const s = copyBack.endsWith(';') ? copyBack.slice(0, -1) : copyBack;
+  return s.split('; ').join(', ');
+}
+
 /** Materialize values with pres into temps (for multi-use contexts). */
 export function materialize(vals: Value[], env: CodegenEnv): Value[] {
   return vals.map((v) => {
@@ -651,6 +669,8 @@ function emitUnary(e: Extract<Expr, { kind: 'unary' }>, env: CodegenEnv): Value[
     // GLSL ES: ++ / -- are PREFIX-only. Per-component on the lvalue.
     const lv = emitLValue(e.operand, env);
     const delta = op === '++' ? '1' : '-1';
+    const preludes = preludeLines(lv.prelude);
+    const post = copyBackComma(lv.copyBack);
     const out: Value[] = [];
     for (let c = 0; c < n; c++) {
       const target = lv.targets[c];
@@ -659,7 +679,16 @@ function emitUnary(e: Extract<Expr, { kind: 'unary' }>, env: CodegenEnv): Value[
       else if (base === 'int') s = `(${target} = (${target} + ${delta}) | 0)`;
       else if (base === 'uint') s = `(${target} = (${target} + ${delta}) >>> 0)`;
       else throw new Error('codegen: cannot increment a bool');
-      out.push({ v: `(${lv.prelude ? lv.prelude + ' ' : ''}${s}${lv.copyBack ? ' ' + lv.copyBack : ''})` });
+      // Prelude (dyn-index temps / spill copy-in) runs BEFORE the write, the
+      // spill copy-back AFTER it — and the expression's VALUE must be the
+      // incremented target. Semicolons are invalid inside parens, so fold
+      // copyBack as comma terms via a temp: (t = (target = target + 1), cb, t).
+      let v = s;
+      if (post) {
+        const t = env.allocTemp();
+        v = `(${t} = ${s}, ${post}, ${t})`;
+      }
+      out.push(preludes.length > 0 ? { v, pre: preludes } : { v });
     }
     return out;
   }
@@ -934,16 +963,33 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
   const lv = emitLValue(e.target, env);
   const rhs = emitExpr(e.value, env);
   const t = lv.type;
-  const pre = lv.prelude ?? '';
-  const post = lv.copyBack ?? '';
+  const preludes = preludeLines(lv.prelude);
+  const post = copyBackComma(lv.copyBack);
   const n = lv.targets.length;
   const out: Value[] = [];
   if (e.op === '=') {
-    const conv = convertValue(rhs, e.value.resolvedType!, t);
+    let conv = convertValue(rhs, e.value.resolvedType!, t);
+    // convertValue DROPS Value.pre when it converts scalar bases — re-attach
+    // (mirrors statements.ts convertPreserving) so RHS pres survive.
+    for (let c = 0; c < n; c++) {
+      const src = rhs[c];
+      if (conv[c] !== src && src.pre && src.pre.length > 0) {
+        conv = conv.map((v, i) => (i === c ? { ...v, pre: src.pre } : v));
+      }
+    }
     for (let c = 0; c < n; c++) {
       const cp = conv[c].pre;
       const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
-      out.push({ v: `(${pre} ${lv.targets[c]} = ${rv}${post ? ' ' + post : ''})` });
+      // Prelude (dyn-index temps / spill copy-in) must run BEFORE the write,
+      // the spill copy-back AFTER it — and the expression's VALUE must be the
+      // assigned value. Semicolons are invalid inside parens, so fold copyBack
+      // as comma terms via a temp: (t = (target = rv), cb, t).
+      let v = `(${lv.targets[c]} = ${rv})`;
+      if (post) {
+        const t = env.allocTemp();
+        v = `(${t} = ${v}, ${post}, ${t})`;
+      }
+      out.push(preludes.length > 0 ? { v, pre: preludes } : { v });
     }
     return out;
   }
@@ -951,11 +997,16 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
   const base = scalarBaseOf(t);
   if (!base) throw new Error('codegen: cannot compound-assign a non-scalar-shaped value');
   const conv = convertValue(rhs, e.value.resolvedType!, t);
+  const cop = e.op.slice(0, -1); // parser emits '+=' — compoundOp switches on '+'
   for (let c = 0; c < n; c++) {
     const cp = conv[c].pre;
     const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
-    const s = compoundOp(e.op, lv.targets[c], rv, base);
-    out.push({ v: `(${pre} ${s}${post ? ' ' + post : ''})` });
+    let v = compoundOp(cop, lv.targets[c], rv, base);
+    if (post) {
+      const t = env.allocTemp();
+      v = `(${t} = ${v}, ${post}, ${t})`;
+    }
+    out.push(preludes.length > 0 ? { v, pre: preludes } : { v });
   }
   return out;
 }
