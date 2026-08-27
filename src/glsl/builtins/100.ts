@@ -18,17 +18,21 @@
  *   raises the array size to 4 (see extensions.ts, which overrides this
  *   entry when the extension is enabled).
  *
- * Counts (verified by selftest-builtins.ts): 216 function signatures,
- * 7 variables, 8 constants.
+ * Counts (verified by selftest-builtins.ts): 216 function signatures in
+ * builtinFunctions100 + 24 ES 1.00 relational int/bool variants in
+ * `relational100` (merged into the version-100 table by builtinSignatures(100)
+ * — see below), 8 variables, 8 constants.
  */
 import {
   arr,
   B,
+  bvec,
   F,
   gen,
   gen2,
   gen3,
   genType,
+  ivec,
   mat,
   sig,
   smp,
@@ -59,8 +63,49 @@ const scalarMix = (name: string, scalarCount: 2 | 3): BuiltinSignature[] => {
   return all;
 };
 
+/**
+ * §8.6 relational float variants: (vecN, vecN) → bvecN. Deliberately FLOAT-ONLY
+ * here: 300.ts builds its table as a superset of builtinFunctions100
+ * (`common100`) and supplies the non-float variants itself via rel300/eq300 —
+ * adding int/bool variants to this shared helper would DUPLICATE them in the
+ * 3.00 table (overload resolution errors "ambiguous call"). The ES 1.00
+ * int/bool variants live in `relational100` below, merged only into the
+ * version-100 table (builtins/index.ts).
+ */
 const rel = (name: string): BuiltinSignature[] =>
   ([2, 3, 4] as const).map((n) => sig(name, [vec(n), vec(n)], ({ kind: 'vector', base: 'bool', size: n })));
+
+const bvecN = (n: 2 | 3 | 4): GLSLType => ({ kind: 'vector', base: 'bool', size: n });
+
+/**
+ * ES 1.00 §8.6 additions to the vector relational functions (NOT part of
+ * builtinFunctions100 — see `rel` for why; merged into the version-100 table
+ * by builtinSignatures(100) in builtins/index.ts).
+ *
+ * Spec text (GLSL ES 1.00 rev 17 §8.6, placeholders "vec"/"ivec"/"bvec"):
+ *   bvec lessThan(vec x, vec y)        bvec lessThan(ivec x, ivec y)
+ *   bvec lessThanEqual(vec x, vec y)   bvec lessThanEqual(ivec x, ivec y)
+ *   bvec greaterThan(vec x, vec y)     bvec greaterThan(ivec x, ivec y)
+ *   bvec greaterThanEqual(vec x, vec y) bvec greaterThanEqual(ivec x, ivec y)
+ *   bvec equal(vec x, vec y)  bvec equal(ivec x, ivec y)  bvec equal(bvec x, bvec y)
+ *   bvec notEqual(vec x, vec y)  bvec notEqual(ivec x, ivec y)  bvec notEqual(bvec x, bvec y)
+ * so the lessThan* family takes float AND int vectors (no bvec — no ordering),
+ * and equal/notEqual additionally take bool vectors. Verified against the
+ * OGLEs equal/notEqual/lessThan/lessThanEqual/greaterThan/greaterThanEqual
+ * groups (ivec2/ivec3 and bvec2/bvec3 shader variants).
+ */
+export const relational100: BuiltinSignature[] = [
+  ...([2, 3, 4] as const).flatMap((n) => [
+    sig('lessThan', [ivec(n), ivec(n)], bvecN(n)),
+    sig('lessThanEqual', [ivec(n), ivec(n)], bvecN(n)),
+    sig('greaterThan', [ivec(n), ivec(n)], bvecN(n)),
+    sig('greaterThanEqual', [ivec(n), ivec(n)], bvecN(n)),
+    sig('equal', [ivec(n), ivec(n)], bvecN(n)),
+    sig('equal', [bvec(n), bvec(n)], bvecN(n)),
+    sig('notEqual', [ivec(n), ivec(n)], bvecN(n)),
+    sig('notEqual', [bvec(n), bvec(n)], bvecN(n)),
+  ]),
+];
 
 const boolFn = (name: string): BuiltinSignature[] =>
   ([2, 3, 4] as const).map((n) => sig(name, [{ kind: 'vector', base: 'bool', size: n }], ({ kind: 'vector', base: 'bool', size: n })));
@@ -135,7 +180,9 @@ export const builtinFunctions100: BuiltinSignature[] = [
   ...([2, 3, 4] as const).map((n) => sig('inverse', [mat(n)], mat(n))),
 
   /* ------------------------------------------------------------------ */
-  /* §8.6 Vector Relational Functions (float vectors only in ES 1.00)    */
+  /* §8.6 Vector Relational Functions — FLOAT variants only here (the     */
+  /* ES 1.00 int/bool variants live in `relational100`, merged by          */
+  /* builtinSignatures(100); see the `rel` helper comment).                */
   /* ------------------------------------------------------------------ */
   ...rel('lessThan'),
   ...rel('lessThanEqual'),
@@ -164,6 +211,20 @@ export const builtinFunctions100: BuiltinSignature[] = [
   sig('textureCubeLod', [smp('samplerCube'), V3, F], V4, { stage: 'VERTEX' }),
 ];
 
+/**
+ * GLSL ES 1.00 §7.6 built-in uniform state type:
+ * `uniform gl_DepthRangeParameters { float near; float far; float diff; }`.
+ */
+const depthRangeParams: GLSLType = {
+  kind: 'struct',
+  name: 'gl_DepthRangeParameters',
+  members: [
+    { name: 'near', type: F },
+    { name: 'far', type: F },
+    { name: 'diff', type: F },
+  ],
+};
+
 export const builtinVariables100: BuiltinVariable[] = [
   { name: 'gl_Position', type: V4, stage: 'VERTEX', writable: true },
   { name: 'gl_PointSize', type: F, stage: 'VERTEX', writable: true },
@@ -174,6 +235,13 @@ export const builtinVariables100: BuiltinVariable[] = [
   // Core ES 1.00: size = gl_MaxDrawBuffers (1 in WebGL 1.0). GL_EXT_draw_buffers
   // overrides this entry with a size-4 array (extensions.ts).
   { name: 'gl_FragData', type: arr(V4, 1), stage: 'FRAGMENT', writable: true },
+  // Core ES 1.00 §7.6 built-in uniform state (usable in BOTH stages):
+  // `uniform gl_DepthRangeParameters { float near; float far; float diff; }
+  //  gl_DepthRange;`. Member reads (gl_DepthRange.near) resolve via the struct
+  // type (semantics analyzeMember). NOTE: codegen has no gl_DepthRange
+  // lowering yet (codegen/env.ts builtinRef + the member walker) — LINK of a
+  // shader reading it is not supported; compile is.
+  { name: 'gl_DepthRange', type: depthRangeParams, stage: 'BOTH', writable: false },
 ];
 
 /**

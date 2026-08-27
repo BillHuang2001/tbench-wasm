@@ -8,6 +8,9 @@
  *   gl_Max* constant folding uses `builtinConstants(version)` (+
  *   `extensionConstants` merged on top when the matching extension is
  *   enabled — EXT_draw_buffers overrides the core gl_MaxDrawBuffers = 1).
+ *   `builtinSignatures(100)` = builtinFunctions100 + relational100 (the ES
+ *   1.00 relational int/bool variants kept out of builtinFunctions100 so
+ *   300.ts's common100 superset does not duplicate its rel300/eq300 rows).
  * - codegen: call lowering for texture functions, derivatives, pack/unpack,
  *   bitfield ops, etc. uses the same tables via `matches()`.
  */
@@ -47,7 +50,7 @@ export {
   gen3,
 } from './types.js';
 
-export { builtinFunctions100, builtinVariables100, builtinConstants100 } from './100.js';
+export { builtinFunctions100, relational100, builtinVariables100, builtinConstants100 } from './100.js';
 export { extensionFunctions, extensionVariables, extensionConstants } from './extensions.js';
 export { builtinFunctions300, builtinVariables300, builtinConstants300 } from './300.js';
 
@@ -56,12 +59,21 @@ import {
   builtinConstants100,
   builtinFunctions100,
   builtinVariables100,
+  relational100,
 } from './100.js';
 import { builtinConstants300, builtinFunctions300, builtinVariables300 } from './300.js';
 
+/**
+ * The complete version-100 signature table: the shared float core
+ * (builtinFunctions100 — also the base of 300.ts's superset) plus the ES 1.00
+ * relational int/bool variants (relational100), which are NOT in
+ * builtinFunctions100 so 300.ts's rel300/eq300 additions stay duplication-free.
+ */
+const builtinSignatures100: BuiltinSignature[] = [...builtinFunctions100, ...relational100];
+
 /** Function signature table for a shader version (1.00 or 3.00 core only). */
 export const builtinSignatures = (version: 100 | 300): BuiltinSignature[] =>
-  version === 300 ? builtinFunctions300 : builtinFunctions100;
+  version === 300 ? builtinFunctions300 : builtinSignatures100;
 
 /** Builtin variable table for a shader version (1.00 or 3.00 core only). */
 export const builtinVariables = (version: 100 | 300): BuiltinVariable[] =>
