@@ -78,6 +78,13 @@ const GL_DYNAMIC_COPY = 0x88ea;
 const GL_BUFFER_MAPPED = 0x88ed;
 
 /**
+ * Buffers that have been bound at least once (any binding point). isBuffer
+ * returns false for never-bound objects (CTS is-object.html) — mirrors
+ * everBoundRenderbuffers in api/framebuffers.ts.
+ */
+const everBoundBuffers = new WeakSet<WebGLBuffer>();
+
+/**
  * Context-loss guard: no-op while lost WITHOUT generating an error (CTS
  * context-lost.html asserts NO_ERROR after every void call while lost — the
  * single CONTEXT_LOST_WEBGL is delivered via getError's lost-epoch, lost.ts).
@@ -307,6 +314,7 @@ function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: G
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
+    everBoundBuffers.add(buf);
     s.uniformBuffers[index] = buf;
     s.uniformBufferRanges[index] = { offset: 0, size: buf._size }; // whole buffer
   } else {
@@ -318,6 +326,7 @@ function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: G
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
+    everBoundBuffers.add(buf);
     // Indexed TF bindings are transform-feedback-OBJECT state (GLES 3.0 §6.24):
     // record on the bound object (getIndexedParameter reads it) and mirror into
     // the global _tfRangeBindings (source for the webgl2 agent's bind/begin
@@ -393,12 +402,11 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
     if (!(buffer instanceof WebGLBuffer)) {
       throw new TypeError(`Argument is not of type 'WebGLBuffer'`);
     }
-    if (buffer._context !== ctx) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return false;
-    }
-    // Deleted (incl. pending-delete) buffers report false immediately, no error.
-    return !buffer._deleted;
+    // Deleted, foreign (different context) and never-bound buffers report false
+    // with NO error (CTS incorrect-context-object-behaviour.html, is-object.html).
+    if (buffer._context !== ctx) return false;
+    if (buffer._deleted) return false;
+    return everBoundBuffers.has(buffer);
   };
 
   proto.bindBuffer = function (this: WebGLRenderingContext, target: GLenum, buffer: WebGLBuffer | null): void {
@@ -445,6 +453,7 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
+    everBoundBuffers.add(buf);
     const s = ctx._state;
     if (target === C1.ARRAY_BUFFER) s.arrayBuffer = buf;
     else if (target === C1.ELEMENT_ARRAY_BUFFER) s.vao.elementArrayBuffer = buf;
@@ -666,6 +675,7 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
+        everBoundBuffers.add(buf);
         s.uniformBuffers[index] = buf;
         s.uniformBufferRanges[index] = { offset, size };
       } else {
@@ -676,6 +686,7 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
+        everBoundBuffers.add(buf);
         const boundTf = s.transformFeedback;
         if (boundTf) {
           boundTf._buffers[index] = buf;

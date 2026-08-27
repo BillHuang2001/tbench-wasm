@@ -79,7 +79,7 @@ import {
   createObject,
 } from '../objects';
 import type { ProgramModel } from '../objects';
-import { validateObject, requireString } from '../validation';
+import { validateNonNullableObject, requireString } from '../validation';
 import { compileShader, linkProgram } from '../../glsl';
 import type { Shader as GlslShader, Program as GlslProgram, LinkOptions } from '../../glsl';
 import type { GLboolean, GLenum, GLint, GLuint } from '../types';
@@ -133,12 +133,32 @@ const ShaderCtorAny = ShaderCtor as unknown as new (...args: never[]) => WebGLSh
 const ProgramCtor = WebGLProgram as unknown as new (context: WebGLRenderingContext) => WebGLProgram;
 const ProgramCtorAny = ProgramCtor as unknown as new (...args: never[]) => WebGLProgram;
 
-/** Lifecycle validation: cross-context/deleted → INVALID_OPERATION (validateObject). */
+/**
+ * Lifecycle validation: WebIDL non-nullable object args — null/undefined →
+ * TypeError (CTS bad-arguments-test / null-object-behaviour); cross-context /
+ * deleted → INVALID_OPERATION (validateNonNullableObject).
+ */
 function validateShader(ctx: WebGLRenderingContext, shader: unknown): WebGLShader | null {
-  return validateObject<WebGLShader>(ctx, shader, ShaderCtorAny);
+  return validateNonNullableObject<WebGLShader>(ctx, shader, ShaderCtorAny);
 }
 function validateProgram(ctx: WebGLRenderingContext, program: unknown): WebGLProgram | null {
-  return validateObject<WebGLProgram>(ctx, program, ProgramCtorAny);
+  return validateNonNullableObject<WebGLProgram>(ctx, program, ProgramCtorAny);
+}
+
+/**
+ * detachShader validation: cross-context → INVALID_OPERATION; null/undefined →
+ * TypeError; DELETED-but-still-attached shaders remain valid — deletion is
+ * deferred until the last attachment is removed, and detachShader is exactly
+ * how that deferred deletion completes (CTS object-deletion-behaviour expects
+ * NO_ERROR detaching a deleted shader that is still attached).
+ */
+function validateShaderDetach(ctx: WebGLRenderingContext, shader: unknown): WebGLShader | null {
+  if (!(shader instanceof WebGLShader)) throw new TypeError(`Argument is not of type 'WebGLShader'`);
+  if (shader._context !== ctx) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return null;
+  }
+  return shader;
 }
 
 /**
@@ -614,11 +634,13 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return false;
     if (shader === null || shader === undefined) return false;
     if (!(shader instanceof WebGLShader)) throw new TypeError(`Argument is not of type 'WebGLShader'`);
-    if (shader._context !== ctx) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return false;
-    }
-    return !shader._deleted;
+    // Cross-context: false with NO error (CTS incorrect-context-object-behaviour).
+    if (shader._context !== ctx) return false;
+    // Context-lost invalidation: the object is dead → false even if still attached.
+    if ((shader as unknown as { _invalidated?: boolean })._invalidated) return false;
+    // Deletion is deferred while attached: a deleted shader stays valid until
+    // its last attachment is removed (CTS object-deletion-behaviour).
+    return !shader._deleted || (shaderAttachCounts.get(shader) ?? 0) > 0;
   };
 
   proto.shaderSource = function (this: WebGLRenderingContext, shader: WebGLShader, source: string): void {
@@ -626,7 +648,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return;
     const s = validateShaderQuery(ctx, shader);
     if (s === null) return;
-    const src = requireString(source, 'source'); // WebIDL DOMString (TypeError for null/undefined)
+    const src = requireString(source, 'source'); // WebIDL DOMString (null → "null", no throw)
     s._source = src;
     s._compileStatus = false;
     s._infoLog = '';
@@ -716,6 +738,23 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     return createObject(ctx, ProgramCtor);
   };
 
+  /**
+   * Fully delete a program that is no longer in use: untrack it, unbind it from
+   * the current-program slot, and detach all attached shaders — completing
+   * their deferred deletion (CTS object-deletion-behaviour expects isShader →
+   * false after the program is released).
+   */
+  function releaseProgram(ctx: WebGLRenderingContext, p: WebGLProgram): void {
+    ctx._resources.untrack(p);
+    if (ctx._state.currentProgram === p) ctx._state.currentProgram = null;
+    for (const s of p._attachedShaders) {
+      const n = (shaderAttachCounts.get(s) ?? 1) - 1;
+      if (n <= 0) shaderAttachCounts.delete(s);
+      else shaderAttachCounts.set(s, n);
+    }
+    p._attachedShaders.clear();
+  }
+
   proto.deleteProgram = function (this: WebGLRenderingContext, program: WebGLProgram | null): void {
     const ctx = this;
     if (isLost(ctx)) return;
@@ -729,10 +768,9 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     program._deleted = true;
     if (!program._inUse && !program._inTransformFeedback) {
       // Not in use: release immediately (spec: deletion deferred only while in use).
-      ctx._resources.untrack(program);
-      if (ctx._state.currentProgram === program) ctx._state.currentProgram = null;
+      releaseProgram(ctx, program);
     }
-    // while _inUse: kept tracked; isProgram → false immediately.
+    // while _inUse: kept tracked; isProgram stays true until released.
   };
 
   proto.isProgram = function (this: WebGLRenderingContext, program: WebGLProgram | null): GLboolean {
@@ -740,11 +778,14 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return false;
     if (program === null || program === undefined) return false;
     if (!(program instanceof WebGLProgram)) throw new TypeError(`Argument is not of type 'WebGLProgram'`);
-    if (program._context !== ctx) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return false;
-    }
-    return !program._deleted;
+    // Cross-context: false with NO error (CTS incorrect-context-object-behaviour).
+    if (program._context !== ctx) return false;
+    // Context-lost invalidation: the object is dead → false even if still in use.
+    if ((program as unknown as { _invalidated?: boolean })._invalidated) return false;
+    // Deletion is deferred while in use: a deleted program stays valid until it
+    // is released (CTS object-deletion-behaviour: isProgram → true after
+    // deleteProgram while in use, false after useProgram(null)).
+    return !program._deleted || program._inUse || program._inTransformFeedback;
   };
 
   // getAttachedShaders is not declared on the context class (implementation
@@ -764,9 +805,10 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return;
     if (program === null || program === undefined) {
       if (ctx._state.currentProgram !== null) {
-        ctx._state.currentProgram._inUse = false;
-        if (ctx._state.currentProgram._deleted) ctx._resources.untrack(ctx._state.currentProgram);
-        ctx._state.currentProgram = null;
+        const prev = ctx._state.currentProgram;
+        prev._inUse = false;
+        if (prev._deleted) releaseProgram(ctx, prev);
+        else ctx._state.currentProgram = null;
       }
       return;
     }
@@ -781,7 +823,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     const prev = ctx._state.currentProgram;
     if (prev !== null) {
       prev._inUse = false;
-      if (prev._deleted) ctx._resources.untrack(prev);
+      if (prev._deleted) releaseProgram(ctx, prev);
     }
     p._inUse = true;
     ctx._state.currentProgram = p;
@@ -813,7 +855,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return;
     const p = validateProgram(ctx, program);
     if (p === null) return;
-    const s = validateShader(ctx, shader);
+    const s = validateShaderDetach(ctx, shader); // deleted-but-attached is legal here
     if (s === null) return;
     if (!p._attachedShaders.has(s)) {
       ctx._errors.push(C1.INVALID_OPERATION); // not attached (CTS program-test)
@@ -974,11 +1016,12 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       return;
     }
     if (nameTooLong(ctx, nm) || badNameChars(ctx, nm)) return;
-    if (index >= ctx._state.limits.MAX_VERTEX_ATTRIBS) {
+    const idx = index >>> 0; // WebIDL GLuint (ToUint32): NaN/strings → 0 (type-conversion-test)
+    if (idx >= ctx._state.limits.MAX_VERTEX_ATTRIBS) {
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
-    p._bindAttribLocations.set(nm, index); // applied at the next link
+    p._bindAttribLocations.set(nm, idx); // applied at the next link
   };
 
   proto.getActiveAttrib = function (this: WebGLRenderingContext, program: WebGLProgram, index: GLuint): WebGLActiveInfo | null {
@@ -986,12 +1029,13 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return null;
     const p = validateProgramQuery(ctx, program);
     if (p === null) return null;
+    const i = index >>> 0; // WebIDL GLuint: NaN/strings → 0 (CTS type-conversion-test)
     const pm = programModels.get(p);
-    if (pm === undefined || index >= pm.attributes.length) {
+    if (pm === undefined || i >= pm.attributes.length) {
       ctx._errors.push(C1.INVALID_VALUE); // out of range (spec §5.14.10)
       return null;
     }
-    const a = pm.attributes[index];
+    const a = pm.attributes[i];
     const name = a.size > 1 ? `${a.name}[0]` : a.name; // arrays: 'a[0]' (spec)
     return new WebGLActiveInfo(a.size, a.type, name);
   };
@@ -1001,12 +1045,13 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return null;
     const p = validateProgramQuery(ctx, program);
     if (p === null) return null;
+    const i = index >>> 0; // WebIDL GLuint: NaN/strings → 0 (CTS type-conversion-test)
     const pm = programModels.get(p);
-    if (pm === undefined || index >= pm.uniforms.length) {
+    if (pm === undefined || i >= pm.uniforms.length) {
       ctx._errors.push(C1.INVALID_VALUE); // out of range (spec §5.14.10)
       return null;
     }
-    const u = pm.uniforms[index];
+    const u = pm.uniforms[i];
     // glsl flattens leaf uniforms: name already formatted ('u[0]', 'u.m').
     return new WebGLActiveInfo(u.size, u.type, u.name);
   };
@@ -1071,12 +1116,13 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return null;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return null;
+      const i = index >>> 0; // WebIDL GLuint
       const pm = programModels.get(p);
-      if (pm === undefined || index >= pm.transformFeedbackVaryings.length) {
+      if (pm === undefined || i >= pm.transformFeedbackVaryings.length) {
         ctx._errors.push(C1.INVALID_VALUE); // out of range (GLES 3.0 §2.12.8)
         return null;
       }
-      const v = pm.transformFeedbackVaryings[index];
+      const v = pm.transformFeedbackVaryings[i];
       return new WebGLActiveInfo(v.size, v.type, v.name);
     };
 
@@ -1099,17 +1145,18 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return null;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return null;
+      const ubi = uniformBlockIndex >>> 0; // WebIDL GLuint
       const pm = programModels.get(p);
-      if (pm === undefined || uniformBlockIndex >= pm.uniformBlocks.length) {
+      if (pm === undefined || ubi >= pm.uniformBlocks.length) {
         ctx._errors.push(C1.INVALID_VALUE); // not an active block (spec §5.14.10)
         return null;
       }
-      const block = pm.uniformBlocks[uniformBlockIndex];
+      const block = pm.uniformBlocks[ubi];
       const refs = blockReferenced.get(p) ?? new Uint32Array(0);
       switch (pname) {
         case C2.UNIFORM_BLOCK_BINDING: {
           const bindings = uniformBlockBindings.get(p);
-          return bindings !== undefined ? bindings[uniformBlockIndex] : 0;
+          return bindings !== undefined ? bindings[ubi] : 0;
         }
         case C2.UNIFORM_BLOCK_DATA_SIZE:
           return block.size;
@@ -1118,15 +1165,15 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
         case C2.UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES: {
           const idxs: number[] = [];
           for (const m of block.activeUniforms) {
-            const i = pm.uniforms.findIndex((u) => u.blockIndex === uniformBlockIndex && u.name === m.name);
+            const i = pm.uniforms.findIndex((u) => u.blockIndex === ubi && u.name === m.name);
             if (i >= 0) idxs.push(i);
           }
           return new Uint32Array(idxs);
         }
         case C2.UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:
-          return ((refs[uniformBlockIndex] ?? 0) & 1) !== 0;
+          return ((refs[ubi] ?? 0) & 1) !== 0;
         case C2.UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:
-          return ((refs[uniformBlockIndex] ?? 0) & 2) !== 0;
+          return ((refs[ubi] ?? 0) & 2) !== 0;
         default:
           ctx._errors.push(C1.INVALID_ENUM);
           return null;
@@ -1138,12 +1185,13 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return null;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return null;
+      const ubi = uniformBlockIndex >>> 0; // WebIDL GLuint
       const pm = programModels.get(p);
-      if (pm === undefined || uniformBlockIndex >= pm.uniformBlocks.length) {
+      if (pm === undefined || ubi >= pm.uniformBlocks.length) {
         ctx._errors.push(C1.INVALID_VALUE);
         return null;
       }
-      return pm.uniformBlocks[uniformBlockIndex].name;
+      return pm.uniformBlocks[ubi].name;
     };
 
     p2.uniformBlockBinding = function (this: WebGL2RenderingContext, program: WebGLProgram, uniformBlockIndex: GLuint, uniformBlockBinding: GLuint): void {
@@ -1151,17 +1199,19 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return;
       const p = validateProgram(ctx, program);
       if (p === null) return;
+      const ubi = uniformBlockIndex >>> 0; // WebIDL GLuint
       const pm = programModels.get(p);
-      if (pm === undefined || uniformBlockIndex >= pm.uniformBlocks.length) {
+      if (pm === undefined || ubi >= pm.uniformBlocks.length) {
         ctx._errors.push(C1.INVALID_VALUE); // GLES 3.0 §2.12.6.5
         return;
       }
-      if (uniformBlockBinding >= ctx._state.limits.MAX_UNIFORM_BUFFER_BINDINGS) {
+      const binding = uniformBlockBinding >>> 0; // WebIDL GLuint
+      if (binding >= ctx._state.limits.MAX_UNIFORM_BUFFER_BINDINGS) {
         ctx._errors.push(C1.INVALID_VALUE); // GLES 3.0 §2.12.6.5
         return;
       }
       const bindings = uniformBlockBindings.get(p);
-      if (bindings !== undefined) bindings[uniformBlockIndex] = uniformBlockBinding;
+      if (bindings !== undefined) bindings[ubi] = binding;
     };
 
     p2.getUniformIndices = function (this: WebGL2RenderingContext, program: WebGLProgram, uniformNames: string[]): GLuint[] | null {

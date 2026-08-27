@@ -45,6 +45,23 @@ export function validateObject<T extends WebGLObject>(
   return obj as T;
 }
 
+/**
+ * Validate a NON-NULLABLE WebGL object argument (WebIDL: null/undefined → the
+ * binding THROWS a TypeError before the implementation runs — CTS
+ * bad-arguments-test / null-object-behaviour). Cross-context/deleted objects
+ * keep the GL INVALID_OPERATION rejection (no throw).
+ */
+export function validateNonNullableObject<T extends WebGLObject>(
+  ctx: WebGLRenderingContext,
+  obj: unknown,
+  ctor: new (...args: never[]) => T,
+): T | null {
+  if (obj === null || obj === undefined) {
+    throw new TypeError(`Argument is not of type '${ctor.name}'`);
+  }
+  return validateObject(ctx, obj, ctor);
+}
+
 /** Validate an argument that may be null (bind/delete semantics — null is legal). */
 export function validateNullableObject<T extends WebGLObject>(
   ctx: WebGLRenderingContext,
@@ -78,9 +95,15 @@ export function requireBufferData(v: unknown, argName: string): ArrayBufferView 
   throw new TypeError(`${argName} is not an ArrayBufferView`);
 }
 
-/** Check an argument is a DOMString (string or anything coercible per WebIDL). */
+/**
+ * Check an argument is a DOMString. Per WebIDL, DOMString conversion is
+ * ToString(argument) — null → "null", undefined → "undefined", NO TypeError
+ * (CTS type-conversion-test calls shaderSource(shader, null) expecting no
+ * exception). Only a Symbol would throw, which String() cannot express — the
+ * WebIDL TypeError for Symbol is not reachable through String() and no CTS
+ * test exercises it.
+ */
 export function requireString(v: unknown, argName: string): string {
   if (typeof v === 'string') return v;
-  if (v === null || v === undefined) throw new TypeError(`${argName} is not a DOMString`);
   return String(v); // WebIDL DOMString conversion
 }
