@@ -69,7 +69,6 @@ The complete WebGL 1.0 (`WebGLRenderingContext`) and WebGL 2.0 (`WebGL2Rendering
 - getProgramParameter pre-link semantics: LINK/DELETE/VALIDATE_STATUS live values; ACTIVE_* → 0 with no error; ACTIVE_*_MAX_LENGTH/INFO_LOG_LENGTH → INVALID_ENUM + null (per CTS program-test.html).
 - `getParameter(EXTENSIONS)` is INVALID_ENUM per spec (use getSupportedExtensions) — do not "fix" to return strings.
 - deqp suite (optional, `tests/deqp/`) counts millions of reportResults calls in-process — never route results through the DOM (root CONTEXT.md).
-- **Bundle-load bug (CONFIRMED, current)**: `objects/index.ts` re-exports the 3 aux classes (`WebGLUniformLocation`/`WebGLActiveInfo`/`WebGLShaderPrecisionFormat`) from `./aux` without value-importing them, so the bottom-of-module `chainToNative(...)` calls resolve to the lib.dom globals; esbuild renames the local classes to `WebGLUniformLocation2` etc. and the bundle dies at load (`TypeError: Cyclic __proto__ value` in browsers — factory never assigned, suites silently run native WebGL; `ReferenceError` in Node). Minimal fix = value-import the 3 classes in `objects/index.ts` (verified). Full details in `objects/CONTEXT.md` — when fixed, delete BOTH entries.
 
 ## Routing Table
 - `webgl1.ts` → WebGLRenderingContext class: signatures + arity + installConstants/installAll wiring

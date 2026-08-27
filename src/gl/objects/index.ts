@@ -21,6 +21,12 @@ import { WebGLSampler } from './webgl-sampler';
 import { WebGLQuery } from './webgl-query';
 import { WebGLSync } from './webgl-sync';
 import { WebGLTransformFeedback } from './webgl-transform-feedback';
+// Value-import the 3 aux classes so the bottom-of-module chainToNative calls
+// bind to OUR classes, NOT the ambient lib.dom globals of the same name
+// (a re-export alone leaves the local references resolving to the native
+// browser classes — Object.setPrototypeOf(nativeProto, nativeProto) throws
+// "Cyclic __proto__ value" at bundle load).
+import { WebGLActiveInfo, WebGLShaderPrecisionFormat, WebGLUniformLocation } from './aux';
 
 export { WebGLObject } from './webgl-object';
 export { WebGLBuffer } from './webgl-buffer';
