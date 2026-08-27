@@ -1685,8 +1685,10 @@ function indexTypeSize(type: GLenum): number {
  * type/offset argument checks): program linked + in use (INVALID_OPERATION),
  * transform-feedback active mode mismatch (INVALID_OPERATION), every enabled
  * attrib array backed by a buffer (INVALID_OPERATION), draw target resolvable
- * (INVALID_FRAMEBUFFER_OPERATION). The engine's executeDraw re-checks these as
- * a safety net; the api layer checks first so error ordering is exact.
+ * (INVALID_FRAMEBUFFER_OPERATION), and — GLES 2.0 §4.1.5 — stencil front/back
+ * state consistency when STENCIL_TEST is enabled and a stencil buffer is
+ * attached (INVALID_OPERATION). The engine's executeDraw re-checks these as a
+ * safety net; the api layer checks first so error ordering is exact.
  */
 function validateCommonDraw(ctx: WebGLRenderingContext, mode: GLenum): boolean {
   const s = ctx._state;
@@ -1712,9 +1714,31 @@ function validateCommonDraw(ctx: WebGLRenderingContext, mode: GLenum): boolean {
       return false;
     }
   }
-  if (!resolveDrawTarget(ctx)) {
+  const fb = resolveDrawTarget(ctx);
+  if (!fb) {
     pushError(ctx, C1.INVALID_FRAMEBUFFER_OPERATION);
     return false;
+  }
+  // GLES 2.0 §4.1.5 stencil front/back consistency (CTS conformance/misc/
+  // webgl-specific-stencil-settings.html): when STENCIL_TEST is enabled AND
+  // the draw target has a stencil buffer attached, a draw generates
+  // INVALID_OPERATION if the front and back stencil func, ref, or valueMask
+  // differ, or if the writeMasks differ. Only the effective 8-bit stencil
+  // values matter (ref clamped to [0,255], masks masked with 0xff); the ops
+  // (fail/depthFail/depthPass) may differ freely. Checked at draw time, AFTER
+  // the FBO-completeness check (an incomplete target still wins with
+  // INVALID_FRAMEBUFFER_OPERATION).
+  if (s.caps.STENCIL_TEST && (fb.stencil || (fb.depth && fb.depth.stencilData))) {
+    const f = s.stencil.front;
+    const b = s.stencil.back;
+    const ref8 = (v: number): number => (v < 0 ? 0 : v > 0xff ? 0xff : v) | 0;
+    if (f.func !== b.func ||
+        ref8(f.ref) !== ref8(b.ref) ||
+        (f.valueMask & 0xff) !== (b.valueMask & 0xff) ||
+        (f.writeMask & 0xff) !== (b.writeMask & 0xff)) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return false;
+    }
   }
   return true;
 }
