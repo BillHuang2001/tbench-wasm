@@ -452,7 +452,11 @@ function toPixelFormatInfo(spec: FormatSpec): PixelFormatInfo {
     isInteger: spec.isInteger,
     isSRGB: spec.isSRGB,
     normalized: spec.normalized,
-    decode: (data, byteOffset, out) => spec.unpack(data, byteOffset, out),
+    decode: (data, byteOffset, out) => {
+      const o = out ?? new Float32Array(4);
+      spec.unpack(data, byteOffset, o);
+      return o;
+    },
     encode: (data, byteOffset, r, g, b, a) => spec.pack(data, byteOffset, r, g, b, a),
   };
 }

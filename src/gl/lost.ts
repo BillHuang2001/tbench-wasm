@@ -308,11 +308,13 @@ function fallbackFormatInfo(format: number): PixelFormatInfo {
       isSRGB: false,
       normalized: false,
       decode(src, byteOffset, out) {
+        out = out ?? new Float32Array(4);
         const d = (src as Float32Array)[byteOffset >> 2];
         out[0] = d;
         out[1] = d;
         out[2] = d;
         out[3] = 1;
+        return out;
       },
       encode(src, byteOffset, r) {
         (src as Float32Array)[byteOffset >> 2] = r;
@@ -334,11 +336,13 @@ function fallbackFormatInfo(format: number): PixelFormatInfo {
       isSRGB: false,
       normalized: false,
       decode(src, byteOffset, out) {
+        out = out ?? new Float32Array(4);
         const s = (src as Uint8Array)[byteOffset];
         out[0] = s;
         out[1] = s;
         out[2] = s;
         out[3] = 1;
+        return out;
       },
       encode(src, byteOffset, r) {
         (src as Uint8Array)[byteOffset] = r & 0xff;
@@ -360,11 +364,13 @@ function fallbackFormatInfo(format: number): PixelFormatInfo {
     isSRGB: false,
     normalized: true,
     decode(src, byteOffset, out) {
+      out = out ?? new Float32Array(4);
       const u = src as Uint8Array;
       out[0] = u[byteOffset] / 255;
       out[1] = u[byteOffset + 1] / 255;
       out[2] = u[byteOffset + 2] / 255;
       out[3] = u[byteOffset + 3] / 255;
+      return out;
     },
     encode(src, byteOffset, r, g, b, a) {
       const u = src as Uint8Array;

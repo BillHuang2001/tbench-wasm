@@ -790,6 +790,8 @@ function buildDrawCall(
   stride: number,
   fb: FramebufferTarget,
   env: { images: (TextureImage | null)[]; samplerStates: SamplerState[]; bindings: (TextureUnitBinding | null)[] },
+  floatStore: Float32Array,
+  uniformBlocks: Record<string, ArrayBufferView> | undefined,
 ): DrawCall {
   const s = ctx._state;
   const { colorMask, drawBuffers } = buildOutputMaps(ctx, pm);
@@ -845,6 +847,8 @@ function buildDrawCall(
     lineWidth: s.lineWidth,
     textures: env.bindings,
     drawBuffers,
+    uniforms: floatStore,
+    uniformBlocks,
   };
 }
 
@@ -1139,7 +1143,12 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
   }
 
   // 6. Rasterize.
-  const dc = buildDrawCall(ctx, pm, req, records, stride, fb, env);
+  // Raster DrawCall contract: fragment uniform stores. `uniforms` = default-block
+  // float store; `uniformBlocks` = WebGL2 UBO stores keyed by block name
+  // (undefined for WebGL1 programs with no blocks).
+  const uniformBlocks: Record<string, ArrayBufferView> = {};
+  for (let bi = 0; bi < blocks.length; bi++) uniformBlocks[blocks[bi].name] = blockStores[bi];
+  const dc = buildDrawCall(ctx, pm, req, records, stride, fb, env, floatStore, blocks.length > 0 ? uniformBlocks : undefined);
   if (activeQuery) {
     (dc as unknown as { sampleCountRef: { value: number } }).sampleCountRef = { value: 0 };
   }
