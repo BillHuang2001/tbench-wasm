@@ -929,7 +929,11 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
       const a = materialize(emitExpr(e.left, env), env)[0];
       const b = emitExpr(e.right, env)[0];
       const bv = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-      return [{ v: op === '&&' ? `(${a.v} && (${bv}))` : `(${a.v} || (${bv}))` }];
+      // `a` was materialized — its pre (the temp assignment) MUST carry on the
+      // result, or the left operand reads an unassigned temp (always falsy).
+      const out: Value = { v: op === '&&' ? `(${a.v} && (${bv}))` : `(${a.v} || (${bv}))` };
+      if (a.pre && a.pre.length > 0) out.pre = a.pre;
+      return [out];
     }
     case '^^': {
       const a = emitExpr(e.left, env)[0];
@@ -944,8 +948,20 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
       const cb = commonBase(lb, rb);
       if (!cb) throw new Error(`codegen: cannot compare ${typeName(lt)} and ${typeName(rt)}`);
       const ct = shapeOf(lt, cb);
-      const av = convertValue(emitExpr(e.left, env), lt, ct);
-      const bv = convertValue(emitExpr(e.right, env), rt, ct);
+      const avSrc = emitExpr(e.left, env);
+      const bvSrc = emitExpr(e.right, env);
+      const av = convertValue(avSrc, lt, ct);
+      const bv = convertValue(bvSrc, rt, ct);
+      // convertValue DROPS Value.pre when it converts scalar bases — re-attach
+      // (mirrors statements.ts convertPreserving) so operand pres survive.
+      for (let c = 0; c < flatComponents(lt); c++) {
+        if (av[c] !== avSrc[c] && avSrc[c].pre && avSrc[c].pre.length > 0) {
+          av[c] = { ...av[c], pre: avSrc[c].pre };
+        }
+        if (bv[c] !== bvSrc[c] && bvSrc[c].pre && bvSrc[c].pre.length > 0) {
+          bv[c] = { ...bv[c], pre: bvSrc[c].pre };
+        }
+      }
       const parts: string[] = [];
       for (let c = 0; c < flatComponents(lt); c++) {
         const ap = av[c].pre;
@@ -963,8 +979,19 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
       const cb = commonBase(lb, rb);
       if (!cb) throw new Error(`codegen: cannot compare ${typeName(lt)} and ${typeName(rt)}`);
       const ct = shapeOf(lt, cb);
-      const a = convertValue(emitExpr(e.left, env), lt, ct)[0];
-      const b = convertValue(emitExpr(e.right, env), rt, ct)[0];
+      const aSrc = emitExpr(e.left, env);
+      const bSrc = emitExpr(e.right, env);
+      const ac = convertValue(aSrc, lt, ct);
+      const bc = convertValue(bSrc, rt, ct);
+      // convertValue DROPS Value.pre when it converts scalar bases — re-attach.
+      if (ac[0] !== aSrc[0] && aSrc[0].pre && aSrc[0].pre.length > 0) {
+        ac[0] = { ...ac[0], pre: aSrc[0].pre };
+      }
+      if (bc[0] !== bSrc[0] && bSrc[0].pre && bSrc[0].pre.length > 0) {
+        bc[0] = { ...bc[0], pre: bSrc[0].pre };
+      }
+      const a = ac[0];
+      const b = bc[0];
       const av = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
       const bv = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
       return [{ v: `(${av} ${op} (${bv}))` }];
