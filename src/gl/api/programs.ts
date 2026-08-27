@@ -1287,11 +1287,8 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return null;
     const p = validateProgramQuery(ctx, program);
     if (p === null) return null;
-<<<<<<< HEAD
     const i = index >>> 0; // WebIDL GLuint: NaN/strings → 0 (CTS type-conversion-test)
-=======
     ensureProgramLinked(ctx, p); // trigger before reading the program model
->>>>>>> 3a3a7e9
     const pm = programModels.get(p);
     if (pm === undefined || i >= pm.attributes.length) {
       ctx._errors.push(C1.INVALID_VALUE); // out of range (spec §5.14.10)
@@ -1380,11 +1377,8 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return null;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return null;
-<<<<<<< HEAD
       const i = index >>> 0; // WebIDL GLuint
-=======
       ensureProgramLinked(ctx, p); // trigger before reading the program model
->>>>>>> 3a3a7e9
       const pm = programModels.get(p);
       if (pm === undefined || i >= pm.transformFeedbackVaryings.length) {
         ctx._errors.push(C1.INVALID_VALUE); // out of range (GLES 3.0 §2.12.8)
@@ -1455,11 +1449,8 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return null;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return null;
-<<<<<<< HEAD
       const ubi = uniformBlockIndex >>> 0; // WebIDL GLuint
-=======
       ensureProgramLinked(ctx, p); // trigger before reading the program model
->>>>>>> 3a3a7e9
       const pm = programModels.get(p);
       if (pm === undefined || ubi >= pm.uniformBlocks.length) {
         ctx._errors.push(C1.INVALID_VALUE);
