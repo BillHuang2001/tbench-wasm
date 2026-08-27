@@ -85,7 +85,7 @@ import {
   createObject,
 } from '../objects';
 import type { WebGLObject } from '../objects';
-import { validateObject } from '../validation';
+import { validateObject, validateNonNullableObject } from '../validation';
 import { defaultVAOState } from '../state';
 import type { VAOState } from '../state';
 import type { GLbitfield, GLboolean, GLenum, GLfloat, GLint, GLuint, GLuint64 } from '../types';
@@ -332,7 +332,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
       }
-      const q = validateObject<WebGLQuery>(ctx, query, Query.any);
+      const q = validateNonNullableObject<WebGLQuery>(ctx, query, Query.any);
       if (q === null) return; // cross-context/deleted → INVALID_OPERATION pushed
       if (activeQueryAt(ctx, target) !== null) {
         ctx._errors.push(C1.INVALID_OPERATION); // target already has an active query
@@ -447,7 +447,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
     proto.getQueryParameter = function (this: WebGL2RenderingContext, query: WebGLQuery, pname: GLenum): any {
       const ctx = this;
       if (isLost(ctx)) return null;
-      const q = validateObject<WebGLQuery>(ctx, query, Query.any);
+      const q = validateNonNullableObject<WebGLQuery>(ctx, query, Query.any);
       if (q === null) return null; // cross-context/deleted → INVALID_OPERATION pushed
       switch (pname) {
         case C2.QUERY_RESULT:
@@ -521,7 +521,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
     proto.clientWaitSync = function (this: WebGL2RenderingContext, sync: WebGLSync, flags: GLbitfield, timeout: GLuint64): GLenum {
       const ctx = this;
       if (isLost(ctx)) return C2.WAIT_FAILED;
-      const s = validateObject<WebGLSync>(ctx, sync, Sync.any);
+      const s = validateNonNullableObject<WebGLSync>(ctx, sync, Sync.any);
       if (s === null) return C2.WAIT_FAILED; // INVALID_OPERATION pushed
       if (flags !== 0 && flags !== C2.SYNC_FLUSH_COMMANDS_BIT) {
         ctx._errors.push(C1.INVALID_VALUE);
@@ -541,7 +541,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
     proto.waitSync = function (this: WebGL2RenderingContext, sync: WebGLSync, flags: GLbitfield, timeout: GLuint64): void {
       const ctx = this;
       if (isLost(ctx)) return;
-      const s = validateObject<WebGLSync>(ctx, sync, Sync.any);
+      const s = validateNonNullableObject<WebGLSync>(ctx, sync, Sync.any);
       if (s === null) return; // INVALID_OPERATION pushed
       if (flags !== 0 && flags !== C2.SYNC_FLUSH_COMMANDS_BIT) {
         ctx._errors.push(C1.INVALID_VALUE);
@@ -559,7 +559,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
     proto.getSyncParameter = function (this: WebGL2RenderingContext, sync: WebGLSync, pname: GLenum): any {
       const ctx = this;
       if (isLost(ctx)) return null;
-      const s = validateObject<WebGLSync>(ctx, sync, Sync.any);
+      const s = validateNonNullableObject<WebGLSync>(ctx, sync, Sync.any);
       if (s === null) return null; // INVALID_OPERATION pushed
       switch (pname) {
         case C2.SYNC_STATUS:
@@ -647,7 +647,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
     proto.samplerParameterf = function (this: WebGL2RenderingContext, sampler: WebGLSampler, pname: GLenum, param: GLfloat): void {
       const ctx = this;
       if (isLost(ctx)) return;
-      const smp = validateObject<WebGLSampler>(ctx, sampler, Sampler.any);
+      const smp = validateNonNullableObject<WebGLSampler>(ctx, sampler, Sampler.any);
       if (smp === null) return;
       setSamplerParam(ctx, smp, pname, param);
     };
@@ -657,7 +657,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
     proto.samplerParameteri = function (this: WebGL2RenderingContext, sampler: WebGLSampler, pname: GLenum, param: GLint): void {
       const ctx = this;
       if (isLost(ctx)) return;
-      const smp = validateObject<WebGLSampler>(ctx, sampler, Sampler.any);
+      const smp = validateNonNullableObject<WebGLSampler>(ctx, sampler, Sampler.any);
       if (smp === null) return;
       setSamplerParam(ctx, smp, pname, param);
     };
@@ -667,7 +667,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
     proto.getSamplerParameter = function (this: WebGL2RenderingContext, sampler: WebGLSampler, pname: GLenum): any {
       const ctx = this;
       if (isLost(ctx)) return null;
-      const smp = validateObject<WebGLSampler>(ctx, sampler, Sampler.any);
+      const smp = validateNonNullableObject<WebGLSampler>(ctx, sampler, Sampler.any);
       if (smp === null) return null; // INVALID_OPERATION pushed
       switch (pname) {
         case C1.TEXTURE_MIN_FILTER:
