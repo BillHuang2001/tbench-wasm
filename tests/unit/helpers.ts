@@ -17,11 +17,19 @@ export const GL = {
   FUNC_ADD: 0x8006,
   FUNC_SUBTRACT: 0x800a,
   LESS: 0x0201,
+  LEQUAL: 0x0203,
+  EQUAL: 0x0202,
   ALWAYS: 0x0207,
   KEEP: 0x1e00,
+  REPLACE: 0x1e01,
+  INCR_WRAP: 0x8507,
   BACK: 0x0405,
   CCW: 0x0901,
   TEXTURE0: 0x84c0,
+
+  // Primitive modes
+  LINES: 0x0001,
+  TRIANGLES: 0x0004,
 
   // Pixel formats (internal & source)
   DEPTH_COMPONENT: 0x1902,
@@ -49,6 +57,7 @@ export const GL = {
   DEPTH_COMPONENT24: 0x81a6,
   DEPTH_COMPONENT32F: 0x8cac,
   DEPTH24_STENCIL8: 0x88f0,
+  STENCIL_INDEX8: 0x8d48,
 
   // Data types (texImage2D / readPixels)
   UNSIGNED_BYTE: 0x1401,
