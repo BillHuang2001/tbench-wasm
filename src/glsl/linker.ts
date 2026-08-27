@@ -173,7 +173,11 @@ function emitType(path: string, t: GLSLType, cursor: number, st: AllocState): { 
       const slot = cursor * 4;
       const int = isIntStoreType(t);
       st.slots.set(path, { store: int ? 'int' : 'float', slot, stride: 0 });
-      const comps = t.kind === 'matrix' ? t.cols * t.rows : t.kind === 'vector' ? t.size : 1;
+      // Matrix storage is COLUMN-MAJOR with vec4 columns: each column occupies
+      // 4 floats in the store (slot = cursor*4, column stride 4), so a matC
+      // leaf needs cols*4 floats — cols*rows under-sizes the store (getUniform
+      // then reads past the end → NaN for matrix arrays).
+      const comps = t.kind === 'matrix' ? t.cols * 4 : t.kind === 'vector' ? t.size : 1;
       if (int) st.intMax = Math.max(st.intMax, slot + comps);
       else st.floatMax = Math.max(st.floatMax, slot + comps);
       return { advance: slotCount(t) };
