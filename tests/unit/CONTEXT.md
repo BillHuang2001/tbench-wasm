@@ -28,8 +28,9 @@ Fast, dependency-free unit tests for the pure `src/` modules — glsl compiler/l
 | `glsl.test.ts` | ✅ | ✅ 18/18 PASS |
 | `math.test.ts` | ✅ | ✅ 11/11 PASS |
 | `present.test.ts` | ✅ | ✅ 5/5 PASS |
+| `raster-pipeline.test.ts` | ✅ | ✅ 11/11 PASS |
 
-`npm run test:unit` and `npm run typecheck` are both fully green. Suite total: 95 tests, all pass.
+`npm run test:unit` and `npm run typecheck` are both fully green. Suite total: 106 tests, all pass.
 
 ## API Surface (coordination contract with src/ — VERIFIED against the real modules)
 Import paths and export names below are the ACTUAL src APIs the tests compile against (rewritten 2026-08 from the earlier assumed contracts). If src/ changes a shape, update the call sites in the listed file AND this table in the same pass.
@@ -45,6 +46,8 @@ Import paths and export names below are the ACTUAL src APIs the tests compile ag
 | `intercept.test.ts` | `../../src/context-intercept` | (module exists — no assumptions; uses explicit missing/temp renderer paths so it stays green after `renderer.js` is built) |
 
 ## Test Strategy
+- `raster-pipeline.test.ts` — end-to-end `draw()` pipeline tests (the areas the old temporary `src/raster/__selfcheck.ts` covered, with corrected expectations): triangle fill top-left rule (exact 8-pixel set of window (0,0),(4,0),(2,4), no center on an edge), depth LEQUAL (cleared-to-1.0 depth surface; winZ=(z/w·0.5+0.5); far draw rejected, near draw overwrites color+depth), occlusion `sampleCountRef` (1 passing sample for a hypotenuse-excluding triangle; 0 under rasterizerDiscard), diamond-exit lines (half-integer y covers 3 pixels with the endpoint excluded; tangent y=1.0 covers nothing), blend math (SRC_ALPHA/ONE_MINUS_SRC_ALPHA with src alpha exactly 128/255 → [127,128,0,191] — the spec-correct value, NOT the earlier investigation's claimed [128,128,0,128]), instancing (records addressed first + i·count + j; no vertex stage in RasterProgram so no gl_InstanceID coloring — same fragment color for both instances), scissor rect, colorMask read-modify-write (masked channels keep current value; note: mask=true WRITES the channel — the old "[true,false,true,true] keeps red" claim was inverted), stencil REPLACE ref 7 then EQUAL+INCR_WRAP → 8. Harness (`prog`/`dc`/`winVert`/`px`/`fb`) adapted from the deleted selfcheck; fragment colors are normalized floats (encode = round(c·255)), depth surfaces filled by hand, row 0 = BOTTOM.
+- `raster.test.ts` — clip/signed-area/viewport-transform/record-layout tests (18/18 PASS)
 - `glsl.test.ts` — compile/link smoke (trivial v+f shaders), compile-error line numbers, WebGL1 `in`-keyword strictness vs v300 in/out, Program metadata (attributes/uniforms/varyings/fragment.outputs), vertex exec via `makeVertexCtx` (position/varyings/uniforms-by-location through `program.floatStore`/gl_PointSize/gl_VertexID/gl_InstanceID), built-in function evaluation, fragment gl_FragColor via `makeFragmentCtx`. Varying-link expectations are native-verified (probe: `src/glsl/probe-native-varying-link.mjs` + `src/glsl/probe-results.json`): FS READS a varying the VS never declares → link FAILS (log contains `not matched`); VS-extra varyings and FS-declared-but-unread varyings (v100 AND v300) → link OK.
 - `formats.test.ts` — metadata (bpp/components/storage/classification) for ~16 core formats; encode/decode round-trips with quantization tolerances (RGBA8 exact-ish, RGB565/RGBA4/RGB5_A1 within bit depth, LUMINANCE(+ALPHA) semantics, DEPTH_COMPONENT16/24 f32, R16F f32, RGBA32F); `getTexImageConverter` per-texel source conversions (RGBA→LUMINANCE, RGB→RGBA8, RGBA→RGB565; no flipY — gl/'s concern); implemented numeric helpers (halfToFloat/floatToHalf incl. specials, sRGB round-trips, packDepth24Stencil/unpackDepth24) — PASS today.
 - `math.test.ts` — vec dot/cross/length/normalize/add/sub/scale; mat4 identity/multiply-composition/invert/mat4MulVec4 transform/mat4Determinant/mat4Transpose (perspective/translate dropped — no API).
@@ -52,7 +55,7 @@ Import paths and export names below are the ACTUAL src APIs the tests compile ag
 - `state.test.ts` — GL spec defaults (caps, clear values, masks, blend/depth/cull/stencil/scissor/polygonOffset/sampleCoverage, dither, lineWidth, activeTexture, pixelStore, currentProgram, limits) + fresh-per-call independence + version-1-vs-2 differences (uniformBuffers sizing) — PASS today.
 - `present.test.ts` — NodeCanvasSurface dimensions via resize(), RGBA8 buffer size (w*h*4), present() no-op; createCanvasSurface structural factory tests (Node for non-canvas, Browser for getContext-bearing object).
 - `intercept.test.ts` — `buildInterceptScript` (renderer-present: embeds source, routes webgl/webgl2/experimental-webgl through `__createSoftwareWebGLContext`, falls through for '2d'; renderer-missing: RENDERER_NOT_FOUND stub that throws), `getRendererPath` env handling, `assertRendererExists`.
-- Not yet covered (add when APIs settle): ImageSource decoding, texture sampler, fragment-ops blending math, raster primitive assembly, glsl uniform blocks / UBO exec. `helpers.ts` is the home for a `makeContext()`-style harness once gl/ lands.
+- Not yet covered (add when APIs settle): ImageSource decoding, texture sampler (filter/wrap/LOD paths), glsl uniform blocks / UBO exec. `helpers.ts` is the home for a `makeContext()`-style harness once gl/ lands. (Blending math and raster primitive assembly are now covered end-to-end by `raster-pipeline.test.ts`.)
 
 ## Constraints
 - Never import the built `renderer.js` bundle; always import `src/` modules directly.
@@ -61,11 +64,12 @@ Import paths and export names below are the ACTUAL src APIs the tests compile ag
 - Never modify anything under `src/` from tests (the API Surface table is the coordination channel).
 
 ## Routing Table
-- `helpers.ts` → shared GL enum constants (incl. UNSIGNED_BYTE/FLOAT data types) + `expectArrayClose` (and future shared harnesses)
+- `helpers.ts` → shared GL enum constants (incl. UNSIGNED_BYTE/FLOAT data types; raster-pipeline tests added LINES/TRIANGLES/LEQUAL/EQUAL/REPLACE/INCR_WRAP/STENCIL_INDEX8) + `expectArrayClose` (and future shared harnesses)
 - `intercept.test.ts` → context-intercept harness helper tests (passes today)
 - `state.test.ts` → GL state container default tests (PASSES today)
 - `formats.test.ts` → pixel format registry + per-texel converter tests (20/20 PASS)
 - `raster.test.ts` → clip/signed-area/viewport-transform/record-layout tests (18/18 PASS)
+- `raster-pipeline.test.ts` → end-to-end `draw()` pipeline tests (11/11 PASS)
 - `glsl.test.ts` → GLSL compiler/linker/Program model tests (18/18 PASS)
 - `math.test.ts` → vec/mat helper tests (11/11 PASS)
 - `present.test.ts` → Node canvas surface tests (5/5 PASS)
