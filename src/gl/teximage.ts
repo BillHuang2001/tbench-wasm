@@ -711,8 +711,12 @@ function ensureImage(texture: WebGLTexture, target: GLenum): NonNullable<WebGLTe
 
 const isPow2 = (v: number): boolean => v > 0 && (v & (v - 1)) === 0;
 
-/** Recompute _image completeness + base/max level after any mutation. */
-function updateCompleteness(texture: WebGLTexture, version: 1 | 2): void {
+/**
+ * Recompute _image completeness + base/max level after any mutation. Also
+ * called at DRAW time (draw.ts buildTextureEnv) so completeness always reflects
+ * the CURRENT texParameteri state, not the state at upload time.
+ */
+export function updateCompleteness(texture: WebGLTexture, version: 1 | 2): void {
   const img = texture._image;
   if (!img) return;
   const base = Math.max(0, texture._params[0x813c] | 0);

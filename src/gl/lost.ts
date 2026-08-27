@@ -54,7 +54,7 @@ interface ContextLike {
   _version: 1 | 2;
   _isLost: boolean;
   _canvas: unknown;
-  _attrs: { depth: boolean; stencil: boolean };
+  _attrs: { depth: boolean; stencil: boolean; alpha?: boolean };
   _state: State;
   _errors: ErrorQueue;
   _resources: { invalidateAll(): void };
@@ -294,7 +294,14 @@ function allocateDefaultFramebuffer(
   }
 }
 
-/** Color surface: zero-copy wrap of the present surface's RGBA8 buffer. */
+/**
+ * Color surface: zero-copy wrap of the present surface's RGBA8 buffer. For an
+ * alpha:false drawing buffer the back buffer has NO alpha channel — the
+ * surface's info is wrapped so every encode stores a=1.0 and every decode
+ * reports a=1.0 (CTS context-attributes-alpha-depth-stencil-antialias.html,
+ * context-hidden-alpha.html, context-no-alpha-fbo-with-alpha.html). FBO color
+ * surfaces are allocated elsewhere and keep their real alpha.
+ */
 function makeColorSurface(ctx: ContextLike, w: number, h: number): Surface {
   let pixels: Uint8Array | null = null;
   if (ctx._presentSurface) {
@@ -305,7 +312,22 @@ function makeColorSurface(ctx: ContextLike, w: number, h: number): Surface {
     }
   }
   if (!pixels || pixels.length < w * h * 4) pixels = new Uint8Array(w * h * 4);
-  return makeSurface(RGBA8, w, h, pixels);
+  const surf = makeSurface(RGBA8, w, h, pixels);
+  if (ctx._attrs.alpha === false) {
+    const base = surf.info;
+    surf.info = {
+      ...base,
+      encode(src, byteOffset, r, g, b, a) {
+        base.encode(src, byteOffset, r, g, b, 1);
+      },
+      decode(src, byteOffset, out) {
+        const o = base.decode(src, byteOffset, out);
+        o[3] = 1;
+        return o;
+      },
+    };
+  }
+  return surf;
 }
 
 function makeDepthSurface(ctx: ContextLike, w: number, h: number): Surface {
@@ -470,8 +492,12 @@ export function handleCanvasResize(ctx: ContextLike): void {
   if (!size) return;
   const { w, h } = size;
   const surf = ctx._presentSurface;
-  const curW = surf ? surf.width : ctx._defaultFB ? ctx._defaultFB.width : 0;
-  const curH = surf ? surf.height : ctx._defaultFB ? ctx._defaultFB.height : 0;
+  // Reference the DEFAULT FRAMEBUFFER size, not the present surface's: the
+  // present adapter may have auto-resized its pixel buffer ahead of the
+  // drawing buffer (its present() safety net), and comparing against the
+  // surface would no-op here and leave the drawing buffer stale forever.
+  const curW = ctx._defaultFB ? ctx._defaultFB.width : surf ? surf.width : 0;
+  const curH = ctx._defaultFB ? ctx._defaultFB.height : surf ? surf.height : 0;
   if (w === curW && h === curH) return; // unchanged (incl. same-value re-set)
   if (surf) {
     try {

@@ -64,6 +64,7 @@ import type { GLenum, GLint, GLintptr, GLsizei, GLuint } from './types';
 import { C1, C2 } from './constants';
 import { resolveFramebufferTarget, resolveReadSurface, getAttachmentSurface } from './framebuffer-util';
 import { handleCanvasResize } from './lost';
+import { updateCompleteness } from './teximage';
 import {
   computeVertexStride,
   RECORD_HEADER_FLOATS,
@@ -123,6 +124,8 @@ interface DrawScratch {
   zeroIntStore: Int32Array;
   /** Stub-era fallback default-framebuffer color surface (until lifecycle lands). */
   fallbackColor: Surface | null;
+  /** preserveDrawingBuffer:false — one pending frame-boundary clear per context. */
+  preserveClearPending: boolean;
   /** Stub-era: float/int stores when a fake ProgramModel has none. */
   emptyFloat: Float32Array;
   emptyInt: Int32Array;
@@ -146,6 +149,7 @@ function getScratch(ctx: WebGLRenderingContext): DrawScratch {
       zeroStore: new Float32Array(16384), // MAX_UNIFORM_BLOCK_SIZE / 4
       zeroIntStore: new Int32Array(16384),
       fallbackColor: null,
+      preserveClearPending: false,
       emptyFloat: new Float32Array(0),
       emptyInt: new Int32Array(0),
     };
@@ -257,6 +261,89 @@ function presentIfDefault(ctx: WebGLRenderingContext): void {
   } catch {
     // present adapter stub era — never leak to the page
   }
+  // preserveDrawingBuffer:false: the drawing buffer must be cleared back to its
+  // initial state AFTER compositing — at the next frame boundary, never
+  // synchronously (CTS draws → readPixels in the same task and must see the
+  // frame; wtu.waitForComposite = 5 rAFs).
+  if (ctx._attrs.preserveDrawingBuffer === false) {
+    schedulePreserveClear(ctx);
+  }
+}
+
+/**
+ * Frame-boundary clear for preserveDrawingBuffer:false. Coalesced to ONE
+ * pending callback per context (draws between schedule and callback just keep
+ * the flag). The callback clears the default framebuffer only — the clear must
+ * NOT respect scissor/colorMask (spec: the buffer returns to its initial
+ * state; CTS buffer-preserve-test enables a scissor before compositing to
+ * prove it is ignored). Browser: requestAnimationFrame (runs before the next
+ * composite — well within wtu.waitForComposite's 5 frames); Node/headless:
+ * setImmediate → microtask → setTimeout (same-task draw→readPixels sequences
+ * survive). A canvas NOT connected to the document is never composited, so
+ * preserve:false must NOT clear it (CTS buffer-offscreen-test's detached gl2
+ * canvas keeps its content); OffscreenCanvas has no isConnected (undefined) →
+ * still clears (its control canvas composites).
+ */
+function schedulePreserveClear(ctx: WebGLRenderingContext): void {
+  const canvas = ctx._canvas as { isConnected?: boolean };
+  if (canvas.isConnected === false) return;
+  const sc = getScratch(ctx);
+  if (sc.preserveClearPending) return;
+  sc.preserveClearPending = true;
+  const run = (): void => {
+    sc.preserveClearPending = false;
+    if (ctx._isLost) return;
+    const dfb = ctx._defaultFB;
+    if (!dfb) return;
+    clearDefaultFramebufferForPreserve(ctx, dfb);
+    // Refresh the canvas bitmap with the cleared buffer: putImageData is a
+    // SNAPSHOT, and the browser's compositor would show the cleared drawing
+    // buffer on the next frame — emulate that composite so drawImage/toDataURL
+    // after the frame boundary see the cleared state (CTS
+    // context-attribute-preserve-drawing-buffer.html). No-op adapters (Node)
+    // make this harmless.
+    try {
+      ctx._presentSurface?.present();
+    } catch {
+      // never leak to the page
+    }
+  };
+  const g = globalThis as {
+    requestAnimationFrame?: (f: () => void) => number;
+    setImmediate?: (f: () => void) => unknown;
+    queueMicrotask?: (f: () => void) => void;
+    setTimeout?: (f: () => void, ms?: number) => unknown;
+  };
+  if (typeof g.requestAnimationFrame === 'function') {
+    g.requestAnimationFrame(run);
+  } else if (typeof g.setImmediate === 'function') {
+    g.setImmediate(run);
+  } else if (typeof g.queueMicrotask === 'function') {
+    g.queueMicrotask(run);
+  } else if (typeof g.setTimeout === 'function') {
+    g.setTimeout(run, 0);
+  } else {
+    run(); // pure sandbox without async primitives — clear synchronously
+  }
+}
+
+/**
+ * Clear the default framebuffer to its initial state (color (0,0,0,0), depth
+ * 1.0, stencil 0) at the frame boundary. alpha:false drawing buffers have NO
+ * alpha channel — the stored alpha byte must be 255 so the composite (raw
+ * putImageData) and later reads see an opaque buffer (CTS
+ * context-attribute-preserve-drawing-buffer.html expects (0,0,0,255)).
+ */
+function clearDefaultFramebufferForPreserve(ctx: WebGLRenderingContext, fb: { color: Surface; depth: Surface | null; stencil: Surface | null }): void {
+  const d = fb.color.data;
+  if (d instanceof Uint8Array) {
+    d.fill(0);
+    if (ctx._attrs.alpha === false) {
+      for (let i = 3; i < d.length; i += 4) d[i] = 255;
+    }
+  }
+  if (fb.depth && fb.depth.data instanceof Float32Array) fb.depth.data.fill(1.0);
+  if (fb.stencil && fb.stencil.data instanceof Uint8Array) fb.stencil.data.fill(0);
 }
 
 /** Canvas resize guard: keep the default FB in sync (lifecycle owns the realloc). */
@@ -818,6 +905,13 @@ function buildTextureEnv(
         // interface; they always hold renderer WebGLTexture instances.
         const tex = unitState[key] as unknown as WebGLTexture | null;
         if (!tex || !tex._image) continue;
+        // Completeness depends on the CURRENT texParameteri state (MIN_FILTER,
+        // BASE/MAX_LEVEL, wrap) plus the levels present — it must be evaluated
+        // at DRAW time, not just upload time (a texture uploaded while
+        // MIN_FILTER was the default NEAREST_MIPMAP_LINEAR then switched to
+        // LINEAR would otherwise sample as incomplete forever). Cheap
+        // recompute per draw.
+        updateCompleteness(tex, ctx._version);
         const img = tex._image as TextureImage;
         const st = effectiveSamplerState(tex, unitState.sampler);
         images[unit] = img;
@@ -1092,13 +1186,17 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
     else if (q2 && q2._active) activeQuery = q2;
   }
 
-  // 2. Resolve the draw target (INVALID_FRAMEBUFFER_OPERATION when incomplete).
+  // 2. Resize the drawing buffer BEFORE resolving the draw target: a canvas
+  // resize replaces ctx._defaultFB (handleCanvasResize reallocates + clears),
+  // so resolving first would capture an orphaned surface and the whole draw
+  // would write a buffer nobody presents (CTS to-data-url-test,
+  // viewport-unchanged-upon-resize.html).
+  ensureCanvasSize(ctx);
   const fb = resolveDrawTarget(ctx);
   if (!fb) {
     pushError(ctx, C1.INVALID_FRAMEBUFFER_OPERATION);
     return;
   }
-  ensureCanvasSize(ctx);
 
   if (req.count === 0 || req.instanceCount === 0) return; // nothing to do, no error
 
@@ -1253,12 +1351,13 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
 /** clear(mask): scissor-respecting clear of color/depth/stencil of the draw target. */
 export function executeClear(ctx: WebGLRenderingContext, mask: GLuint): void {
   const s = ctx._state;
+  // Resize before resolve (canvas resize replaces _defaultFB — see executeDraw).
+  ensureCanvasSize(ctx);
   const fb = resolveDrawTarget(ctx);
   if (!fb) {
     pushError(ctx, C1.INVALID_FRAMEBUFFER_OPERATION);
     return;
   }
-  ensureCanvasSize(ctx);
   const scissor = scissorState(ctx);
 
   if (mask & C1.COLOR_BUFFER_BIT) {
@@ -1503,6 +1602,11 @@ export function executeBlitFramebuffer(
   const dstW = dstX1 - dstX0;
   const dstH = dstY1 - dstY0;
 
+  // Resize before resolving read/draw targets (a canvas resize replaces
+  // _defaultFB — see executeDraw); blitFramebuffer can target the default FB
+  // and presentIfDefault runs at the end.
+  ensureCanvasSize(ctx);
+
   if (mask & C1.COLOR_BUFFER_BIT) {
     const src = resolveReadColor(ctx);
     const fb = resolveDrawTarget(ctx);
@@ -1587,12 +1691,13 @@ export function executeClearBuffer(
   depth?: number, stencil?: number,
 ): void {
   const s = ctx._state;
+  // Resize before resolve (canvas resize replaces _defaultFB — see executeDraw).
+  ensureCanvasSize(ctx);
   const fb = resolveDrawTarget(ctx);
   if (!fb) {
     pushError(ctx, C1.INVALID_FRAMEBUFFER_OPERATION);
     return;
   }
-  ensureCanvasSize(ctx);
   const scissor = scissorState(ctx);
 
   if (buffer === C2.COLOR) {

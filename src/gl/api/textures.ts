@@ -35,7 +35,7 @@ import type { WebGLRenderingContext } from '../webgl1';
 import { C1, C2 } from '../constants';
 import { WebGLTexture, createObject } from '../objects';
 import { validateObject } from '../validation';
-import { generateMipmap } from '../teximage';
+import { generateMipmap, updateCompleteness } from '../teximage';
 import type { GLboolean, GLenum, GLfloat, GLint } from '../types';
 
 // GL values not present in C1 (see constants.ts provenance / state.ts precedent).
@@ -235,6 +235,14 @@ function texParameterImpl(ctx: WebGLRenderingContext, target: GLenum, pname: GLe
   }
   if (!isValidTexParamValue(ctx, pname, param)) return;
   tex._params[pname] = param;
+  // MIN_FILTER / MAG_FILTER / BASE_LEVEL / MAX_LEVEL affect completeness
+  // (MAG_FILTER doesn't, but recomputing is harmless) — recompute from the
+  // CURRENT params so a texture uploaded while MIN_FILTER was the default
+  // NEAREST_MIPMAP_LINEAR and later switched to LINEAR becomes complete.
+  if (pname === 0x2801 /* MIN_FILTER */ || pname === 0x2800 /* MAG_FILTER */ ||
+      pname === 0x813c /* BASE_LEVEL */ || pname === 0x813d /* MAX_LEVEL */) {
+    updateCompleteness(tex, ctx._version);
+  }
 }
 
 export function installTexturesApi(proto: WebGLRenderingContext): void {
