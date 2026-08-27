@@ -135,7 +135,12 @@ export interface EXT_disjoint_timer_query {
 // WebGL2-only extensions
 // ---------------------------------------------------------------------------
 export interface EXT_color_buffer_float { }
-export interface EXT_color_buffer_half_float { }
+export interface EXT_color_buffer_half_float {
+  readonly RGB16F_EXT: GLenum;
+  readonly RGBA16F_EXT: GLenum;
+  readonly FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT: GLenum;
+  readonly UNSIGNED_NORMALIZED_EXT: GLenum;
+}
 export interface EXT_float_blend { }
 export interface EXT_texture_norm16 {
   readonly R16_EXT: GLenum;
@@ -167,10 +172,10 @@ export interface OES_draw_buffers_indexed {
   colorMaskiOES(buf: GLuint, r: GLboolean, g: GLboolean, b: GLboolean, a: GLboolean): void;
 }
 export interface WEBGL_multi_draw {
-  multiDrawArraysWEBGL(mode: GLenum, firsts: Int32List, counts: Int32List, drawcount: GLsizei): void;
-  multiDrawElementsWEBGL(mode: GLenum, counts: Int32List, type: GLenum, offsets: Int32List, drawcount: GLsizei): void;
-  multiDrawArraysInstancedWEBGL(mode: GLenum, firsts: Int32List, counts: Int32List, instanceCounts: Int32List, drawcount: GLsizei): void;
-  multiDrawElementsInstancedWEBGL(mode: GLenum, counts: Int32List, type: GLenum, offsets: Int32List, instanceCounts: Int32List, drawcount: GLsizei): void;
+  multiDrawArraysWEBGL(mode: GLenum, firsts: Int32List, firstsOffset: GLuint, counts: Int32List, countsOffset: GLuint, drawcount: GLsizei): void;
+  multiDrawElementsWEBGL(mode: GLenum, counts: Int32List, countsOffset: GLuint, type: GLenum, offsets: Int32List, offsetsOffset: GLuint, drawcount: GLsizei): void;
+  multiDrawArraysInstancedWEBGL(mode: GLenum, firsts: Int32List, firstsOffset: GLuint, counts: Int32List, countsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei): void;
+  multiDrawElementsInstancedWEBGL(mode: GLenum, counts: Int32List, countsOffset: GLuint, type: GLenum, offsets: Int32List, offsetsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei): void;
 }
 export interface WEBGL_clip_cull_distance {
   readonly MAX_CLIP_DISTANCES_WEBGL: GLenum;

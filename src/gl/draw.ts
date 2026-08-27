@@ -64,6 +64,7 @@ import type { GLenum, GLint, GLintptr, GLsizei, GLuint } from './types';
 import { C1, C2 } from './constants';
 import { resolveFramebufferTarget, resolveReadSurface, getAttachmentSurface } from './framebuffer-util';
 import { handleCanvasResize } from './lost';
+import { getClipControl } from './extensions/clip-state';
 import {
   computeVertexStride,
   RECORD_HEADER_FLOATS,
@@ -75,6 +76,7 @@ import {
   blitDepthStencilSurface,
   getPackConverter,
   getFormat,
+  floatToHalf,
 } from '../raster';
 import type {
   DrawCall, FramebufferTarget, SamplerState, Surface, TextureImage, TextureUnitBinding,
@@ -84,6 +86,7 @@ import type { VertexExecCtx, AttribSource } from '../glsl/program';
 import type { WebGLProgram } from './objects';
 import type { ProgramModel } from './objects';
 import type { WebGLBuffer, WebGLQuery, WebGLTexture, WebGLTransformFeedback } from './objects';
+import { ensureProgramLinked } from './api/programs';
 
 /** A fully validated, assembled draw request (before rasterizer call). */
 export interface DrawRequest {
@@ -97,6 +100,12 @@ export interface DrawRequest {
   indexType?: GLenum;
   /** For drawRangeElements: [start, end] inclusive index range. */
   range?: [GLuint, GLuint];
+  /**
+   * gl_DrawID (WEBGL_multi_draw): the 0-based multi-draw subdraw index,
+   * constant for every vertex/instance of THIS draw. Omitted (or 0) for
+   * single draws. The vertex exec ctx reads it as `gl_DrawID`.
+   */
+  drawId?: number;
 }
 
 /* ================================================================== */
@@ -862,6 +871,7 @@ function buildDrawCall(
 ): DrawCall {
   const s = ctx._state;
   const { colorMask, drawBuffers } = buildOutputMaps(ctx, pm);
+  const clipControl = getClipControl(ctx);
   const blend0 = s.blendPerDrawBuffer.get(0);
   const blend = {
     enabled: s.caps.BLEND,
@@ -885,6 +895,8 @@ function buildDrawCall(
     fb,
     viewport: { x: s.viewport.x, y: s.viewport.y, w: s.viewport.w, h: s.viewport.h },
     depthRange: { near: s.depth.range[0], far: s.depth.range[1] },
+    clipOrigin: clipControl.origin,
+    clipDepthMode: clipControl.depth,
     scissor: {
       enabled: s.caps.SCISSOR_TEST,
       x: s.scissor.x, y: s.scissor.y, w: s.scissor.w, h: s.scissor.h,
@@ -1037,6 +1049,7 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
 
   // 1. Cheap preconditions (full validation in api/draw.ts).
   const prog = s.currentProgram;
+  if (prog !== null) ensureProgramLinked(ctx, prog); // KHR: finish any deferred link
   if (!prog || !prog._linkStatus || !prog._program) {
     pushError(ctx, C1.INVALID_OPERATION);
     return;
@@ -1159,6 +1172,7 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
     attribIndices: ai,
     vertexId: 0,
     instanceId: 0,
+    drawId: req.drawId ?? 0, // gl_DrawID: subdraw index; 0 for single draws
     uniforms: floatStore,
     intUniforms: intStore,
     blockStores,
@@ -1370,6 +1384,15 @@ function makeLocalPack(surf: Surface, format: GLenum, type: GLenum): ((src: Arra
         for (let c = 0; c < comps; c++) df[(d >> 2) + c] = tmp[c];
       };
     }
+    case 0x140b /* HALF_FLOAT */:
+    case 0x8d61 /* HALF_FLOAT_OES */: {
+      const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
+      return (_src, so, dst, d) => {
+        decodeSurfaceTexel(surf, so, tmp);
+        const dh = dst as Uint16Array;
+        for (let c = 0; c < comps; c++) dh[(d >> 1) + c] = floatToHalf(tmp[c]);
+      };
+    }
     case C1.UNSIGNED_INT: // DEPTH_COMPONENT / integer formats
       if (format === C1.DEPTH_COMPONENT) {
         return (_src, so, dst, d) => {
@@ -1411,15 +1434,20 @@ export function executeReadPixels(
     pushError(ctx, C1.INVALID_OPERATION);
     return;
   }
-  // Pack converter: raster's when available, else local.
+  // Pack converter: raster's when available, else local. When the surface is
+  // float-storage (W1 unsized float textures promoted to f32), raster's static
+  // table maps unsized formats to u8 and would mis-decode — use the local pack,
+  // which decodes via surf.info (the real float spec).
   let conv: ((src: ArrayBufferView, srcOff: number, dst: ArrayBufferView, dstOff: number) => void) | null = null;
-  try {
-    const rc = getPackConverter(surf.format, format, type);
-    if (rc) {
-      conv = (src, so, dst, d) => rc.convert(src, so, dst, d);
+  if (!surf.info?.isFloat) {
+    try {
+      const rc = getPackConverter(surf.format, format, type);
+      if (rc) {
+        conv = (src, so, dst, d) => rc.convert(src, so, dst, d);
+      }
+    } catch {
+      conv = null;
     }
-  } catch {
-    conv = null;
   }
   if (!conv) {
     conv = makeLocalPack(surf, format, type);
@@ -1693,6 +1721,7 @@ function indexTypeSize(type: GLenum): number {
 function validateCommonDraw(ctx: WebGLRenderingContext, mode: GLenum): boolean {
   const s = ctx._state;
   const prog = s.currentProgram;
+  if (prog !== null) ensureProgramLinked(ctx, prog); // KHR: finish any deferred link
   if (!prog || !prog._linkStatus || !prog._program) {
     pushError(ctx, C1.INVALID_OPERATION);
     return false;
@@ -1809,35 +1838,22 @@ export function validateDrawElements(
 }
 
 /* ================================================================== */
-/* WEBGL_multi_draw engine entries (extensions/misc.ts delegates here)  */
+/* WEBGL_multi_draw engine entries (api/draw.ts + extensions/misc.ts   */
+/* delegate here)                                                      */
 /* ================================================================== */
 
 /**
- * multiDrawArraysWEBGL engine: validate EVERY subdraw first (any invalid →
- * push the error + NO drawing at all), then execute each subdraw via
- * executeDraw. drawcount ≤ 0 → NO_ERROR no-op. firsts/counts are
- * Int32Array/sequence (values are WebIDL longs).
- *
- * NOTE: `mode` is a parameter here (the objective's shorthand omitted it) —
- * executeDraw requires the per-subdraw mode, and the extension validates it
- * against the same DRAW_MODES table before any drawing.
+ * Shared multi-draw execution: every subdraw was already validated
+ * (validate-all-first contract) — run each via executeDraw. gl_DrawID is the
+ * 0-based subdraw index i (constant per subdraw, across all vertices/instances).
  */
-export function executeMultiDrawArrays(
+function runMultiSubdraws(
   ctx: WebGLRenderingContext,
-  mode: GLenum,
-  firsts: Int32Array | number[],
-  counts: Int32Array | number[],
-  drawcount: number,
+  reqs: DrawRequest[],
 ): void {
-  if (ctx._isLost) { pushError(ctx, C1.CONTEXT_LOST_WEBGL); return; }
-  const n = drawcount | 0;
-  if (n <= 0) return; // NO_ERROR no-op
-  for (let i = 0; i < n; i++) {
-    if (!validateDrawArrays(ctx, mode, firsts[i], counts[i], 1)) return;
-  }
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < reqs.length; i++) {
     try {
-      executeDraw(ctx, { mode, count: counts[i], instanceCount: 1, firstOrOffset: firsts[i], indexed: false });
+      executeDraw(ctx, { ...reqs[i], drawId: i });
     } catch {
       pushError(ctx, C1.INVALID_OPERATION); // engine must not throw; guard anyway
     }
@@ -1845,29 +1861,123 @@ export function executeMultiDrawArrays(
 }
 
 /**
+ * multiDrawArraysWEBGL engine: validate EVERY subdraw first (any invalid →
+ * push the error + NO drawing at all), then execute each subdraw via
+ * executeDraw. drawcount ≤ 0 → NO_ERROR no-op (caller guarantees ≥ 0).
+ * firsts/counts are Int32Array/sequence (values are WebIDL longs);
+ * firstsOffset/countsOffset are ELEMENT offsets into the lists (prototype
+ * layer already checked offset + drawcount ≤ list.length).
+ *
+ * NOTE: `mode` is a parameter here (the objective's shorthand omitted it) —
+ * executeDraw requires the per-subdraw mode, and it is validated against the
+ * same DRAW_MODES table before any drawing.
+ */
+export function executeMultiDrawArrays(
+  ctx: WebGLRenderingContext,
+  mode: GLenum,
+  firsts: Int32Array | number[],
+  firstsOffset: number,
+  counts: Int32Array | number[],
+  countsOffset: number,
+  drawcount: number,
+): void {
+  const n = drawcount | 0;
+  if (n <= 0) return; // NO_ERROR no-op
+  const reqs: DrawRequest[] = [];
+  for (let i = 0; i < n; i++) {
+    const req = validateDrawArrays(ctx, mode, firsts[firstsOffset + i], counts[countsOffset + i], 1);
+    if (!req) return; // error already pushed; nothing drawn
+    reqs.push(req);
+  }
+  runMultiSubdraws(ctx, reqs);
+}
+
+/**
  * multiDrawElementsWEBGL engine entry (same validate-all-first contract as
  * executeMultiDrawArrays). counts/offsets are Int32Array/sequence; offsets are
- * byte offsets into the element array buffer.
+ * byte offsets into the element array buffer; countsOffset/offsetsOffset are
+ * ELEMENT offsets into the lists.
  */
 export function executeMultiDrawElements(
   ctx: WebGLRenderingContext,
   mode: GLenum,
   counts: Int32Array | number[],
+  countsOffset: number,
   type: GLenum,
   offsets: Int32Array | number[],
+  offsetsOffset: number,
   drawcount: number,
 ): void {
-  if (ctx._isLost) { pushError(ctx, C1.CONTEXT_LOST_WEBGL); return; }
   const n = drawcount | 0;
   if (n <= 0) return; // NO_ERROR no-op
+  const reqs: DrawRequest[] = [];
   for (let i = 0; i < n; i++) {
-    if (!validateDrawElements(ctx, mode, counts[i], type, offsets[i])) return;
+    const req = validateDrawElements(ctx, mode, counts[countsOffset + i], type, offsets[offsetsOffset + i]);
+    if (!req) return; // error already pushed; nothing drawn
+    reqs.push(req);
   }
+  runMultiSubdraws(ctx, reqs);
+}
+
+/**
+ * multiDrawArraysInstancedWEBGL engine entry (same validate-all-first
+ * contract). Per-subdraw instanceCounts[instanceCountsOffset + i] flows into
+ * validateDrawArrays and the executed instanceCount.
+ */
+export function executeMultiDrawArraysInstanced(
+  ctx: WebGLRenderingContext,
+  mode: GLenum,
+  firsts: Int32Array | number[],
+  firstsOffset: number,
+  counts: Int32Array | number[],
+  countsOffset: number,
+  instanceCounts: Int32Array | number[],
+  instanceCountsOffset: number,
+  drawcount: number,
+): void {
+  const n = drawcount | 0;
+  if (n <= 0) return; // NO_ERROR no-op
+  const reqs: DrawRequest[] = [];
   for (let i = 0; i < n; i++) {
-    try {
-      executeDraw(ctx, { mode, count: counts[i], instanceCount: 1, firstOrOffset: offsets[i], indexed: true, indexType: type });
-    } catch {
-      pushError(ctx, C1.INVALID_OPERATION); // engine must not throw; guard anyway
-    }
+    const req = validateDrawArrays(
+      ctx, mode,
+      firsts[firstsOffset + i], counts[countsOffset + i],
+      instanceCounts[instanceCountsOffset + i],
+    );
+    if (!req) return; // error already pushed; nothing drawn
+    reqs.push(req);
   }
+  runMultiSubdraws(ctx, reqs);
+}
+
+/**
+ * multiDrawElementsInstancedWEBGL engine entry (same validate-all-first
+ * contract). Per-subdraw instanceCounts[instanceCountsOffset + i] flows into
+ * validateDrawElements and the executed instanceCount.
+ */
+export function executeMultiDrawElementsInstanced(
+  ctx: WebGLRenderingContext,
+  mode: GLenum,
+  counts: Int32Array | number[],
+  countsOffset: number,
+  type: GLenum,
+  offsets: Int32Array | number[],
+  offsetsOffset: number,
+  instanceCounts: Int32Array | number[],
+  instanceCountsOffset: number,
+  drawcount: number,
+): void {
+  const n = drawcount | 0;
+  if (n <= 0) return; // NO_ERROR no-op
+  const reqs: DrawRequest[] = [];
+  for (let i = 0; i < n; i++) {
+    const req = validateDrawElements(
+      ctx, mode,
+      counts[countsOffset + i], type, offsets[offsetsOffset + i],
+      { instanceCount: instanceCounts[instanceCountsOffset + i] },
+    );
+    if (!req) return; // error already pushed; nothing drawn
+    reqs.push(req);
+  }
+  runMultiSubdraws(ctx, reqs);
 }

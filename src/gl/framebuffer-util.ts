@@ -91,7 +91,6 @@ import type { FramebufferTarget, Surface, PixelFormatInfo } from '../raster';
 import { getFormat } from '../raster';
 import type { GLenum } from './types';
 import { C1, C2 } from './constants';
-import { getExtensionObject } from './extensions';
 
 /* ================================================================== */
 /* Constants                                                           */
@@ -176,9 +175,19 @@ const W2_STENCIL_RENDERABLE = new Set<GLenum>([
   0x8cad /* DEPTH32F_STENCIL8 */, 0x84f9 /* DEPTH_STENCIL */,
 ]);
 
-/** Extension availability (engine path — same semantics as ctx.getExtension). */
+/**
+ * Extension availability (engine path — same semantics as ctx.getExtension).
+ * Checks the ENABLED-extensions cache (`ctx._extensions`, populated by
+ * getExtensionObject) instead of calling getExtension: calling it here would
+ * cache and thereby SELF-ENABLE the extension, observable as e.g. float
+ * renderbuffers accepted before EXT_color_buffer_half_float is requested.
+ */
 function hasExtension(ctx: WebGLRenderingContext, name: string): boolean {
-  return getExtensionObject(ctx, name) !== null;
+  try {
+    return ctx._extensions.has(name);
+  } catch {
+    return false;
+  }
 }
 
 /** CUBE_FACE_TO_INDEX: face enum (TEXTURE_CUBE_MAP_POSITIVE_X..NEGATIVE_Z) → data index. */
@@ -241,10 +250,10 @@ function isColorRenderable(ctx: WebGLRenderingContext, format: GLenum): boolean 
   if (ctx._version === 2) {
     if (W2_COLOR_RENDERABLE_CORE.has(format)) return true;
     if (W2_COLOR_RENDERABLE_EXT_FLOAT.has(format)) {
-      return (
-        hasExtension(ctx, 'EXT_color_buffer_float') ||
-        (format === 0x881a /* RGBA16F */ && hasExtension(ctx, 'EXT_color_buffer_half_float'))
-      );
+      if (hasExtension(ctx, 'EXT_color_buffer_float')) return true;
+      // EXT_color_buffer_half_float (WebGL2) enables the 16F formats only.
+      return (format === 0x822d /* R16F */ || format === 0x822f /* RG16F */ || format === 0x881a /* RGBA16F */) &&
+        hasExtension(ctx, 'EXT_color_buffer_half_float');
     }
     if (W2_COLOR_RENDERABLE_EXT_NORM16.has(format)) return hasExtension(ctx, 'EXT_texture_norm16');
     if (format === 0x8c3d /* RGB9_E5 */) return hasExtension(ctx, 'WEBGL_render_shared_exponent');
@@ -253,7 +262,9 @@ function isColorRenderable(ctx: WebGLRenderingContext, format: GLenum): boolean 
   if (!W1_COLOR_RENDERABLE.has(format)) return false;
   switch (format) {
     case 0x8c43 /* SRGB8_ALPHA8 */: return hasExtension(ctx, 'EXT_sRGB');
-    case 0x881a /* RGBA16F */: return hasExtension(ctx, 'EXT_color_buffer_half_float');
+    case 0x881a /* RGBA16F */:
+    case 0x881b /* RGB16F (renderability optional; report supported) */:
+      return hasExtension(ctx, 'EXT_color_buffer_half_float');
     default: return true;
   }
 }
@@ -554,6 +565,13 @@ function checkAttachment(
     }
     if (lvl.width === 0 || lvl.height === 0) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
     format = image.internalFormat;
+    // WebGL1: float-storage LUMINANCE/LUMINANCE_ALPHA/ALPHA textures are NOT
+    // color-renderable (EXT_color_buffer_half_float spec; CTS copyTex matrix
+    // hard-asserts FRAMEBUFFER_INCOMPLETE_ATTACHMENT for these).
+    if (ctx._version === 1 && image.info?.isFloat &&
+        (format === 0x1909 /* LUMINANCE */ || format === 0x190a /* LUMINANCE_ALPHA */ || format === 0x1906 /* ALPHA */)) {
+      return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+    }
   }
 
   switch (kind) {

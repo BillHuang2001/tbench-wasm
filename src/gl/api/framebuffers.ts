@@ -260,38 +260,63 @@ function invalidateFboStatus(fbo: WebGLFramebuffer): void {
 // Renderbuffer format tables
 // ---------------------------------------------------------------------------
 
-/** Local renderbuffer-format validation (raster/formats.isValidRenderbufferFormat throws until it lands). */
+/**
+ * Local renderbuffer-format validation (raster/formats.isValidRenderbufferFormat
+ * throws until it lands). Extension gates check the ENABLED-extensions cache
+ * (`ctx._extensions`) — calling getExtension() here would SELF-ENABLE the
+ * extension, observable as renderbuffers accepted before it is requested.
+ */
 function isValidRenderbufferFormat(ctx: WebGLRenderingContext, format: GLenum): boolean {
   if (ctx._version === 1) {
     if (
       format === C1.RGBA4 || format === C1.RGB565 || format === C1.RGB5_A1 ||
       format === C1.DEPTH_COMPONENT16 || format === C1.STENCIL_INDEX8
     ) return true;
-    if (format === CExt.SRGB_ALPHA_EXT && ctx.getExtension('EXT_sRGB') !== null) return true;
-    if ((format === C1.DEPTH_COMPONENT || format === C1.DEPTH_STENCIL) &&
-        ctx.getExtension('WEBGL_depth_texture') !== null) return true;
-    if (format === C2.RGBA16F && ctx.getExtension('EXT_color_buffer_half_float') !== null) return true;
+    if (format === CExt.SRGB_ALPHA_EXT && ctx._extensions.has('EXT_sRGB')) return true;
+    // DEPTH_COMPONENT/DEPTH_STENCIL are core WebGL1 renderbuffer formats
+    // (WEBGL_depth_texture gates only the *texture* side of depth formats).
+    if (format === C1.DEPTH_COMPONENT || format === C1.DEPTH_STENCIL) return true;
+    // EXT_color_buffer_half_float (WebGL1): RGB16F + RGBA16F renderbuffers.
+    if ((format === C2.RGB16F || format === C2.RGBA16F) &&
+        ctx._extensions.has('EXT_color_buffer_half_float')) return true;
     return false;
   }
   // WebGL2: ES3 sized color/depth/stencil set + DEPTH_STENCIL (CTS uses it).
   if (W2_RB_FORMATS.has(format)) return true;
-  if (
-    (format === CExt.R16_EXT || format === CExt.RG16_EXT || format === CExt.RGB16_EXT || format === CExt.RGBA16_EXT) &&
-    ctx.getExtension('EXT_texture_norm16') !== null
-  ) return true;
-  if (format === C2.RGB9_E5 && ctx.getExtension('WEBGL_render_shared_exponent') !== null) return true;
+  // EXT_color_buffer_float (WebGL2): all float renderbuffer formats; the 16F
+  // subset is also enabled by EXT_color_buffer_half_float. RGB16F/RGB32F are
+  // NEVER legal renderbuffer formats (CTS ext-color-buffer-half-float.html
+  // runRGB16FNegativeTest expects INVALID_ENUM).
+  if (W2_RB_EXT_FLOAT.has(format)) {
+    if (ctx._extensions.has('EXT_color_buffer_float')) return true;
+    return (format === C2.R16F || format === C2.RG16F || format === C2.RGBA16F) &&
+      ctx._extensions.has('EXT_color_buffer_half_float');
+  }
+  if (W2_RB_EXT_NORM16.has(format) && ctx._extensions.has('EXT_texture_norm16')) return true;
+  if (format === C2.RGB9_E5 && ctx._extensions.has('WEBGL_render_shared_exponent')) return true;
   return false;
 }
 
+/** WebGL2 core renderbuffer formats (RGB16F/RGB32F are NOT legal — see above). */
 const W2_RB_FORMATS: ReadonlySet<GLenum> = new Set<GLenum>([
-  C2.R8, C2.R16F, C2.R32F, C2.R8UI, C2.R8I, C2.R16UI, C2.R16I, C2.R32UI, C2.R32I,
-  C2.RG8, C2.RG16F, C2.RG32F, C2.RG8UI, C2.RG8I, C2.RG16UI, C2.RG16I, C2.RG32UI, C2.RG32I,
-  C2.RGB8, C2.RGB16F, C2.RGB32F, C2.RGB8UI, C2.RGB8I, C2.RGB16UI, C2.RGB16I, C2.RGB32UI, C2.RGB32I,
-  C2.RGBA8, C2.RGBA16F, C2.RGBA32F, C2.RGBA8UI, C2.RGBA8I, C2.RGBA16UI, C2.RGBA16I,
+  C2.R8, C2.R8UI, C2.R8I, C2.R16UI, C2.R16I, C2.R32UI, C2.R32I,
+  C2.RG8, C2.RG8UI, C2.RG8I, C2.RG16UI, C2.RG16I, C2.RG32UI, C2.RG32I,
+  C2.RGB8, C2.RGB8UI, C2.RGB8I, C2.RGB16UI, C2.RGB16I, C2.RGB32UI, C2.RGB32I,
+  C2.RGBA8, C2.RGBA8UI, C2.RGBA8I, C2.RGBA16UI, C2.RGBA16I,
   C2.RGBA32UI, C2.RGBA32I,
   C2.RGB10_A2, C1.RGBA4, C1.RGB5_A1, C1.RGB565, C2.SRGB8_ALPHA8,
   C1.DEPTH_COMPONENT16, C2.DEPTH_COMPONENT24, C2.DEPTH_COMPONENT32F,
   C2.DEPTH24_STENCIL8, C2.DEPTH32F_STENCIL8, C1.DEPTH_STENCIL,
+]);
+
+/** WebGL2 float renderbuffer formats (EXT_color_buffer_float / _half_float). */
+const W2_RB_EXT_FLOAT: ReadonlySet<GLenum> = new Set<GLenum>([
+  C2.R16F, C2.RG16F, C2.RGBA16F, C2.R32F, C2.RG32F, C2.RGBA32F, C2.R11F_G11F_B10F,
+]);
+
+/** WebGL2 renderbuffer formats gated on EXT_texture_norm16. */
+const W2_RB_EXT_NORM16: ReadonlySet<GLenum> = new Set<GLenum>([
+  CExt.R16_EXT, CExt.RG16_EXT, CExt.RGB16_EXT, CExt.RGBA16_EXT,
 ]);
 
 /**
@@ -330,25 +355,34 @@ function colorDesc(bpp: number, storage: StorageKind, components: number, extra?
   return {
     bpp, storage, components, isColor: true, isDepth: false, isStencil: false,
     isFloat: storage === 'f32', isSigned: storage === 'i8' || storage === 'i16' || storage === 'i32',
-    isInteger: storage === 'i8' || storage === 'i16' || storage === 'i32' || storage === 'u8' || storage === 'u16' || storage === 'u32',
-    isSRGB: false, normalized: storage === 'u8' || storage === 'u16' || storage === 'i8' || storage === 'i16',
+    isInteger: false, isSRGB: false, normalized: false,
     ...extra,
   };
+}
+
+/** Normalized-color desc (u8/u16/u32 storage; isInteger must stay false). */
+function normColorDesc(bpp: number, storage: StorageKind, components: number, extra?: Partial<LocalFormatDesc>): LocalFormatDesc {
+  return colorDesc(bpp, storage, components, { normalized: true, ...extra });
+}
+
+/** Integer-color desc (raw storage; normalized must stay false). */
+function intColorDesc(bpp: number, storage: StorageKind, components: number): LocalFormatDesc {
+  return colorDesc(bpp, storage, components, { isInteger: true });
 }
 
 function localFormatDesc(format: GLenum): LocalFormatDesc {
   switch (format) {
     case C1.RGBA4: case C1.RGB5_A1: case C1.RGB565:
-      return colorDesc(2, 'u16', format === C1.RGB565 ? 3 : 4);
+      return normColorDesc(2, 'u16', format === C1.RGB565 ? 3 : 4);
     case C1.RGBA8: case C2.SRGB8_ALPHA8: case CExt.SRGB_ALPHA_EXT:
-      return colorDesc(4, 'u8', 4, { isSRGB: format !== C1.RGBA8 });
-    case C2.RGB8: return colorDesc(3, 'u8', 3);
-    case C2.R8: return colorDesc(1, 'u8', 1);
-    case C2.RG8: return colorDesc(2, 'u8', 2);
-    case CExt.R16_EXT: return colorDesc(2, 'u16', 1);
-    case CExt.RG16_EXT: return colorDesc(4, 'u16', 2);
-    case CExt.RGB16_EXT: return colorDesc(6, 'u16', 3);
-    case CExt.RGBA16_EXT: return colorDesc(8, 'u16', 4);
+      return normColorDesc(4, 'u8', 4, { isSRGB: format !== C1.RGBA8 });
+    case C2.RGB8: return normColorDesc(3, 'u8', 3);
+    case C2.R8: return normColorDesc(1, 'u8', 1);
+    case C2.RG8: return normColorDesc(2, 'u8', 2);
+    case CExt.R16_EXT: return normColorDesc(2, 'u16', 1);
+    case CExt.RG16_EXT: return normColorDesc(4, 'u16', 2);
+    case CExt.RGB16_EXT: return normColorDesc(6, 'u16', 3);
+    case CExt.RGBA16_EXT: return normColorDesc(8, 'u16', 4);
     case C2.R16F: return colorDesc(2, 'f32', 1);
     case C2.RG16F: return colorDesc(4, 'f32', 2);
     case C2.RGB16F: return colorDesc(6, 'f32', 3);
@@ -358,31 +392,31 @@ function localFormatDesc(format: GLenum): LocalFormatDesc {
     case C2.RGB32F: return colorDesc(12, 'f32', 3);
     case C2.RGBA32F: return colorDesc(16, 'f32', 4);
     case C2.RGB9_E5: return colorDesc(12, 'f32', 3);
-    case C2.R8I: return colorDesc(1, 'i8', 1);
-    case C2.R8UI: return colorDesc(1, 'u8', 1);
-    case C2.R16I: return colorDesc(2, 'i16', 1);
-    case C2.R16UI: return colorDesc(2, 'u16', 1);
-    case C2.R32I: return colorDesc(4, 'i32', 1);
-    case C2.R32UI: return colorDesc(4, 'u32', 1);
-    case C2.RG8I: return colorDesc(2, 'i8', 2);
-    case C2.RG8UI: return colorDesc(2, 'u8', 2);
-    case C2.RG16I: return colorDesc(4, 'i16', 2);
-    case C2.RG16UI: return colorDesc(4, 'u16', 2);
-    case C2.RG32I: return colorDesc(8, 'i32', 2);
-    case C2.RG32UI: return colorDesc(8, 'u32', 2);
-    case C2.RGB8I: return colorDesc(3, 'i8', 3);
-    case C2.RGB8UI: return colorDesc(3, 'u8', 3);
-    case C2.RGB16I: return colorDesc(6, 'i16', 3);
-    case C2.RGB16UI: return colorDesc(6, 'u16', 3);
-    case C2.RGB32I: return colorDesc(12, 'i32', 3);
-    case C2.RGB32UI: return colorDesc(12, 'u32', 3);
-    case C2.RGBA8I: return colorDesc(4, 'i8', 4);
-    case C2.RGBA8UI: return colorDesc(4, 'u8', 4);
-    case C2.RGBA16I: return colorDesc(8, 'i16', 4);
-    case C2.RGBA16UI: return colorDesc(8, 'u16', 4);
-    case C2.RGBA32I: return colorDesc(16, 'i32', 4);
-    case C2.RGBA32UI: return colorDesc(16, 'u32', 4);
-    case C2.RGB10_A2: return colorDesc(4, 'u32', 4);
+    case C2.R8I: return intColorDesc(1, 'i8', 1);
+    case C2.R8UI: return intColorDesc(1, 'u8', 1);
+    case C2.R16I: return intColorDesc(2, 'i16', 1);
+    case C2.R16UI: return intColorDesc(2, 'u16', 1);
+    case C2.R32I: return intColorDesc(4, 'i32', 1);
+    case C2.R32UI: return intColorDesc(4, 'u32', 1);
+    case C2.RG8I: return intColorDesc(2, 'i8', 2);
+    case C2.RG8UI: return intColorDesc(2, 'u8', 2);
+    case C2.RG16I: return intColorDesc(4, 'i16', 2);
+    case C2.RG16UI: return intColorDesc(4, 'u16', 2);
+    case C2.RG32I: return intColorDesc(8, 'i32', 2);
+    case C2.RG32UI: return intColorDesc(8, 'u32', 2);
+    case C2.RGB8I: return intColorDesc(3, 'i8', 3);
+    case C2.RGB8UI: return intColorDesc(3, 'u8', 3);
+    case C2.RGB16I: return intColorDesc(6, 'i16', 3);
+    case C2.RGB16UI: return intColorDesc(6, 'u16', 3);
+    case C2.RGB32I: return intColorDesc(12, 'i32', 3);
+    case C2.RGB32UI: return intColorDesc(12, 'u32', 3);
+    case C2.RGBA8I: return intColorDesc(4, 'i8', 4);
+    case C2.RGBA8UI: return intColorDesc(4, 'u8', 4);
+    case C2.RGBA16I: return intColorDesc(8, 'i16', 4);
+    case C2.RGBA16UI: return intColorDesc(8, 'u16', 4);
+    case C2.RGBA32I: return intColorDesc(16, 'i32', 4);
+    case C2.RGBA32UI: return intColorDesc(16, 'u32', 4);
+    case C2.RGB10_A2: return normColorDesc(4, 'u32', 4);
     case C1.DEPTH_COMPONENT16: case C2.DEPTH_COMPONENT24: case C2.DEPTH_COMPONENT32F:
     case C1.DEPTH_COMPONENT:
       return DEPTH_DESC;
@@ -391,7 +425,7 @@ function localFormatDesc(format: GLenum): LocalFormatDesc {
     case C1.STENCIL_INDEX8:
       return STENCIL_DESC;
     default:
-      return colorDesc(4, 'u8', 4); // unknown color-ish default
+      return normColorDesc(4, 'u8', 4); // unknown color-ish default
   }
 }
 
@@ -845,6 +879,18 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
             return null;
           }
           return rec.type === 'renderbuffer' ? 0 : rec.face;
+        case CExt.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT:
+          // EXT_color_buffer_half_float (WebGL1): component-type queries become
+          // legal with the extension enabled (CTS ext-color-buffer-half-float.html).
+          if (!ctx._extensions.has('EXT_color_buffer_half_float')) {
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+          }
+          if (rec === null) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return null;
+          }
+          return attachmentParameterValue(ctx, rec, pname);
         default:
           ctx._errors.push(C1.INVALID_ENUM);
           return null;
@@ -882,7 +928,7 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       case TEXTURE_SAMPLES_EXT:
         // WEBGL_multisampled_render_to_texture (WebGL2-only): sample count of a
         // texture attachment, 0 otherwise (extension spec).
-        if (ctx.getExtension('WEBGL_multisampled_render_to_texture') === null) {
+        if (!ctx._extensions.has('WEBGL_multisampled_render_to_texture')) {
           ctx._errors.push(C1.INVALID_ENUM);
           return null;
         }
@@ -1386,6 +1432,18 @@ function attachmentParameterValue(ctx: WebGLRenderingContext, rec: FramebufferAt
     case C2.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
       return formatColorEncoding(format);
     case C2.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+      // Combined depth-stencil images have no single component type — the
+      // query is INVALID_OPERATION (GLES3 + CTS ext-color-buffer-half-float.html).
+      if (format === C1.DEPTH_STENCIL || format === C2.DEPTH24_STENCIL8 || format === C2.DEPTH32F_STENCIL8) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
+      // WebGL1 unsized float textures (RGBA/RGB + FLOAT/HALF_FLOAT_OES storage)
+      // report FLOAT even though the unsized internal format has no sized desc.
+      if (rec.type === 'texture' && !localFormatDesc(format).isFloat &&
+          rec.texture._image?.info?.isFloat) {
+        return FLOAT;
+      }
       return formatComponentType(format);
     default: {
       const bits = formatComponentBits(format);

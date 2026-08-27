@@ -164,7 +164,7 @@ const COMPARE_FUNC_VALUES: number[] = [
 function isValidTexParamPname(ctx: WebGLRenderingContext, pname: GLenum): boolean {
   if (TEX_PARAM_PNAMES_W1.includes(pname)) return true;
   if (pname === 0x84fe /* TEXTURE_MAX_ANISOTROPY_EXT */) {
-    return ctx.getExtension('EXT_texture_filter_anisotropic') !== null;
+    return ctx._extensions.has('EXT_texture_filter_anisotropic');
   }
   if (ctx._version !== 2) return false;
   return TEX_PARAM_PNAMES_W2.includes(pname);
@@ -420,15 +420,23 @@ export function installTexturesApi(proto: WebGLRenderingContext): void {
     }
     if (img.info.isFloat) {
       if (ctx._version === 2) {
-        // RGB9_E5 is never mipmap-generatable; other float formats need
-        // EXT_color_buffer_float (WebGL2 core has no float mipmap rule beyond it).
-        if (img.internalFormat === RGB9_E5 || ctx.getExtension('EXT_color_buffer_float') === null) {
+        // RGB9_E5 is never mipmap-generatable; the 16F formats are
+        // mipmap-generatable with either float extension (EXT_color_buffer_half_float
+        // makes them color-renderable → their mip chain must be buildable), all
+        // other float formats need EXT_color_buffer_float.
+        const is16F =
+          img.internalFormat === 0x822d /* R16F */ ||
+          img.internalFormat === 0x822f /* RG16F */ ||
+          img.internalFormat === 0x881a /* RGBA16F */;
+        const floatExtOK = ctx._extensions.has('EXT_color_buffer_float') ||
+          (is16F && ctx._extensions.has('EXT_color_buffer_half_float'));
+        if (img.internalFormat === RGB9_E5 || !floatExtOK) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
       } else if (
-        ctx.getExtension('OES_texture_float_linear') === null &&
-        ctx.getExtension('OES_texture_half_float_linear') === null
+        !ctx._extensions.has('OES_texture_float_linear') &&
+        !ctx._extensions.has('OES_texture_half_float_linear')
       ) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;

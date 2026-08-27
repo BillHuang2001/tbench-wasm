@@ -383,6 +383,13 @@ export const builtinVariables300: BuiltinVariable[] = [
   { name: 'gl_PointCoord', type: V2, stage: 'FRAGMENT', writable: false },
   { name: 'gl_VertexID', type: I, stage: 'VERTEX', writable: false },
   { name: 'gl_InstanceID', type: I, stage: 'VERTEX', writable: false },
+  {
+    name: 'gl_DrawID',
+    type: I,
+    stage: 'VERTEX',
+    writable: false,
+    extension: 'GL_ANGLE_multi_draw',
+  },
   { name: 'gl_FragDepth', type: F, stage: 'FRAGMENT', writable: true },
   // GLSL ES 3.00 §7.7 built-in uniform state (usable in BOTH stages):
   // `uniform gl_DepthRangeParameters { float near; float far; float diff; }

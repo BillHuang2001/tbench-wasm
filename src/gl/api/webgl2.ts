@@ -86,6 +86,7 @@ import {
 } from '../objects';
 import type { WebGLObject } from '../objects';
 import { validateObject, validateNonNullableObject } from '../validation';
+import { ensureProgramLinked } from './programs';
 import { defaultVAOState } from '../state';
 import type { VAOState } from '../state';
 import type { GLbitfield, GLboolean, GLenum, GLfloat, GLint, GLuint, GLuint64 } from '../types';
@@ -285,13 +286,6 @@ const RENDERBUFFER_FORMATS = new Set<number>([
   C2.RGBA8,
   C2.RGB10_A2,
   C2.SRGB8_ALPHA8,
-  C2.R16F,
-  C2.RG16F,
-  C2.RGBA16F,
-  C2.R32F,
-  C2.RG32F,
-  C2.RGBA32F,
-  C2.R11F_G11F_B10F,
   C2.R8I,
   C2.R8UI,
   C2.R16I,
@@ -317,10 +311,26 @@ const RENDERBUFFER_FORMATS = new Set<number>([
   C2.DEPTH24_STENCIL8,
   C2.DEPTH32F_STENCIL8,
   C1.STENCIL_INDEX8,
-  CExt.R16_EXT,
-  CExt.RG16_EXT,
-  CExt.RGBA16_EXT,
 ]);
+
+/** WebGL2 float renderbuffer formats (gated on EXT_color_buffer_float / _half_float). */
+const RB_EXT_FLOAT_FORMATS = new Set<number>([
+  C2.R16F, C2.RG16F, C2.RGBA16F, C2.R32F, C2.RG32F, C2.RGBA32F, C2.R11F_G11F_B10F,
+]);
+
+/** WebGL2 renderbuffer formats gated on EXT_texture_norm16. */
+const RB_EXT_NORM16_FORMATS = new Set<number>([CExt.R16_EXT, CExt.RG16_EXT, CExt.RGBA16_EXT]);
+
+/** True when an EXT-gated internal format is a legal getInternalformatParameter target. */
+function extRenderbufferFormatOK(ctx: WebGLRenderingContext, internalformat: number): boolean {
+  if (RB_EXT_FLOAT_FORMATS.has(internalformat)) {
+    if (ctx._extensions.has('EXT_color_buffer_float')) return true;
+    return (internalformat === C2.R16F || internalformat === C2.RG16F || internalformat === C2.RGBA16F) &&
+      ctx._extensions.has('EXT_color_buffer_half_float');
+  }
+  if (RB_EXT_NORM16_FORMATS.has(internalformat)) return ctx._extensions.has('EXT_texture_norm16');
+  return false;
+}
 
 export function installWebGL2Api(proto: WebGL2RenderingContext): void {
   // ---- Queries ----
@@ -867,6 +877,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         return;
       }
       const program = s.currentProgram;
+      if (program !== null) ensureProgramLinked(ctx, program); // KHR: finish any deferred link
       if (program === null || !program._linkStatus) {
         ctx._errors.push(C1.INVALID_OPERATION); // no linked program in use
         return;
@@ -960,7 +971,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
       }
-      if (!RENDERBUFFER_FORMATS.has(internalformat)) {
+      if (!RENDERBUFFER_FORMATS.has(internalformat) && !extRenderbufferFormatOK(ctx, internalformat)) {
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
       }

@@ -115,6 +115,7 @@ function baseLayout(version: 100 | 300, extraUniforms?: [string, { store: 'float
       fragDepth: false,
       vertexId: false,
       instanceId: false,
+      drawId: false,
       derivatives: false,
     },
   };

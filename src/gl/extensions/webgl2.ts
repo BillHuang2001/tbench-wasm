@@ -24,10 +24,15 @@ export function createEXTColorBufferFloat(ctx: WebGLRenderingContext): object {
   return buildExtension({});
 }
 
-/** EXT_color_buffer_half_float — half-float renderbuffer formats (W1+W2; no members). */
+/** EXT_color_buffer_half_float — half-float renderbuffer formats (W1+W2). */
 export function createEXTColorBufferHalfFloat(ctx: WebGLRenderingContext): object {
   void ctx;
-  return buildExtension({});
+  return buildExtension({
+    RGB16F_EXT: CExt.RGB16F_EXT,
+    RGBA16F_EXT: CExt.RGBA16F_EXT,
+    FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT: CExt.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT,
+    UNSIGNED_NORMALIZED_EXT: CExt.UNSIGNED_NORMALIZED_EXT,
+  });
 }
 
 /** EXT_float_blend — blending of float framebuffers (no members). */

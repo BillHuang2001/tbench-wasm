@@ -188,6 +188,8 @@ export interface ShaderUses {
   vertexId: boolean;
   /** Vertex reads gl_InstanceID. */
   instanceId: boolean;
+  /** Vertex reads gl_DrawID (GL_ANGLE_multi_draw / WEBGL_multi_draw). */
+  drawId: boolean;
   /** Fragment uses dFdx/dFdy/fwidth or any implicit-LOD texture function (→ dual-number codegen). */
   derivatives: boolean;
 }

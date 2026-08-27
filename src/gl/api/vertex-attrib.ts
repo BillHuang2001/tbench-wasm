@@ -355,12 +355,19 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
       case C1.VERTEX_ATTRIB_ARRAY_POINTER:
         return 0; // WebGL has no client-side pointers
       case C2.VERTEX_ATTRIB_ARRAY_INTEGER:
-      case C2.VERTEX_ATTRIB_ARRAY_DIVISOR:
         if (ctx._version !== 2) {
           ctx._errors.push(C1.INVALID_ENUM);
           return null;
         }
-        return pname === C2.VERTEX_ATTRIB_ARRAY_INTEGER ? attrib.integer : attrib.divisor;
+        return attrib.integer;
+      case C2.VERTEX_ATTRIB_ARRAY_DIVISOR:
+        // WebGL2: core. WebGL1: only with ANGLE_instanced_arrays (which
+        // WEBGL_multi_draw enables implicitly — see extensions/index.ts).
+        if (ctx._version !== 2 && !ctx._extensions.has('ANGLE_instanced_arrays')) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        }
+        return attrib.divisor;
       default:
         ctx._errors.push(C1.INVALID_ENUM);
         return null;

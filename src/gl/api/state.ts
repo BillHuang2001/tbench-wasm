@@ -310,7 +310,14 @@ export function installStateApi(proto: WebGLRenderingContext): void {
   proto.clearColor = function (this: WebGLRenderingContext, red: GLclampf, green: GLclampf, blue: GLclampf, alpha: GLclampf): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    ctx._state.clearColor = [clamp01(red), clamp01(green), clamp01(blue), clamp01(alpha)];
+    // EXT_color_buffer_half_float spec: "clearColor() will no longer clamp its
+    // parameter values on input" — store raw values in WebGL2 (float buffers are
+    // core-renderable there) and in WebGL1 once the extension is enabled.
+    if (ctx._version === 2 || ctx._extensions.has('EXT_color_buffer_half_float')) {
+      ctx._state.clearColor = [Number.isNaN(red) ? 0 : red, Number.isNaN(green) ? 0 : green, Number.isNaN(blue) ? 0 : blue, Number.isNaN(alpha) ? 0 : alpha];
+    } else {
+      ctx._state.clearColor = [clamp01(red), clamp01(green), clamp01(blue), clamp01(alpha)];
+    }
   };
 
   proto.clearDepth = function (this: WebGLRenderingContext, depth: GLclampf): void {

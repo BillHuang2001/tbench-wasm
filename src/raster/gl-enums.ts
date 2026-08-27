@@ -223,3 +223,11 @@ export const STENCIL_INDEX8 = 0x8d48;
 export const COLOR_ATTACHMENT0 = 0x8ce0;
 export const DEPTH_ATTACHMENT = 0x8d00;
 export const STENCIL_ATTACHMENT = 0x8d20;
+
+/* ------------------------------------------------------------------ */
+/* EXT_clip_control (clip origin + depth mode)                         */
+/* ------------------------------------------------------------------ */
+export const LOWER_LEFT_EXT = 0x8ca1;
+export const UPPER_LEFT_EXT = 0x8ca2;
+export const NEGATIVE_ONE_TO_ONE_EXT = 0x935e;
+export const ZERO_TO_ONE_EXT = 0x935f;

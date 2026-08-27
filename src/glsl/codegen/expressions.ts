@@ -169,6 +169,8 @@ function leafRead(p: P, env: CodegenEnv, c: number): string {
         return 'ctx.vertexId';
       case 'gl_InstanceID':
         return 'ctx.instanceId';
+      case 'gl_DrawID':
+        return 'ctx.drawId';
       case 'gl_FragDepth':
       case 'gl_FragDepthEXT':
         return 'ctx.out.fragDepth';

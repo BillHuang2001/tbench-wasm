@@ -1,6 +1,7 @@
 /**
- * clip.ts — homogeneous clipping against all 6 clip planes (-w ≤ x,y,z ≤ w)
- * plus the viewport transform.
+ * clip.ts — homogeneous clipping against all 6 clip planes (x,y ∈ [-w,w];
+ * z ∈ [-w,w] or [0,w] per the EXT_clip_control depth mode) plus the viewport
+ * transform (window y origin and NDC→window z map per EXT_clip_control).
  *
  * Clipping interpolates EVERY record field (x, y, z, w, pointSize, varyings)
  * linearly in clip space, preserving perspective correctness after the
@@ -10,6 +11,10 @@
  * 2 vertices; no allocation in the draw path.
  */
 import type { DepthRange, Viewport } from './types';
+import {
+  LOWER_LEFT_EXT, UPPER_LEFT_EXT, NEGATIVE_ONE_TO_ONE_EXT, ZERO_TO_ONE_EXT,
+} from './gl-enums';
+import type { GLenum } from './gl-enums';
 
 /** Record header offsets (must match types.ts). */
 const X = 0;
@@ -17,7 +22,10 @@ const Y = 1;
 const Z = 2;
 const W = 3;
 
-/** The 6 clip planes as affine f = a·x + b·y + c·z + d·w ≥ 0 (inside). Fixed order. */
+/**
+ * The 6 clip planes as affine f = a·x + b·y + c·z + d·w ≥ 0 (inside), for the
+ * default clip depth mode NEGATIVE_ONE_TO_ONE_EXT: -w ≤ x,y,z ≤ w. Fixed order.
+ */
 const CLIP_PLANES: readonly (readonly [number, number, number, number])[] = [
   [1, 0, 0, 1],   // x ≥ -w → x + w ≥ 0
   [-1, 0, 0, 1],  // x ≤  w → w - x ≥ 0
@@ -26,6 +34,24 @@ const CLIP_PLANES: readonly (readonly [number, number, number, number])[] = [
   [0, 0, 1, 1],   // z ≥ -w → z + w ≥ 0
   [0, 0, -1, 1],  // z ≤  w → w - z ≥ 0
 ];
+
+/**
+ * The 6 clip planes for clip depth mode ZERO_TO_ONE_EXT (EXT_clip_control):
+ * the near plane moves from z ≥ -w to z ≥ 0 (z ≤ w unchanged).
+ */
+const CLIP_PLANES_ZERO_TO_ONE: readonly (readonly [number, number, number, number])[] = [
+  [1, 0, 0, 1],   // x ≥ -w
+  [-1, 0, 0, 1],  // x ≤  w
+  [0, 1, 0, 1],   // y ≥ -w
+  [0, -1, 0, 1],  // y ≤  w
+  [0, 0, 1, 0],   // z ≥ 0
+  [0, 0, -1, 1],  // z ≤  w
+];
+
+/** Plane list for the active clip depth mode (no allocation). */
+function clipPlanesFor(depthMode: GLenum | undefined): readonly (readonly [number, number, number, number])[] {
+  return depthMode === ZERO_TO_ONE_EXT ? CLIP_PLANES_ZERO_TO_ONE : CLIP_PLANES;
+}
 
 /** Plane function value at a record (double precision). */
 function planeAt(
@@ -122,7 +148,9 @@ function clipPlanePass(
 export function clipPrimitive(
   buf: Float32Array, base: number, stride: number, count: number,
   scratch: Float32Array, out: Float32Array, outBase: number,
+  depthMode?: GLenum,
 ): number {
+  const planes = clipPlanesFor(depthMode);
   if (count === 2) {
     // Segment clip: the intersection of a segment with the convex clip
     // region is a segment, tracked as a parameter interval [t0, t1] along
@@ -139,8 +167,8 @@ export function clipPrimitive(
         buf[aIdx + W] === buf[bIdx + W]) return 0;
     let t0 = 0;
     let t1 = 1;
-    for (let p = 0; p < CLIP_PLANES.length; p++) {
-      const plane = CLIP_PLANES[p];
+    for (let p = 0; p < planes.length; p++) {
+      const plane = planes[p];
       const fa = planeAt(plane, buf, aIdx);
       const fb = planeAt(plane, buf, bIdx);
       if (fa < 0 && fb < 0) return 0;
@@ -170,18 +198,18 @@ export function clipPrimitive(
   let src: Float32Array = buf;
   let srcBase = base;
   let n = count;
-  for (let p = 0; p < CLIP_PLANES.length; p++) {
+  for (let p = 0; p < planes.length; p++) {
     let dst: Float32Array;
     let dstBase: number;
     let cap: number;
-    if (p === CLIP_PLANES.length - 1) {
+    if (p === planes.length - 1) {
       dst = out; dstBase = outBase; cap = outBaseCap;
     } else if (p % 2 === 0) {
       dst = scratch; dstBase = 0; cap = scratchCap;
     } else {
       dst = out; dstBase = 0; cap = outCap;
     }
-    n = clipPlanePass(CLIP_PLANES[p], src, srcBase, n, stride, dst, dstBase, cap);
+    n = clipPlanePass(planes[p], src, srcBase, n, stride, dst, dstBase, cap);
     if (n === 0) return 0;
     src = dst;
     srcBase = dstBase;
@@ -190,15 +218,20 @@ export function clipPrimitive(
 }
 
 /**
- * Point visibility: true when w > 0 and the point satisfies -w ≤ z ≤ w.
+ * Point visibility: true when w > 0 and the point satisfies the active depth
+ * mode's z range (z_m ≤ z ≤ w with z_m = -w for NEGATIVE_ONE_TO_ONE_EXT, 0 for
+ * ZERO_TO_ONE_EXT).
  * GLES 2.0 §2.13: points are clipped ONLY against the near/far planes — an
  * x/y-outside center passes and the point square is clipped to the viewport
  * by the rasterizer's bbox clamp (points are not polygon-clipped).
  */
-export function pointIsVisible(buf: Float32Array, base: number, stride: number): boolean {
+export function pointIsVisible(
+  buf: Float32Array, base: number, stride: number, depthMode?: GLenum,
+): boolean {
   const z = buf[base + Z];
   const w = buf[base + W];
-  return w > 0 && z >= -w && z <= w;
+  if (w <= 0) return false;
+  return depthMode === ZERO_TO_ONE_EXT ? z >= 0 && z <= w : z >= -w && z <= w;
 }
 
 /**
@@ -207,11 +240,19 @@ export function pointIsVisible(buf: Float32Array, base: number, stride: number):
  * (perspective interpolation, gl_FragCoord.w). Depth maps through
  * depthRange, clamped to [0,1] (polygon offset is applied later per
  * fragment, in the rasterizers).
+ *
+ * EXT_clip_control (§12.5/§12.5.1): the clip origin flips the window y axis
+ * (UPPER_LEFT_EXT → y origin at the viewport TOP), and the depth mode selects
+ * the NDC→window z map: z_w = n + (f-n)·(z_d+1)/2 (NEGATIVE_ONE_TO_ONE_EXT)
+ * vs z_w = n + (f-n)·z_d (ZERO_TO_ONE_EXT).
  */
 export function applyViewportTransform(
   buf: Float32Array, base: number, stride: number, count: number,
   viewport: Viewport, depthRange: DepthRange,
+  clipOrigin?: GLenum, clipDepthMode?: GLenum,
 ): void {
+  const upperLeft = clipOrigin === UPPER_LEFT_EXT;
+  const zeroToOne = clipDepthMode === ZERO_TO_ONE_EXT;
   for (let i = 0; i < count; i++) {
     const idx = base + i * stride;
     const x = buf[idx + X];
@@ -230,8 +271,16 @@ export function applyViewportTransform(
     } else {
       const invW = 1 / w;
       winX = viewport.x + (x * invW * 0.5 + 0.5) * viewport.w;
-      winY = viewport.y + (y * invW * 0.5 + 0.5) * viewport.h;
-      winZ = depthRange.near + (depthRange.far - depthRange.near) * (z * invW * 0.5 + 0.5);
+      if (upperLeft) {
+        winY = viewport.y + viewport.h - (y * invW * 0.5 + 0.5) * viewport.h;
+      } else {
+        winY = viewport.y + (y * invW * 0.5 + 0.5) * viewport.h;
+      }
+      if (zeroToOne) {
+        winZ = depthRange.near + (depthRange.far - depthRange.near) * (z * invW);
+      } else {
+        winZ = depthRange.near + (depthRange.far - depthRange.near) * (z * invW * 0.5 + 0.5);
+      }
     }
     if (winZ < 0) winZ = 0;
     else if (winZ > 1) winZ = 1;

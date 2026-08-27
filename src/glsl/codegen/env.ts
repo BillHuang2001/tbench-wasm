@@ -1246,6 +1246,8 @@ function builtinRef(env: CodegenEnv, info: Extract<GlobalInfo, { kind: 'builtin'
       return mkPath(type, false, () => 'ctx.vertexId', ro);
     case 'gl_InstanceID':
       return mkPath(type, false, () => 'ctx.instanceId', ro);
+    case 'gl_DrawID':
+      return mkPath(type, false, () => 'ctx.drawId', ro);
     case 'gl_FragDepth':
     case 'gl_FragDepthEXT':
       return mkPath(type, true, () => 'ctx.out.fragDepth', () => 'ctx.out.fragDepth');

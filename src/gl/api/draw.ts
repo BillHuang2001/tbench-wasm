@@ -3,9 +3,11 @@
  *
  * Owns: drawArrays, drawElements, drawArraysInstanced (W2), drawElementsInstanced
  * (W2), drawRangeElements (W2), clear, clearBuffer{fv,iv,uiv,fi} (W2), flush,
- * finish, readPixels. (multiDraw*WEBGL belong to the WEBGL_multi_draw extension
- * object; its engine entries — executeMultiDrawArrays/Elements, including the
- * validate-all-subdraws-first contract — live in ../draw.)
+ * finish, readPixels, and the four WEBGL_multi_draw methods (installed
+ * unconditionally on both context prototypes; the extension object delegates
+ * here too). The multi-draw engine entries — executeMultiDrawArrays/Elements
+ * (+Instanced), including the validate-all-subdraws-first contract — live in
+ * ../draw.
  *
  * Validation (spec order) before delegating to the draw.ts engine:
  *  - drawArrays/drawElements(+Instanced/drawRangeElements): mode
@@ -41,6 +43,10 @@ import {
   executeClear,
   executeClearBuffer,
   executeDraw,
+  executeMultiDrawArrays,
+  executeMultiDrawArraysInstanced,
+  executeMultiDrawElements,
+  executeMultiDrawElementsInstanced,
   executeReadPixels,
   extSupported,
   validateDrawArrays,
@@ -165,13 +171,34 @@ function floatReadOK(ctx: WebGLRenderingContext, type: GLenum, halfFloat: boolea
   return false;
 }
 
-/** True when (format, type) is a legal readPixels combo for the attachment's internal format. */
+/**
+ * WebGL1 unsized float-storage attachment (RGBA/RGB/LUMINANCE/LA/ALPHA
+ * uploaded with FLOAT or HALF_FLOAT_OES): readPixels accepts RGBA with
+ * FLOAT (OES_texture_float / EXT_color_buffer_half_float) and with
+ * HALF_FLOAT/HALF_FLOAT_OES (OES_texture_half_float / EXT_color_buffer_half_float).
+ */
+function floatStorageReadOK(ctx: WebGLRenderingContext, format: GLenum, type: GLenum): boolean {
+  if (format !== C1.RGBA) return false;
+  if (type === C1.FLOAT) {
+    return extSupported(ctx, 'OES_texture_float') || extSupported(ctx, 'EXT_color_buffer_half_float');
+  }
+  if (type === 0x140b /* HALF_FLOAT */ || type === 0x8d61 /* HALF_FLOAT_OES */) {
+    return extSupported(ctx, 'OES_texture_half_float') || extSupported(ctx, 'EXT_color_buffer_half_float');
+  }
+  return false;
+}
+
+/** True when (format, type) is a legal readPixels combo for the attachment's
+ *  internal format. `floatStorage` marks W1 UNSIZED float-storage levels
+ *  (info.isFloat on the attached texture/renderbuffer surface). */
 function readComboOK(
   ctx: WebGLRenderingContext, internalFormat: GLenum, format: GLenum, type: GLenum,
+  floatStorage?: boolean,
 ): boolean {
   switch (internalFormat) {
     // Unsigned normalized color
     case C1.RGBA: case C1.RGBA8: case C2.RGBA8: case C2.SRGB8_ALPHA8:
+      if (floatStorage) return floatStorageReadOK(ctx, format, type);
       return format === C1.RGBA && type === C1.UNSIGNED_BYTE;
     case C1.RGBA4:
       return format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4);
@@ -180,16 +207,26 @@ function readComboOK(
     case C1.RGB565:
       return format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5);
     case C1.RGB: case C2.RGB8:
+      if (floatStorage) return floatStorageReadOK(ctx, format, type);
       return format === C1.RGB && type === C1.UNSIGNED_BYTE;
+    case C1.LUMINANCE: case C1.LUMINANCE_ALPHA: case C1.ALPHA:
+      if (floatStorage) return floatStorageReadOK(ctx, format, type);
+      return false;
     case C2.R8: return format === C2.RED && type === C1.UNSIGNED_BYTE;
     case C2.RG8: return format === C2.RG && type === C1.UNSIGNED_BYTE;
     case C2.RGB10_A2: return format === C1.RGBA && type === C2.UNSIGNED_INT_2_10_10_10_REV;
     case C2.RGB10_A2UI: return format === C2.RGBA_INTEGER && type === C1.UNSIGNED_INT;
-    // Floating point (renderable only with the color-buffer-float extensions)
-    case C2.R16F: return format === C2.RED && floatReadOK(ctx, type, true);
-    case C2.RG16F: return format === C2.RG && floatReadOK(ctx, type, true);
-    case C2.RGBA16F:
-      return format === C1.RGBA && floatReadOK(ctx, type, true);
+    // Floating point (renderable only with the color-buffer-float extensions).
+    // FLOAT is accepted with format ∈ {RED, RG, RGB, RGBA} for the 16F formats
+    // when EITHER float color-buffer extension is enabled (GLES3 ReadPixels
+    // table: R16F/RG16F/RGBA16F accept RG/RGB/RGBA expansion with FLOAT).
+    case C2.R16F: case C2.RG16F: case C2.RGBA16F:
+      if (type === C1.FLOAT &&
+          (extSupported(ctx, 'EXT_color_buffer_float') || extSupported(ctx, 'EXT_color_buffer_half_float'))) {
+        return format === C2.RED || format === C2.RG || format === C1.RGB || format === C1.RGBA;
+      }
+      return format === (internalFormat === C2.R16F ? C2.RED : internalFormat === C2.RG16F ? C2.RG : C1.RGBA) &&
+        floatReadOK(ctx, type, true);
     case C2.R32F: return format === C2.RED && floatReadOK(ctx, type, false);
     case C2.RG32F: return format === C2.RG && floatReadOK(ctx, type, false);
     case C2.RGBA32F: return format === C1.RGBA && floatReadOK(ctx, type, false);
@@ -348,7 +385,12 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       const internalFormat = att.type === 'renderbuffer'
         ? att.renderbuffer._internalformat
         : (att.texture._image?.internalFormat ?? 0);
-      if (!readComboOK(ctx, internalFormat, format, type)) {
+      // W1 unsized float-storage levels (RGBA/RGB/... + FLOAT/HALF_FLOAT_OES)
+      // report their storage class via the attached surface info.
+      const floatStorage = att.type === 'renderbuffer'
+        ? !!(att.renderbuffer._surface?.info?.isFloat)
+        : !!(att.texture._image?.info?.isFloat);
+      if (!readComboOK(ctx, internalFormat, format, type, floatStorage)) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
@@ -462,4 +504,118 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       try { executeClearBuffer(ctx, buffer, drawbuffer, null, depth, stencil); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
   }
+
+  // ---- WEBGL_multi_draw (extension methods; installed UNCONDITIONALLY — the   ----
+  // extension registry exposes them on both WebGL1 and WebGL2, and the WebGL2
+  // prototype receives them via installAll + the descriptor copy in webgl2.ts).
+  //
+  // Prototype layer validates ONLY the multi-draw-specific preconditions
+  // (WebIDL list conversion, drawcount, list lengths) and delegates to the
+  // engine entries, which validate every subdraw first (validate-all-first
+  // contract: any invalid subdraw → error + NOTHING drawn) and then execute.
+  // The *Offset args are ELEMENT offsets into the lists (NOT bytes); drawcount
+  // < 0 → INVALID_VALUE; offset + drawcount > list.length → INVALID_OPERATION.
+  //
+  // Extension methods are not part of the core class declaration — widen the
+  // prototype for installation (same pattern as the `p2` WebGL2 cast above).
+  const mdProto = proto as unknown as {
+    multiDrawArraysWEBGL(mode: GLenum, firsts: Int32List, firstsOffset: GLuint, counts: Int32List, countsOffset: GLuint, drawcount: GLsizei): void;
+    multiDrawElementsWEBGL(mode: GLenum, counts: Int32List, countsOffset: GLuint, type: GLenum, offsets: Int32List, offsetsOffset: GLuint, drawcount: GLsizei): void;
+    multiDrawArraysInstancedWEBGL(mode: GLenum, firsts: Int32List, firstsOffset: GLuint, counts: Int32List, countsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei): void;
+    multiDrawElementsInstancedWEBGL(mode: GLenum, counts: Int32List, countsOffset: GLuint, type: GLenum, offsets: Int32List, offsetsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei): void;
+  };
+
+  mdProto.multiDrawArraysWEBGL = function (
+    this: WebGLRenderingContext,
+    mode: GLenum, firsts: Int32List, firstsOffset: GLuint,
+    counts: Int32List, countsOffset: GLuint, drawcount: GLsizei,
+  ): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const firstsArr = toList(firsts, Int32Array, 'Int32List');
+    const countsArr = toList(counts, Int32Array, 'Int32List');
+    const dc = drawcount | 0;
+    if (dc < 0) { ctx._errors.push(C1.INVALID_VALUE); return; }
+    if (dc === 0) return; // NO_ERROR no-op
+    const fo = firstsOffset >>> 0;
+    const co = countsOffset >>> 0;
+    if (fo + dc > firstsArr.length || co + dc > countsArr.length) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    try { executeMultiDrawArrays(ctx, mode, firstsArr, fo, countsArr, co, dc); }
+    catch { ctx._errors.push(C1.INVALID_OPERATION); }
+  };
+
+  mdProto.multiDrawElementsWEBGL = function (
+    this: WebGLRenderingContext,
+    mode: GLenum, counts: Int32List, countsOffset: GLuint,
+    type: GLenum, offsets: Int32List, offsetsOffset: GLuint, drawcount: GLsizei,
+  ): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const countsArr = toList(counts, Int32Array, 'Int32List');
+    const offsetsArr = toList(offsets, Int32Array, 'Int32List');
+    const dc = drawcount | 0;
+    if (dc < 0) { ctx._errors.push(C1.INVALID_VALUE); return; }
+    if (dc === 0) return; // NO_ERROR no-op
+    const co = countsOffset >>> 0;
+    const oo = offsetsOffset >>> 0;
+    if (co + dc > countsArr.length || oo + dc > offsetsArr.length) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    try { executeMultiDrawElements(ctx, mode, countsArr, co, type, offsetsArr, oo, dc); }
+    catch { ctx._errors.push(C1.INVALID_OPERATION); }
+  };
+
+  mdProto.multiDrawArraysInstancedWEBGL = function (
+    this: WebGLRenderingContext,
+    mode: GLenum, firsts: Int32List, firstsOffset: GLuint,
+    counts: Int32List, countsOffset: GLuint,
+    instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei,
+  ): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const firstsArr = toList(firsts, Int32Array, 'Int32List');
+    const countsArr = toList(counts, Int32Array, 'Int32List');
+    const instArr = toList(instanceCounts, Int32Array, 'Int32List');
+    const dc = drawcount | 0;
+    if (dc < 0) { ctx._errors.push(C1.INVALID_VALUE); return; }
+    if (dc === 0) return; // NO_ERROR no-op
+    const fo = firstsOffset >>> 0;
+    const co = countsOffset >>> 0;
+    const io = instanceCountsOffset >>> 0;
+    if (fo + dc > firstsArr.length || co + dc > countsArr.length || io + dc > instArr.length) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    try { executeMultiDrawArraysInstanced(ctx, mode, firstsArr, fo, countsArr, co, instArr, io, dc); }
+    catch { ctx._errors.push(C1.INVALID_OPERATION); }
+  };
+
+  mdProto.multiDrawElementsInstancedWEBGL = function (
+    this: WebGLRenderingContext,
+    mode: GLenum, counts: Int32List, countsOffset: GLuint,
+    type: GLenum, offsets: Int32List, offsetsOffset: GLuint,
+    instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei,
+  ): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const countsArr = toList(counts, Int32Array, 'Int32List');
+    const offsetsArr = toList(offsets, Int32Array, 'Int32List');
+    const instArr = toList(instanceCounts, Int32Array, 'Int32List');
+    const dc = drawcount | 0;
+    if (dc < 0) { ctx._errors.push(C1.INVALID_VALUE); return; }
+    if (dc === 0) return; // NO_ERROR no-op
+    const co = countsOffset >>> 0;
+    const oo = offsetsOffset >>> 0;
+    const io = instanceCountsOffset >>> 0;
+    if (co + dc > countsArr.length || oo + dc > offsetsArr.length || io + dc > instArr.length) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    try { executeMultiDrawElementsInstanced(ctx, mode, countsArr, co, type, offsetsArr, oo, instArr, io, dc); }
+    catch { ctx._errors.push(C1.INVALID_OPERATION); }
+  };
 }

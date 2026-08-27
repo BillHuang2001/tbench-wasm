@@ -1153,6 +1153,7 @@ function mergeUses(vs: Shader, fs: Shader): ShaderUses {
     fragDepth: vs.info.uses.fragDepth || fs.info.uses.fragDepth,
     vertexId: vs.info.uses.vertexId || fs.info.uses.vertexId,
     instanceId: vs.info.uses.instanceId || fs.info.uses.instanceId,
+    drawId: vs.info.uses.drawId || fs.info.uses.drawId,
     derivatives: vs.info.uses.derivatives || fs.info.uses.derivatives,
   };
 }
