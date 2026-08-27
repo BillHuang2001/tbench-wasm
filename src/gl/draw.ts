@@ -163,7 +163,7 @@ function pushError(ctx: WebGLRenderingContext, err: GLenum): void {
 }
 
 function alignUp(n: number, align: number): number {
-  return ((n + align - 1) / align) | 0 * align;
+  return (((n + align - 1) / align) | 0) * align;
 }
 
 /** Extension gate that never throws (extension factories are stubs in Phase 2). */
@@ -1038,10 +1038,14 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
   // 3. Attribute fetch (dense extraction).
   const sc = getScratch(ctx);
   const { attribs, plans } = buildAttribs(ctx, pm, req, indices);
-  const ai = sc.attribIndices;
-  if (ai.length < maxAttribs) {
-    // attribIndices is fixed-size per context; maxAttribs never grows.
+  // attribIndices must cover every possible attrib location: it starts
+  // 0-length and grows to maxAttribs on first use (typed-array writes past
+  // the end are silently dropped — a zero-length array would leave every
+  // fetch index undefined and every vertex record NaN).
+  if (sc.attribIndices.length < maxAttribs) {
+    sc.attribIndices = new Int32Array(maxAttribs);
   }
+  const ai = sc.attribIndices;
 
   // 4. Vertex evaluation loop.
   const stride = computeVertexStride(pm.varyings ?? []);
@@ -1247,14 +1251,14 @@ function packBytesPerPixel(format: GLenum, type: GLenum): number {
 }
 
 /** Local pack conversion (replace with raster getPackConverter when it lands). */
-function makeLocalPack(format: GLenum, type: GLenum): ((src: ArrayBufferView, srcOff: number, dst: ArrayBufferView, dstOff: number) => void) | null {
+function makeLocalPack(surf: Surface, format: GLenum, type: GLenum): ((src: ArrayBufferView, srcOff: number, dst: ArrayBufferView, dstOff: number) => void) | null {
   const tmp = new Float32Array(4);
   const u8 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
   switch (type) {
     case C1.UNSIGNED_BYTE: {
       const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
-      return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
+      return (_src, so, dst, d) => {
+        decodeSurfaceTexel(surf, so, tmp);
         const d8 = dst as Uint8Array;
         if (comps === 4) { d8[d] = (u8(tmp[0]) * 255 + 0.5) | 0; d8[d + 1] = (u8(tmp[1]) * 255 + 0.5) | 0; d8[d + 2] = (u8(tmp[2]) * 255 + 0.5) | 0; d8[d + 3] = (u8(tmp[3]) * 255 + 0.5) | 0; }
         else if (comps === 3) { d8[d] = (u8(tmp[0]) * 255 + 0.5) | 0; d8[d + 1] = (u8(tmp[1]) * 255 + 0.5) | 0; d8[d + 2] = (u8(tmp[2]) * 255 + 0.5) | 0; }
@@ -1263,54 +1267,53 @@ function makeLocalPack(format: GLenum, type: GLenum): ((src: ArrayBufferView, sr
       };
     }
     case C1.UNSIGNED_SHORT_5_6_5:
-      return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
+      return (_src, so, dst, d) => {
+        decodeSurfaceTexel(surf, so, tmp);
         const v = ((u8(tmp[0]) * 31 + 0.5) | 0) << 11 | ((u8(tmp[1]) * 63 + 0.5) | 0) << 5 | (u8(tmp[2]) * 31 + 0.5) | 0;
         const d8 = dst as Uint8Array;
         d8[d] = v & 0xff; d8[d + 1] = (v >> 8) & 0xff;
       };
     case C1.UNSIGNED_SHORT_4_4_4_4:
-      return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
+      return (_src, so, dst, d) => {
+        decodeSurfaceTexel(surf, so, tmp);
         const v = ((u8(tmp[0]) * 15 + 0.5) | 0) << 12 | ((u8(tmp[1]) * 15 + 0.5) | 0) << 8 | ((u8(tmp[2]) * 15 + 0.5) | 0) << 4 | (u8(tmp[3]) * 15 + 0.5) | 0;
         const d8 = dst as Uint8Array;
         d8[d] = v & 0xff; d8[d + 1] = (v >> 8) & 0xff;
       };
     case C1.UNSIGNED_SHORT_5_5_5_1:
-      return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
+      return (_src, so, dst, d) => {
+        decodeSurfaceTexel(surf, so, tmp);
         const v = ((u8(tmp[0]) * 31 + 0.5) | 0) << 11 | ((u8(tmp[1]) * 31 + 0.5) | 0) << 6 | ((u8(tmp[2]) * 31 + 0.5) | 0) << 1 | (u8(tmp[3]) > 0.5 ? 1 : 0);
         const d8 = dst as Uint8Array;
         d8[d] = v & 0xff; d8[d + 1] = (v >> 8) & 0xff;
       };
     case C1.FLOAT: {
       const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
-      return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
+      return (_src, so, dst, d) => {
+        decodeSurfaceTexel(surf, so, tmp);
         const df = dst as Float32Array;
         for (let c = 0; c < comps; c++) df[(d >> 2) + c] = tmp[c];
       };
     }
     case C1.UNSIGNED_INT: // DEPTH_COMPONENT / integer formats
       if (format === C1.DEPTH_COMPONENT) {
-        return (src, so, dst, d) => {
-          decodeSurfaceTexel(src as unknown as Surface, so, tmp);
+        return (_src, so, dst, d) => {
+          decodeSurfaceTexel(surf, so, tmp);
           const dv = dst as DataView;
           dv.setUint32(d, Math.min(0xffffffff, Math.max(0, Math.round(tmp[0] * 0xffffffff))), true);
         };
       }
-      return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
+      return (_src, so, dst, d) => {
+        decodeSurfaceTexel(surf, so, tmp);
         (dst as Uint32Array)[d >> 2] = tmp[0] >>> 0;
       };
     case C1.UNSIGNED_SHORT: // DEPTH_COMPONENT
-      return (src, so, dst, d) => {
-        decodeSurfaceTexel(src as unknown as Surface, so, tmp);
+      return (_src, so, dst, d) => {
+        decodeSurfaceTexel(surf, so, tmp);
         (dst as Uint16Array)[d >> 1] = Math.min(0xffff, Math.max(0, Math.round(tmp[0] * 0xffff)));
       };
     case C2.UNSIGNED_INT_24_8:
-      return (src, so, dst, d) => {
-        const surf = src as unknown as Surface;
+      return (_src, so, dst, d) => {
         decodeSurfaceTexel(surf, so, tmp);
         const st = surf.stencilData ? surf.stencilData[so / surfaceBytesPerPixel(surf)] : 0;
         (dst as Uint32Array)[d >> 2] = ((Math.min(0xffffff, Math.max(0, Math.round(tmp[0] * 0xffffff))) << 8) | (st & 0xff)) >>> 0;
@@ -1344,7 +1347,7 @@ export function executeReadPixels(
     conv = null;
   }
   if (!conv) {
-    conv = makeLocalPack(format, type);
+    conv = makeLocalPack(surf, format, type);
     if (!conv) {
       pushError(ctx, C1.INVALID_OPERATION);
       return;
