@@ -33,7 +33,9 @@ await context.addInitScript(HARNESS_SHIM_SCRIPT);
 
 for (const url of urls) {
   const page = await context.newPage();
-  const full = `${server.baseUrl}sdk/tests/${url}?webglVersion=1`;
+  // Infer the WebGL version from the URL path: conformance2/ → 2, else 1.
+  const webglVersion = url.startsWith("conformance2/") ? 2 : 1;
+  const full = `${server.baseUrl}sdk/tests/${url}?webglVersion=${webglVersion}`;
   const msgs: string[] = [];
   const logs: string[] = [];
   page.on("pageerror", (err) => msgs.push(`pageerror: ${err.message}`));
