@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
  * browser pages before any scripts run and must define:
  *   window.__createSoftwareWebGLContext(canvas, attrs) → WebGLRenderingContext
  *
- * All canvas.getContext('webgl') calls are then routed through it.
+ * All canvas.getContext('webgl') calls are then routed through it —
+ * both HTMLCanvasElement and OffscreenCanvas (when the global exists).
  * Defaults to ./renderer.js — tests fail until the renderer is built.
  */
 
@@ -45,6 +46,16 @@ export function buildInterceptScript(): string {
     }
     return _orig.call(this, type, attrs);
   };
+  if (typeof OffscreenCanvas !== 'undefined') {
+    var _origOff = OffscreenCanvas.prototype.getContext;
+    OffscreenCanvas.prototype.getContext = function(type, attrs) {
+      if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
+        document.title = 'RENDERER_NOT_FOUND';
+        throw new Error(${JSON.stringify(msg)});
+      }
+      return _origOff.call(this, type, attrs);
+    };
+  }
 })();
 `;
   }
@@ -61,6 +72,16 @@ ${source}
     }
     return _orig.call(this, type, attrs);
   };
+  if (typeof OffscreenCanvas !== 'undefined') {
+    var _origOff = OffscreenCanvas.prototype.getContext;
+    OffscreenCanvas.prototype.getContext = function(type, attrs) {
+      if ((type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') &&
+          typeof window.__createSoftwareWebGLContext === 'function') {
+        return window.__createSoftwareWebGLContext(this, attrs, type);
+      }
+      return _origOff.call(this, type, attrs);
+    };
+  }
 })();
 `;
 }
