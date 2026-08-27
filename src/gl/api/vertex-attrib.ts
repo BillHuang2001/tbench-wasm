@@ -10,17 +10,19 @@
  * Behavior notes (implemented):
  *  - index args: 0 ≤ index < MAX_VERTEX_ATTRIBS (WebIDL unsigned-long
  *    converted), else INVALID_VALUE.
- *  - vertexAttribPointer: a buffer MUST be bound to ARRAY_BUFFER
- *    (INVALID_OPERATION) and is CAPTURED into attrib.buffer; size 1..4
- *    (INVALID_VALUE); type ∈ {BYTE, UNSIGNED_BYTE, SHORT, UNSIGNED_SHORT,
- *    FLOAT} (+ WebGL2 {INT, UNSIGNED_INT, HALF_FLOAT, INT_2_10_10_10_REV,
- *    UNSIGNED_INT_2_10_10_10_REV}, INVALID_ENUM otherwise); for the
- *    2_10_10_10_REV types size must be 4 (INVALID_OPERATION); stride 0..MAX_
- *    VERTEX_ATTRIB_STRIDE (INVALID_VALUE); offset ≥ 0 and < 2^31
- *    (INVALID_VALUE). Sets attrib.integer = false.
+ *  - vertexAttribPointer: a bound ARRAY_BUFFER is CAPTURED into attrib.buffer;
+ *    with NO buffer bound, offset 0 succeeds (attrib.buffer = null) and
+ *    offset ≠ 0 → INVALID_OPERATION; size 1..4 (INVALID_VALUE); type ∈ {BYTE,
+ *    UNSIGNED_BYTE, SHORT, UNSIGNED_SHORT, FLOAT} (+ WebGL2 {INT,
+ *    UNSIGNED_INT, HALF_FLOAT, INT_2_10_10_10_REV, UNSIGNED_INT_2_10_10_10_REV},
+ *    INVALID_ENUM otherwise); for the 2_10_10_10_REV types size must be 4
+ *    (INVALID_OPERATION); stride 0..255 (INVALID_VALUE); offset ≥ 0 and < 2^31
+ *    (INVALID_VALUE); stride and offset must be multiples of the type's
+ *    component size (INVALID_OPERATION). Sets attrib.integer = false.
  *  - vertexAttribIPointer (WebGL2): type ∈ {BYTE, UNSIGNED_BYTE, SHORT,
- *    UNSIGNED_SHORT, INT, UNSIGNED_INT} (INVALID_ENUM); sets
- *    attrib.integer = true (getVertexAttrib VERTEX_ATTRIB_ARRAY_INTEGER).
+ *    UNSIGNED_SHORT, INT, UNSIGNED_INT} (INVALID_ENUM); same stride/offset
+ *    and null-buffer rules as vertexAttribPointer; sets attrib.integer = true
+ *    (getVertexAttrib VERTEX_ATTRIB_ARRAY_INTEGER).
  *  - vertexAttrib*f(v): sets the constant generic value (constantF, default
  *    (v...,0,0,1) fill) — does NOT touch the enabled state (the array is used
  *    when enabled, the constant otherwise). fv: values shorter than needed →
@@ -80,12 +82,43 @@ function isPointerType(ctx: WebGLRenderingContext, type: GLenum): boolean {
 }
 
 /**
- * Shared stride/offset validation for vertexAttribPointer & vertexAttribIPointer.
- * Returns the converted [stride, offset] or null (INVALID_VALUE already pushed).
+ * Size in bytes of one component for each vertexAttribPointer/IPointer type.
+ * The 2_10_10_10_REV types are 4-byte packed formats.
  */
-function validateStrideOffset(ctx: WebGLRenderingContext, stride: GLsizei, offset: GLintptr): [number, number] | null {
+const TYPE_BYTE_SIZE: Record<number, number> = {
+  [C1.BYTE]: 1,
+  [C1.UNSIGNED_BYTE]: 1,
+  [C1.SHORT]: 2,
+  [C1.UNSIGNED_SHORT]: 2,
+  [C1.FLOAT]: 4,
+  [C1.INT]: 4,
+  [C1.UNSIGNED_INT]: 4,
+  [C2.HALF_FLOAT]: 2,
+  [C2.INT_2_10_10_10_REV]: 4,
+  [C2.UNSIGNED_INT_2_10_10_10_REV]: 4,
+};
+
+/**
+ * WebGL supports vertex attribute data strides up to 255 bytes (spec
+ * "Vertex Attribute Data Stride": a call with stride > 255 generates
+ * INVALID_VALUE). Applies to BOTH WebGL1 and WebGL2, for all types.
+ */
+const MAX_VERTEX_ATTRIB_STRIDE_BYTES = 255;
+
+/**
+ * Shared stride/offset validation for vertexAttribPointer & vertexAttribIPointer.
+ * Enforces, per spec ("Buffer Offset and Stride Requirements" / "Vertex
+ * Attribute Data Stride"):
+ *  - 0 ≤ stride ≤ 255, else INVALID_VALUE
+ *  - 0 ≤ offset < 2^31, else INVALID_VALUE
+ *  - stride and offset must be multiples of the size of the data type,
+ *    else INVALID_OPERATION.
+ * Returns the converted [stride, offset] or null (INVALID_VALUE or
+ * INVALID_OPERATION already pushed).
+ */
+function validateStrideOffset(ctx: WebGLRenderingContext, stride: GLsizei, offset: GLintptr, typeSize: number): [number, number] | null {
   const st = stride | 0;
-  if (st < 0 || st > ctx._state.limits.MAX_VERTEX_ATTRIB_STRIDE) {
+  if (st < 0 || st > MAX_VERTEX_ATTRIB_STRIDE_BYTES) {
     ctx._errors.push(C1.INVALID_VALUE);
     return null;
   }
@@ -93,6 +126,10 @@ function validateStrideOffset(ctx: WebGLRenderingContext, stride: GLsizei, offse
   // through the comparison and becomes 0 below (WebIDL NaN → 0).
   if (offset < 0 || offset >= 0x80000000) {
     ctx._errors.push(C1.INVALID_VALUE);
+    return null;
+  }
+  if (st % typeSize !== 0 || offset % typeSize !== 0) {
+    ctx._errors.push(C1.INVALID_OPERATION);
     return null;
   }
   return [st, offset | 0];
@@ -172,10 +209,12 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
-    const so = validateStrideOffset(ctx, stride, offset);
+    const so = validateStrideOffset(ctx, stride, offset, TYPE_BYTE_SIZE[type]);
     if (so === null) return;
+    // No buffer bound: only legal when offset is 0 — the attrib's buffer
+    // binding is cleared to null (spec); offset ≠ 0 → INVALID_OPERATION.
     const bound = ctx._state.arrayBuffer;
-    if (bound === null) {
+    if (bound === null && so[1] !== 0) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
@@ -186,7 +225,7 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
     attrib.integer = false;
     attrib.stride = so[0];
     attrib.offset = so[1];
-    attrib.buffer = bound; // captured at pointer time
+    attrib.buffer = bound; // captured at pointer time (null when no buffer bound + offset 0)
   };
 
   proto.vertexAttrib1f = function (this: WebGLRenderingContext, index: GLuint, x: GLfloat): void {
@@ -363,10 +402,12 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
           ctx._errors.push(C1.INVALID_ENUM);
           return;
       }
-      const so = validateStrideOffset(ctx, stride, offset);
+      const so = validateStrideOffset(ctx, stride, offset, TYPE_BYTE_SIZE[type]);
       if (so === null) return;
+      // No buffer bound: only legal when offset is 0 (attrib.buffer = null);
+      // offset ≠ 0 → INVALID_OPERATION (same rule as vertexAttribPointer).
       const bound = ctx._state.arrayBuffer;
-      if (bound === null) {
+      if (bound === null && so[1] !== 0) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
