@@ -49,6 +49,7 @@ import {
   executeMultiDrawElementsInstanced,
   executeReadPixels,
   extSupported,
+  transferToImageBitmapSnapshot,
   validateDrawArrays,
   validateDrawElements,
 } from '../draw';
@@ -421,6 +422,17 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
     try {
       executeReadPixels(ctx, x, y, width, height, format, type, pixels);
     } catch { ctx._errors.push(C1.INVALID_OPERATION); }
+  };
+
+  /**
+   * @internal — OffscreenCanvas.transferToImageBitmap() hook. Installed here
+   * (not as a class-body method) because installAll runs on BOTH the WebGL1 and
+   * WebGL2 prototypes, and webgl2.ts re-chains the WebGL2 prototype under the
+   * NATIVE WebGL2 prototype — class-body methods declared on WebGL1 are LOST
+   * for WebGL2 contexts, while api-installed own props survive.
+   */
+  proto._transferToImageBitmap = function (): { width: number; height: number; data: Uint8ClampedArray } | null {
+    return transferToImageBitmapSnapshot(this);
   };
 
   // ---- WebGL2-only methods (no-op installer on the WebGL1 prototype) ----

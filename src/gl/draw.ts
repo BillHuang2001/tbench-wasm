@@ -84,6 +84,7 @@ import type {
   ColorMask, ScissorState,
 } from '../raster';
 import type { VertexExecCtx, AttribSource } from '../glsl/program';
+import { buildPresentedPixels } from '../present/canvas';
 import type { WebGLProgram } from './objects';
 import type { ProgramModel } from './objects';
 import type { WebGLBuffer, WebGLQuery, WebGLTexture, WebGLTransformFeedback } from './objects';
@@ -353,6 +354,42 @@ function clearDefaultFramebufferForPreserve(ctx: WebGLRenderingContext, fb: { co
   }
   if (fb.depth && fb.depth.data instanceof Float32Array) fb.depth.data.fill(1.0);
   if (fb.stencil && fb.stencil.data instanceof Uint8Array) fb.stencil.data.fill(0);
+}
+
+/**
+ * OffscreenCanvas.transferToImageBitmap() snapshot: builds the TOP-DOWN,
+ * unpremultiplied RGBA8 copy of the drawing buffer (the same presentation
+ * transform as present() — y-flip + unpremultiply + alpha handling via
+ * buildPresentedPixels), then UNCONDITIONALLY resets the drawing buffer to its
+ * initial state (color (0,0,0,0), depth 1.0, stencil 0): per spec the transfer
+ * takes the canvas bitmap out of the OffscreenCanvas regardless of
+ * preserveDrawingBuffer. The reset is immediate (not scheduled at a frame
+ * boundary). Returns null when there is no drawing buffer (context lost / not
+ * yet allocated).
+ */
+export function transferToImageBitmapSnapshot(ctx: WebGLRenderingContext):
+    { width: number; height: number; data: Uint8ClampedArray } | null {
+  const dfb = ctx._defaultFB;
+  if (!dfb || !dfb.color) return null; // context lost / no drawing buffer
+  const w = dfb.color.width, h = dfb.color.height;
+  const data = new Uint8Array(w * h * 4);
+  const src = dfb.color.data; // BOTTOM-UP RGBA8
+  if (!(src instanceof Uint8Array)) return null; // default FB is always RGBA8
+  // Premultiplied when the context was created with premultipliedAlpha (spec
+  // default true); alpha:false buffers are forced opaque after unpremultiply.
+  buildPresentedPixels(src, data, w, h,
+    ctx._attrs.premultipliedAlpha !== false, ctx._attrs.alpha !== false);
+  // transferToImageBitmap UNCONDITIONALLY clears the canvas bitmap (spec):
+  clearDefaultFramebufferForPreserve(ctx, dfb);
+  // Refresh the canvas bitmap with the cleared buffer (no-op adapters, e.g.
+  // Node, make this harmless) — never leak adapter failures to the page.
+  try {
+    ctx._presentSurface?.present();
+  } catch {
+    // never leak to the page
+  }
+  // Uint8ClampedArray view over the same memory (no copy) — ImageBitmap data.
+  return { width: w, height: h, data: new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength) };
 }
 
 /** Canvas resize guard: keep the default FB in sync (lifecycle owns the realloc). */

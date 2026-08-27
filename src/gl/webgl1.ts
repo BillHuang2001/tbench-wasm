@@ -388,6 +388,13 @@ export class WebGLRenderingContext {
   flush(): void { throw new Error('GL stub'); }
   finish(): void { throw new Error('GL stub'); }
   readPixels(x: GLint, y: GLint, width: GLsizei, height: GLsizei, format: GLenum, type: GLenum, pixels: ArrayBufferView | null): void { throw new Error('GL stub'); }
+
+  /**
+   * @internal installed via installDrawApi — see api/draw.ts
+   */
+  _transferToImageBitmap(): { width: number; height: number; data: Uint8ClampedArray } | null {
+    throw new Error('GL stub');
+  }
 }
 
 // ---- Typed getExtension overloads for implemented extensions (interface merging) ----
