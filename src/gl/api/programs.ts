@@ -438,12 +438,12 @@ function doLinkProgram(ctx: WebGLRenderingContext, p: WebGLProgram): void {
 // getUniform
 // ---------------------------------------------------------------------------
 
-/** Read one component of one array element from the store. */
+/** Read one component of one array element from the store (float-indexed). */
 function readStoreValue(pm: GlslProgram, uniform: GlslProgram['uniforms'][number], elementIdx: number, comp: number, asUint: boolean): number {
-  const slot = uniform.location + elementIdx * elementSlots(uniform);
-  if (isMatrixType(uniform.type)) return pm.floatStore[slot * 4 + comp];
-  if (isFloatType(uniform.type)) return pm.floatStore[slot * 4 + comp];
-  const v = pm.intStore[slot * 4 + comp];
+  const base = uniform.location + elementIdx * elementSlots(uniform);
+  if (isMatrixType(uniform.type)) return pm.floatStore[base + comp];
+  if (isFloatType(uniform.type)) return pm.floatStore[base + comp];
+  const v = pm.intStore[base + comp];
   return asUint ? v >>> 0 : v;
 }
 
@@ -532,9 +532,9 @@ function readUniform(pm: GlslProgram, uniform: GlslProgram['uniforms'][number], 
     return out;
   }
   if (isSamplerType(uniform.type)) {
-    if (count === 1) return pm.intStore[(uniform.location + elem) * 4];
+    if (count === 1) return pm.intStore[uniform.location + elem];
     const out = new Int32Array(count);
-    for (let e = 0; e < count; e++) out[e] = pm.intStore[(uniform.location + elem + e) * 4];
+    for (let e = 0; e < count; e++) out[e] = pm.intStore[uniform.location + elem + e];
     return out;
   }
   return null; // unreachable for active uniforms
@@ -905,18 +905,30 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (pm === undefined) return null;
     // glsl Program.uniformMap is keyed by canonical lookup paths ('u', 'u[2]',
     // 'u.m', 'u[0].m', ...); uniform-block members are absent → null per spec.
+    // NOTE: glsl layoutUniforms builds uniformMap with FRESH UniformInfo
+    // instances (per-element leaves, size 1) while Program.uniforms holds the
+    // flattened entries — resolve the array entry BY NAME (object identity
+    // across the two maps is not guaranteed; a -1 index would poison every
+    // later uniform* call with INVALID_OPERATION).
     const u = pm.uniformMap.get(nm);
     if (u === undefined) return null;
+    let entry = pm.uniforms.find((x) => x.name === u.name);
+    if (entry === undefined) entry = pm.uniforms.find((x) => x.name === u.name.replace(/\[\d+\]/, '[0]'));
+    if (entry === undefined) return null;
     let elem = 0;
     let whole = false;
-    if (u.size > 1) {
+    // elem/whole come from the ENTRY (map leaves carry size 1).
+    if (entry.size > 1) {
       const m = /\[(\d+)\]$/.exec(nm);
-      if (m !== null) elem = parseInt(m[1], 10);
-      else whole = true; // bare array name → location of the first element
-      if (elem >= u.size) return null; // out-of-range index → null, no error
+      if (m !== null) {
+        elem = parseInt(m[1], 10);
+        if (elem >= entry.size) return null; // out-of-range index → null, no error
+      } else {
+        whole = true; // bare array name → location of the first element
+      }
     }
-    const idx = pm.uniforms.indexOf(u);
-    const loc = new WebGLUniformLocation(p, idx, u.name);
+    const idx = pm.uniforms.indexOf(entry);
+    const loc = new WebGLUniformLocation(p, idx, entry.name);
     locGen.set(loc, linkGen.get(p) ?? 0);
     uniformLocInfo.set(loc, { elem, whole });
     return loc;
@@ -1132,9 +1144,18 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       }
       // GLES 3.0 glGetUniformIndices: not-found names yield GL_INVALID_INDEX
       // (0xFFFFFFFF), no error (CTS uniform-buffers.html checks INVALID_INDEX).
+      // Resolve BY NAME (uniformMap holds fresh leaf instances — identity
+      // with Program.uniforms entries is not guaranteed).
       const out: number[] = [];
       for (const n of names) {
-        const u = pm.uniformMap.get(n) ?? pm.uniforms.find((un) => un.name === n);
+        let u = pm.uniformMap.get(n);
+        if (u !== undefined) {
+          const entry = pm.uniforms.find((x) => x.name === u!.name) ??
+            pm.uniforms.find((x) => x.name === u!.name.replace(/\[\d+\]/, '[0]'));
+          if (entry !== undefined) u = entry;
+          else u = undefined;
+        }
+        if (u === undefined) u = pm.uniforms.find((un) => un.name === n);
         out.push(u === undefined ? C2.INVALID_INDEX : pm.uniforms.indexOf(u));
       }
       return out;

@@ -338,8 +338,9 @@ function uniformMatrix(ctx: WebGLRenderingContext, location: WebGLUniformLocatio
     const element = Math.floor(i / n);
     const col = Math.floor((i % n) / rows);
     const row = i % rows;
-    // Column-major: value index i = column col, row row; slot = element*slots + col.
-    writeFloatAt(t, element * t.slots + col, row, values[i]);
+    // Column-major: value index i = column col, row row; float offset =
+    // element*stride + col*4 (stride = cols*4 floats per element).
+    writeFloatAt(t, element * t.slots + col * 4, row, values[i]);
   }
 }
 

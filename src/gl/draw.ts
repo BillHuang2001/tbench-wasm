@@ -525,6 +525,7 @@ interface AttribPlan {
   divisor: number;
   instanced: boolean; // divisor > 0
   present: boolean;   // attrib is used by the program
+  constant: boolean;  // disabled/no-buffer: source is the CURRENT constant value
 }
 
 const MAT2 = 0x8b5a, MAT3 = 0x8b5b, MAT4 = 0x8b5c;
@@ -564,9 +565,9 @@ function buildAttribs(
       const l = loc + col;
       if (l >= maxAttribs) break;
       const a = vao.attribs[l];
-      plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: true };
       if (!a.enabled || !a.buffer || !a.buffer._data) {
         // constant attribute
+        plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: true, constant: true };
         if (pa.integral) {
           attribs[l] = (a.constantI ?? sc.emptyInt) as Int32Array;
         } else {
@@ -574,6 +575,7 @@ function buildAttribs(
         }
         continue;
       }
+      plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: true, constant: false };
       const buf = a.buffer;
       const data = buf._data as ArrayBuffer;
       const typeSize = attribTypeSize(a.type);
@@ -631,7 +633,7 @@ function buildAttribs(
   for (let l = 0; l < maxAttribs; l++) {
     if (!plans[l]) {
       const a = vao.attribs[l];
-      plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: false };
+      plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: false, constant: true };
       attribs[l] = a.constantF as Float32Array;
     }
   }
@@ -1103,15 +1105,23 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
     out: { position: sc.outPosition, pointSize: 0, varyings: sc.outVaryings },
   };
 
-  // Precompute per-loc loops for the inner hot path.
+  // Precompute per-loc loops for the inner hot path. Constant (disabled)
+  // attribs read the CURRENT constant value: codegen fetches
+  // `attribs[loc][attribIndices[loc] * comps + c]`, and constantF/constantI/
+  // constantUI are 4-element arrays — their fetch index must stay 0 or the
+  // constant view is read out of bounds (NaN → wrong fragment colors).
   const vertexLocs: number[] = [];
   const instancedLocs: { loc: number; divisor: number }[] = [];
+  const constantLocs: number[] = [];
   for (let l = 0; l < maxAttribs; l++) {
     const p = plans[l];
     if (!p.present) continue;
-    if (p.instanced) instancedLocs.push({ loc: l, divisor: p.divisor });
+    if (p.constant) constantLocs.push(l);
+    else if (p.instanced) instancedLocs.push({ loc: l, divisor: p.divisor });
     else vertexLocs.push(l);
   }
+  // Constant values never change mid-draw: zero the fetch index once.
+  for (let k = 0; k < constantLocs.length; k++) ai[constantLocs[k]] = 0;
 
   const records = sc.records;
   const pos = sc.outPosition;
