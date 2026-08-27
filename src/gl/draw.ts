@@ -1279,6 +1279,9 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
     samplerStates: env.samplerStates,
     scratch: sc.scratch,
     intScratch: sc.intScratch,
+    // gl_DepthRange builtin uniform: [near, far, far - near] (state already
+    // clamped to 0..1 by depthRange(); GLES2 §2.11.1).
+    depthRange: new Float32Array([s.depth.range[0], s.depth.range[1], s.depth.range[1] - s.depth.range[0]]),
     out: { position: sc.outPosition, pointSize: 0, varyings: sc.outVaryings },
   };
 
