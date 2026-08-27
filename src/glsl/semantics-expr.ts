@@ -868,6 +868,13 @@ function analyzeCall(e: CallExpr, scope: Scope, ctx: SemContext): void {
       analyzeUserCall(e, sym, ctx);
       return;
     }
+    if (sym !== undefined && sym.kind === 'fn' && sym.builtin && sym.siblings.some((s) => !s.builtin)) {
+      // Builtin function name with USER overloads (GLSL ES 1.00 §6.1: user
+      // functions may overload builtins with different signatures): resolve
+      // across BOTH the user signatures and the builtin signature tables.
+      analyzeHybridCall(e, sym, ctx);
+      return;
+    }
     if (matches(name, builtinSignatures(ctx.version)).length > 0 || extensionFunctions.some((s) => s.name === name)) {
       analyzeBuiltinCall(e, name, ctx);
       return;
@@ -900,14 +907,14 @@ function scoreSignature(params: GLSLType[], args: Expr[], ctx: SemContext): numb
 }
 
 /** Select the best-scoring signature among `candidates`; reports ambiguity. */
-function pickBest(
-  candidates: { params: GLSLType[]; ret: GLSLType }[],
+function pickBest<T extends { params: GLSLType[]; ret: GLSLType }>(
+  candidates: T[],
   args: Expr[],
   ctx: SemContext,
   name: string,
   line: number,
-): { params: GLSLType[]; ret: GLSLType } | null {
-  let best: { params: GLSLType[]; ret: GLSLType } | null = null;
+): T | null {
+  let best: T | null = null;
   let bestScore = Infinity;
   for (const c of candidates) {
     const sc = scoreSignature(c.params, args, ctx);
@@ -985,6 +992,64 @@ function analyzeBuiltinCall(e: CallExpr, name: string, ctx: SemContext): void {
   e.constValue = foldBuiltin(name, best.ret, e.args);
 }
 
+/**
+ * The builtin signatures of `name` usable in this shader: core table plus
+ * extension entries (deduped against core), filtered to enabled extensions
+ * and the current stage — the same visibility rules analyzeBuiltinCall
+ * applies, as a plain candidate list for hybrid resolution.
+ */
+function stagedBuiltinSigs(name: string, ctx: SemContext): BuiltinSignature[] {
+  const all: BuiltinSignature[] = [...matches(name, builtinSignatures(ctx.version))];
+  for (const s of extensionFunctions) {
+    if (s.name !== name) continue;
+    // Skip extension entries duplicating a core signature exactly (e.g. dFdx
+    // is core in 3.00 AND listed for GL_OES_standard_derivatives).
+    const dup = all.some(
+      (c) =>
+        c.params.length === s.params.length &&
+        c.params.every((p, i) => typeEquals(p, s.params[i])) &&
+        typeEquals(c.ret, s.ret) &&
+        c.stage === s.stage,
+    );
+    if (!dup) all.push(s);
+  }
+  // GL_OES_standard_derivatives functions (dFdx/dFdy/fwidth) are CORE in
+  // GLSL ES 3.00 — their extension gate applies to 1.00 shaders only.
+  const coreIn300 = (s: BuiltinSignature): boolean =>
+    ctx.version === 300 && s.extension === 'GL_OES_standard_derivatives';
+  const enabled = all.filter((s) => s.extension === undefined || coreIn300(s) || ctx.enabledExtensions.has(s.extension));
+  return enabled.filter((s) => s.stage === undefined || s.stage === ctx.stage);
+}
+
+/**
+ * Call to a builtin function name that user code has overloaded: GLSL ES
+ * 1.00 allows user-defined functions to overload builtins (any signature
+ * differing from every visible builtin signature). Resolution picks the best
+ * match across the user signatures AND the builtin tables — the user
+ * overload wins on an exact/int-better match, the builtin still serves
+ * calls that only it can take (e.g. radians(float) for a float argument).
+ */
+function analyzeHybridCall(e: CallExpr, sym: FnSymbol, ctx: SemContext): void {
+  const name = sym.name;
+  const userCands = sym.siblings
+    .filter((s) => !s.builtin)
+    .map((s) => ({ params: s.params.map((p) => p.type), ret: s.retType, user: true }));
+  const builtinCands = stagedBuiltinSigs(name, ctx).map((s) => ({ params: s.params, ret: s.ret, user: false }));
+  const best = pickBest([...userCands, ...builtinCands], e.args, ctx, name, e.loc.line);
+  if (best === null) {
+    if (ctx.errors.length === 0 || !ctx.errors[ctx.errors.length - 1].message.includes('ambiguous')) {
+      ctx.error(e.loc.line, `'${name}' : no matching function`);
+    }
+    return;
+  }
+  e.resolvedType = best.ret;
+  if (best.user) {
+    ctx.currentFunction?.calls.add(name); // recursion-detection edge
+  } else {
+    e.constValue = foldBuiltin(name, best.ret, e.args);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Constructors                                                        */
 /* ------------------------------------------------------------------ */
@@ -1007,12 +1072,16 @@ function analyzeConstructor(e: CallExpr, name: string, scope: Scope, ctx: SemCon
       }
       const at = e.args[0].resolvedType;
       if (at === undefined) return;
-      if (at.kind !== 'scalar') {
+      // Scalar constructors take the FIRST element of a non-scalar
+      // (GLSL ES 1.00 §5.4.1: float(vec3) selects the first component).
+      if (at.kind !== 'scalar' && at.kind !== 'vector' && at.kind !== 'matrix') {
         ctx.error(e.args[0].loc.line, `'${name}' : cannot construct from '${typeName(at)}'`);
         return;
       }
       e.resolvedType = t;
-      if (e.args[0].constValue !== undefined) e.constValue = convertConst(e.args[0].constValue, at.base, t.base);
+      if (at.kind === 'scalar' && e.args[0].constValue !== undefined) {
+        e.constValue = convertConst(e.args[0].constValue, at.base, t.base);
+      }
       return;
     }
     case 'vector':
@@ -1045,6 +1114,21 @@ function analyzeConstructor(e: CallExpr, name: string, scope: Scope, ctx: SemCon
   }
 }
 
+/** Component count an argument contributes to a constructor: scalar → 1,
+ * vector → size, matrix → cols*rows (components read in column-major order). */
+function ctorArgComponents(at: GLSLType): number {
+  switch (at.kind) {
+    case 'scalar':
+      return 1;
+    case 'vector':
+      return at.size;
+    case 'matrix':
+      return at.cols * at.rows;
+    default:
+      return 0;
+  }
+}
+
 function analyzeVectorConstructor(
   e: CallExpr,
   t: Extract<GLSLType, { kind: 'vector' }>,
@@ -1052,6 +1136,7 @@ function analyzeVectorConstructor(
 ): void {
   const args = e.args;
   const targetName = typeName(t);
+  const n = t.size;
   if (args.length === 1) {
     const at = args[0].resolvedType;
     if (at === undefined) return;
@@ -1063,38 +1148,43 @@ function analyzeVectorConstructor(
       e.resolvedType = t; // splat
       return;
     }
-    if (at.kind === 'vector' && at.size === t.size) {
-      if (!ctorBaseConvertible(at.base, t.base, ctx.version)) {
-        ctx.error(args[0].loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
-        return;
-      }
-      e.resolvedType = t;
-      return;
-    }
-    ctx.error(args[0].loc.line, `'${targetName}' : cannot construct from '${typeName(at)}'`);
-    return;
   }
-  // N args: scalars and/or smaller vectors; total components must equal size
+  // General form: scalars, vectors and matrices (matrix components are read
+  // in column-major order — GLSL ES 1.00 §5.4.2: vecN(matM) = the first N
+  // components of the matrix). Constructors can SHORTEN: extra trailing
+  // components are dropped, but an argument that contributes no component at
+  // all is an error (matches ANGLE and the CTS constructor generator:
+  // vec3(5.0, 4.0, ivec2(...)) OK, vec4(v, v, v) rejected).
   let total = 0;
+  const comps: number[] = [];
   for (const a of args) {
     const at = a.resolvedType;
     if (at === undefined) return;
-    if (at.kind === 'scalar') total += 1;
-    else if (at.kind === 'vector') total += at.size;
-    else {
+    if (at.kind !== 'scalar' && at.kind !== 'vector' && at.kind !== 'matrix') {
       ctx.error(a.loc.line, `'${targetName}' : invalid constructor argument of type '${typeName(at)}'`);
       return;
     }
+    const c = ctorArgComponents(at);
+    comps.push(c);
+    total += c;
   }
-  if (total !== t.size) {
-    ctx.error(e.loc.line, `'${targetName}' : constructor requires ${t.size} components`);
+  if (total < n) {
+    ctx.error(e.loc.line, `'${targetName}' : constructor requires ${n} components`);
+    return;
+  }
+  if (total - comps[comps.length - 1] >= n) {
+    ctx.error(e.loc.line, `'${targetName}' : too many arguments for constructor`);
     return;
   }
   for (const a of args) {
     const at = a.resolvedType;
     if (at === undefined) return;
-    if (at.kind !== 'scalar' && at.kind !== 'vector') return;
-    if (!ctorBaseConvertible(at.base, t.base, ctx.version)) {
+    // Matrix components are float — convertibility is checked against float.
+    let abase: BaseScalar;
+    if (at.kind === 'scalar' || at.kind === 'vector') abase = at.base;
+    else if (at.kind === 'matrix') abase = 'float';
+    else return;
+    if (!ctorBaseConvertible(abase, t.base, ctx.version)) {
       ctx.error(a.loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
       return;
     }
@@ -1109,53 +1199,61 @@ function analyzeMatrixConstructor(
 ): void {
   const args = e.args;
   const targetName = typeName(t);
+  const size = t.cols * t.rows;
   if (args.length === 1) {
     const at = args[0].resolvedType;
     if (at === undefined) return;
-    if (at.kind === 'scalar' && at.base !== 'bool') {
+    if (at.kind === 'scalar') {
+      if (!ctorBaseConvertible(at.base, 'float', ctx.version)) {
+        ctx.error(args[0].loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
+        return;
+      }
       e.resolvedType = t; // diagonal
       return;
     }
-    if (at.kind === 'matrix' && at.cols === t.cols && at.rows === t.rows) {
-      e.resolvedType = t; // same-dims conversion
+    if (at.kind === 'matrix') {
+      // matN(matM) of any dimensions: components at corresponding col/row
+      // indices are copied, the rest is filled from the identity matrix.
+      e.resolvedType = t;
       return;
     }
-    ctx.error(args[0].loc.line, `'${targetName}' : cannot construct from '${typeName(at)}'`);
+  }
+  // Mixed scalars/vectors. A matrix argument inside a MULTI-argument matrix
+  // constructor is an error (GLSL/ANGLE: "constructing matrix from matrix can
+  // only take one argument" — CTS generator rejects any such argument list).
+  let total = 0;
+  const comps: number[] = [];
+  for (const a of args) {
+    const at = a.resolvedType;
+    if (at === undefined) return;
+    if (at.kind === 'matrix') {
+      ctx.error(a.loc.line, `'${targetName}' : constructing a matrix from a matrix can only take one argument`);
+      return;
+    }
+    if (at.kind !== 'scalar' && at.kind !== 'vector') {
+      ctx.error(a.loc.line, `'${targetName}' : invalid constructor argument of type '${typeName(at)}'`);
+      return;
+    }
+    const c = ctorArgComponents(at);
+    comps.push(c);
+    total += c;
+  }
+  // Same component-count rules as vectors: enough components AND the last
+  // argument must contribute at least one (extra trailing components drop).
+  if (total < size || total - comps[comps.length - 1] >= size) {
+    ctx.error(e.loc.line, `'${targetName}' : wrong number of arguments for matrix constructor`);
     return;
   }
-  if (args.length === t.cols) {
-    // C vectors of size R (columns)
-    let allVecs = true;
-    for (const a of args) {
-      const at = a.resolvedType;
-      if (at === undefined) return;
-      if (!(at.kind === 'vector' && at.size === t.rows && at.base !== 'bool')) {
-        allVecs = false;
-        break;
-      }
-    }
-    if (allVecs) {
-      e.resolvedType = t;
+  for (const a of args) {
+    const at = a.resolvedType;
+    if (at === undefined) return;
+    if (at.kind !== 'scalar' && at.kind !== 'vector') return;
+    if (!ctorBaseConvertible(at.base, 'float', ctx.version)) {
+      ctx.error(a.loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
       return;
     }
   }
-  if (args.length === t.cols * t.rows) {
-    // C*R scalars, column-major
-    let allScalars = true;
-    for (const a of args) {
-      const at = a.resolvedType;
-      if (at === undefined) return;
-      if (!(at.kind === 'scalar' && at.base !== 'bool')) {
-        allScalars = false;
-        break;
-      }
-    }
-    if (allScalars) {
-      e.resolvedType = t;
-      return;
-    }
-  }
-  ctx.error(e.loc.line, `'${targetName}' : wrong number of arguments for matrix constructor`);
+  e.resolvedType = t;
 }
 
 /** `T[size](...)` array constructor (ES 3.00 only). `callee` is the IndexExpr. */
