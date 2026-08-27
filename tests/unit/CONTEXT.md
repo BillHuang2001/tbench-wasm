@@ -15,7 +15,7 @@ Fast, dependency-free unit tests for the pure `src/` modules — glsl compiler/l
 - **Imports**: static imports from `src/` at their final contract paths (see API Surface below). No bundle, no globals.
 - **GL enums**: use the `GL` constants from `./helpers` (spec-fixed numeric values); never import a src/gl constants module.
 - **Determinism**: pure functions only, no network, no timers. Typed-array results compared with `expectArrayClose` (tolerance-aware; handles NaN/Infinity).
-- **Status discipline**: tests are written against the FINAL contracts and are expected to FAIL AT RUNTIME until the corresponding `src/` module lands — the failures are the executable spec for src/ implementers. Current failure mode is `Error: not implemented: <module>` from src stubs (NOT "Failed to resolve import" — all modules exist and type-check today). Do NOT delete or skip tests to make the suite green. When a src module lands, its test file should flip to green; fix a test only if the src contract changed (update this file's API Surface in the same pass).
+- **Status discipline**: the suite is the executable spec for src/ and is fully green (95/95). Do NOT delete or skip tests to make the suite green; fix a test only if the src contract changed (update this file's API Surface in the same pass). A failing test is a regression signal — investigate src/ first, and report genuine src bugs rather than papering over them in the test.
 - **File size**: each test file ≤ ~1000 lines; split by module.
 
 ## Current status (verified at alignment, 2026-08)
