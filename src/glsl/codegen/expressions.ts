@@ -1010,6 +1010,80 @@ function shapeOf(t: GLSLType, base: string): GLSLType {
   return { kind: 'scalar', base: base as never };
 }
 
+/**
+ * Dual-mode arithmetic on ONE float component: (v, dx, dy) per the op.
+ * Operands are materialized — v/dx/dy each reference the operand strings,
+ * so pre-carrying values (inlined-call IIFEs, assignment composites) must
+ * run exactly once via their hoisted pres; pure reads (varyings, uniforms,
+ * temps) are untouched by materialize and repeat safely. Missing duals
+ * (int/uint operands, literals) are the constant 0 — mixed float/int
+ * arithmetic's derivatives come only from the float side.
+ *   + / - : linear — the op applied to each plane.
+ *   *     : product rule  d(a·b) = da·b + a·db.
+ *   /     : quotient rule d(a/b) = (da·b − a·db) / b².
+ *   %     : v mirrors the non-dual float '%' (JS remainder — the compiler
+ *           rejects float '%' so this is the permissive path); the dual
+ *           planes use the GLSL-mod view dv = da − floor(a/b)·db (floor is
+ *           a.e. constant, so its derivative vanishes).
+ */
+function arithDual(op: string, a: Value, b: Value, env: CodegenEnv): Value {
+  const am = materialize([a], env)[0];
+  const bm = materialize([b], env)[0];
+  const av = am.v;
+  const bv = bm.v;
+  const adx = am.dx ?? '0';
+  const ady = am.dy ?? '0';
+  const bdx = bm.dx ?? '0';
+  const bdy = bm.dy ?? '0';
+  const pre: string[] = [];
+  if (am.pre && am.pre.length > 0) pre.push(...am.pre);
+  if (bm.pre && bm.pre.length > 0 && bm.pre !== am.pre) pre.push(...bm.pre);
+  let v: string;
+  let dx: string;
+  let dy: string;
+  switch (op) {
+    case '+':
+      v = `(${av} + ${bv})`;
+      dx = `(${adx} + ${bdx})`;
+      dy = `(${ady} + ${bdy})`;
+      break;
+    case '-':
+      v = `(${av} - ${bv})`;
+      dx = `(${adx} - ${bdx})`;
+      dy = `(${ady} - ${bdy})`;
+      break;
+    case '*':
+      v = `(${av} * ${bv})`;
+      dx = `(${adx} * ${bv} + ${av} * ${bdx})`;
+      dy = `(${ady} * ${bv} + ${av} * ${bdy})`;
+      break;
+    case '/':
+      v = `(${av} / ${bv})`;
+      dx = `((${adx} * ${bv} - ${av} * ${bdx}) / (${bv} * ${bv}))`;
+      dy = `((${ady} * ${bv} - ${av} * ${bdy}) / (${bv} * ${bv}))`;
+      break;
+    case '%': {
+      v = `(${av} % ${bv})`;
+      const q = `Math.floor(${av} / ${bv})`;
+      dx = `(${adx} - ${q} * ${bdx})`;
+      dy = `(${ady} - ${q} * ${bdy})`;
+      break;
+    }
+    default:
+      throw new Error(`codegen: bad arithmetic op '${op}'`);
+  }
+  const out: Value = { v, dx, dy };
+  if (pre.length > 0) out.pre = pre;
+  return out;
+}
+
+/** Dual-aware left fold of '+' (dot-product sums of matrix multiplies). */
+function foldAdd(terms: Value[], env: CodegenEnv): Value {
+  let acc = terms[0];
+  for (let i = 1; i < terms.length; i++) acc = arithDual('+', acc, terms[i], env);
+  return acc;
+}
+
 function emitArith(
   e: Extract<Expr, { kind: 'binary' }>,
   env: CodegenEnv,
@@ -1017,18 +1091,15 @@ function emitArith(
   rt: GLSLType,
   t: GLSLType,
 ): Value[] {
-  // Dual mode: float arithmetic needs the arithmetic dual templates
-  // (product/quotient rule etc.) — C5a2. Throw rather than silently drop
-  // the duals (int/uint arithmetic is unaffected — no duals).
-  if (env.dual && hasFloatLeaves(t)) {
-    throw new Error(`codegen: dual-mode arithmetic '${e.op}' requires arithmetic dual templates (C5a2)`);
-  }
   const op = e.op;
   const lb = scalarBaseOf(lt);
   const rb = scalarBaseOf(rt);
   const base = commonBase(lb, rb)!;
   const isU = base === 'uint';
   const isI = base === 'int';
+  // Dual mode: float-typed results carry (v, dx, dy) per the arithmetic
+  // dual templates (arithDual); int/uint arithmetic has no duals.
+  const dual = env.dual && hasFloatLeaves(t);
   // matrix * matrix / matrix * vector / vector * matrix
   if (op === '*') {
     if (lt.kind === 'matrix' && rt.kind === 'matrix') {
@@ -1041,15 +1112,23 @@ function emitArith(
       const out: Value[] = [];
       for (let c = 0; c < rt.cols; c++) {
         for (let r = 0; r < aRows; r++) {
-          const parts: string[] = [];
-          for (let s = 0; s < aCols; s++) {
-            const a = av[s * aRows + r];
-            const b = bv[c * bRows + s];
-            const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
-            const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-            parts.push(`(${ax} * (${bx}))`);
+          if (dual) {
+            const terms: Value[] = [];
+            for (let s = 0; s < aCols; s++) {
+              terms.push(arithDual('*', av[s * aRows + r], bv[c * bRows + s], env));
+            }
+            out.push(terms.length === 1 ? terms[0] : foldAdd(terms, env));
+          } else {
+            const parts: string[] = [];
+            for (let s = 0; s < aCols; s++) {
+              const a = av[s * aRows + r];
+              const b = bv[c * bRows + s];
+              const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
+              const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
+              parts.push(`(${ax} * (${bx}))`);
+            }
+            out.push({ v: `(${parts.join(' + ')})` });
           }
-          out.push({ v: `(${parts.join(' + ')})` });
         }
       }
       return out;
@@ -1062,15 +1141,23 @@ function emitArith(
       const bv = emitExpr(e.right, env);
       const out: Value[] = [];
       for (let r = 0; r < R; r++) {
-        const parts: string[] = [];
-        for (let c = 0; c < C; c++) {
-          const a = av[c * R + r];
-          const b = bv[c];
-          const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
-          const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-          parts.push(`(${ax} * (${bx}))`);
+        if (dual) {
+          const terms: Value[] = [];
+          for (let c = 0; c < C; c++) {
+            terms.push(arithDual('*', av[c * R + r], bv[c], env));
+          }
+          out.push(terms.length === 1 ? terms[0] : foldAdd(terms, env));
+        } else {
+          const parts: string[] = [];
+          for (let c = 0; c < C; c++) {
+            const a = av[c * R + r];
+            const b = bv[c];
+            const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
+            const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
+            parts.push(`(${ax} * (${bx}))`);
+          }
+          out.push({ v: `(${parts.join(' + ')})` });
         }
-        out.push({ v: `(${parts.join(' + ')})` });
       }
       return out;
     }
@@ -1082,15 +1169,23 @@ function emitArith(
       const bv = emitExpr(e.right, env);
       const out: Value[] = [];
       for (let c = 0; c < C; c++) {
-        const parts: string[] = [];
-        for (let r = 0; r < R; r++) {
-          const a = av[r];
-          const b = bv[c * R + r];
-          const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
-          const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-          parts.push(`(${ax} * (${bx}))`);
+        if (dual) {
+          const terms: Value[] = [];
+          for (let r = 0; r < R; r++) {
+            terms.push(arithDual('*', av[r], bv[c * R + r], env));
+          }
+          out.push(terms.length === 1 ? terms[0] : foldAdd(terms, env));
+        } else {
+          const parts: string[] = [];
+          for (let r = 0; r < R; r++) {
+            const a = av[r];
+            const b = bv[c * R + r];
+            const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
+            const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
+            parts.push(`(${ax} * (${bx}))`);
+          }
+          out.push({ v: `(${parts.join(' + ')})` });
         }
-        out.push({ v: `(${parts.join(' + ')})` });
       }
       return out;
     }
@@ -1103,6 +1198,10 @@ function emitArith(
   for (let c = 0; c < n; c++) {
     const a = av[lt.kind === 'scalar' ? 0 : c];
     const b = bv[rt.kind === 'scalar' ? 0 : c];
+    if (dual) {
+      out.push(arithDual(op, a, b, env));
+      continue;
+    }
     const x = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
     const y = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
     let s: string;
