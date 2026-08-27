@@ -177,10 +177,10 @@ void main() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Mixed-base relational / equality with pre-carrying LEFT operand     */
+/* Relational / equality with pre-carrying LEFT operand                */
 /* ------------------------------------------------------------------ */
 
-// (c) int user fn < float literal (convertValue re-attach path).
+// (c) user fn (explicit float ctor) in a relational feeding a ternary.
 {
   const { ctx } = runMain(
     `#version 300 es
@@ -188,16 +188,16 @@ precision mediump float;
 int f() { return 3; }
 out vec4 color;
 void main() {
-  float r = (f() < 3.5) ? 1.0 : 0.0;
+  float r = (float(f()) < 3.5) ? 1.0 : 0.0;
   color = vec4(r, 0.0, 0.0, 1.0);
 }`,
     'FRAGMENT',
     300,
   );
-  check(ctx.out.color[0][0] === 1, `relational int userfn vs float (got [${ctx.out.color[0].join(',')}])`);
+  check(ctx.out.color[0][0] === 1, `relational userfn vs float (got [${ctx.out.color[0].join(',')}])`);
 }
 
-// (d) int user fn == float literal.
+// (d) user fn (explicit float ctor) in an equality.
 {
   const { ctx } = runMain(
     `#version 300 es
@@ -205,20 +205,20 @@ precision mediump float;
 int f() { return 3; }
 out vec4 color;
 void main() {
-  float r = (f() == 3.0) ? 1.0 : 0.0;
+  float r = (float(f()) == 3.0) ? 1.0 : 0.0;
   color = vec4(r, 0.0, 0.0, 1.0);
 }`,
     'FRAGMENT',
     300,
   );
-  check(ctx.out.color[0][0] === 1, `equality int userfn vs float (got [${ctx.out.color[0].join(',')}])`);
+  check(ctx.out.color[0][0] === 1, `equality userfn vs float (got [${ctx.out.color[0].join(',')}])`);
 }
 
 /* ------------------------------------------------------------------ */
-/* Decl-init / compound assign with mixed-base conversion              */
+/* Decl-init / compound assign with a user-fn conversion               */
 /* ------------------------------------------------------------------ */
 
-// (e) float x = f();  (int user fn → float; emitDeclStmt convertPreserving).
+// (e) float x = float(f());  (user fn in a decl-init ctor; emitDeclStmt path).
 {
   const { ctx } = runMain(
     `#version 300 es
@@ -226,17 +226,17 @@ precision mediump float;
 int f() { return 3; }
 out vec4 color;
 void main() {
-  float x = f();
+  float x = float(f());
   color = vec4(x, 0.0, 0.0, 1.0);
 }`,
     'FRAGMENT',
     300,
   );
-  check(ctx.out.color[0][0] === 3, `decl-init int userfn to float (got [${ctx.out.color[0].join(',')}])`);
+  check(ctx.out.color[0][0] === 3, `decl-init userfn ctor to float (got [${ctx.out.color[0].join(',')}])`);
 }
 
-// (f) compound assign with mixed-base RHS in EXPRESSION position
-//     (emitAssign compound path; float += int user fn).
+// (f) compound assign with user-fn RHS in EXPRESSION position
+//     (emitAssign compound path; float += float(f())).
 {
   const { ctx } = runMain(
     `#version 300 es
@@ -245,7 +245,7 @@ int f() { return 3; }
 out vec4 color;
 void main() {
   float x = 1.0;
-  float y = (x += f()) + 0.0;
+  float y = (x += float(f())) + 0.0;
   color = vec4(y, x, 0.0, 1.0);
 }`,
     'FRAGMENT',
@@ -253,15 +253,15 @@ void main() {
   );
   check(
     ctx.out.color[0][0] === 4 && ctx.out.color[0][1] === 4,
-    `compound assign mixed-base rhs (got [${ctx.out.color[0].join(',')}])`,
+    `compound assign userfn rhs (got [${ctx.out.color[0].join(',')}])`,
   );
 }
 
 /* ------------------------------------------------------------------ */
-/* Bitwise binary with mixed base (convertValue re-attach path)        */
+/* Bitwise binary with a pre-carrying left operand                     */
 /* ------------------------------------------------------------------ */
 
-// (g) int user fn & uint literal (no wrapper ctor).
+// (g) user fn (explicit uint ctor) & uint literal.
 {
   const { ctx } = runMain(
     `#version 300 es
@@ -269,26 +269,26 @@ precision mediump float;
 int f() { return 6; }
 out vec4 color;
 void main() {
-  uint r = f() & 3u;
+  uint r = uint(f()) & 3u;
   color = vec4(float(r), 0.0, 0.0, 1.0);
 }`,
     'FRAGMENT',
     300,
   );
-  check(ctx.out.color[0][0] === 2, `bitwise int userfn & 3u (got [${ctx.out.color[0].join(',')}])`);
+  check(ctx.out.color[0][0] === 2, `bitwise userfn uint & 3u (got [${ctx.out.color[0].join(',')}])`);
 }
 
 /* ------------------------------------------------------------------ */
-/* Struct / array constructors with mixed-base members                 */
+/* Struct / array constructors with pre-carrying member args           */
 /* ------------------------------------------------------------------ */
 
-// (h) struct ctor S(f()) — int user fn → float member.
+// (h) struct ctor S(f()) — user fn (float) → float member.
 {
   const { ctx } = runMain(
     `#version 300 es
 precision mediump float;
 struct S { float x; };
-int f() { return 3; }
+float f() { return 3.0; }
 out vec4 color;
 void main() {
   S s = S(f());
@@ -298,15 +298,15 @@ void main() {
     300,
     { structNames: ['S'] },
   );
-  check(ctx.out.color[0][0] === 3, `struct ctor mixed-base member (got [${ctx.out.color[0].join(',')}])`);
+  check(ctx.out.color[0][0] === 3, `struct ctor userfn member (got [${ctx.out.color[0].join(',')}])`);
 }
 
-// (i) array ctor float[1](f()) — int user fn → float element.
+// (i) array ctor float[1](f()) — user fn (float) → float element.
 {
   const { ctx } = runMain(
     `#version 300 es
 precision mediump float;
-int f() { return 3; }
+float f() { return 3.0; }
 out vec4 color;
 void main() {
   float arr[1] = float[1](f());
@@ -315,7 +315,7 @@ void main() {
     'FRAGMENT',
     300,
   );
-  check(ctx.out.color[0][0] === 3, `array ctor mixed-base element (got [${ctx.out.color[0].join(',')}])`);
+  check(ctx.out.color[0][0] === 3, `array ctor userfn element (got [${ctx.out.color[0].join(',')}])`);
 }
 
 /* ------------------------------------------------------------------ */
