@@ -30,6 +30,7 @@ import type {
 import type { GLSLType, Precision, SamplerKind, StorageClass, StructMember } from './types.js';
 import { isFloat, typeEquals, typeName } from './types.js';
 import { analyzeExpr, convertible } from './semantics-expr.js';
+import { evalConstExpr } from './semantics-const.js';
 import { analyzeStatement } from './semantics-stmt.js';
 import {
   builtinConstants, builtinSignatures, builtinVariables,
@@ -145,6 +146,13 @@ export interface VarSymbol extends BaseSymbol {
   storage?: StorageClass;
   /** const globals/locals with constant initializers: the folded value. */
   constValue?: number | boolean;
+  /**
+   * const variables ONLY (never const-qualified params): the FULLY folded
+   * initializer as flat components (column-major matrices, struct members
+   * flattened in declaration order, arrays element-major, scalar = [v]).
+   * Non-scalar consts have no scalar constValue — this array is their value.
+   */
+  constData?: (number | boolean)[];
 }
 
 /** One function parameter (name may be '' for unnamed params). */
@@ -481,9 +489,12 @@ function checkFloatPrecision(ctx: SemContext, line: number, t: GLSLType, name: s
  * Analyze an initializer + register each declarator as a VarSymbol.
  * Shared by global declarations and local decl-statements. Initializers are
  * analyzed as expressions and must convert (implicitly) to the declared
- * type; `const` variables require a constant initializer (scalar/vector/
- * matrix: a folded constValue; array/struct: a constructor call). Array dims
- * are validated via wrapArrayDims.
+ * type; `const` variables require a CONSTANT initializer — `evalConstExpr`
+ * (semantics-const.ts) folds the whole expression (scalar/vector/matrix
+ * constructors, struct/array constant initializers, comma/ternary, binary
+ * ops, member/index reads of consts); the folded flat components are stored
+ * on the symbol as `constData` (scalars additionally mirror `constValue`).
+ * Array dims are validated via wrapArrayDims.
  */
 export function declareVariables(
   baseType: GLSLType | null,
@@ -510,22 +521,25 @@ export function declareVariables(
         ctx.error(d.init.loc.line, `cannot convert from '${typeName(it)}' to '${typeName(type)}'`);
       }
     }
+    let constData: (number | boolean)[] | undefined;
     if (spec.qualifiers.storage === 'const') {
       if (d.init === null) {
         ctx.error(d.loc.line, `'${d.name}' : const variable must be initialized`);
-      } else if (type.kind === 'array' || type.kind === 'struct') {
-        // const arrays/structs: accept constructor-call initializers (the
-        // scalar constValue model cannot represent aggregates).
-        if (d.init.kind !== 'call') {
-          ctx.error(d.init.loc.line, `'${d.name}' : initializer of const variable must be a constant expression`);
-        }
-      } else if (d.init.constValue === undefined) {
-        ctx.error(d.init.loc.line, `'${d.name}' : initializer of const variable must be a constant expression`);
       } else {
-        constValue = d.init.constValue;
+        // evalConstExpr covers every constant-expression form: literals,
+        // const reads, all constructor families (incl. the CTS boilerplate
+        // `const vec4 green = vec4(0.0, 1.0, 0.0, 1.0);`), comma/ternary,
+        // binary/unary ops and member/index reads of consts. Undefined =
+        // a non-const leaf → not a constant expression.
+        constData = evalConstExpr(d.init, scope, ctx);
+        if (constData === undefined) {
+          ctx.error(d.init.loc.line, `'${d.name}' : initializer of const variable must be a constant expression`);
+        } else if (type.kind === 'scalar') {
+          constValue = constData[0];
+        }
       }
     }
-    scope.declare({ kind: 'var', name: d.name, type, storage: spec.qualifiers.storage, constValue }, ctx, d.loc.line);
+    scope.declare({ kind: 'var', name: d.name, type, storage: spec.qualifiers.storage, constValue, constData }, ctx, d.loc.line);
   }
 }
 
