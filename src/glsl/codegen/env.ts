@@ -129,14 +129,17 @@ export function isIntegralFamily(t: GLSLType): boolean {
   }
 }
 
-/** Wrap an expression string to int32 range (int-typed results). */
+/** Wrap an expression string to int32 range (int-typed results). The result
+ *  is SELF-PARENTHESIZED — wrapped values are embedded in larger expressions
+ *  (`(a + (x) | 0)` would parse as `(a + x) | 0`; `|` binds looser than `+`). */
 export function wrapInt(s: string): string {
-  return `(${s}) | 0`;
+  return `((${s}) | 0)`;
 }
 
-/** Wrap an expression string to uint32 range (uint-typed results). */
+/** Wrap an expression string to uint32 range (uint-typed results). Same
+ *  self-parenthesizing contract as wrapInt (`>>> 0` binds looser than `+`). */
 export function wrapUint(s: string): string {
-  return `(${s}) >>> 0`;
+  return `((${s}) >>> 0)`;
 }
 
 /** Convert ONE value to another scalar base (per-component; vectors zip outside).

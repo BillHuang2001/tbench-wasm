@@ -700,7 +700,7 @@ function emitUnary(e: Extract<Expr, { kind: 'unary' }>, env: CodegenEnv): Value[
         return { v: `(${x})` };
       case '-':
         if (base === 'uint') return { v: `((0 - (${x})) >>> 0)` };
-        if (base === 'int') return { v: `(-(${x})) | 0` };
+        if (base === 'int') return { v: `((-(${x})) | 0)` };
         return { v: `(-(${x}))` };
       case '!':
         return { v: `(!(${x}))` };

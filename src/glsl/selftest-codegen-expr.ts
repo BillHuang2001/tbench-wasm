@@ -372,7 +372,7 @@ function evalParams(v: Value, e: CodegenEnv, params: string[], args: number[]): 
     call('packHalf2x16', [call('vec2', [ident('a', fT()), ident('b', fT())], vT('float', 2))], uT()),
     e,
   )[0];
-  check(v.v === '(R.packHalf2x16(a, b)) >>> 0', `packHalf2x16 → '(R.packHalf2x16(a, b)) >>> 0' (got '${v.v}')`);
+  check(v.v === '((R.packHalf2x16(a, b)) >>> 0)', `packHalf2x16 → '((R.packHalf2x16(a, b)) >>> 0)' (got '${v.v}')`);
   check(evalParams(v, e, ['a', 'b'], [1.0, -2.0]) === 0xc0003c00, `packHalf2x16(1, -2) === 0xC0003C00`);
 }
 
@@ -644,7 +644,7 @@ const TEX_UNIFORM: [string, { store: 'float' | 'int'; slot: number; stride: numb
     call('texelFetch', [ident('u_tex', sT('usampler2D')), call('ivec2', [lit(1, iT()), lit(2, iT())], vT('int', 2)), lit(0, iT())], vT('uint', 4)),
     e,
   );
-  check(vals[0].v === '(ctx.tex.outUint[0]) >>> 0', `usampler texelFetch wraps outUint (got '${vals[0].v}')`);
+  check(vals[0].v === '((ctx.tex.outUint[0]) >>> 0)', `usampler texelFetch wraps outUint (got '${vals[0].v}')`);
 }
 
 {
@@ -692,7 +692,7 @@ const TEX_UNIFORM: [string, { store: 'float' | 'int'; slot: number; stride: numb
 {
   const e = env('VERTEX', 100);
   const v = emitExpr(ident('u_i', uT()), e)[0];
-  check(v.v === '(ctx.intUniforms[4 + 0]) >>> 0', `uint uniform read wrapped (got '${v.v}')`);
+  check(v.v === '((ctx.intUniforms[4 + 0]) >>> 0)', `uint uniform read wrapped (got '${v.v}')`);
 }
 
 {
