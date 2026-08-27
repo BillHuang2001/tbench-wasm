@@ -19,7 +19,6 @@
  * designed by the implementation tasks (expressions.ts etc.) — this file only
  * pins the linker-facing surface + the Value seam.
  */
-import type { TranslationUnit } from '../ast.js';
 import type { ShaderUses } from '../compiler.js';
 
 /** One flattened default-block uniform path → store position. */
@@ -134,15 +133,14 @@ export interface Value {
   pre?: string[];
 }
 
-/** Generate the vertex stage body (writes ctx.out.position/pointSize/varyings). */
-export function generateVertexStage(ast: TranslationUnit, layout: CodegenLayout): StageCodegenResult {
-  throw new Error('not implemented');
-}
+/** Generate the vertex stage body (writes ctx.out.position/pointSize/varyings).
+ *  Implemented in vertex.ts (stage assembly: env + installUserFunctions +
+ *  emitStatements of `main`). */
+export { generateVertexStage } from './vertex.js';
 
-/** Generate the fragment stage body (writes ctx.out.color[loc], ctx.out.fragDepth, ctx.discarded). */
-export function generateFragmentStage(ast: TranslationUnit, layout: CodegenLayout): StageCodegenResult {
-  throw new Error('not implemented');
-}
+/** Generate the fragment stage body (writes ctx.out.color[loc], ctx.out.fragDepth, ctx.discarded).
+ *  Implemented in fragment.ts (same assembly; fragment storage surface). */
+export { generateFragmentStage } from './fragment.js';
 
 /** The shared runtime object passed as the 2nd arg of new Function('ctx','R', body). */
 export { R } from './runtime.js';
