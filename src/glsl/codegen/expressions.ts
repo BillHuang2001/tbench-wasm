@@ -929,7 +929,11 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
       const a = materialize(emitExpr(e.left, env), env)[0];
       const b = emitExpr(e.right, env)[0];
       const bv = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-      return [{ v: op === '&&' ? `(${a.v} && (${bv}))` : `(${a.v} || (${bv}))` }];
+      // `a` was materialized — its pre (the temp assignment) MUST carry on the
+      // result, or the left operand reads an unassigned temp (always falsy).
+      const out: Value = { v: op === '&&' ? `(${a.v} && (${bv}))` : `(${a.v} || (${bv}))` };
+      if (a.pre && a.pre.length > 0) out.pre = a.pre;
+      return [out];
     }
     case '^^': {
       const a = emitExpr(e.left, env)[0];
@@ -944,8 +948,22 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
       const cb = commonBase(lb, rb);
       if (!cb) throw new Error(`codegen: cannot compare ${typeName(lt)} and ${typeName(rt)}`);
       const ct = shapeOf(lt, cb);
-      const av = convertValue(emitExpr(e.left, env), lt, ct);
-      const bv = convertValue(emitExpr(e.right, env), rt, ct);
+      const avSrc = emitExpr(e.left, env);
+      const bvSrc = emitExpr(e.right, env);
+      const av = convertValue(avSrc, lt, ct);
+      const bv = convertValue(bvSrc, rt, ct);
+      // convertValue DROPS Value.pre when it converts scalar bases — re-attach
+      // (mirrors statements.ts convertPreserving) so operand pres survive.
+      for (let c = 0; c < flatComponents(lt); c++) {
+        const as = avSrc[c];
+        const bs = bvSrc[c];
+        if (av[c] !== as && as.pre && as.pre.length > 0) {
+          av[c] = { ...av[c], pre: as.pre };
+        }
+        if (bv[c] !== bs && bs.pre && bs.pre.length > 0) {
+          bv[c] = { ...bv[c], pre: bs.pre };
+        }
+      }
       const parts: string[] = [];
       for (let c = 0; c < flatComponents(lt); c++) {
         const ap = av[c].pre;
@@ -963,8 +981,19 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
       const cb = commonBase(lb, rb);
       if (!cb) throw new Error(`codegen: cannot compare ${typeName(lt)} and ${typeName(rt)}`);
       const ct = shapeOf(lt, cb);
-      const a = convertValue(emitExpr(e.left, env), lt, ct)[0];
-      const b = convertValue(emitExpr(e.right, env), rt, ct)[0];
+      const aSrc = emitExpr(e.left, env);
+      const bSrc = emitExpr(e.right, env);
+      const ac = convertValue(aSrc, lt, ct);
+      const bc = convertValue(bSrc, rt, ct);
+      // convertValue DROPS Value.pre when it converts scalar bases — re-attach.
+      if (ac[0] !== aSrc[0] && aSrc[0].pre && aSrc[0].pre.length > 0) {
+        ac[0] = { ...ac[0], pre: aSrc[0].pre };
+      }
+      if (bc[0] !== bSrc[0] && bSrc[0].pre && bSrc[0].pre.length > 0) {
+        bc[0] = { ...bc[0], pre: bSrc[0].pre };
+      }
+      const a = ac[0];
+      const b = bc[0];
       const av = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
       const bv = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
       return [{ v: `(${av} ${op} (${bv}))` }];
@@ -989,8 +1018,22 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
       const cb = commonBase(lb, rb);
       if (!cb) throw new Error(`codegen: incompatible bitwise operands`);
       const ct = shapeOf(lt, cb);
-      const av = convertValue(emitExpr(e.left, env), lt, ct);
-      const bv = convertValue(emitExpr(e.right, env), rt, ct);
+      const avSrc = emitExpr(e.left, env);
+      const bvSrc = emitExpr(e.right, env);
+      const av = convertValue(avSrc, lt, ct);
+      const bv = convertValue(bvSrc, rt, ct);
+      // convertValue DROPS Value.pre when it converts scalar bases — re-attach
+      // (mirrors statements.ts convertPreserving) so operand pres survive.
+      for (let c = 0; c < flatComponents(lt); c++) {
+        const as = avSrc[c];
+        const bs = bvSrc[c];
+        if (av[c] !== as && as.pre && as.pre.length > 0) {
+          av[c] = { ...av[c], pre: as.pre };
+        }
+        if (bv[c] !== bs && bs.pre && bs.pre.length > 0) {
+          bv[c] = { ...bv[c], pre: bs.pre };
+        }
+      }
       const isU = cb === 'uint';
       return av.map((a, c) => {
         const x = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
@@ -1323,7 +1366,15 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
   // compound: target op= rhs  (read target once — targets are pure paths)
   const base = scalarBaseOf(t);
   if (!base) throw new Error('codegen: cannot compound-assign a non-scalar-shaped value');
-  const conv = convertValue(rhs, e.value.resolvedType!, t);
+  let conv = convertValue(rhs, e.value.resolvedType!, t);
+  // convertValue DROPS Value.pre when it converts scalar bases — re-attach
+  // (mirrors statements.ts convertPreserving) so RHS pres survive.
+  for (let c = 0; c < n; c++) {
+    const src = rhs[c];
+    if (conv[c] !== src && src.pre && src.pre.length > 0) {
+      conv = conv.map((v, i) => (i === c ? { ...v, pre: src.pre } : v));
+    }
+  }
   const cop = e.op.slice(0, -1); // parser emits '+=' — compoundOp switches on '+'
   if (env.dual && lv.dualTargets && base === 'float') {
     // Dual mode, float target: the compound composite (updates all three
@@ -1397,7 +1448,18 @@ function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Va
       if (pre.length > 0) val.pre = pre;
       out.push(val);
     } else {
-      out.push({ v: `(${cond.v} ? (${a[c].v}) : (${b[c].v}))` });
+      // Non-dual: cond/a/b were materialized at the top — carry their pres
+      // (the temp assignments) so the select reads assigned temps.
+      const pre: string[] = [];
+      const cp = cond.pre;
+      if (cp) pre.push(...cp);
+      const ap = a[c].pre;
+      if (ap) pre.push(...ap);
+      const bp = b[c].pre;
+      if (bp && bp !== ap) pre.push(...bp);
+      const val: Value = { v: `(${cond.v} ? (${a[c].v}) : (${b[c].v}))` };
+      if (pre.length > 0) val.pre = pre;
+      out.push(val);
     }
   }
   return out;
@@ -1461,7 +1523,16 @@ function emitArrayCtor(args: Expr[], elem: GLSLType, t: GLSLType, env: CodegenEn
   for (let k = 0; k < n; k++) {
     const a = args[k];
     if (!a) throw new Error('codegen: array constructor arity mismatch');
-    const vals = convertValue(emitExpr(a, env), a.resolvedType!, elem);
+    const srcVals = emitExpr(a, env);
+    const vals = convertValue(srcVals, a.resolvedType!, elem);
+    // convertValue DROPS Value.pre when it converts scalar bases — re-attach
+    // so element pres survive.
+    for (let c = 0; c < srcVals.length; c++) {
+      const src = srcVals[c];
+      if (vals[c] !== src && src.pre && src.pre.length > 0) {
+        vals[c] = { ...vals[c], pre: src.pre };
+      }
+    }
     out.push(...vals);
   }
   return out;

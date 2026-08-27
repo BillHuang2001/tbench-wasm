@@ -225,7 +225,7 @@ function emitDeclStmt(s: DeclStmt, env: CodegenEnv, out: string[]): void {
       }
       continue;
     }
-    const vals = convertValue(emitExpr(d.init, env), d.init.resolvedType!, type);
+    const vals = convertPreserving(emitExpr(d.init, env), d.init.resolvedType!, type);
     emitPres(out, vals);
     if (lv.kind === 'scratch') {
       const store = lv.int ? 'ctx.intScratch' : 'ctx.scratch';

@@ -556,6 +556,8 @@ function dualLowerBuiltin(
       const x = materialize(argVals[0], env);
       const outLv = emitLValue(args[1], env);
       const pre: string[] = [];
+      const xPre = mergePre(x);
+      if (xPre) pre.push(...xPre);
       const ts: string[] = [];
       for (let c = 0; c < nc; c++) {
         const t = env.allocTemp();
@@ -968,7 +970,10 @@ function lowerBuiltin(
         const d = `((${a[c].v}) - (${b[c].v}))`;
         parts.push(`(${d} * ${d})`);
       }
-      return [{ v: `Math.sqrt(${parts.join(' + ')})` }];
+      const res: Value = { v: `Math.sqrt(${parts.join(' + ')})` };
+      const pre = mergePre([...a, ...b]);
+      if (pre) res.pre = pre;
+      return [res];
     }
     case 'dot': {
       const parts: string[] = [];
@@ -997,7 +1002,10 @@ function lowerBuiltin(
       const t = env.allocTemp();
       const parts: string[] = [];
       for (let c = 0; c < argN[0]; c++) parts.push(`(${v[c].v} * ${v[c].v})`);
-      const pre = [`${t} = Math.sqrt(${parts.join(' + ')})`];
+      const pre: string[] = [];
+      const vPre = mergePre(v);
+      if (vPre) pre.push(...vPre);
+      pre.push(`${t} = Math.sqrt(${parts.join(' + ')})`);
       const out: Value[] = [];
       for (let c = 0; c < argN[0]; c++) out.push({ v: `((${v[c].v}) / ${t})`, pre });
       return out;
@@ -1009,7 +1017,8 @@ function lowerBuiltin(
       for (let c = 0; c < argN[0]; c++) {
         parts.push(`(${use(argVals[1][c])} * ${use(argVals[2][c])})`);
       }
-      const pre = [`${t} = (${parts.join(' + ')})`];
+      const pre = mergePre(N) ?? [];
+      pre.unshift(`${t} = (${parts.join(' + ')})`);
       const out: Value[] = [];
       for (let c = 0; c < argN[0]; c++) out.push({ v: `((${t}) < 0 ? (${N[c].v}) : (-(${N[c].v})))`, pre });
       return out;
@@ -1035,10 +1044,13 @@ function lowerBuiltin(
       for (let c = 0; c < argN[0]; c++) {
         parts.push(`(${use(argVals[1][c])} * ${use(argVals[0][c])})`); // dot(N, I)
       }
-      const pre = [
+      const pre: string[] = [];
+      const etaPre = mergePre([eta]);
+      if (etaPre) pre.push(...etaPre);
+      pre.push(
         `${td} = (${parts.join(' + ')})`,
         `${tk} = (1 - (${eta.v}) * (${eta.v}) * (1 - (${td}) * (${td})))`,
-      ];
+      );
       const out: Value[] = [];
       for (let c = 0; c < argN[0]; c++) {
         out.push({
@@ -1060,6 +1072,8 @@ function lowerBuiltin(
       for (let c = 0; c < ret.cols; c++) {
         for (let r = 0; r < ret.rows; r++) out.push({ v: `(${cv[c].v} * ${rv[r].v})` });
       }
+      const pre = mergePre([...cv, ...rv]);
+      if (pre) for (const o of out) o.pre = pre;
       return out;
     }
     case 'transpose': {
@@ -1077,13 +1091,18 @@ function lowerBuiltin(
       if (argTypes[0].kind !== 'matrix') throw new Error('codegen: determinant requires a matrix');
       const m = materialize(argVals[0], env);
       const cols = argTypes[0].cols;
+      let v: string;
       if (cols === 2) {
-        return [{ v: `((${m[0].v}) * (${m[3].v}) - (${m[1].v}) * (${m[2].v}))` }];
+        v = `((${m[0].v}) * (${m[3].v}) - (${m[1].v}) * (${m[2].v}))`;
+      } else if (cols === 3) {
+        v = det3s(m[0].v, m[1].v, m[2].v, m[3].v, m[4].v, m[5].v, m[6].v, m[7].v, m[8].v);
+      } else {
+        v = det4s(m);
       }
-      if (cols === 3) {
-        return [{ v: det3s(m[0].v, m[1].v, m[2].v, m[3].v, m[4].v, m[5].v, m[6].v, m[7].v, m[8].v) }];
-      }
-      return [{ v: det4s(m) }];
+      const res: Value = { v };
+      const pre = mergePre(m);
+      if (pre) res.pre = pre;
+      return [res];
     }
     case 'inverse': {
       if (argTypes[0].kind !== 'matrix') throw new Error('codegen: inverse requires a matrix');
@@ -1178,6 +1197,8 @@ function lowerBuiltin(
       const outLv = emitLValue(args[2], env);
       const b = env.allocIntScratch(2 * nc);
       const pre: string[] = [];
+      const argPre = mergePre([...x, ...y]);
+      if (argPre) pre.push(...argPre);
       for (let c = 0; c < nc; c++) {
         pre.push(`R.${name}(${x[c].v}, ${y[c].v}, ctx.intScratch, ${b + 2 * c})`);
         pre.push(lvWrite(outLv, c, `ctx.intScratch[${b + 2 * c + 1}]`));
@@ -1196,6 +1217,8 @@ function lowerBuiltin(
       const o2 = emitLValue(args[3], env);
       const b = env.allocIntScratch(2 * nc);
       const parts: string[] = [];
+      const argPre = mergePre([...x, ...y]);
+      if (argPre) parts.push(...argPre);
       for (let c = 0; c < nc; c++) {
         parts.push(`R.${name}(${x[c].v}, ${y[c].v}, ctx.intScratch, ${b + 2 * c})`);
         parts.push(lvWrite(o1, c, isU ? wrapUint(`ctx.intScratch[${b + 2 * c}]`) : `ctx.intScratch[${b + 2 * c}]`));
@@ -1208,6 +1231,8 @@ function lowerBuiltin(
       const x = materialize(argVals[0], env);
       const outLv = emitLValue(args[1], env);
       const pre: string[] = [];
+      const xPre = mergePre(x);
+      if (xPre) pre.push(...xPre);
       const ts: string[] = [];
       for (let c = 0; c < nc; c++) {
         const t = env.allocTemp();

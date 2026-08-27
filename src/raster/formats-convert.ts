@@ -814,7 +814,10 @@ export function getPackConverter(
     if (INTEGER_PACK_FORMATS.has(packFormat) && isIntegerPackType(packType)) {
       convert = buildIntegerPack(info, packFormat, packType);
     }
-  } else if (!INTEGER_PACK_FORMATS.has(packFormat) && !isIntegerPackType(packType)) {
+  } else if (!INTEGER_PACK_FORMATS.has(packFormat)) {
+    // Non-integer pack formats always take the normalized color path;
+    // buildColorPack's per-format switches return null for unsupported
+    // pack types (e.g. RGBA + BYTE), so no invalid converter is produced.
     convert = buildColorPack(info, packFormat, packType);
   }
   return convert ? { convert } : null;

@@ -26,7 +26,7 @@ linkProgram:    uniform merge → attrib locations → varying match/pack → un
 - `preprocessor.ts` (1186 lines — over the 1000 guideline, deliberately not split; see Known Issues) → `lexer.ts` → `parser.ts`/`parser-stmt.ts`/`parser-expr.ts` → `semantics.ts`/`semantics-expr.ts`/`semantics-stmt.ts`/`semantics-decl.ts` (type checking, symbol tables, overload resolution, const folding, precision rules, extension gating, ShaderInfo) → `linker.ts`.
 - `builtins/` — builtin SIGNATURE tables + VARIABLES + gl_Max* constants: `100.ts` (216 sigs, 7 vars, 8 constants), `300.ts` (625 sigs, 8 vars, 20 constants), `extensions.ts` (OES_standard_derivatives, EXT_shader_texture_lod (fragment-only), EXT_frag_depth, EXT_draw_buffers), `index.ts`.
 - `codegen/` — `env.ts` (CodegenEnv: storage access, scratch/temp allocation, dualWrite hook), `expressions.ts` (+`expr-builtins.ts`, `expr-ctor.ts`; non-dual + dual-number lowering), `statements.ts` (control flow, discard), `functions.ts` (user-function inliner), `vertex.ts`/`fragment.ts` (stage assembly), `runtime.ts` (shared `R` helper object: math/pack/bitfield/texture wrappers), `index.ts` (CodegenLayout seam + stage entry + Value).
-- `selftest-*.ts` — 14 committed tsx scripts (see Test Strategy).
+- `selftest-*.ts` — 15 committed tsx scripts (see Test Strategy; `codegen/selftest-predrop.ts` is the Value.pre-drop regression suite).
 
 ## Design Decisions (implemented; deviations from the original plan are noted)
 
@@ -86,7 +86,7 @@ linkProgram:    uniform merge → attrib locations → varying match/pack → un
 - **Sampler conflicts**: only EXPLICIT `layout(binding=)` conflicts (different types, same unit) are link errors; default-0 samplers are not (WebGL practice).
 
 ## Test Strategy
-- **In-repo selftests (committed tsx scripts, the PRIMARY gate — run via `npx tsx src/glsl/selftest-<name>.ts`)**: preproc 298, lexer 578, parse 328, semantics-core 186, semantics 141, runtime 129, codegen-expr 118, codegen-stmt 30, codegen-fn 21, codegen-stage 27, link 111, dual 31, dual-builtins 60, integration 59 — 2,117 checks, all green. They compile shaders via compileShader, link via linkProgram, and RUN generated stages against hand-built exec ctxs (per program.ts).
+- **In-repo selftests (committed tsx scripts, the PRIMARY gate — run via `npx tsx src/glsl/selftest-<name>.ts`)**: preproc 298, lexer 578, parse 328, semantics-core 186, semantics 141, runtime 129, codegen-expr 118, codegen-stmt 30, codegen-fn 21, codegen-stage 27, link 111, dual 31, dual-builtins 60, integration 59 — 2,117 checks, all green. Plus `codegen/selftest-predrop.ts` (21 checks): compiles+runs real shaders to pin every `Value.pre`-drop consumer (ternary, &&/||, convertValue re-attach paths, non-dual builtins, modf dual) — all 21 fail on pre-fix codegen.
 - `tests/unit/` is owned by the tests manager (parallel work) — do NOT rely on it; its glsl.test.ts may use minimal ctxs that don't match the full contract.
 - CTS gates (must pass 100%): `sdk/tests/conformance/glsl/` (313 tests) and `sdk/tests/conformance2/glsl3/` via `tests/conformance/`.
 - Regression: compile the full three.js/Babylon example shader sets without errors.
@@ -101,10 +101,10 @@ linkProgram:    uniform merge → attrib locations → varying match/pack → un
 - `parser.ts` → declarations & statements; `parser-expr.ts` → expressions; `parser-stmt.ts` → statement forms
 - `semantics.ts` → scopes, type checking, overload resolution, const folding; `semantics-expr.ts` → expressions; `semantics-stmt.ts` → statements; `semantics-decl.ts` → declarations, precision/extension rules, interface blocks, ShaderInfo
 - `builtins/` → builtin signature/variable/constant tables: `100.ts`, `300.ts`, `extensions.ts`, `index.ts`
-- `codegen/` → `index.ts` (CodegenLayout seam, Value, stage entry), `env.ts` (CodegenEnv, dualWrite), `expressions.ts` (+`expr-builtins.ts`, `expr-ctor.ts`), `statements.ts`, `functions.ts` (inliner), `vertex.ts`, `fragment.ts`, `runtime.ts` (R helpers; imports raster/texture-sampler.ts)
-- `selftest-*.ts` → the 14 committed tsx validation scripts (see Test Strategy)
+- `codegen/` → `index.ts` (CodegenLayout seam, Value, stage entry), `env.ts` (CodegenEnv, dualWrite), `expressions.ts` (+`expr-builtins.ts`, `expr-ctor.ts`), `statements.ts`, `functions.ts` (inliner), `vertex.ts`, `fragment.ts`, `runtime.ts` (R helpers; imports raster/texture-sampler.ts), `selftest-predrop.ts` (Value.pre-drop regressions)
+- `selftest-*.ts` → the 15 committed tsx validation scripts (see Test Strategy)
 - `../raster/texture-sampler.ts` → texture sampling runtime + TextureImage/SamplerState types (sibling — READ-ONLY from here; writes escalate to `../`)
 - `../gl/` → consumer of Program/Shader (sibling — read-only)
 
 ## Status
-COMPLETE: front-end (preprocessor/lexer/parser/semantics), builtins tables, linker (all features), and JS codegen (non-dual + dual-number modes) implemented; 2,117 selftest checks green; `npx tsc --noEmit` clean for src/glsl. Remaining work: CTS/three.js/Babylon verification (needs the test harnesses + gl/ integration), the known gaps listed above, and reconciling the texture approximations against CTS.
+COMPLETE: front-end (preprocessor/lexer/parser/semantics), builtins tables, linker (all features), and JS codegen (non-dual + dual-number modes) implemented; 2,138 selftest checks green (incl. 21 codegen-predrop); `npx tsc --noEmit` clean for src/glsl. Remaining work: CTS/three.js/Babylon verification (needs the test harnesses + gl/ integration), the known gaps listed above, and reconciling the texture approximations against CTS.
