@@ -192,12 +192,34 @@ export function convertScalar(v: string, from: string, to: string): string {
   throw new Error(`codegen: no implicit conversion ${from} → ${to}`);
 }
 
-/** Convert a Value[] (flat components of `from`) to `to`'s scalar base. */
+/**
+ * Convert a Value[] (flat components of `from`) to `to`'s scalar base.
+ * Same-base conversions (float→float — incl. shape-changing broadcasts/
+ * truncations at the caller) return `vals` unchanged, duals and all.
+ * DUAL MODE (detected by the values carrying dx — only dual mode sets it):
+ * int/uint→float attaches the constant duals (dx=dy='0' — the source has no
+ * derivative planes) and preserves `pre` (the dx/dy strings may reference
+ * temps its statements set); float→int/uint/bool drops the duals (integral
+ * results carry none). Non-dual mode keeps the historical behavior
+ * byte-identical (conversion drops pre — callers re-attach it when needed).
+ */
 export function convertValue(vals: Value[], from: GLSLType, to: GLSLType): Value[] {
   const fb = scalarBaseOf(from);
   const tb = scalarBaseOf(to);
   if (fb === null || tb === null || fb === tb) return vals;
-  return vals.map((v) => ({ v: convertScalar(v.v, fb, tb) }));
+  const dual = vals.length > 0 && vals[0].dx !== undefined;
+  if (!dual) return vals.map((v) => ({ v: convertScalar(v.v, fb, tb) }));
+  return vals.map((v) => {
+    const out: Value = { v: convertScalar(v.v, fb, tb) };
+    if (tb === 'float') {
+      // int/uint → float: the source carries no duals — constant duals.
+      out.dx = '0';
+      out.dy = '0';
+    }
+    // float → int/uint/bool: integral result — no duals (left absent).
+    if (v.pre && v.pre.length > 0) out.pre = v.pre;
+    return out;
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -949,14 +971,36 @@ export class CodegenEnv {
    * (null when the target has no dual planes — outputs, gl_FragDepth — or
    * the component is not float); `val` = the RHS Value (dx/dy absent = the
    * constant 0 — covers int→float conversions and literals). With `op`
-   * ('+'|'-') emits a compound update — the derivative of a LINEAR op is the
-   * op applied to the derivatives — any other op throws (needs the C5a2
-   * arithmetic dual templates: product/quotient rule). Returns a comma
+   * ('+','-','*','/','%') emits a compound update. Returns a comma
    * expression ENDING WITH THE v READ:
    *   '='      : (vslot = vv, dxslot = dxv, dyslot = dyv, vslot)
    *   '+='/'-=': (vslot = vslot op vv, dxslot = dxslot op dxv, dyslot = dyslot op dyv, vslot)
    * so both `target = <result>` statement emitters and expression contexts
-   * stay correct. Non-dual mode / no-dual-plane targets degrade to a plain
+   * stay correct.
+   *
+   * NON-LINEAR COMPOUNDS ('*','/','%' — the C5a2 arithmetic dual templates):
+   * the dual terms read the OLD v/dx slots, so they are ordered FIRST (comma
+   * evaluates left-to-right), the v update LAST. The RHS `val.v` is captured
+   * into a fresh temp (`t0 = val.v`) as the FIRST term — this runs any folded
+   * RHS pres exactly once (the RHS dx/dy strings may reference temps those
+   * pres set) and makes the RHS available to all three plane updates without
+   * re-evaluation (a side-effectful RHS — assignment, inlined call — must
+   * run once):
+   *   '*=': (t0 = vv, dxslot = dxslot * t0 + target * dxv,
+   *          dyslot = dyslot * t0 + target * dyv, target = target * t0, target)
+   *   '/=': (t0 = vv, dxslot = (dxslot * t0 - target * dxv) / (t0 * t0),
+   *          dyslot = (dyslot * t0 - target * dyv) / (t0 * t0),
+   *          target = target / t0, target)
+   *   '%=': (t0 = vv, dxslot = dxslot - Math.floor(target / t0) * dxv,
+   *          dyslot = dyslot - Math.floor(target / t0) * dyv,
+   *          target = target % t0, target)
+   * The '%=' v plane mirrors the non-dual float '%' (JS remainder); the dual
+   * planes use the GLSL mod view dv = da − floor(a/b)·db (floor is a.e.
+   * constant, so its derivative vanishes). Int/uint compounds ('<<=' etc.)
+   * never reach this hook — the assignment emitters gate on float targets
+   * (int targets have no dual planes).
+   *
+   * Non-dual mode / no-dual-plane targets degrade to a plain
    * `(target = val.v)` — byte-identical to the pre-dual emitters.
    */
   dualWrite(target: string, dual: [string, string] | null, val: Value, op?: string): string {
@@ -971,6 +1015,18 @@ export class CodegenEnv {
     const dyv = val.dy ?? '0';
     if (op === '+' || op === '-') {
       return `(${target} = ${target} ${op} ${val.v}, ${dual[0]} = ${dual[0]} ${op} ${dxv}, ${dual[1]} = ${dual[1]} ${op} ${dyv}, ${target})`;
+    }
+    if (op === '*') {
+      const t = this.allocTemp();
+      return `(${t} = ${val.v}, ${dual[0]} = ${dual[0]} * ${t} + ${target} * ${dxv}, ${dual[1]} = ${dual[1]} * ${t} + ${target} * ${dyv}, ${target} = ${target} * ${t}, ${target})`;
+    }
+    if (op === '/') {
+      const t = this.allocTemp();
+      return `(${t} = ${val.v}, ${dual[0]} = (${dual[0]} * ${t} - ${target} * ${dxv}) / (${t} * ${t}), ${dual[1]} = (${dual[1]} * ${t} - ${target} * ${dyv}) / (${t} * ${t}), ${target} = ${target} / ${t}, ${target})`;
+    }
+    if (op === '%') {
+      const t = this.allocTemp();
+      return `(${t} = ${val.v}, ${dual[0]} = ${dual[0]} - Math.floor(${target} / ${t}) * ${dxv}, ${dual[1]} = ${dual[1]} - Math.floor(${target} / ${t}) * ${dyv}, ${target} = ${target} % ${t}, ${target})`;
     }
     if (op !== undefined) {
       throw new Error(`codegen: dual-mode compound-assign '${op}=' requires arithmetic dual templates (C5a2)`);

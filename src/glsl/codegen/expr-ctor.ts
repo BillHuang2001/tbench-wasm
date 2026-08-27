@@ -1,5 +1,5 @@
 /**
- * expr-ctor.ts — GLSL constructor-call lowering (non-dual): emitConstructorCall.
+ * expr-ctor.ts — GLSL constructor-call lowering: emitConstructorCall.
  *
  * Handles the scalar / vector / matrix / struct constructor families (GLSL ES
  * §5.4.2). The general model:
@@ -18,6 +18,14 @@
  * - STRUCT ctors evaluate each argument and concatenate its flat components
  *   (member types match by construction — semantics verified arity/types).
  *
+ * DUAL MODE (env.dual — C5a2): every FLOAT result component carries the
+ * source component's (v, dx, dy) — each ctorComp preserves the source duals
+ * for float→float and attaches the constant 0 for int/uint/bool sources
+ * (those values carry no derivative planes). Int/uint/bool RESULTS carry no
+ * duals. Pads (0.0 / 1.0) are constant duals. `pre` attaches to the result
+ * components (shared array) so materialized temps the dual strings reference
+ * are set even when only the dx/dy planes are consumed.
+ *
  * Multi-use argument values (splat, diagonal, padded matrix) are materialized
  * once into a temp var via materialize() (only values carrying `pre` actually
  * allocate a temp); single-use values fold their `pre` inline via foldPre.
@@ -28,7 +36,7 @@
 import type { Expr } from '../ast.js';
 import type { GLSLType } from '../types.js';
 import type { CodegenEnv } from './env.js';
-import { scalarBaseOf, foldPre, convertValue, hasFloatLeaves } from './env.js';
+import { scalarBaseOf, foldPre, convertValue } from './env.js';
 import type { Value } from './index.js';
 import { emitExpr, materialize } from './expressions.js';
 
@@ -56,18 +64,39 @@ function ctorConvert(v: string, from: string, to: string): string {
   throw new Error(`codegen: no conversion ${from} → ${to}`);
 }
 
-/** Padding constants per vector base (0s then a final 1). */
+/**
+ * One constructor component. Non-dual: `{ v: ctorConvert(v.v), pre: v.pre }`
+ * (byte-identical to the pre-dual emitters). Dual mode: float RESULTS attach
+ * the source duals — preserved for float→float (the source carries the
+ * derivative planes), constant 0 for int/uint/bool sources; integral results
+ * carry no duals. `pre` attaches so source temps stay alive for dx-only
+ * consumers (dFdx(float(f()))).
+ */
+function ctorComp(v: Value, from: string | null, to: string, env: CodegenEnv): Value {
+  const out: Value = { v: ctorConvert(v.v, from ?? to, to), pre: v.pre };
+  if (env.dual && to === 'float') {
+    out.dx = from === 'float' ? (v.dx ?? '0') : '0';
+    out.dy = from === 'float' ? (v.dy ?? '0') : '0';
+  }
+  return out;
+}
+
+/** Padding constant per vector base (0s then a final 1). */
 const PAD_ZERO: Record<string, string> = { float: '0.0', int: '0', uint: '0', bool: 'false' };
 const PAD_ONE: Record<string, string> = { float: '1.0', int: '1', uint: '1', bool: 'true' };
 
+/** A constant pad component — constant duals in dual mode. */
+function padComp(base: string, v: string, env: CodegenEnv): Value {
+  const out: Value = { v };
+  if (env.dual && base === 'float') {
+    out.dx = '0';
+    out.dy = '0';
+  }
+  return out;
+}
+
 /** Lower a constructor call (name is a builtin type name or a user struct). */
 export function emitConstructorCall(name: string, args: Expr[], retType: GLSLType, env: CodegenEnv): Value[] {
-  // Dual mode: float-typed constructors need the dual-aware argument
-  // concatenation/splat/pad lowering (C5a2) — a v-only flattening would
-  // silently zero the result derivatives. Int/uint/bool ctors stay legal.
-  if (env.dual && hasFloatLeaves(retType)) {
-    throw new Error(`codegen: dual-mode constructor '${name}' requires C5a2 (constructors)`);
-  }
   switch (retType.kind) {
     case 'scalar':
       return emitScalarCtor(name, args, retType, env);
@@ -94,9 +123,14 @@ function emitScalarCtor(
 ): Value[] {
   if (args.length !== 1) throw new Error(`codegen: '${name}' takes exactly one argument`);
   const base = retType.base;
-  const v = emitExpr(args[0], env)[0];
+  const raw = emitExpr(args[0], env)[0];
   const from = scalarBaseOf(args[0].resolvedType!);
-  return [{ v: ctorConvert(use(v), from ?? base, base) }];
+  if (!env.dual) return [{ v: ctorConvert(use(raw), from ?? base, base) }];
+  // Dual mode: materialize so the result's duals reference stable temps and
+  // pre-carrying sources (inlined calls) run exactly once even when only the
+  // duals are consumed (dFdx(float(f()))).
+  const v = materialize([raw], env)[0];
+  return [ctorComp(v, from ?? base, base, env)];
 }
 
 /* ------------------------------------------------------------------ */
@@ -124,15 +158,16 @@ function emitVectorCtor(
       const d = Math.min(at.cols, at.rows);
       for (let k = 0; k < d; k++) {
         const vv = av[k * at.rows + k];
-        flat.push({ v: ctorConvert(vv.v, from ?? base, base), pre: vv.pre });
+        flat.push(ctorComp(vv, from ?? base, base, env));
       }
     } else {
-      for (const vv of av) flat.push({ v: ctorConvert(vv.v, from ?? base, base), pre: vv.pre });
+      for (const vv of av) flat.push(ctorComp(vv, from ?? base, base, env));
     }
   }
   if (flat.length === 0) throw new Error(`codegen: empty '${name}' constructor`);
   if (flat.length === 1 && n > 1) {
-    // Splat: one scalar argument fills every component.
+    // Splat: one scalar argument fills every component (same Value object —
+    // its duals broadcast to all components).
     const s = flat[0];
     const out: Value[] = [];
     for (let i = 0; i < n; i++) out.push(s);
@@ -140,7 +175,7 @@ function emitVectorCtor(
   }
   if (flat.length > n) flat.length = n; // permissive truncation (semantics rejects)
   const out: Value[] = [...flat];
-  while (out.length < n) out.push({ v: out.length === n - 1 ? PAD_ONE[base] : PAD_ZERO[base] });
+  while (out.length < n) out.push(padComp(base, out.length === n - 1 ? PAD_ONE[base] : PAD_ZERO[base], env));
   return out;
 }
 
@@ -160,10 +195,17 @@ function emitMatrixCtor(
   // Lone scalar → diagonal.
   if (args.length === 1 && args[0].resolvedType!.kind === 'scalar') {
     const s = materialize(emitExpr(args[0], env), env)[0];
-    const sv = use(s);
     const out: Value[] = [];
     for (let c = 0; c < cols; c++) {
-      for (let r = 0; r < rows; r++) out.push({ v: c === r ? sv : '0.0' });
+      for (let r = 0; r < rows; r++) {
+        out.push(
+          c === r
+            ? env.dual
+              ? ctorComp(s, scalarBaseOf(args[0].resolvedType!) ?? 'float', 'float', env)
+              : { v: use(s) }
+            : padComp('float', '0.0', env),
+        );
+      }
     }
     return out;
   }
@@ -175,9 +217,9 @@ function emitMatrixCtor(
     for (let c = 0; c < cols; c++) {
       for (let r = 0; r < rows; r++) {
         if (c < src.cols && r < src.rows) {
-          out.push({ v: use(sv[c * src.rows + r]) });
+          out.push(env.dual ? ctorComp(sv[c * src.rows + r], 'float', 'float', env) : { v: use(sv[c * src.rows + r]) });
         } else {
-          out.push({ v: c === r ? '1.0' : '0.0' });
+          out.push(padComp('float', c === r ? '1.0' : '0.0', env));
         }
       }
     }
@@ -186,17 +228,19 @@ function emitMatrixCtor(
   // General: concatenate in column-major order, pad with (col===row ? 1 : 0).
   const flat: Value[] = [];
   for (const a of args) {
-    for (const vv of materialize(emitExpr(a, env), env)) flat.push({ v: vv.v, pre: vv.pre });
+    for (const vv of materialize(emitExpr(a, env), env)) {
+      flat.push(ctorComp(vv, scalarBaseOf(a.resolvedType!) ?? 'float', 'float', env));
+    }
   }
   if (flat.length > total) throw new Error(`codegen: '${name}' has too many components`);
   const out: Value[] = [];
   for (let k = 0; k < total; k++) {
     if (k < flat.length) {
-      out.push({ v: use(flat[k]) });
+      out.push(env.dual ? flat[k] : { v: use(flat[k]) });
     } else {
       const c = Math.floor(k / rows);
       const r = k % rows;
-      out.push({ v: c === r ? '1.0' : '0.0' });
+      out.push(padComp('float', c === r ? '1.0' : '0.0', env));
     }
   }
   return out;
@@ -218,6 +262,8 @@ function emitStructCtor(
   const out: Value[] = [];
   for (let i = 0; i < args.length; i++) {
     const m = retType.members[i];
+    // convertValue preserves float→float duals; int→float attaches constant
+    // duals; int members carry no duals.
     out.push(...convertValue(emitExpr(args[i], env), args[i].resolvedType!, m.type));
   }
   return out;
