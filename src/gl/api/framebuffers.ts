@@ -189,9 +189,26 @@ function attachmentKeys(ctx: WebGLRenderingContext, attachment: GLenum): GLenum[
 }
 
 /**
+ * Attachment-OBJECT identity for the WebGL2 DEPTH_STENCIL_ATTACHMENT query:
+ * the query succeeds when the depth and stencil points hold the same
+ * renderbuffer object or the same texture OBJECT (level/face/layer are NOT
+ * compared — CTS framebuffer-texture-layer.html attaches the same 2D_ARRAY
+ * texture at depth layer 0 and stencil layer 1 and still expects the query to
+ * return the texture; mismatch = different objects or one point empty →
+ * INVALID_OPERATION per framebuffer-object-attachment.html).
+ */
+function sameAttachmentObject(a: FramebufferAttachment, b: FramebufferAttachment): boolean {
+  if (a.type === 'renderbuffer' && b.type === 'renderbuffer') return a.renderbuffer === b.renderbuffer;
+  if (a.type === 'texture' && b.type === 'texture') return a.texture === b.texture;
+  return false;
+}
+
+/**
  * Resolve one attachment point's record. For WebGL2 DEPTH_STENCIL_ATTACHMENT
- * the record is returned only when the depth and stencil slots hold the SAME
- * record object (spec); a depth/stencil mismatch is reported via `conflict`.
+ * the record is returned only when the depth and stencil attachment points
+ * hold the same attachment OBJECT (see sameAttachmentObject); a mismatch
+ * (different objects, or one point empty) is reported via `conflict` and the
+ * caller generates INVALID_OPERATION.
  */
 function resolveAttachmentRecord(
   fbo: WebGLFramebuffer,
@@ -201,7 +218,7 @@ function resolveAttachmentRecord(
     const d = fbo._attachments.get(DEPTH_ATTACHMENT) ?? null;
     const s = fbo._attachments.get(STENCIL_ATTACHMENT) ?? null;
     if (d === null || s === null) return { rec: null, conflict: true };
-    if (d !== s) return { rec: null, conflict: true };
+    if (!sameAttachmentObject(d, s)) return { rec: null, conflict: true };
     return { rec: d, conflict: false };
   }
   return { rec: fbo._attachments.get(attachment) ?? null, conflict: false };
@@ -600,11 +617,13 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
     if (ctx._isLost) return false;
     if (framebuffer === null || framebuffer === undefined) return false;
     if (!(framebuffer instanceof WebGLFramebuffer)) throw new TypeError("Argument is not of type 'WebGLFramebuffer'");
-    if (framebuffer._context !== ctx) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return false;
-    }
-    return !framebuffer._deleted;
+    // A cross-context object IS a valid WebGLFramebuffer (WebIDL conversion
+    // succeeds) but is not valid for THIS context: is* returns false with NO
+    // error (CTS misc/is-object.html; spec §5.14.6).
+    if (framebuffer._context !== ctx) return false;
+    if (framebuffer._deleted) return false;
+    // Spec + CTS: an object must have been bound at least once to be true.
+    return everBoundFramebuffers.has(framebuffer);
   };
 
   proto.bindFramebuffer = function (this: WebGLRenderingContext, target: GLenum, framebuffer: WebGLFramebuffer | null): void {
@@ -629,7 +648,10 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       s.drawFramebuffer = fbo;
       if (target === C1.FRAMEBUFFER) s.readFramebuffer = fbo;
     }
-    if (fbo) fbo._isBound = true;
+    if (fbo) {
+      fbo._isBound = true;
+      everBoundFramebuffers.add(fbo); // isFramebuffer "has been bound" marker
+    }
   };
 
   proto.framebufferRenderbuffer = function (
@@ -638,6 +660,13 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
   ): void {
     const ctx = this;
     if (isLost(ctx)) return;
+    // WebIDL converts arguments left-to-right BEFORE any GL semantics run, so
+    // the object argument is converted first: a wrong JS type throws TypeError
+    // even when target/attachment would otherwise generate a GL error (CTS
+    // bad-arguments-test.html, null-object-behaviour.html); null/undefined are
+    // legal (detach).
+    const rb = renderbuffer === null || renderbuffer === undefined ? null : validateRbo(ctx, renderbuffer);
+    if (renderbuffer !== null && renderbuffer !== undefined && rb === null) return;
     if (!isValidFramebufferTarget(ctx, target)) {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
@@ -655,16 +684,20 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
     }
-    const rb = renderbuffer === null || renderbuffer === undefined ? null : validateRbo(ctx, renderbuffer);
-    if (renderbuffer !== null && renderbuffer !== undefined && rb === null) return;
     if (rb !== null && ctx._version === 1 && !everBoundRenderbuffers.has(rb)) {
       // WebGL1 CTS: bindRenderbuffer must be called before attachment.
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
+    // WebGL2 DEPTH_STENCIL_ATTACHMENT aliases the DEPTH and STENCIL slots: store
+    // the SAME record object under both keys so the query side's image-identity
+    // check (resolveAttachmentRecord) never sees a spurious depth/stencil
+    // mismatch (identity bug — see repro-fbo-depth-stencil.ts).
+    const rec: FramebufferAttachment | null =
+      rb === null ? null : { type: 'renderbuffer', renderbuffer: rb };
     for (const key of attachmentKeys(ctx, attachment)) {
-      if (rb === null) fbo._attachments.delete(key);
-      else fbo._attachments.set(key, { type: 'renderbuffer', renderbuffer: rb });
+      if (rec === null) fbo._attachments.delete(key);
+      else fbo._attachments.set(key, rec);
     }
     invalidateFboStatus(fbo);
   };
@@ -675,6 +708,9 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
   ): void {
     const ctx = this;
     if (isLost(ctx)) return;
+    // Object arg first (WebIDL left-to-right conversion — see framebufferRenderbuffer).
+    const tex = texture === null || texture === undefined ? null : validateTex(ctx, texture);
+    if (texture !== null && texture !== undefined && tex === null) return;
     if (!isValidFramebufferTarget(ctx, target)) {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
@@ -692,15 +728,21 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
     }
-    const tex = texture === null || texture === undefined ? null : validateTex(ctx, texture);
-    if (texture !== null && texture !== undefined && tex === null) return;
     if (tex !== null) {
+      // The texture must have been bound at least once (to TEXTURE_2D or
+      // TEXTURE_CUBE_MAP): `_target` is fixed at the first bindTexture call
+      // (api/textures.ts) and stays 0 while never bound — CTS
+      // state/fb-attach-implicit-target-assignment.html requires INVALID_OPERATION.
+      if (tex._target === 0) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
       // The texture must be a 2D or cube texture matching textarget (a 3D/
       // 2D_ARRAY/multisample texture → INVALID_OPERATION; target mismatch → INVALID_OPERATION).
       const cubeTex = tex._target === C1.TEXTURE_CUBE_MAP;
-      const flatTex = tex._target === C1.TEXTURE_2D || tex._target === 0;
+      const flatTex = tex._target === C1.TEXTURE_2D;
       if (isCubeFace(textarget)) {
-        if (!cubeTex && tex._target !== 0) {
+        if (!cubeTex) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
@@ -725,9 +767,12 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         return;
       }
     }
+    // Same-record sharing for DEPTH_STENCIL_ATTACHMENT (see framebufferRenderbuffer).
+    const rec: FramebufferAttachment | null =
+      tex === null ? null : { type: 'texture', texture: tex, level, face: textarget, layer: 0 };
     for (const key of attachmentKeys(ctx, attachment)) {
-      if (tex === null) fbo._attachments.delete(key);
-      else fbo._attachments.set(key, { type: 'texture', texture: tex, level, face: textarget, layer: 0 });
+      if (rec === null) fbo._attachments.delete(key);
+      else fbo._attachments.set(key, rec);
     }
     invalidateFboStatus(fbo);
   };
@@ -870,24 +915,24 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
     if (renderbuffer._deleted) return;
     renderbuffer._deleted = true;
     if (ctx._state.renderbuffer === renderbuffer) ctx._state.renderbuffer = null;
-    // Detach from every framebuffer (GLES2: deleting detaches the image).
-    let touched = false;
-    for (const obj of ctx._resources.all) {
-      if (obj instanceof WebGLFramebuffer) {
-        let changed = false;
-        for (const [key, rec] of obj._attachments) {
-          if (rec.type === 'renderbuffer' && rec.renderbuffer === renderbuffer) {
-            obj._attachments.delete(key);
-            changed = true;
-          }
-        }
-        if (changed) {
-          invalidateFboStatus(obj);
-          touched = true;
+    // Detach ONLY from the currently bound framebuffer(s) (GLES2/WebGL spec:
+    // deletion while attached to the bound FBO detaches it there; attachments
+    // in UNBOUND framebuffers persist until detached or the FBO is deleted —
+    // CTS context/deleted-object-behavior.html testUnboundFBORenderbuffer and
+    // misc/object-deletion-behaviour.html both hard-require the persistence).
+    const bound = new Set<WebGLFramebuffer>();
+    if (ctx._state.drawFramebuffer !== null) bound.add(ctx._state.drawFramebuffer);
+    if (ctx._version === 2 && ctx._state.readFramebuffer !== null) bound.add(ctx._state.readFramebuffer);
+    for (const fbo of bound) {
+      let changed = false;
+      for (const [key, rec] of fbo._attachments) {
+        if (rec.type === 'renderbuffer' && rec.renderbuffer === renderbuffer) {
+          fbo._attachments.delete(key);
+          changed = true;
         }
       }
+      if (changed) invalidateFboStatus(fbo);
     }
-    void touched;
     ctx._resources.untrack(renderbuffer);
   };
 
@@ -896,11 +941,11 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
     if (ctx._isLost) return false;
     if (renderbuffer === null || renderbuffer === undefined) return false;
     if (!(renderbuffer instanceof WebGLRenderbuffer)) throw new TypeError("Argument is not of type 'WebGLRenderbuffer'");
-    if (renderbuffer._context !== ctx) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return false;
-    }
-    return !renderbuffer._deleted;
+    // Cross-context → false with NO error (see isFramebuffer).
+    if (renderbuffer._context !== ctx) return false;
+    if (renderbuffer._deleted) return false;
+    // Spec + CTS (misc/is-object.html): must have been bound at least once.
+    return everBoundRenderbuffers.has(renderbuffer);
   };
 
   proto.bindRenderbuffer = function (this: WebGLRenderingContext, target: GLenum, renderbuffer: WebGLRenderbuffer | null): void {
@@ -989,6 +1034,9 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
     ): void {
       const ctx = this;
       if (isLost(ctx)) return;
+      // Object arg first (WebIDL left-to-right conversion — see framebufferRenderbuffer).
+      const tex = texture === null || texture === undefined ? null : validateTex(ctx, texture);
+      if (texture !== null && texture !== undefined && tex === null) return;
       if (!isValidFramebufferTarget(ctx, target)) {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
@@ -1002,11 +1050,12 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
       }
-      const tex = texture === null || texture === undefined ? null : validateTex(ctx, texture);
-      if (texture !== null && texture !== undefined && tex === null) return;
       if (tex !== null) {
-        // Only 2D_ARRAY / 3D textures can be attached by layer (CTS: 2D → INVALID_OPERATION).
-        if (tex._target !== 0 && tex._target !== C2.TEXTURE_2D_ARRAY && tex._target !== C2.TEXTURE_3D) {
+        // Only 2D_ARRAY / 3D textures can be attached by layer (CTS: 2D → INVALID_OPERATION),
+        // and the texture must have been bound at least once (spec mirrors
+        // framebufferTexture2D; `_target` is fixed at first bindTexture).
+        if (tex._target === 0 ||
+            (tex._target !== C2.TEXTURE_2D_ARRAY && tex._target !== C2.TEXTURE_3D)) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
@@ -1022,9 +1071,12 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
           return;
         }
       }
+      // Same-record sharing for DEPTH_STENCIL_ATTACHMENT (see framebufferRenderbuffer).
+      const rec: FramebufferAttachment | null =
+        tex === null ? null : { type: 'texture', texture: tex, level, face: C2.TEXTURE_2D_ARRAY, layer };
       for (const key of attachmentKeys(ctx, attachment)) {
-        if (tex === null) fbo._attachments.delete(key);
-        else fbo._attachments.set(key, { type: 'texture', texture: tex, level, face: C2.TEXTURE_2D_ARRAY, layer });
+        if (rec === null) fbo._attachments.delete(key);
+        else fbo._attachments.set(key, rec);
       }
       invalidateFboStatus(fbo);
     };
@@ -1283,6 +1335,9 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
 
 /** WebGL1 rule: a renderbuffer must have been bound before it can be attached. */
 const everBoundRenderbuffers = new WeakSet<WebGLRenderbuffer>();
+
+/** isFramebuffer "has been bound at least once" marker (spec + CTS misc/is-object.html). */
+const everBoundFramebuffers = new WeakSet<WebGLFramebuffer>();
 
 /** W2 default-framebuffer attachment parameter values. */
 function defaultFbAttachmentParameter(ctx: WebGLRenderingContext, pname: GLenum): any {
