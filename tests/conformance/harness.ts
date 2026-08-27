@@ -124,11 +124,17 @@ export async function runTestPage(
   const page: Page = await context.newPage();
   const started = Date.now();
   const messages: string[] = [];
-  const pushMessage = (m: string) => {
-    if (messages.length < MAX_MESSAGES) messages.push(m.slice(0, MAX_MESSAGE_LENGTH));
+  const pushMessage = (m: string, maxLen: number = MAX_MESSAGE_LENGTH) => {
+    if (messages.length < MAX_MESSAGES) messages.push(m.slice(0, maxLen));
   };
 
-  page.on("pageerror", (err) => pushMessage(`pageerror: ${errMsg(err)}`));
+  page.on("pageerror", (err) => {
+    // Truncated stack capture: the first/only pageerror of a test is usually
+    // the root cause (e.g. "Cyclic __proto__ value" from the renderer bundle's
+    // native instanceof chaining).
+    const stack = err instanceof Error && err.stack ? `\n${err.stack.split("\n").slice(0, 12).join("\n")}` : "";
+    pushMessage(`pageerror: ${errMsg(err)}${stack}`, 2000);
+  });
   page.on("console", (msg) => {
     if (msg.type() === "error") pushMessage(`console: ${msg.text()}`);
   });
