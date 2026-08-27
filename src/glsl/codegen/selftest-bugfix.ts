@@ -538,6 +538,75 @@ void main() {
   }
 }
 
+// (c5) BUG 3/6 relational family: the expr-builtins refactor dropped
+// lessThan/lessThanEqual/greaterThan/greaterThanEqual (core vec — ES 1.00)
+// and any use threw "codegen: builtin 'lessThan' not lowered". Both functions
+// share one shader; each result component lands in its own output channel.
+// lessThan inputs pin `<` (equal bound is false); lessThanEqual inputs pin
+// `<=` on the equal bound (a mis-lowered `<` would yield (F,F) there).
+{
+  const { ctx } = runMain(
+    `precision mediump float;
+void main() {
+  bvec2 a = lessThan(vec2(1.0, 2.0), vec2(2.0, 1.0));
+  bvec2 b = lessThanEqual(vec2(1.0, 2.0), vec2(1.0, 1.0));
+  gl_FragColor = vec4(a.x ? 1.0 : 0.0, a.y ? 1.0 : 0.0, b.x ? 1.0 : 0.0, b.y ? 1.0 : 0.0);
+}`,
+    'FRAGMENT',
+    100,
+  );
+  check(
+    ctx.out.color[0][0] === 1 && ctx.out.color[0][1] === 0 &&
+      ctx.out.color[0][2] === 1 && ctx.out.color[0][3] === 0,
+    `lessThan/lessThanEqual (got [${ctx.out.color[0].join(',')}], want [1,0,1,0])`,
+  );
+}
+
+// (c6) greaterThan/greaterThanEqual — same shared-shader pattern. greaterThan
+// input pins `>` on the equal bound (2.0 > 2.0 is false); greaterThanEqual
+// pins `>=` (both components true — a mis-lowered `>` would yield (F,F)).
+{
+  const { ctx } = runMain(
+    `precision mediump float;
+void main() {
+  bvec2 c = greaterThan(vec2(3.0, 2.0), vec2(2.0, 2.0));
+  bvec2 d = greaterThanEqual(vec2(2.0, 2.0), vec2(2.0, 2.0));
+  gl_FragColor = vec4(c.x ? 1.0 : 0.0, c.y ? 1.0 : 0.0, d.x ? 1.0 : 0.0, d.y ? 1.0 : 0.0);
+}`,
+    'FRAGMENT',
+    100,
+  );
+  check(
+    ctx.out.color[0][0] === 1 && ctx.out.color[0][1] === 0 &&
+      ctx.out.color[0][2] === 1 && ctx.out.color[0][3] === 1,
+    `greaterThan/greaterThanEqual (got [${ctx.out.color[0].join(',')}], want [1,0,1,1])`,
+  );
+}
+
+// (c7) numeric equal/notEqual must stay STRICT (no `!!` normalization on
+// numbers): equal(ivec2(2,2), ivec2(1,2)) → (false,true) — `!!(2) === !!(1)`
+// would wrongly read (true,true) — and notEqual(uvec2(1u,2u), uvec2(2u,2u))
+// → (true,false) — `!!(1u) !== !!(2u)` would wrongly read (false,false).
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+out vec4 color;
+void main() {
+  bvec2 e = equal(ivec2(2, 2), ivec2(1, 2));
+  bvec2 f = notEqual(uvec2(1u, 2u), uvec2(2u, 2u));
+  color = vec4(e.x ? 1.0 : 0.0, e.y ? 1.0 : 0.0, f.x ? 1.0 : 0.0, f.y ? 1.0 : 0.0);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  check(
+    ctx.out.color[0][0] === 0 && ctx.out.color[0][1] === 1 &&
+      ctx.out.color[0][2] === 1 && ctx.out.color[0][3] === 0,
+    `equal(ivec2)/notEqual(uvec2) strict (got [${ctx.out.color[0].join(',')}], want [0,1,1,0])`,
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* BUG 5 — swizzled attribute fetch stride                             */
 /* ------------------------------------------------------------------ */

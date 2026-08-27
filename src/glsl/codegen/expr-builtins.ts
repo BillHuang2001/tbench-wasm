@@ -1246,17 +1246,28 @@ function lowerBuiltin(
     }
 
     /* ---------------- relational ---------------- */
+    case 'lessThan':
+    case 'lessThanEqual':
+    case 'greaterThan':
+    case 'greaterThanEqual':
     case 'equal':
     case 'notEqual': {
       // BUG 6 (audit of the bool strict-equality class): equal/notEqual accept
       // BOOL vectors — uniform-store operands are numbers (0/1) while literals
       // are true/false, so strict ===/!== miscompares. Normalize both sides
       // only for bool operands (numeric comparisons stay strict).
+      // BUG 3/6 regression: lessThan/lessThanEqual/greaterThan/greaterThanEqual
+      // (vec/ivec/uvec, core 1.00/3.00) were dropped by the refactor — restore
+      // them here; isBool is only true for equal/notEqual (semantics rejects
+      // lessThan on bools), so numeric comparisons stay strict.
+      const numOp: Record<string, string> = {
+        lessThan: '<', lessThanEqual: '<=', greaterThan: '>', greaterThanEqual: '>=',
+        equal: '===', notEqual: '!==',
+      };
       const isBool =
         scalarBaseOf(argTypes[0]) === 'bool' && scalarBaseOf(argTypes[1]) === 'bool';
-      const op = name === 'equal' ? '===' : '!==';
       return perComp(n, argVals, argTypes, ([a, b]) =>
-        isBool ? `(!!(${a})) ${op} (!!(${b}))` : `(${a}) ${op} (${b})`,
+        isBool ? `(!!(${a})) ${numOp[name]} (!!(${b}))` : `(${a}) ${numOp[name]} (${b})`,
       );
     }
     case 'any': {
