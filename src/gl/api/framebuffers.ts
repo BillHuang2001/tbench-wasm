@@ -379,7 +379,7 @@ function localFormatDesc(format: GLenum): LocalFormatDesc {
   }
 }
 
-const noopDecode = (_data: ArrayBufferView, _byteOffset: number, _out: Float32Array): void => { /* placeholder */ };
+const noopDecode = (_data: ArrayBufferView, _byteOffset: number, out?: Float32Array): Float32Array => out ?? new Float32Array(4);
 const noopEncode = (_data: ArrayBufferView, _byteOffset: number, _r: number, _g: number, _b: number, _a: number): void => { /* placeholder */ };
 
 /** Build a synthetic PixelFormatInfo when the raster registry has no entry yet. */
