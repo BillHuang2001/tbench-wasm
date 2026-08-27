@@ -347,7 +347,9 @@ function emitTriangle(
   applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange);
 
   // Facing + culling in window space (after clipping AND viewport transform).
-  const area = signedArea2(clipB, 0, 1, 2, stride);
+  // signedArea2 expects FLOAT offsets into the packed record buffer (record k
+  // lives at k*stride) — matching the rasterizeTriangle fan-loop calls below.
+  const area = signedArea2(clipB, 0, stride, 2 * stride, stride);
   const frontFacing = (dc.cull.frontFace === CCW) ? area > 0 : area < 0;
   if (dc.cull.enabled) {
     const face = dc.cull.face;
