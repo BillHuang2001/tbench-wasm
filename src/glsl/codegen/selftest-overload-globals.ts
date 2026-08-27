@@ -163,7 +163,7 @@ runVsCheck(
      par[0] = bvec4(true, true, true, true);
      par[1] = bvec4(true, true, true, true);
      par[2] = bvec4(true, true, true, true);
-     bvec4 ret = bvec4(false, false, false, false);
+     bvec4 ret = bvec4(true, true, true, true);
      bool r = is_all(par, bvec4(true, true, true, true)); // array overload
      bool s = is_all(ret, true);                          // scalar overload
      gl_Position.x = (r && s) ? 1.0 : 0.0;

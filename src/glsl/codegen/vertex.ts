@@ -25,7 +25,7 @@
  */
 import type { FunctionDefinition, TranslationUnit } from '../ast.js';
 import { CodegenEnv } from './env.js';
-import { installUserFunctions } from './functions.js';
+import { installUserFunctions, installUserGlobals } from './functions.js';
 import { emitStatements } from './statements.js';
 import type { CodegenLayout, StageCodegenResult } from './index.js';
 
@@ -43,9 +43,12 @@ export function generateVertexStage(ast: TranslationUnit, layout: CodegenLayout)
   // Seed user struct type names so `Foo(...)` calls resolve to the struct
   // ctor (emitStructCtor) instead of falling through to builtin resolution.
   for (const s of layout.structNames ?? []) env.structNames.add(s);
+  // File-scope globals first: their scratch init lines run before main's
+  // statements (and before user-function inlines reference them).
+  const globalInit = installUserGlobals(ast, env);
   installUserFunctions(ast, env); // BEFORE main emission — calls must inline
   const main = findMain(ast);
-  const lines = emitStatements(main.body.body, env);
+  const lines = [...globalInit, ...emitStatements(main.body.body, env)];
   const body = (env.temps.length ? `var ${env.temps.join(', ')};` : '') + '\n' + lines.join('\n');
   return { body, scratchSize: env.scratchSize, intScratchSize: env.intScratchSize };
 }

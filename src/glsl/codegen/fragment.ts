@@ -19,7 +19,7 @@
  */
 import type { FunctionDefinition, TranslationUnit } from '../ast.js';
 import { CodegenEnv } from './env.js';
-import { installUserFunctions } from './functions.js';
+import { installUserFunctions, installUserGlobals } from './functions.js';
 import { emitStatements } from './statements.js';
 import type { CodegenLayout, StageCodegenResult } from './index.js';
 
@@ -41,9 +41,12 @@ export function generateFragmentStage(ast: TranslationUnit, layout: CodegenLayou
   // derivatives (see env.ts DUAL MODE + the dualWrite/varyingReadDual hooks).
   // The raster supplies ctx.varyings[i].ddx/ddy whenever usesDerivatives.
   env.dual = layout.uses.derivatives;
+  // File-scope globals first: their scratch init lines (incl. the dual-mode
+  // dx/dy plane zeroing) run before main's statements.
+  const globalInit = installUserGlobals(ast, env);
   installUserFunctions(ast, env); // BEFORE main emission — calls must inline
   const main = findMain(ast);
-  const lines = emitStatements(main.body.body, env);
+  const lines = [...globalInit, ...emitStatements(main.body.body, env)];
   const body = (env.temps.length ? `var ${env.temps.join(', ')};` : '') + '\n' + lines.join('\n');
   return { body, scratchSize: env.scratchSize, intScratchSize: env.intScratchSize };
 }
