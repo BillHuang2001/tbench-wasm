@@ -41,6 +41,7 @@
  * Prints "OK" and exits 0 on success.
  */
 import { compileShader, linkProgram } from './compiler.js';
+import { collectStructNames } from './linker.js';
 import type { LinkResult } from './compiler.js';
 import type { Program } from './program.js';
 
@@ -1334,6 +1335,81 @@ const INT = 0x1404; // 5124
   );
   const l4 = linkProgram(vs4, fs4);
   check(l4.ok, `default-0 samplers of different types link (${l4.ok ? '' : l4.log})`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 15. collectStructNames (pure AST walker — no codegen dependency)     */
+/* ------------------------------------------------------------------ */
+
+function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT'): string[] {
+  const r = compileShader(src, { type, version });
+  if (!r.ok) throw new Error(`compile failed: ${JSON.stringify(r.errors)}`);
+  return collectStructNames(r.shader.ast);
+}
+
+{
+  // Top-level bare struct-decl + struct-with-declarators + local structs in
+  // nested blocks; source order. Within-stage dedup via the same struct name
+  // declared in two DIFFERENT function bodies (sibling scopes — legal GLSL).
+  const vs = structNames(
+    `#version 300 es
+     struct A { vec2 a; };
+     struct B { float b; } bVar;
+     uniform struct C { float c; } cVar;
+     void f() {
+       struct D { float d; };
+       if (true) { struct E { float e; }; }
+       for (int i = 0; i < 1; i++) { struct F { float f; }; }
+       while (false) { struct G { float g; }; }
+       do { struct H { float h; }; } while (false);
+       switch (1) { default: { struct I { float i; }; } }
+     }
+     void g() { struct D { float d; }; } // same name, sibling scope → dedup
+     `,
+    300,
+    'VERTEX',
+  );
+  check(
+    JSON.stringify(vs) === JSON.stringify(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']),
+    `collectStructNames vertex: got ${JSON.stringify(vs)}`,
+  );
+
+  // Struct declared in only ONE stage still lands in the (union) layout.
+  const fs = structNames(
+    `#version 300 es
+     precision mediump float;
+     struct Foo { vec2 a; float b; };
+     out vec4 o;
+     void main() { o = vec4(0.0); }`,
+    300,
+    'FRAGMENT',
+  );
+  check(JSON.stringify(fs) === JSON.stringify(['Foo']), `collectStructNames fragment: got ${JSON.stringify(fs)}`);
+
+  // Sanity: struct decls (incl. a struct in only one stage) do not break the
+  // link. These shaders do NOT call a struct constructor, so this check does
+  // not depend on codegen struct-ctor dispatch (covered by codegen's own
+  // selftests once env.structNames seeding lands).
+  const vs2 = compile(
+    `#version 300 es
+     struct Shared { vec2 a; };
+     struct VsOnly { float x; };
+     in vec4 aPos;
+     void main() { gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs2 = compile(
+    `#version 300 es
+     precision mediump float;
+     struct Shared { vec2 a; };
+     out vec4 o;
+     void main() { o = vec4(0.0); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs2, fs2);
+  check(l.ok, `struct-decl pair links without ctors (${l.ok ? '' : l.log})`);
 }
 
 /* ------------------------------------------------------------------ */

@@ -34,6 +34,9 @@ function findMain(ast: TranslationUnit): FunctionDefinition {
 /** Generate the fragment stage body (writes ctx.out.color[loc], ctx.out.fragDepth, ctx.discarded). */
 export function generateFragmentStage(ast: TranslationUnit, layout: CodegenLayout): StageCodegenResult {
   const env = new CodegenEnv('FRAGMENT', layout);
+  // Seed user struct type names so `Foo(...)` calls resolve to the struct
+  // ctor (emitStructCtor) instead of falling through to builtin resolution.
+  for (const s of layout.structNames ?? []) env.structNames.add(s);
   // Dual-number mode: every FLOAT value carries (v, dx, dy) screen-space
   // derivatives (see env.ts DUAL MODE + the dualWrite/varyingReadDual hooks).
   // The raster supplies ctx.varyings[i].ddx/ddy whenever usesDerivatives.

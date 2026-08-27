@@ -200,8 +200,8 @@ function evalParams(v: Value, e: CodegenEnv, params: string[], args: number[]): 
   e.declareLocal('m', mT(2, 2));
   const vals = emitExpr(call('vec4', [ident('m', mT(2, 2))], vT('float', 4)), e);
   check(
-    vals.map((x) => x.v).join(',') === 'm__0,m__3,0.0,1.0',
-    `vec4(mat2) takes the diagonal + padding (got ${vals.map((x) => x.v).join(',')})`,
+    vals.map((x) => x.v).join(',') === 'm__0,m__1,m__2,m__3',
+    `vec4(mat2) flattens column-major per GLSL ES 1.00 §5.4.2 (got ${vals.map((x) => x.v).join(',')})`,
   );
 }
 

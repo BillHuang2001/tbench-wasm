@@ -43,7 +43,7 @@
  * declaration order (matched fs inputs read the same offsets). Struct varyings
  * flatten to per-member leaves ('v.m'), each with its own (index, offset).
  */
-import type { TranslationUnit } from './ast.js';
+import type { Stmt, StructDefinition, TranslationUnit } from './ast.js';
 import type { LinkLimits, LinkOptions, LinkResult, Shader, ShaderUses, TransformFeedbackSpec, UniformBlockDecl, UniformDecl } from './compiler.js';
 import type { AttribInfo, FragmentExecCtx, Program, TransformFeedbackVarying, UniformBlockInfo, UniformBlockMemberInfo, UniformInfo, VaryingInfo, VertexExecCtx } from './program.js';
 import { generateFragmentStage, generateVertexStage, R } from './codegen/index.js';
@@ -1187,6 +1187,77 @@ function varyingBlockError(vs: Shader, fs: Shader): string | null {
 }
 
 /* ------------------------------------------------------------------ */
+/* Struct type names (codegen struct-constructor dispatch)              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Collect every user struct type name declared in a shader AST, in source
+ * order, deduplicated. Codegen resolves `Foo(...)` constructor calls only for
+ * type names present in `CodegenLayout.structNames` (seeded into
+ * env.structNames) — the linker fills that field from BOTH stages' ASTs, since
+ * one layout serves both and a struct declared in only one stage must still
+ * resolve there. Sources:
+ *  - top-level bare `struct S {...};` (ExternalDecl 'struct-decl' — the
+ *    common case);
+ *  - top-level struct-with-declarators `struct S {...} v;` / `uniform struct
+ *    S {...} u;` (GlobalVarDecl whose TypeSpec.base is an inline struct
+ *    definition);
+ *  - local struct declarations inside function bodies (DeclStmt with an
+ *    inline struct-definition base, in any nested block).
+ * No descent into uniform-block members or other declarations is needed:
+ * parser.ts rejects struct definitions inside structs, in function parameters
+ * and as function return types, and builtin struct types (gl_DepthRange
+ * parameters) live in the builtin tables, never in the AST — so every
+ * StructDecl/StructDefinition node here is a user type.
+ */
+export function collectStructNames(tu: TranslationUnit): string[] {
+  const names = new Set<string>();
+  const addDef = (def: StructDefinition | null): void => {
+    // Parser rejects anonymous structs; '' guard is defensive only.
+    if (def !== null && def.name !== null && def.name !== '') names.add(def.name);
+  };
+  const walkStmt = (s: Stmt): void => {
+    switch (s.kind) {
+      case 'compound':
+        for (const c of s.body) walkStmt(c);
+        return;
+      case 'decl-stmt':
+        if (s.type.base.kind === 'struct-definition') addDef(s.type.base);
+        return;
+      case 'if':
+        walkStmt(s.then);
+        if (s.else !== null) walkStmt(s.else);
+        return;
+      case 'for':
+        if (s.init !== null) walkStmt(s.init);
+        walkStmt(s.body);
+        return;
+      case 'while':
+        walkStmt(s.body);
+        return;
+      case 'do-while':
+        walkStmt(s.body);
+        return;
+      case 'switch':
+        walkStmt(s.body);
+        return;
+      default:
+        return;
+    }
+  };
+  for (const d of tu.declarations) {
+    if (d.kind === 'struct-decl') {
+      if (d.name !== '') names.add(d.name);
+    } else if (d.kind === 'global-var-decl') {
+      if (d.type.base.kind === 'struct-definition') addDef(d.type.base);
+    } else if (d.kind === 'function-definition') {
+      walkStmt(d.body);
+    }
+  }
+  return [...names];
+}
+
+/* ------------------------------------------------------------------ */
 /* linkProgram                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -1229,6 +1300,7 @@ export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkRes
   if ('error' in ol) return { ok: false, log: ol.error };
 
   const uses = mergeUses(vs, fs);
+  const structNames = [...new Set([...collectStructNames(vs.ast), ...collectStructNames(fs.ast)])];
   const layout: CodegenLayout = {
     version: vs.version,
     uniformSlots: ul.slots,
@@ -1238,6 +1310,7 @@ export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkRes
     attribLocations: al.map,
     outputLocations: ol.map,
     uses,
+    structNames,
   };
 
   let vsRes: StageCodegenResult;

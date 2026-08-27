@@ -246,6 +246,15 @@ export interface BaseExecCtx {
   scratch: Float32Array;
   /** Codegen scratch for int locals/arrays (size ≥ program.intScratchSize). */
   intScratch: Int32Array;
+  /**
+   * Builtin uniform gl_DepthRange state (GLSL ES 1.00 §7.6 / 3.00 §7.7):
+   * [near, far, far − near] from the current depthRange. gl/ fills it on the
+   * VERTEX exec ctx (gl/draw.ts) and raster fills it on the FRAGMENT exec ctx
+   * (rasterizer.ts) per draw; codegen lowers `gl_DepthRange.near/far/diff` to
+   * `ctx.depthRange[0/1/2]`. Absent (layers not yet updated) → shaders reading
+   * gl_DepthRange throw at runtime — the gl/raster managers must fill it.
+   */
+  depthRange?: Float32Array;
 }
 
 /**

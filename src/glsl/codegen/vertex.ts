@@ -40,6 +40,9 @@ function findMain(ast: TranslationUnit): FunctionDefinition {
 /** Generate the vertex stage body (writes ctx.out.position/pointSize/varyings). */
 export function generateVertexStage(ast: TranslationUnit, layout: CodegenLayout): StageCodegenResult {
   const env = new CodegenEnv('VERTEX', layout);
+  // Seed user struct type names so `Foo(...)` calls resolve to the struct
+  // ctor (emitStructCtor) instead of falling through to builtin resolution.
+  for (const s of layout.structNames ?? []) env.structNames.add(s);
   installUserFunctions(ast, env); // BEFORE main emission — calls must inline
   const main = findMain(ast);
   const lines = emitStatements(main.body.body, env);
