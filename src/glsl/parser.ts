@@ -404,7 +404,9 @@ export function parseTypeSpec(p: Parser, ctx: TypeSpecCtx): TypeSpec {
           p.next();
           continue;
         }
-        if (p.version === 100 && (name === 'in' || name === 'out' || name === 'inout')) {
+        if (p.version === 100 && (name === 'in' || name === 'out' || name === 'inout') && !ctx.param) {
+          // Reserved in ES 1.00 §3.6 EXCEPT in function parameter lists, where
+          // §6.1 makes in/out/inout legal parameter qualifiers.
           p.error(t.line, `'${name}' is reserved in GLSL ES 1.00`);
           p.next();
           continue;
