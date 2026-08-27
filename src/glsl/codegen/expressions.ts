@@ -176,6 +176,10 @@ function leafRead(p: P, env: CodegenEnv, c: number): string {
         const loc = env.layout.outputLocations.get('gl_FragColor') ?? 0;
         return `ctx.out.color[${loc}][${i}]`;
       }
+      case 'gl_DepthRange':
+        // Builtin struct uniform gl_DepthRange: members near/far/diff are
+        // flat offsets 0/1/2 → ctx.depthRange = [near, far, far−near].
+        return `ctx.depthRange[${i}]`;
       default:
         throw new Error(`codegen: unsupported builtin '${p.builtin}'`);
     }
@@ -252,6 +256,9 @@ function leafDual(p: P, env: CodegenEnv, c: number): [string, string] | null {
       case 'gl_FragDepth':
       case 'gl_FragDepthEXT':
         return ['0', '0'];
+      case 'gl_DepthRange':
+        // Builtin uniform state — no screen-space derivative (constant duals).
+        return ['0', '0'];
       default:
         // gl_Position/gl_PointSize (vertex) — never dual; gl_FrontFacing is
         // bool (caller-gated). Constant duals are a safe fallback.
@@ -302,6 +309,10 @@ function leafWrite(p: P, env: CodegenEnv, c: number): string {
         const loc = env.layout.outputLocations.get('gl_FragColor') ?? 0;
         return `ctx.out.color[${loc}][${i}]`;
       }
+      case 'gl_DepthRange':
+        // lvalue:false in the builtin table (semantics rejects writes); the
+        // explicit case is defensive — never reachable.
+        throw new Error('codegen: gl_DepthRange is read-only');
       default:
         throw new Error(`codegen: '${p.builtin}' is read-only`);
     }
@@ -469,6 +480,12 @@ function subP(p: P, name: string, mtype: GLSLType, off: number, env: CodegenEnv)
   else if (q.storage && (q.storage.kind === 'uniform' || q.storage.kind === 'block' || q.storage.kind === 'varying')) {
     q.storage = { ...q.storage, key: q.storage.key + '.' + name };
     q.flatOff = 0; // leaf entries are keyed per member (offset relative to the member)
+  } else if (q.builtin === 'gl_DepthRange') {
+    // Builtin struct uniform gl_DepthRangeParameters { near; far; diff; }
+    // (GLSL ES 1.00 §7.6 / 3.00 §7.7, BOTH stages, read-only): the members
+    // are flat offsets 0/1/2 of the builtin — leafRead/leafDual lower them
+    // to `ctx.depthRange[0/1/2]` ([near, far, far−near]); no storage key.
+    q.flatOff += off;
   } else {
     throw new Error(`codegen: struct member on ${q.storage ? q.storage.kind : 'builtin'} path`);
   }
@@ -1048,6 +1065,58 @@ function commonBase(a: string | null, b: string | null): string | null {
   return 'int';
 }
 
+/** Per-leaf comparison strings for struct ==/!= (GLSL ES 1.00 §5.9 / ES 3.00
+ *  §5.9: same-typed structs compare MEMBER-WISE — semantics guarantees
+ *  identical type/name; const operands fold at semantics, this is the runtime
+ *  path). `av`/`bv` are the flat operand Values in member order (emitExpr
+ *  expands structs/arrays/matrices in declaration order, exactly matching
+ *  flatComponents). Nested structs (and arrays of structs) recurse; every
+ *  other member contributes one comparison string per flat leaf. Bool leaves
+ *  normalize both sides with `!!` (uniform-store 0/1 vs literal true/false —
+ *  mirrors the scalar/vector path); each leaf's pre folds inline (pres are
+ *  pure, each leaf is used exactly once). */
+function structCompareParts(
+  op: '==' | '!=',
+  t: GLSLType,
+  av: Value[],
+  bv: Value[],
+): string[] {
+  const parts: string[] = [];
+  if (t.kind === 'array') {
+    const n = flatComponents(t.element);
+    let off = 0;
+    for (let k = 0; k < (t.size ?? 0); k++) {
+      parts.push(...structCompareParts(op, t.element, av.slice(off, off + n), bv.slice(off, off + n)));
+      off += n;
+    }
+    return parts;
+  }
+  if (t.kind === 'struct') {
+    let off = 0;
+    for (const m of t.members) {
+      parts.push(
+        ...structCompareParts(op, m.type, av.slice(off, off + flatComponents(m.type)), bv.slice(off, off + flatComponents(m.type))),
+      );
+      off += flatComponents(m.type);
+    }
+    return parts;
+  }
+  // Leaf: scalar/vector/matrix (base null is unreachable — fall back to plain).
+  const base = scalarBaseOf(t);
+  for (let c = 0; c < av.length; c++) {
+    const a = av[c];
+    const b = bv[c];
+    const avs = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
+    const bvs = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
+    if (base === 'bool') {
+      parts.push(op === '==' ? `(!!(${avs})) === (!!(${bvs}))` : `(!!(${avs})) !== (!!(${bvs}))`);
+    } else {
+      parts.push(op === '==' ? `(${avs} === (${bvs}))` : `(${avs} !== (${bvs}))`);
+    }
+  }
+  return parts;
+}
+
 function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Value[] {
   const t = e.resolvedType!;
   const op = e.op;
@@ -1079,6 +1148,17 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
     }
     case '==':
     case '!=': {
+      // GLSL ES 1.00 §5.9 / ES 3.00 §5.9: ==/!= on same-typed STRUCTS is
+      // legal (member-wise comparison; semantics guarantees identical
+      // type/name — const operands fold at semantics, this is the runtime
+      // path). The operand Values come back in flat member order; compare
+      // recursively and join: == → all members, != → any member.
+      if (lt.kind === 'struct' && rt.kind === 'struct') {
+        const avSrc = emitExpr(e.left, env);
+        const bvSrc = emitExpr(e.right, env);
+        const parts = structCompareParts(op, lt, avSrc, bvSrc);
+        return [{ v: `(${parts.join(op === '==' ? ' && ' : ' || ')})` }];
+      }
       // semantics: ALWAYS resolves to scalar bool (all-components compare).
       const cb = commonBase(lb, rb);
       if (!cb) throw new Error(`codegen: cannot compare ${typeName(lt)} and ${typeName(rt)}`);
