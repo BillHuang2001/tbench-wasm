@@ -810,6 +810,13 @@ function varyingMatchKey(v: { blockName: string | null; name: string }): string 
  *  interpolates the whole record). Struct varyings flatten to per-member
  *  leaves, each with its own (index, offset).
  *
+ *  FRAGMENT-USED MATCHING (native Chromium behavior, both GLSL versions):
+ *  only fragment varyings whose value is actually READ (VaryingDecl.used)
+ *  must match a vertex output; fragment varyings that are declared but never
+ *  read impose NO constraint (they are stripped before linking, so no match
+ *  / type / flat checks). Vertex-side extras are always allowed. `used` is
+ *  tracked by semantics (scanUses) and is false on vertex-stage entries.
+ *
  *  VaryingLayout keys: plain varyings + instance-less block members use their
  *  bare name; named block members use the FULL '<instance>.<member>' path.
  *  Because block instance names may differ between stages, every matched block
@@ -823,6 +830,9 @@ function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayo
   for (const f of fs.info.varyings) {
     const key = varyingMatchKey(f);
     fsByKey.set(key, f);
+    // Declared-but-unread fragment varyings are inactive: no match/type/flat
+    // constraint (native behavior — see the doc comment above).
+    if (!f.used) continue;
     const v = vsByKey.get(key);
     if (!v) return { error: `linker: varying '${f.name}' not matched` };
     if (!typeEquals(f.type, v.type) || f.arraySize !== v.arraySize) {
@@ -852,11 +862,13 @@ function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayo
     }
     // Fragment-side twin leaves (block members only — the fs instance name may
     // differ; the matched decl's types equal the vertex's, so the leaf shapes
-    // agree).
+    // agree). UNUSED fragment twins (declared but never read) are skipped: the
+    // codegen only looks up the fragment read-side key when the FS actually
+    // reads the member, so no read-side key or layout-mismatch check is needed.
     let fsLeaves: VaryingLeaf[] | null = null;
     if (v.blockName !== null) {
       const f = fsByKey.get(varyingMatchKey(v));
-      if (f !== undefined) {
+      if (f !== undefined && f.used) {
         fsLeaves = [];
         if (f.type.kind === 'struct') flattenVaryingStruct(f.name, f.type, fsLeaves);
         else fsLeaves.push({ key: f.name, type: f.type, arraySize: f.arraySize });

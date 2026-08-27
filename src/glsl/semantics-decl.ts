@@ -172,6 +172,8 @@ function varyingOf(name: string, element: GLSLType, arraySize: number, q: TypeQu
     centroid: q.centroid === true,
     noperspective: q.interpolation === 'noperspective',
     invariant: q.invariant === true,
+    // Set to true by scanUses when the FRAGMENT shader reads the varying.
+    used: false,
   };
 }
 
@@ -315,6 +317,8 @@ function analyzeInterfaceBlock(d: InterfaceBlockDecl, ctx: SemContext, info: Sha
       centroid: mq.centroid === true,
       noperspective: mq.interpolation === 'noperspective',
       invariant: q.invariant === true,
+      // Set to true by scanUses when the FRAGMENT shader reads the member.
+      used: false,
     });
   }
 }
@@ -352,6 +356,23 @@ function writeRoot(e: Expr): { root: IdentifierExpr; firstIndex: Expr | null } |
     }
     if (node.kind === 'index') {
       if (firstIndex === null) firstIndex = node.index;
+      node = node.object;
+      continue;
+    }
+    return null;
+  }
+}
+
+/** The base identifier of a member/index chain (`b.c` → `b`, `b[0].c` → `b`,
+ *  `b.c[0]` → `b`); null when the object is itself a member expression
+ *  (nested struct access — the INNER member node then carries the varying
+ *  key). Used to reconstruct the '<instance>.<member>' key of a
+ *  varying-interface-block member read. */
+function baseIdentifier(e: Expr): IdentifierExpr | null {
+  let node = e;
+  for (;;) {
+    if (node.kind === 'identifier') return node;
+    if (node.kind === 'index') {
       node = node.object;
       continue;
     }
@@ -416,6 +437,22 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
       default:
         break;
     }
+    // A fragment-varying value load marks the varying USED (the linker only
+    // matches used fragment varyings against vertex outputs — native
+    // behavior). GLSL ES forbids shadowing (Scope.declare rejects redefinition
+    // in any enclosing scope), so a successfully resolved identifier with a
+    // varying's name IS that varying — name lookup is exact.
+    markVaryingUsed(id.name);
+  };
+
+  /** Mark the fragment varying with ShaderInfo key `key` as READ. Keys: plain
+   *  varyings + instance-less block members use the bare name; named block
+   *  members '<instance>.<member>'. No-op in the vertex stage (the linker
+   *  ignores `used` there) and for non-varying names. */
+  const markVaryingUsed = (key: string): void => {
+    if (ctx.stage !== 'FRAGMENT') return;
+    const v = info.varyings.find((vv) => vv.name === key);
+    if (v !== undefined) v.used = true;
   };
 
   const recordCall = (c: CallExpr): void => {
@@ -440,7 +477,9 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
         if (e.op === '++' || e.op === '--') {
           const w = writeRoot(e.operand);
           if (w !== null) {
-            written.add(w.root);
+            // Pre/post increment READS the operand as well as writing it (the
+            // old value must be loaded) — deliberately not added to `written`,
+            // so the operand visit below counts as a varying read.
             recordWrite(w.root, w.firstIndex);
           }
         }
@@ -454,7 +493,10 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
       case 'assign': {
         const w = writeRoot(e.target);
         if (w !== null) {
-          written.add(w.root);
+          // Plain `=` is a pure write (target never read); compound
+          // assignments (`+=` etc.) read the target as well — keep the root
+          // OUT of `written` so the target visit counts as a varying read.
+          if (e.op === '=') written.add(w.root);
           recordWrite(w.root, w.firstIndex);
         }
         visit(e.target);
@@ -475,9 +517,20 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
         visit(e.object);
         visit(e.index);
         return;
-      case 'member':
+      case 'member': {
+        // Varying-interface-block member access: entries are keyed
+        // '<instance>.<member>' — reconstruct the key from the object chain
+        // and mark the varying used, UNLESS the whole chain is a pure
+        // `=`-write target (base identifier in `written`). The base-identifier
+        // visit below already covers plain varyings (incl. swizzles) and
+        // instance-less block members (bare names).
+        const base = baseIdentifier(e.object);
+        if (base !== null && !written.has(base)) {
+          markVaryingUsed(`${base.name}.${e.name}`);
+        }
         visit(e.object);
         return;
+      }
       case 'comma':
         for (const x of e.exprs) visit(x);
         return;

@@ -127,6 +127,15 @@ export interface VaryingDecl {
   centroid: boolean;
   noperspective: boolean;
   invariant: boolean;
+  /**
+   * FRAGMENT stage only: true iff the fragment shader READS this varying's
+   * value (a load of its value — a pure `=`-write target or a never-read
+   * declaration stays false). The linker matches only USED fragment varyings
+   * against vertex outputs (native behavior); declared-but-unread fragment
+   * varyings impose no constraint. Vertex-stage entries are never read (the
+   * linker ignores `used` there), but the field exists on all constructions.
+   */
+  used: boolean;
 }
 
 /** Default-block uniform (top-level only; the linker flattens structs/arrays). */
