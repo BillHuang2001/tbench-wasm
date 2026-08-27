@@ -99,6 +99,7 @@ import type { Token } from '../../glsl/lexer';
 import { parse } from '../../glsl/parser';
 import type { TranslationUnit } from '../../glsl/ast';
 import { analyze } from '../../glsl/semantics';
+import { shaderCompileExtensions } from '../extensions/glsl-names';
 import {
   enqueueShaderCompile,
   enqueueProgramLink,
@@ -406,7 +407,7 @@ function doCompileShader(ctx: WebGLRenderingContext, shader: WebGLShader): void 
       type: shader._type === C1.VERTEX_SHADER ? 'VERTEX' : 'FRAGMENT',
       version: ctx._version === 2 ? 300 : 100,
       defines: {},
-      extensions: new Set(ctx.getSupportedExtensions()),
+      extensions: shaderCompileExtensions(ctx),
     });
   } catch (e) {
     // glsl/ must never let the exception reach the page: behave as a compile
@@ -440,7 +441,7 @@ function enqueueCompile(ctx: WebGLRenderingContext, shader: WebGLShader): void {
     type: shader._type === C1.VERTEX_SHADER ? 'VERTEX' : 'FRAGMENT',
     version: ctx._version === 2 ? 300 : 100,
     defines: {},
-    extensions: new Set(ctx.getSupportedExtensions()),
+    extensions: shaderCompileExtensions(ctx),
   };
   const inter: {
     pp?: Extract<PreprocessResult, { ok: true }>;
