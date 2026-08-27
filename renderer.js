@@ -24082,7 +24082,8 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
   }
   function elementSlots(uniform) {
-    return isMatrixType(uniform.type) ? matrixCols(uniform.type) : Math.ceil(uniform.components / 4);
+    if (isMatrixType(uniform.type)) return matrixCols(uniform.type) * 4;
+    return uniform.components > 1 ? 4 : 1;
   }
   function doCompileShader(ctx, shader) {
     shader._compileStatus = false;
@@ -24202,7 +24203,10 @@ ${inner.map((l) => "  " + l).join("\n")}
   }
   function readStoreValue(pm, uniform, elementIdx, comp2, asUint) {
     const base = uniform.location + elementIdx * elementSlots(uniform);
-    if (isMatrixType(uniform.type)) return pm.floatStore[base + comp2];
+    if (isMatrixType(uniform.type)) {
+      const r = matrixRows(uniform.type);
+      return pm.floatStore[base + Math.floor(comp2 / r) * 4 + comp2 % r];
+    }
     if (isFloatType2(uniform.type)) return pm.floatStore[base + comp2];
     const v2 = pm.intStore[base + comp2];
     return asUint ? v2 >>> 0 : v2;
@@ -24258,7 +24262,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       const out = new Float32Array(count * c * r);
       for (let e = 0; e < count; e++)
         for (let col = 0; col < c; col++)
-          for (let row = 0; row < r; row++) out[e * c * r + col * r + row] = pm.floatStore[(uniform.location + (elem + e) * slots + col) * 4 + row];
+          for (let row = 0; row < r; row++) out[e * c * r + col * r + row] = pm.floatStore[uniform.location + (elem + e) * slots + col * 4 + row];
       return out;
     }
     if (isFloatType2(uniform.type) || uniform.type === C1.BOOL_VEC2) {
@@ -24699,7 +24703,11 @@ ${inner.map((l) => "  " + l).join("\n")}
         return null;
       }
       const info = (_c = uniformLocInfo.get(location)) != null ? _c : { elem: 0, whole: true };
-      return readUniform(pm, uniform, info.elem, info.whole);
+      try {
+        return readUniform(pm, uniform, info.elem, info.whole);
+      } catch {
+        return null;
+      }
     };
     if ("uniformBlockBinding" in proto) {
       const p2 = proto;
@@ -25069,24 +25077,30 @@ ${inner.map((l) => "  " + l).join("\n")}
   function writeFloatAt(t, slotOffset, comp2, v2) {
     const dv = t.program._uniformStore;
     if (dv === null) return;
-    dv.setFloat32((t.uniform.location + slotOffset) * 16 + comp2 * 4, v2, true);
+    try {
+      dv.setFloat32((t.uniform.location + slotOffset + comp2) * 4, v2, true);
+    } catch {
+    }
   }
   function writeIntAt(t, slotOffset, comp2, v2, mode) {
     const store = t.pm.intStore;
-    const idx = (t.uniform.location + slotOffset) * 4 + comp2;
-    switch (mode) {
-      case "int":
-        store[idx] = v2 | 0;
-        break;
-      case "uint":
-        store[idx] = v2 >>> 0;
-        break;
-      case "bool":
-        store[idx] = (v2 | 0) !== 0 ? 1 : 0;
-        break;
-      case "boolf":
-        store[idx] = v2 !== 0 ? 1 : 0;
-        break;
+    const idx = t.uniform.location + slotOffset + comp2;
+    try {
+      switch (mode) {
+        case "int":
+          store[idx] = v2 | 0;
+          break;
+        case "uint":
+          store[idx] = v2 >>> 0;
+          break;
+        case "bool":
+          store[idx] = (v2 | 0) !== 0 ? 1 : 0;
+          break;
+        case "boolf":
+          store[idx] = v2 !== 0 ? 1 : 0;
+          break;
+      }
+    } catch {
     }
   }
   function isBoolType2(type) {
@@ -25146,11 +25160,12 @@ ${inner.map((l) => "  " + l).join("\n")}
       const element = Math.floor(i / k);
       const comp2 = i % k;
       const v2 = values[i];
+      const off = element * t.slots;
       if (family === "f") {
-        if (isBool) writeIntAt(t, element, comp2, v2, "boolf");
-        else writeFloatAt(t, element, comp2, v2);
-      } else if (family === "i") writeIntAt(t, element, comp2, v2, isBool ? "bool" : "int");
-      else writeIntAt(t, element, comp2, v2, "uint");
+        if (isBool) writeIntAt(t, off, comp2, v2, "boolf");
+        else writeFloatAt(t, off, comp2, v2);
+      } else if (family === "i") writeIntAt(t, off, comp2, v2, isBool ? "bool" : "int");
+      else writeIntAt(t, off, comp2, v2, "uint");
     }
   }
   function uniformMatrix(ctx, location, transpose, value, cols, rows, typeConst) {
