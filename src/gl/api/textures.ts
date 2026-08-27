@@ -33,7 +33,7 @@
 
 import type { WebGLRenderingContext } from '../webgl1';
 import { C1, C2 } from '../constants';
-import { WebGLTexture, createObject } from '../objects';
+import { WebGLFramebuffer, WebGLTexture, createObject } from '../objects';
 import { validateObject } from '../validation';
 import { generateMipmap } from '../teximage';
 import type { GLboolean, GLenum, GLfloat, GLint } from '../types';
@@ -43,6 +43,13 @@ const COMPARE_REF_TO_TEXTURE = 0x884e;
 const TEXTURE_IMMUTABLE_FORMAT = 0x912f;
 const TEXTURE_IMMUTABLE_LEVELS = 0x82df;
 const RGB9_E5 = 0x8c3d;
+
+/**
+ * Textures that have been bound at least once. isTexture returns false for
+ * never-bound objects (CTS is-object.html) — mirrors everBoundRenderbuffers in
+ * api/framebuffers.ts.
+ */
+const everBoundTextures = new WeakSet<WebGLTexture>();
 
 /**
  * Context-loss guard: no-op while lost WITHOUT generating an error (CTS
@@ -259,6 +266,39 @@ export function installTexturesApi(proto: WebGLRenderingContext): void {
     }
     if (texture._deleted) return; // already deleted: silent no-op (spec)
     const wasBound = unbindTextureEverywhere(ctx, texture);
+    // Detach from every framebuffer currently bound to the context (WebGL spec:
+    // deleting a texture attached to the bound framebuffer is as if
+    // framebufferTexture2D(null) for each attachment point in THAT framebuffer;
+    // UNBOUND framebuffers keep the attachment and the image stays alive —
+    // CTS deleted-object-behavior.html testUnboundFBOTexture, object-deletion-
+    // behaviour.html "using deleted texture"). Mirrors deleteRenderbuffer.
+    const s = ctx._state;
+    const boundFbos = new Set<WebGLFramebuffer>();
+    if (s.drawFramebuffer instanceof WebGLFramebuffer) boundFbos.add(s.drawFramebuffer);
+    if (s.readFramebuffer instanceof WebGLFramebuffer) boundFbos.add(s.readFramebuffer);
+    for (const fbo of boundFbos) {
+      let changed = false;
+      for (const [key, rec] of fbo._attachments) {
+        if (rec.type === 'texture' && rec.texture === texture) {
+          fbo._attachments.delete(key);
+          changed = true;
+        }
+      }
+      if (changed) {
+        // Invalidate the completeness cache + recompute the multisample flag
+        // (same as invalidateFboStatus in api/framebuffers.ts).
+        fbo._status = 0;
+        let ms = false;
+        for (const rec of fbo._attachments.values()) {
+          if (rec.type === 'renderbuffer') {
+            if (rec.renderbuffer._samples > 0) ms = true;
+          } else if (rec.texture._msaaSamples > 0) {
+            ms = true;
+          }
+        }
+        fbo._multisampled = ms;
+      }
+    }
     texture._deleted = true;
     texture._deletePending = wasBound;
     ctx._resources.untrack(texture);
@@ -269,9 +309,12 @@ export function installTexturesApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return false;
     if (texture === null || texture === undefined) return false;
     if (!(texture instanceof WebGLTexture)) return false;
+    // Deleted, foreign (different context) and never-bound textures report
+    // false with NO error (CTS incorrect-context-object-behaviour.html,
+    // is-object.html).
     if (texture._context !== ctx) return false;
     if (texture._deleted) return false;
-    return true;
+    return everBoundTextures.has(texture);
   };
 
   proto.bindTexture = function (this: WebGLRenderingContext, target: GLenum, texture: WebGLTexture | null): void {
@@ -301,6 +344,7 @@ export function installTexturesApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
+    everBoundTextures.add(tex);
     unit[slot] = tex;
   };
 
