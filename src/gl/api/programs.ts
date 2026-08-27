@@ -126,6 +126,10 @@ function validateProgram(ctx: WebGLRenderingContext, program: unknown): WebGLPro
  * Query validation for shaders: deleted shaders still attached to a program are
  * valid (delete is deferred until detached); a deleted, unattached shader is
  * "not the name of a shader object" → INVALID_VALUE (ES2 / CTS program-test).
+ * Context-lost INVALIDATED shaders (flag set by lost.ts loseContext) →
+ * INVALID_OPERATION per spec — checked AFTER deleted so a page-deleted object
+ * keeps its INVALID_VALUE (CTS gl-get-attrib-location-errors.html post-restore
+ * expects INVALID_VALUE for deletedProgram).
  */
 function validateShaderQuery(ctx: WebGLRenderingContext, shader: unknown): WebGLShader | null {
   if (!(shader instanceof WebGLShader)) throw new TypeError(`Argument is not of type 'WebGLShader'`);
@@ -137,10 +141,20 @@ function validateShaderQuery(ctx: WebGLRenderingContext, shader: unknown): WebGL
     ctx._errors.push(C1.INVALID_VALUE);
     return null;
   }
+  if ((shader as unknown as { _invalidated?: boolean })._invalidated) {
+    ctx._errors.push(C1.INVALID_OPERATION); // invalidated by context loss (spec)
+    return null;
+  }
   return shader;
 }
 
-/** Query validation for programs (deleted-but-in-use programs remain valid). */
+/**
+ * Query validation for programs (deleted-but-in-use programs remain valid).
+ * Context-lost INVALIDATED programs → INVALID_OPERATION even while in use —
+ * checked AFTER deleted so a page-deleted object keeps INVALID_VALUE (CTS
+ * gl-get-attrib-location-errors.html post-restore expects INVALID_VALUE for
+ * deletedProgram, INVALID_OPERATION for a pre-loss program still in use).
+ */
 function validateProgramQuery(ctx: WebGLRenderingContext, program: unknown): WebGLProgram | null {
   if (!(program instanceof WebGLProgram)) throw new TypeError(`Argument is not of type 'WebGLProgram'`);
   if (program._context !== ctx) {
@@ -151,16 +165,52 @@ function validateProgramQuery(ctx: WebGLRenderingContext, program: unknown): Web
     ctx._errors.push(C1.INVALID_VALUE);
     return null;
   }
+  if ((program as unknown as { _invalidated?: boolean })._invalidated) {
+    ctx._errors.push(C1.INVALID_OPERATION); // invalidated by context loss (spec)
+    return null;
+  }
   return program;
 }
 
 // ---- Name validation (WebGL 1.0 spec §5.14.10 / WebGL2: limits 256 vs 1024) ----
 
-/** Characters forbidden in attribute/uniform names: `" $ ` @ \ '`. */
+/**
+ * Characters forbidden in attribute/uniform/block names: anything outside the
+ * GLSL source character set (WebGL spec "Characters Outside the GLSL Source
+ * Character Set" — ISO/IEC 646/ASCII subset of GLSL ES §3.1). That is: the six
+ * ASCII symbols `" $ ' @ \ `` plus EVERY non-ASCII character (e.g. 'à' — CTS
+ * gl-get-attrib-location-errors.html expects INVALID_VALUE). All other ASCII —
+ * letters, digits, underscore, the GLSL symbols `. + - / * % < > [ ] ( ) { }
+ * ^ | & ~ = ! : ; , ? #`, and whitespace — is allowed so array suffixes
+ * ('u[2]') and struct paths ('u.m') keep working at the getUniformLocation
+ * call site.
+ */
 function hasBadNameChars(name: string): boolean {
   for (let i = 0; i < name.length; i++) {
     const c = name.charCodeAt(i);
-    if (c === 0x22 || c === 0x24 || c === 0x60 || c === 0x40 || c === 0x5c || c === 0x27) return true;
+    if (c === 0x09 || c === 0x0a || c === 0x0b || c === 0x0c || c === 0x0d || c === 0x20) {
+      continue; // whitespace (tab/LF/VT/FF/CR/space) is in the GLSL char set
+    }
+    if (c < 0x21 || c >= 0x7f) return true; // control / non-ASCII (e.g. 'à')
+    if (
+      (c >= 0x30 && c <= 0x39) || // 0-9
+      (c >= 0x41 && c <= 0x5a) || // A-Z
+      (c >= 0x61 && c <= 0x7a) || // a-z
+      c === 0x5f // _
+    ) {
+      continue;
+    }
+    switch (c) {
+      // GLSL symbols: . + - / * % < > [ ] ( ) { } ^ | & ~ = ! : ; , ? #
+      case 0x2e: case 0x2b: case 0x2d: case 0x2f: case 0x2a: case 0x25:
+      case 0x3c: case 0x3e: case 0x5b: case 0x5d: case 0x28: case 0x29:
+      case 0x7b: case 0x7d: case 0x5e: case 0x7c: case 0x26: case 0x7e:
+      case 0x3d: case 0x21: case 0x3a: case 0x3b: case 0x2c: case 0x3f:
+      case 0x23:
+        continue;
+      default:
+        return true; // `" $ ' @ \` and anything else not in the set
+    }
   }
   return false;
 }
@@ -498,7 +548,14 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
   // ---- Shaders ----
   proto.createShader = function (this: WebGLRenderingContext, type: GLenum): WebGLShader | null {
     const ctx = this;
-    if (isLost(ctx)) return null;
+    // No [WebGLHandlesContextLoss] on createShader: while lost it still creates
+    // an object (CTS context-lost.html asserts createShader → non-null and
+    // isShader → false) and generates NO error — the type check is skipped too
+    // (the implementation is not run per the spec's lost-context algorithm).
+    if (ctx._isLost) {
+      if (type !== C1.VERTEX_SHADER && type !== C1.FRAGMENT_SHADER) return null;
+      return createObject(ctx, ShaderCtor);
+    }
     if (type !== C1.VERTEX_SHADER && type !== C1.FRAGMENT_SHADER) {
       ctx._errors.push(C1.INVALID_ENUM);
       return null;
@@ -624,7 +681,9 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
   // ---- Programs ----
   proto.createProgram = function (this: WebGLRenderingContext): WebGLProgram | null {
     const ctx = this;
-    if (isLost(ctx)) return null;
+    // No [WebGLHandlesContextLoss] on createProgram: while lost it still
+    // creates an object (CTS context-lost.html: createProgram → non-null,
+    // isProgram → false, no error).
     return createObject(ctx, ProgramCtor);
   };
 
@@ -658,6 +717,18 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     }
     return !program._deleted;
   };
+
+  // getAttachedShaders is not declared on the context class (implementation
+  // gap) — installed via cast, same pattern as the getActiveUniforms alias
+  // below. Returns the shaders attached to the program (spec §5.14.10).
+  (proto as unknown as { getAttachedShaders?: (program: WebGLProgram) => WebGLShader[] | null }).getAttachedShaders =
+    function (this: WebGLRenderingContext, program: WebGLProgram): WebGLShader[] | null {
+      const ctx = this;
+      if (isLost(ctx)) return null;
+      const p = validateProgramQuery(ctx, program);
+      if (p === null) return null;
+      return Array.from(p._attachedShaders);
+    };
 
   proto.useProgram = function (this: WebGLRenderingContext, program: WebGLProgram | null): void {
     const ctx = this;

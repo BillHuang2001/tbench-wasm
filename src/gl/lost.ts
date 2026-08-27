@@ -124,22 +124,27 @@ export function loseContext(ctx: ContextLike): void {
     return;
   }
   ctx._isLost = true;
+  // Set the spec's "invalidated flag" on every tracked object BEFORE
+  // invalidateAll() (which sets _deleted and clears the tracking set). Query
+  // validators reject invalidated objects with INVALID_OPERATION even when
+  // they are still in use — CTS gl-get-attrib-location-errors.html checks
+  // getAttribLocation on a pre-loss program after restore (expects -1 +
+  // INVALID_OPERATION, "Program created before the context lost event").
+  const tracked = (ctx._resources as unknown as { all?: Set<{ _invalidated?: boolean }> }).all;
+  if (tracked) {
+    for (const obj of tracked) obj._invalidated = true;
+  }
   ctx._resources.invalidateAll();
   lostState.set(ctx, { restoreAllowed: false, restorePending: false });
   const canvas = ctx._canvas;
   schedule(() => {
-    let prevented = false;
-    const event = {
-      type: 'webglcontextlost',
-      statusMessage: '',
-      cancelable: true,
-      preventDefault(): void {
-        prevented = true;
-      },
-    };
+    // A REAL Event in browsers — canvas.dispatchEvent throws TypeError on plain
+    // objects, which would silently swallow the page's webglcontextlost
+    // listener (CTS context-lost tests hang forever without it).
+    const event = makeContextEvent('webglcontextlost', '', true);
     dispatchCanvasEvent(canvas, event);
     const st = lostState.get(ctx);
-    if (st) st.restoreAllowed = prevented;
+    if (st) st.restoreAllowed = event.defaultPrevented === true;
   });
 }
 
@@ -184,7 +189,7 @@ function doRestore(ctx: ContextLike): void {
     if (!/lose_context$/i.test(key)) ctx._extensions.delete(key);
   }
   lostState.delete(ctx);
-  dispatchCanvasEvent(ctx._canvas, { type: 'webglcontextrestored', statusMessage: '' });
+  dispatchCanvasEvent(ctx._canvas, makeContextEvent('webglcontextrestored', '', false));
 }
 
 /* ================================================================== */
@@ -214,6 +219,18 @@ export function initContextResources(ctx: ContextLike): void {
   // Default framebuffer (drawing buffer) — null on stub throw (callers guard).
   const w = Math.max(1, ctx._drawingBufferWidth);
   const h = Math.max(1, ctx._drawingBufferHeight);
+  // Resize the present surface BEFORE the color surface aliases its pixel
+  // buffer: a freshly created surface is 0×0, and its first present() would
+  // auto-resize to a NEW zeroed buffer, orphaning the zero-copy alias (canvas
+  // screenshots/toDataURL would composite black). Stub-safe.
+  if (ctx._presentSurface) {
+    try {
+      const ps = ctx._presentSurface as { resize?: (w: number, h: number) => void };
+      if (typeof ps.resize === 'function') ps.resize(w, h);
+    } catch {
+      /* present stub — local surface fallback below still works */
+    }
+  }
   ctx._defaultFB = allocateDefaultFramebuffer(ctx, w, h);
   // Initial viewport + scissor = drawing buffer size (WebGL spec initial state).
   ctx._state.viewport = { x: 0, y: 0, w, h };
@@ -473,6 +490,38 @@ interface CanvasEvent {
   statusMessage?: string;
   cancelable?: boolean;
   preventDefault?: () => void;
+  /** True after preventDefault() ran (real DOM Events; our mocks mirror it). */
+  defaultPrevented?: boolean;
+}
+
+/**
+ * Build a context-lifecycle event (webglcontextlost / webglcontextrestored).
+ * Environments with an Event constructor (browsers — and Node ≥15, where unit
+ * tests run) get a REAL Event: canvas.dispatchEvent throws TypeError on plain
+ * objects, so without this the page's listeners never run and CTS context-lost
+ * tests hang. Environments without Event get a plain mock with the same
+ * observable shape (type/statusMessage/cancelable/preventDefault/
+ * defaultPrevented). statusMessage is attached as a property either way (CTS
+ * context-lost tests read event.statusMessage); preventDefault() tracks via
+ * defaultPrevented, which the caller reads after dispatch.
+ */
+function makeContextEvent(type: string, statusMessage: string, cancelable: boolean): CanvasEvent {
+  const evtCtor = (globalThis as { Event?: new (type: string, init?: EventInit) => Event }).Event;
+  if (typeof evtCtor === 'function') {
+    const ev = new evtCtor(type, { cancelable });
+    (ev as unknown as { statusMessage?: string }).statusMessage = statusMessage;
+    return ev as unknown as CanvasEvent;
+  }
+  const ev: CanvasEvent & { defaultPrevented: boolean } = {
+    type,
+    statusMessage,
+    cancelable,
+    defaultPrevented: false,
+    preventDefault(): void {
+      if (cancelable) ev.defaultPrevented = true;
+    },
+  };
+  return ev;
 }
 
 /**
