@@ -166,10 +166,16 @@ function alignUp(n: number, align: number): number {
   return (((n + align - 1) / align) | 0) * align;
 }
 
-/** Extension gate that never throws (extension factories are stubs in Phase 2). */
+/**
+ * Extension gate that never throws. Checks the enabled-extension cache
+ * (`ctx._extensions`, populated by getExtension) instead of CALLING
+ * getExtension — calling it here would cache and thereby SELF-ENABLE the
+ * extension, observable as e.g. UNSIGNED_INT indices accepted without
+ * OES_element_index_uint ever being requested.
+ */
 export function extSupported(ctx: WebGLRenderingContext, name: string): boolean {
   try {
-    return ctx.getExtension(name) !== null;
+    return ctx._extensions.has(name);
   } catch {
     return false;
   }
@@ -537,10 +543,41 @@ function matrixDims(type: number): { cols: number; rows: number } | null {
   return null;
 }
 
+/** One enabled buffer-backed attribute extraction (dense pool fill). */
+interface AttribExtraction {
+  l: number;
+  pool: 'floatPool' | 'intPool' | 'uintPool';
+  need: number;      // element count in the dense layout
+  elemCount: number; // number of fetched vertices/elements
+  comps: number;     // program component count (element stride)
+  data: ArrayBuffer;
+  dv: DataView;
+  typeSize: number;
+  stride: number;
+  colOffset: number;
+  divisor: number;
+  integer: boolean;
+  unsigned: boolean;
+  normalized: boolean;
+  aSize: number;
+  aType: GLenum;
+  aOffset: number;
+}
+
 /**
  * Build the per-draw attribute plan: dense extraction into the scratch pools.
  * Returns the attribs array (indexed by location) — constant views for
  * disabled attribs. `indices` non-null for indexed draws.
+ *
+ * TWO-PASS POOL LAYOUT: ensurePool REASSIGNS sc[which] when it grows, which
+ * would invalidate any view created before the grow. So pass 1 walks every
+ * enabled buffer-backed location and sums its dense element need per pool;
+ * each pool is grown ONCE to the total; pass 2 then hands each extraction a
+ * CUMULATIVE byte offset into its pool (running cursor in element units,
+ * reset at the top of this call = once per draw; byteOffset = base*4 — all
+ * extracted elements are 32-bit, so always 4-byte aligned). Without the
+ * cumulative offsets every attribute view aliases byteOffset 0 and the last
+ * extraction wins for ALL locations.
  */
 function buildAttribs(
   ctx: WebGLRenderingContext,
@@ -556,6 +593,10 @@ function buildAttribs(
   const plans: AttribPlan[] = new Array(maxAttribs);
 
   const attrs = pm.attributes ?? [];
+
+  // Pass 1 (sizing): plan constants and collect buffer-backed extractions.
+  const extract: AttribExtraction[] = [];
+  const totals: { floatPool: number; intPool: number; uintPool: number } = { floatPool: 0, intPool: 0, uintPool: 0 };
   for (const pa of attrs) {
     const loc = pa.location;
     if (loc < 0 || loc >= maxAttribs) continue;
@@ -586,47 +627,64 @@ function buildAttribs(
         ? Math.ceil(req.instanceCount / a.divisor)
         : req.count;
       const colOffset = col * (dims ? dims.rows * typeSize : 0);
-      const dv = new DataView(data);
+      const need = elemCount * comps;
+      const integer = a.integer;
+      const unsigned = integer && (a.type === C1.UNSIGNED_BYTE || a.type === C1.UNSIGNED_SHORT || a.type === C1.UNSIGNED_INT);
+      const pool = integer ? (unsigned ? 'uintPool' : 'intPool') : 'floatPool';
+      totals[pool] += need;
+      extract.push({
+        l, pool, need, elemCount, comps,
+        data, dv: new DataView(data), typeSize, stride, colOffset,
+        divisor: a.divisor, integer, unsigned, normalized: a.normalized,
+        aSize: a.size, aType: a.type, aOffset: a.offset,
+      });
+    }
+  }
+  // Grow each pool once, AFTER sizing (no reassignment during the fill pass).
+  if (totals.floatPool > 0) ensurePool(sc, 'floatPool', totals.floatPool);
+  if (totals.intPool > 0) ensurePool(sc, 'intPool', totals.intPool);
+  if (totals.uintPool > 0) ensurePool(sc, 'uintPool', totals.uintPool);
 
-      if (a.integer) {
-        // raw integer path (vertexAttribIPointer)
-        const unsigned = a.type === C1.UNSIGNED_BYTE || a.type === C1.UNSIGNED_SHORT || a.type === C1.UNSIGNED_INT;
-        const need = elemCount * comps;
-        ensurePool(sc, unsigned ? 'uintPool' : 'intPool', need);
-        const dst = unsigned
-          ? new Uint32Array(sc.uintPool.buffer, 0, need)
-          : new Int32Array(sc.intPool.buffer, 0, need);
-        for (let e = 0; e < elemCount; e++) {
-          const element = a.divisor > 0 ? e : (indices ? indices[e] : req.firstOrOffset + e);
-          const byteOff = a.offset + element * stride + colOffset;
-          for (let c = 0; c < comps; c++) {
-            let v = 0;
-            if (c < a.size && byteOff + c * typeSize + typeSize <= data.byteLength) {
-              v = readIntComponent(dv, a.type, byteOff + c * typeSize);
-            }
-            dst[e * comps + c] = c < a.size ? v : (c === 3 ? 1 : 0);
+  // Pass 2 (fill): cumulative per-pool cursor (element units, reset per draw).
+  let floatBase = 0, intBase = 0, uintBase = 0;
+  for (const ex of extract) {
+    const { l, pool, need, elemCount, comps, data, dv, typeSize, stride, colOffset,
+            divisor, integer, unsigned, normalized, aSize, aType, aOffset } = ex;
+    if (integer) {
+      // raw integer path (vertexAttribIPointer)
+      const base = unsigned ? uintBase : intBase;
+      const dst = unsigned
+        ? new Uint32Array(sc.uintPool.buffer, base * 4, need)
+        : new Int32Array(sc.intPool.buffer, base * 4, need);
+      if (unsigned) uintBase += need; else intBase += need;
+      for (let e = 0; e < elemCount; e++) {
+        const element = divisor > 0 ? e : (indices ? indices[e] : req.firstOrOffset + e);
+        const byteOff = aOffset + element * stride + colOffset;
+        for (let c = 0; c < comps; c++) {
+          let v = 0;
+          if (c < aSize && byteOff + c * typeSize + typeSize <= data.byteLength) {
+            v = readIntComponent(dv, aType, byteOff + c * typeSize);
           }
+          dst[e * comps + c] = c < aSize ? v : (c === 3 ? 1 : 0);
         }
-        attribs[l] = dst;
-      } else {
-        // float path with normalization
-        const need = elemCount * comps;
-        ensurePool(sc, 'floatPool', need);
-        const dst = new Float32Array(sc.floatPool.buffer, 0, need);
-        const normalized = a.normalized;
-        for (let e = 0; e < elemCount; e++) {
-          const element = a.divisor > 0 ? e : (indices ? indices[e] : req.firstOrOffset + e);
-          const byteOff = a.offset + element * stride + colOffset;
-          for (let c = 0; c < comps; c++) {
-            let v = 0;
-            if (c < a.size && byteOff + c * typeSize + typeSize <= data.byteLength) {
-              v = readFloatComponent(dv, a.type, byteOff + c * typeSize, normalized);
-            }
-            dst[e * comps + c] = c < a.size ? v : (c === 3 ? 1 : 0);
-          }
-        }
-        attribs[l] = dst;
       }
+      attribs[l] = dst;
+    } else {
+      // float path with normalization
+      const dst = new Float32Array(sc.floatPool.buffer, floatBase * 4, need);
+      floatBase += need;
+      for (let e = 0; e < elemCount; e++) {
+        const element = divisor > 0 ? e : (indices ? indices[e] : req.firstOrOffset + e);
+        const byteOff = aOffset + element * stride + colOffset;
+        for (let c = 0; c < comps; c++) {
+          let v = 0;
+          if (c < aSize && byteOff + c * typeSize + typeSize <= data.byteLength) {
+            v = readFloatComponent(dv, aType, byteOff + c * typeSize, normalized);
+          }
+          dst[e * comps + c] = c < aSize ? v : (c === 3 ? 1 : 0);
+        }
+      }
+      attribs[l] = dst;
     }
   }
   // Attribs not used by the program: constants (never fetched).
@@ -746,19 +804,26 @@ function buildTextureEnv(
   if (intStore) {
     for (const u of uniforms) {
       if (!u.sampler) continue;
-      const unit = intStore[u.location] ?? 0;
-      if (unit < 0 || unit >= numUnits) continue;
-      const key = samplerTargetKey(u.type);
-      const unitState = s.textureUnits[unit];
-      // state.ts texture-unit slots are typed with the DOM WebGLTexture
-      // interface; they always hold renderer WebGLTexture instances.
-      const tex = unitState[key] as unknown as WebGLTexture | null;
-      if (!tex || !tex._image) continue;
-      const img = tex._image as TextureImage;
-      const st = effectiveSamplerState(tex, unitState.sampler);
-      images[unit] = img;
-      samplerStates[unit] = st;
-      bindings[unit] = { img, state: st };
+      // Sampler arrays: `u.size` = array length, elements packed contiguously
+      // at intStore[u.location + e] (glsl linker dense packing). Bind each
+      // element's unit; the uniform1i write side addresses the same
+      // `u.location + e` convention.
+      const size = u.size ?? 1;
+      for (let e = 0; e < size; e++) {
+        const unit = intStore[u.location + e] ?? 0;
+        if (unit < 0 || unit >= numUnits) continue;
+        const key = samplerTargetKey(u.type);
+        const unitState = s.textureUnits[unit];
+        // state.ts texture-unit slots are typed with the DOM WebGLTexture
+        // interface; they always hold renderer WebGLTexture instances.
+        const tex = unitState[key] as unknown as WebGLTexture | null;
+        if (!tex || !tex._image) continue;
+        const img = tex._image as TextureImage;
+        const st = effectiveSamplerState(tex, unitState.sampler);
+        images[unit] = img;
+        samplerStates[unit] = st;
+        bindings[unit] = { img, state: st };
+      }
     }
   }
   return { images, samplerStates, bindings };
