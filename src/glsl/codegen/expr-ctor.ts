@@ -8,9 +8,10 @@
  * - VECTOR ctors concatenate the flat components of their arguments (each
  *   converted to the target base), SPLAT a lone scalar argument across all
  *   N components, and pad a short component list with 0s and a final 1
- *   (vec4(vec2) = (v0, v1, 0, 1)). A lone MATRIX argument contributes its
- *   DIAGONAL (not legal GLSL — kept permissive for robustness; semantics
- *   rejects such programs).
+ *   (vec4(vec2) = (v0, v1, 0, 1)). A MATRIX argument is flattened
+ *   COLUMN-MAJOR (GLSL ES 1.00 §5.4.2: vec4(mat2) = [m00, m10, m01, m11])
+ *   and is legal as the SOLE argument or as the LAST argument of a multi-arg
+ *   ctor (vec4(scalar, mat2) valid; vec4(mat2, scalar) invalid).
  * - MATRIX ctors fill column-major from the concatenated argument components
  *   and pad with (col===row ? 1 : 0). Special cases: a lone scalar argument
  *   builds a diagonal; a lone matrix argument copies the overlapping
@@ -151,15 +152,15 @@ function emitVectorCtor(
     const from = scalarBaseOf(at);
     const av = materialize(emitExpr(args[i], env), env);
     if (at.kind === 'matrix') {
-      // Not legal GLSL; permissive: the matrix's diagonal feeds the vector.
-      if (args.length !== 1) {
-        throw new Error(`codegen: matrix argument in a multi-argument vector constructor`);
+      // GLSL ES 1.00 §5.4.2: a matrix argument is flattened COLUMN-MAJOR
+      // (vec4(mat2) = [m00,m10,m01,m11]). Legal as the SOLE argument or as
+      // the LAST argument of a multi-arg ctor (vec4(scalar, mat2) valid;
+      // vec4(mat2, scalar) invalid — semantics rejects non-last matrices via
+      // its component-count rule, so this throw is defensive).
+      if (i !== args.length - 1) {
+        throw new Error('codegen: matrix argument must be the last argument of a vector constructor');
       }
-      const d = Math.min(at.cols, at.rows);
-      for (let k = 0; k < d; k++) {
-        const vv = av[k * at.rows + k];
-        flat.push(ctorComp(vv, from ?? base, base, env));
-      }
+      for (const vv of av) flat.push(ctorComp(vv, from ?? base, base, env));
     } else {
       for (const vv of av) flat.push(ctorComp(vv, from ?? base, base, env));
     }
