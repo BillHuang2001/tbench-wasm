@@ -140,6 +140,426 @@ function emitDerivatives(name: string, sig: BuiltinSignature, argVals: Value[][]
   return out;
 }
 
+/* ------------------------------------------------------------------ */
+/* Dual-mode builtin derivative templates (C5b)                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Dual-mode lowering of float-returning builtins. Each template composes the
+ * result's (v, dx, dy) strings from the ARGUMENT dual strings using PLAIN
+ * string math (chain/product/quotient rules) — no calls into the C5a2
+ * arithmetic-dual machinery (which may not exist on this branch). The `v`
+ * formula is the same expression the non-dual path emits; `dx`/`dy` are the
+ * analytic screen-space derivatives w.r.t. each float arg's dx/dy. Argument
+ * pres merge into the result (deduped by array identity) so materialized
+ * temps run once, before any component value/dual evaluates.
+ *
+ * Coverage: §8.3 common functions (radians..roundEven, mod, min/max/clamp,
+ * mix incl. the bvec selector, step/smoothstep, modf with out-param),
+ * intBitsToFloat/uintBitsToFloat (result duals 0 — bit reinterpretation),
+ * §8.5 geometry (length/distance/dot/cross/normalize/faceforward/reflect/
+ * refract), §8.6 component-wise matrix ops (matrixCompMult, outerProduct,
+ * transpose). determinant/inverse throw — no derivative template (rare in
+ * derivative shaders). int/uint/bool-returning builtins (pack/unpack,
+ * bitfield, relational, floatBitsTo*) never reach this function (the caller
+ * gates on hasFloatLeaves(ret)).
+ */
+
+/** One dual argument component: value + screen-space derivative strings. */
+interface DualArg {
+  v: string;
+  dx: string;
+  dy: string;
+}
+
+/** Merge unique (by array identity) pre arrays into one; undefined when none. */
+function mergePre(vals: (Value | undefined)[]): string[] | undefined {
+  const seen = new Set<string[]>();
+  const out: string[] = [];
+  for (const v of vals) {
+    if (v && v.pre && v.pre.length > 0 && !seen.has(v.pre)) {
+      seen.add(v.pre);
+      out.push(...v.pre);
+    }
+  }
+  return out.length ? out : undefined;
+}
+
+/**
+ * Per-component dual lowering for component-wise builtins (scalars, vectors,
+ * matrices — flat column-major). `f` maps the component's arg records to the
+ * result triple; its per-component `pre` (e.g. smoothstep's clamp temp) plus
+ * all arg pres merge into ONE array attached to every result component (pres
+ * are pure, so running all of them before any component is safe).
+ */
+function dualPerComp(
+  n: number,
+  argVals: Value[][],
+  argTypes: GLSLType[],
+  f: (xs: DualArg[], c: number) => { v: string; dx: string; dy: string; pre?: string[] },
+): Value[] {
+  const seen = new Set<string[]>();
+  const pres: string[] = [];
+  const out: Value[] = [];
+  for (let c = 0; c < n; c++) {
+    const xs: DualArg[] = argVals.map((vals, i) => {
+      const v = comp(vals, argTypes[i], c);
+      if (v.pre && v.pre.length > 0 && !seen.has(v.pre)) {
+        seen.add(v.pre);
+        pres.push(...v.pre);
+      }
+      const isF = scalarBaseOf(argTypes[i]) === 'float';
+      return { v: v.v, dx: isF ? v.dx ?? '0' : '0', dy: isF ? v.dy ?? '0' : '0' };
+    });
+    const r = f(xs, c);
+    if (r.pre && r.pre.length > 0 && !seen.has(r.pre)) {
+      seen.add(r.pre);
+      pres.push(...r.pre);
+    }
+    out.push({ v: r.v, dx: r.dx, dy: r.dy });
+  }
+  if (pres.length) for (const o of out) o.pre = pres;
+  return out;
+}
+
+function dualLowerBuiltin(
+  name: string,
+  args: Expr[],
+  argVals: Value[][],
+  argTypes: GLSLType[],
+  n: number,
+  argN: number[],
+  env: CodegenEnv,
+): Value[] {
+  switch (name) {
+    /* ---------------- §8.3 common functions (component-wise) ---------------- */
+    case 'radians':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `(${x.v} * 0.017453292519943295)`,
+        dx: `(${x.dx} * 0.017453292519943295)`,
+        dy: `(${x.dy} * 0.017453292519943295)`,
+      }));
+    case 'degrees':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `(${x.v} * 57.29577951308232)`,
+        dx: `(${x.dx} * 57.29577951308232)`,
+        dy: `(${x.dy} * 57.29577951308232)`,
+      }));
+    case 'sin':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.sin(${x.v})`,
+        dx: `(Math.cos(${x.v}) * (${x.dx}))`,
+        dy: `(Math.cos(${x.v}) * (${x.dy}))`,
+      }));
+    case 'cos':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.cos(${x.v})`,
+        dx: `(-Math.sin(${x.v}) * (${x.dx}))`,
+        dy: `(-Math.sin(${x.v}) * (${x.dy}))`,
+      }));
+    case 'tan':
+      return dualPerComp(n, argVals, argTypes, ([x]) => {
+        const v = `Math.tan(${x.v})`;
+        return {
+          v,
+          dx: `((${x.dx}) * (1 + (${v}) * (${v})))`,
+          dy: `((${x.dy}) * (1 + (${v}) * (${v})))`,
+        };
+      });
+    case 'asin':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.asin(${x.v})`,
+        dx: `((${x.dx}) / Math.sqrt(1 - (${x.v}) * (${x.v})))`,
+        dy: `((${x.dy}) / Math.sqrt(1 - (${x.v}) * (${x.v})))`,
+      }));
+    case 'acos':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.acos(${x.v})`,
+        dx: `(-(${x.dx}) / Math.sqrt(1 - (${x.v}) * (${x.v})))`,
+        dy: `(-(${x.dy}) / Math.sqrt(1 - (${x.v}) * (${x.v})))`,
+      }));
+    case 'sinh':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.sinh(${x.v})`,
+        dx: `(Math.cosh(${x.v}) * (${x.dx}))`,
+        dy: `(Math.cosh(${x.v}) * (${x.dy}))`,
+      }));
+    case 'cosh':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.cosh(${x.v})`,
+        dx: `(Math.sinh(${x.v}) * (${x.dx}))`,
+        dy: `(Math.sinh(${x.v}) * (${x.dy}))`,
+      }));
+    case 'tanh':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.tanh(${x.v})`,
+        dx: `((${x.dx}) / (Math.cosh(${x.v}) * Math.cosh(${x.v})))`,
+        dy: `((${x.dy}) / (Math.cosh(${x.v}) * Math.cosh(${x.v})))`,
+      }));
+    case 'asinh':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.asinh(${x.v})`,
+        dx: `((${x.dx}) / Math.sqrt((${x.v}) * (${x.v}) + 1))`,
+        dy: `((${x.dy}) / Math.sqrt((${x.v}) * (${x.v}) + 1))`,
+      }));
+    case 'acosh':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.acosh(${x.v})`,
+        dx: `((${x.dx}) / Math.sqrt((${x.v}) * (${x.v}) - 1))`,
+        dy: `((${x.dy}) / Math.sqrt((${x.v}) * (${x.v}) - 1))`,
+      }));
+    case 'atanh':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.atanh(${x.v})`,
+        dx: `((${x.dx}) / (1 - (${x.v}) * (${x.v})))`,
+        dy: `((${x.dy}) / (1 - (${x.v}) * (${x.v})))`,
+      }));
+    case 'exp':
+      return dualPerComp(n, argVals, argTypes, ([x]) => {
+        const v = `Math.exp(${x.v})`;
+        return {
+          v,
+          dx: `(${v} * (${x.dx}))`,
+          dy: `(${v} * (${x.dy}))`,
+        };
+      });
+    case 'exp2':
+      return dualPerComp(n, argVals, argTypes, ([x]) => {
+        const v = `Math.pow(2, ${x.v})`;
+        return {
+          v,
+          dx: `(${v} * Math.LN2 * (${x.dx}))`,
+          dy: `(${v} * Math.LN2 * (${x.dy}))`,
+        };
+      });
+    case 'log':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.log(${x.v})`,
+        dx: `((${x.dx}) / (${x.v}))`,
+        dy: `((${x.dy}) / (${x.v}))`,
+      }));
+    case 'log2':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.log2(${x.v})`,
+        dx: `((${x.dx}) / ((${x.v}) * Math.LN2))`,
+        dy: `((${x.dy}) / ((${x.v}) * Math.LN2))`,
+      }));
+    case 'sqrt':
+      return dualPerComp(n, argVals, argTypes, ([x]) => {
+        const v = `Math.sqrt(${x.v})`;
+        return {
+          v,
+          dx: `((${x.dx}) / (2 * (${v})))`,
+          dy: `((${x.dy}) / (2 * (${v})))`,
+        };
+      });
+    case 'inversesqrt':
+      return dualPerComp(n, argVals, argTypes, ([x]) => {
+        const v = `(1 / Math.sqrt(${x.v}))`;
+        return {
+          v,
+          dx: `(-0.5 * (${v}) * (${v}) * (${v}) * (${x.dx}))`,
+          dy: `(-0.5 * (${v}) * (${v}) * (${v}) * (${x.dy}))`,
+        };
+      });
+    case 'atan': {
+      if (argVals.length === 1) {
+        return dualPerComp(n, argVals, argTypes, ([x]) => ({
+          v: `Math.atan(${x.v})`,
+          dx: `((${x.dx}) / (1 + (${x.v}) * (${x.v})))`,
+          dy: `((${x.dy}) / (1 + (${x.v}) * (${x.v})))`,
+        }));
+      }
+      // atan(y, x) = atan2: d/dy = x/(x²+y²), d/dx = −y/(x²+y²).
+      return dualPerComp(n, argVals, argTypes, ([y, x]) => {
+        const denom = `((${x.v}) * (${x.v}) + (${y.v}) * (${y.v}))`;
+        return {
+          v: `Math.atan2(${y.v}, ${x.v})`,
+          dx: `(((${x.v}) * (${y.dx}) - (${y.v}) * (${x.dx})) / ${denom})`,
+          dy: `(((${x.v}) * (${y.dy}) - (${y.v}) * (${x.dy})) / ${denom})`,
+        };
+      });
+    }
+    case 'pow':
+      return dualPerComp(n, argVals, argTypes, ([x, y]) => {
+        const v = `Math.pow(${x.v}, ${y.v})`;
+        return {
+          v,
+          dx: `(${v} * ((${y.v}) * (${x.dx}) / (${x.v}) + (${y.dx}) * Math.log(${x.v})))`,
+          dy: `(${v} * ((${y.v}) * (${x.dy}) / (${x.v}) + (${y.dy}) * Math.log(${x.v})))`,
+        };
+      });
+    case 'abs':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.abs(${x.v})`,
+        dx: `((${x.dx}) * ((${x.v}) < 0 ? -1 : 1))`,
+        dy: `((${x.dy}) * ((${x.v}) < 0 ? -1 : 1))`,
+      }));
+    case 'sign':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `((${x.v}) > 0 ? 1 : ((${x.v}) < 0 ? -1 : 0))`,
+        dx: '0',
+        dy: '0',
+      }));
+    case 'floor':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.floor(${x.v})`,
+        dx: '0',
+        dy: '0',
+      }));
+    case 'ceil':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.ceil(${x.v})`,
+        dx: '0',
+        dy: '0',
+      }));
+    case 'trunc':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.trunc(${x.v})`,
+        dx: '0',
+        dy: '0',
+      }));
+    case 'round':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `Math.round(${x.v})`,
+        dx: '0',
+        dy: '0',
+      }));
+    case 'roundEven': {
+      const x = materialize(argVals[0], env);
+      const t = env.allocTemp();
+      return dualPerComp(n, [x], argTypes, ([xv]) => {
+        const r = `${t} = Math.round(${xv.v})`;
+        const tie = `(Math.abs(${xv.v} - Math.trunc(${xv.v})) === 0.5 && (${t} & 1))`;
+        return {
+          v: `(${r}, ${tie} ? ${t} - 1 : ${t})`,
+          dx: '0',
+          dy: '0',
+        };
+      });
+    }
+    case 'fract':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `((${x.v}) - Math.floor(${x.v}))`,
+        dx: `(${x.dx})`,
+        dy: `(${x.dy})`,
+      }));
+    case 'mod': {
+      const x = materialize(argVals[0], env);
+      const y = materialize(argVals[1], env);
+      return dualPerComp(n, [x, y], argTypes, ([xv, yv]) => ({
+        v: `((${xv.v}) - (${yv.v}) * Math.floor((${xv.v}) / (${yv.v})))`,
+        dx: `((${xv.dx}) - Math.floor((${xv.v}) / (${yv.v})) * (${yv.dx}))`,
+        dy: `((${xv.dy}) - Math.floor((${xv.v}) / (${yv.v})) * (${yv.dy}))`,
+      }));
+    }
+    case 'min':
+      return dualPerComp(n, argVals, argTypes, ([x, y]) => ({
+        v: `Math.min(${x.v}, ${y.v})`,
+        dx: `((${x.v}) < (${y.v}) ? (${x.dx}) : (${y.dx}))`,
+        dy: `((${x.v}) < (${y.v}) ? (${x.dy}) : (${y.dy}))`,
+      }));
+    case 'max':
+      return dualPerComp(n, argVals, argTypes, ([x, y]) => ({
+        v: `Math.max(${x.v}, ${y.v})`,
+        dx: `((${x.v}) > (${y.v}) ? (${x.dx}) : (${y.dx}))`,
+        dy: `((${x.v}) > (${y.v}) ? (${x.dy}) : (${y.dy}))`,
+      }));
+    case 'clamp': {
+      // clamp(x, lo, hi) = min(max(x, lo), hi): compose the min/max selection
+      // derivatives (per-component argument selection; constant lo/hi collapse
+      // to the usual in-range x' / out-of-range 0).
+      const x = materialize(argVals[0], env);
+      return dualPerComp(n, [x, argVals[1], argVals[2]], argTypes, ([xv, lo, hi]) => {
+        const m = `Math.max(${xv.v}, ${lo.v})`;
+        return {
+          v: `Math.min(${m}, ${hi.v})`,
+          dx: `(((${m}) < (${hi.v})) ? ((${xv.v}) > (${lo.v}) ? (${xv.dx}) : (${lo.dx})) : (${hi.dx}))`,
+          dy: `(((${m}) < (${hi.v})) ? ((${xv.v}) > (${lo.v}) ? (${xv.dy}) : (${lo.dy})) : (${hi.dy}))`,
+        };
+      });
+    }
+    case 'mix': {
+      const a = materialize(argVals[2], env);
+      if (isBoolType(argTypes[2])) {
+        // bvec selector: component-wise selection — dual = selected arg's.
+        return dualPerComp(n, [argVals[0], argVals[1], a], argTypes, ([x, y, s]) => ({
+          v: `(${s.v} ? ${y.v} : ${x.v})`,
+          dx: `(${s.v} ? ${y.dx} : ${x.dx})`,
+          dy: `(${s.v} ? ${y.dy} : ${x.dy})`,
+        }));
+      }
+      return dualPerComp(n, [argVals[0], argVals[1], a], argTypes, ([x, y, s]) => ({
+        v: `((${x.v}) * (1 - (${s.v})) + (${y.v}) * (${s.v}))`,
+        dx: `((${x.dx}) * (1 - (${s.v})) + (${y.dx}) * (${s.v}) + ((${y.v}) - (${x.v})) * (${s.dx}))`,
+        dy: `((${x.dy}) * (1 - (${s.v})) + (${y.dy}) * (${s.v}) + ((${y.v}) - (${x.v})) * (${s.dy}))`,
+      }));
+    }
+    case 'step':
+      // Discontinuous: derivative 0 a.e. (spec: undefined; 0 is the standard).
+      return dualPerComp(n, argVals, argTypes, ([edge, x]) => ({
+        v: `((${x.v}) < (${edge.v}) ? 0.0 : 1.0)`,
+        dx: '0',
+        dy: '0',
+      }));
+    case 'smoothstep': {
+      const e0 = materialize(argVals[0], env);
+      const e1 = materialize(argVals[1], env);
+      const x = materialize(argVals[2], env);
+      return dualPerComp(n, [e0, e1, x], argTypes, ([a, b, c]) => {
+        // t = clamp((x−e0)/(e1−e0), 0, 1); result = t²(3−2t);
+        // d/dt = 6t(1−t); dt/dx = x'/(e1−e0) (e0/e1 duals ignored — constants
+        // in practice; matches the value formula's temp flow).
+        const t = env.allocTemp();
+        const clamp = `${t} = Math.min(Math.max(((${c.v}) - (${a.v})) / ((${b.v}) - (${a.v})), 0), 1)`;
+        return {
+          v: `${t} * ${t} * (3 - 2 * ${t})`,
+          dx: `(6 * ${t} * (1 - ${t}) * ((${c.dx}) / ((${b.v}) - (${a.v}))))`,
+          dy: `(6 * ${t} * (1 - ${t}) * ((${c.dy}) / ((${b.v}) - (${a.v}))))`,
+          pre: [clamp],
+        };
+      });
+    }
+    case 'intBitsToFloat':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `R.i2f(${x.v})`,
+        dx: '0',
+        dy: '0',
+      }));
+    case 'uintBitsToFloat':
+      return dualPerComp(n, argVals, argTypes, ([x]) => ({
+        v: `R.u2f(${x.v})`,
+        dx: '0',
+        dy: '0',
+      }));
+    case 'modf': {
+      // modf(x, ip): result = fract(x) — derivative passes through (trunc is
+      // constant a.e.); ip's integer part is piecewise constant → its dual
+      // planes (when present) are zeroed alongside the v-plane write.
+      const nc = argN[0];
+      const x = materialize(argVals[0], env);
+      const outLv = emitLValue(args[1], env);
+      const pre: string[] = [];
+      const ts: string[] = [];
+      for (let c = 0; c < nc; c++) {
+        const t = env.allocTemp();
+        ts.push(t);
+        pre.push(`${t} = Math.trunc(${x[c].v})`);
+        const w = lvWrite(outLv, c, t);
+        const d = outLv.dualTargets?.[c];
+        pre.push(d ? `(${w}, ${d[0]} = 0, ${d[1]} = 0)` : w);
+      }
+      const out: Value[] = [];
+      for (let c = 0; c < nc; c++) {
+        out.push({ v: `((${x[c].v}) - ${ts[c]})`, dx: x[c].dx ?? '0', dy: x[c].dy ?? '0', pre });
+      }
+      return out;
+    }
+    default:
+      throw new Error(`codegen: dual-mode lowering of '${name}' has no derivative template (C5b)`);
+  }
+}
+
 function lowerBuiltin(
   name: string,
   sig: BuiltinSignature,
@@ -151,18 +571,18 @@ function lowerBuiltin(
   if (DERIV_NAMES.has(name)) {
     return emitDerivatives(name, sig, argVals, env);
   }
-  // Dual mode: float-result builtins need dual lowering (per-builtin
-  // derivative templates — C5a2). Throw rather than silently dropping the
-  // duals. Int/uint/bool-result builtins (textureSize, bitfield ops,
-  // relationals, floatBitsToInt, ...) carry no duals and stay legal.
-  if (env.dual && hasFloatLeaves(sig.ret)) {
-    throw new Error(`codegen: dual-mode lowering of '${name}' requires the C5a2 builtin dual templates`);
-  }
   const ret = sig.ret;
   const n = flatComponents(ret);
   const argN = argTypes.map((t) => flatComponents(t));
   if (name.startsWith('texture') || name.startsWith('texelFetch')) {
     return emitTextureCall(name, sig, args, argVals, argTypes, argN, ret, env);
+  }
+  // Dual mode: float-result builtins lower through per-builtin analytic
+  // derivative templates (C5b — dualLowerBuiltin). Int/uint/bool-result
+  // builtins (textureSize, bitfield ops, relationals, floatBitsToInt, ...)
+  // carry no duals and stay legal on the non-dual path below.
+  if (env.dual && hasFloatLeaves(ret)) {
+    return dualLowerBuiltin(name, args, argVals, argTypes, n, argN, env);
   }
   switch (name) {
     /* ---------------- §8.3 common functions ---------------- */
