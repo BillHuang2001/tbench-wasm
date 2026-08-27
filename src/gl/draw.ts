@@ -99,6 +99,12 @@ export interface DrawRequest {
   indexType?: GLenum;
   /** For drawRangeElements: [start, end] inclusive index range. */
   range?: [GLuint, GLuint];
+  /**
+   * gl_DrawID (WEBGL_multi_draw): the 0-based multi-draw subdraw index,
+   * constant for every vertex/instance of THIS draw. Omitted (or 0) for
+   * single draws. The vertex exec ctx reads it as `gl_DrawID`.
+   */
+  drawId?: number;
 }
 
 /* ================================================================== */
@@ -1165,6 +1171,7 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
     attribIndices: ai,
     vertexId: 0,
     instanceId: 0,
+    drawId: req.drawId ?? 0, // gl_DrawID: subdraw index; 0 for single draws
     uniforms: floatStore,
     intUniforms: intStore,
     blockStores,
@@ -1792,35 +1799,22 @@ export function validateDrawElements(
 }
 
 /* ================================================================== */
-/* WEBGL_multi_draw engine entries (extensions/misc.ts delegates here)  */
+/* WEBGL_multi_draw engine entries (api/draw.ts + extensions/misc.ts   */
+/* delegate here)                                                      */
 /* ================================================================== */
 
 /**
- * multiDrawArraysWEBGL engine: validate EVERY subdraw first (any invalid →
- * push the error + NO drawing at all), then execute each subdraw via
- * executeDraw. drawcount ≤ 0 → NO_ERROR no-op. firsts/counts are
- * Int32Array/sequence (values are WebIDL longs).
- *
- * NOTE: `mode` is a parameter here (the objective's shorthand omitted it) —
- * executeDraw requires the per-subdraw mode, and the extension validates it
- * against the same DRAW_MODES table before any drawing.
+ * Shared multi-draw execution: every subdraw was already validated
+ * (validate-all-first contract) — run each via executeDraw. gl_DrawID is the
+ * 0-based subdraw index i (constant per subdraw, across all vertices/instances).
  */
-export function executeMultiDrawArrays(
+function runMultiSubdraws(
   ctx: WebGLRenderingContext,
-  mode: GLenum,
-  firsts: Int32Array | number[],
-  counts: Int32Array | number[],
-  drawcount: number,
+  reqs: DrawRequest[],
 ): void {
-  if (ctx._isLost) { pushError(ctx, C1.CONTEXT_LOST_WEBGL); return; }
-  const n = drawcount | 0;
-  if (n <= 0) return; // NO_ERROR no-op
-  for (let i = 0; i < n; i++) {
-    if (!validateDrawArrays(ctx, mode, firsts[i], counts[i], 1)) return;
-  }
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < reqs.length; i++) {
     try {
-      executeDraw(ctx, { mode, count: counts[i], instanceCount: 1, firstOrOffset: firsts[i], indexed: false });
+      executeDraw(ctx, { ...reqs[i], drawId: i });
     } catch {
       pushError(ctx, C1.INVALID_OPERATION); // engine must not throw; guard anyway
     }
@@ -1828,29 +1822,123 @@ export function executeMultiDrawArrays(
 }
 
 /**
+ * multiDrawArraysWEBGL engine: validate EVERY subdraw first (any invalid →
+ * push the error + NO drawing at all), then execute each subdraw via
+ * executeDraw. drawcount ≤ 0 → NO_ERROR no-op (caller guarantees ≥ 0).
+ * firsts/counts are Int32Array/sequence (values are WebIDL longs);
+ * firstsOffset/countsOffset are ELEMENT offsets into the lists (prototype
+ * layer already checked offset + drawcount ≤ list.length).
+ *
+ * NOTE: `mode` is a parameter here (the objective's shorthand omitted it) —
+ * executeDraw requires the per-subdraw mode, and it is validated against the
+ * same DRAW_MODES table before any drawing.
+ */
+export function executeMultiDrawArrays(
+  ctx: WebGLRenderingContext,
+  mode: GLenum,
+  firsts: Int32Array | number[],
+  firstsOffset: number,
+  counts: Int32Array | number[],
+  countsOffset: number,
+  drawcount: number,
+): void {
+  const n = drawcount | 0;
+  if (n <= 0) return; // NO_ERROR no-op
+  const reqs: DrawRequest[] = [];
+  for (let i = 0; i < n; i++) {
+    const req = validateDrawArrays(ctx, mode, firsts[firstsOffset + i], counts[countsOffset + i], 1);
+    if (!req) return; // error already pushed; nothing drawn
+    reqs.push(req);
+  }
+  runMultiSubdraws(ctx, reqs);
+}
+
+/**
  * multiDrawElementsWEBGL engine entry (same validate-all-first contract as
  * executeMultiDrawArrays). counts/offsets are Int32Array/sequence; offsets are
- * byte offsets into the element array buffer.
+ * byte offsets into the element array buffer; countsOffset/offsetsOffset are
+ * ELEMENT offsets into the lists.
  */
 export function executeMultiDrawElements(
   ctx: WebGLRenderingContext,
   mode: GLenum,
   counts: Int32Array | number[],
+  countsOffset: number,
   type: GLenum,
   offsets: Int32Array | number[],
+  offsetsOffset: number,
   drawcount: number,
 ): void {
-  if (ctx._isLost) { pushError(ctx, C1.CONTEXT_LOST_WEBGL); return; }
   const n = drawcount | 0;
   if (n <= 0) return; // NO_ERROR no-op
+  const reqs: DrawRequest[] = [];
   for (let i = 0; i < n; i++) {
-    if (!validateDrawElements(ctx, mode, counts[i], type, offsets[i])) return;
+    const req = validateDrawElements(ctx, mode, counts[countsOffset + i], type, offsets[offsetsOffset + i]);
+    if (!req) return; // error already pushed; nothing drawn
+    reqs.push(req);
   }
+  runMultiSubdraws(ctx, reqs);
+}
+
+/**
+ * multiDrawArraysInstancedWEBGL engine entry (same validate-all-first
+ * contract). Per-subdraw instanceCounts[instanceCountsOffset + i] flows into
+ * validateDrawArrays and the executed instanceCount.
+ */
+export function executeMultiDrawArraysInstanced(
+  ctx: WebGLRenderingContext,
+  mode: GLenum,
+  firsts: Int32Array | number[],
+  firstsOffset: number,
+  counts: Int32Array | number[],
+  countsOffset: number,
+  instanceCounts: Int32Array | number[],
+  instanceCountsOffset: number,
+  drawcount: number,
+): void {
+  const n = drawcount | 0;
+  if (n <= 0) return; // NO_ERROR no-op
+  const reqs: DrawRequest[] = [];
   for (let i = 0; i < n; i++) {
-    try {
-      executeDraw(ctx, { mode, count: counts[i], instanceCount: 1, firstOrOffset: offsets[i], indexed: true, indexType: type });
-    } catch {
-      pushError(ctx, C1.INVALID_OPERATION); // engine must not throw; guard anyway
-    }
+    const req = validateDrawArrays(
+      ctx, mode,
+      firsts[firstsOffset + i], counts[countsOffset + i],
+      instanceCounts[instanceCountsOffset + i],
+    );
+    if (!req) return; // error already pushed; nothing drawn
+    reqs.push(req);
   }
+  runMultiSubdraws(ctx, reqs);
+}
+
+/**
+ * multiDrawElementsInstancedWEBGL engine entry (same validate-all-first
+ * contract). Per-subdraw instanceCounts[instanceCountsOffset + i] flows into
+ * validateDrawElements and the executed instanceCount.
+ */
+export function executeMultiDrawElementsInstanced(
+  ctx: WebGLRenderingContext,
+  mode: GLenum,
+  counts: Int32Array | number[],
+  countsOffset: number,
+  type: GLenum,
+  offsets: Int32Array | number[],
+  offsetsOffset: number,
+  instanceCounts: Int32Array | number[],
+  instanceCountsOffset: number,
+  drawcount: number,
+): void {
+  const n = drawcount | 0;
+  if (n <= 0) return; // NO_ERROR no-op
+  const reqs: DrawRequest[] = [];
+  for (let i = 0; i < n; i++) {
+    const req = validateDrawElements(
+      ctx, mode,
+      counts[countsOffset + i], type, offsets[offsetsOffset + i],
+      { instanceCount: instanceCounts[instanceCountsOffset + i] },
+    );
+    if (!req) return; // error already pushed; nothing drawn
+    reqs.push(req);
+  }
+  runMultiSubdraws(ctx, reqs);
 }

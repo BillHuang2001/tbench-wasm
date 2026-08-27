@@ -3,9 +3,11 @@
  *
  * Owns: drawArrays, drawElements, drawArraysInstanced (W2), drawElementsInstanced
  * (W2), drawRangeElements (W2), clear, clearBuffer{fv,iv,uiv,fi} (W2), flush,
- * finish, readPixels. (multiDraw*WEBGL belong to the WEBGL_multi_draw extension
- * object; its engine entries — executeMultiDrawArrays/Elements, including the
- * validate-all-subdraws-first contract — live in ../draw.)
+ * finish, readPixels, and the four WEBGL_multi_draw methods (installed
+ * unconditionally on both context prototypes; the extension object delegates
+ * here too). The multi-draw engine entries — executeMultiDrawArrays/Elements
+ * (+Instanced), including the validate-all-subdraws-first contract — live in
+ * ../draw.
  *
  * Validation (spec order) before delegating to the draw.ts engine:
  *  - drawArrays/drawElements(+Instanced/drawRangeElements): mode
@@ -41,6 +43,10 @@ import {
   executeClear,
   executeClearBuffer,
   executeDraw,
+  executeMultiDrawArrays,
+  executeMultiDrawArraysInstanced,
+  executeMultiDrawElements,
+  executeMultiDrawElementsInstanced,
   executeReadPixels,
   extSupported,
   validateDrawArrays,
@@ -462,4 +468,118 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       try { executeClearBuffer(ctx, buffer, drawbuffer, null, depth, stencil); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
   }
+
+  // ---- WEBGL_multi_draw (extension methods; installed UNCONDITIONALLY — the   ----
+  // extension registry exposes them on both WebGL1 and WebGL2, and the WebGL2
+  // prototype receives them via installAll + the descriptor copy in webgl2.ts).
+  //
+  // Prototype layer validates ONLY the multi-draw-specific preconditions
+  // (WebIDL list conversion, drawcount, list lengths) and delegates to the
+  // engine entries, which validate every subdraw first (validate-all-first
+  // contract: any invalid subdraw → error + NOTHING drawn) and then execute.
+  // The *Offset args are ELEMENT offsets into the lists (NOT bytes); drawcount
+  // < 0 → INVALID_VALUE; offset + drawcount > list.length → INVALID_OPERATION.
+  //
+  // Extension methods are not part of the core class declaration — widen the
+  // prototype for installation (same pattern as the `p2` WebGL2 cast above).
+  const mdProto = proto as unknown as {
+    multiDrawArraysWEBGL(mode: GLenum, firsts: Int32List, firstsOffset: GLuint, counts: Int32List, countsOffset: GLuint, drawcount: GLsizei): void;
+    multiDrawElementsWEBGL(mode: GLenum, counts: Int32List, countsOffset: GLuint, type: GLenum, offsets: Int32List, offsetsOffset: GLuint, drawcount: GLsizei): void;
+    multiDrawArraysInstancedWEBGL(mode: GLenum, firsts: Int32List, firstsOffset: GLuint, counts: Int32List, countsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei): void;
+    multiDrawElementsInstancedWEBGL(mode: GLenum, counts: Int32List, countsOffset: GLuint, type: GLenum, offsets: Int32List, offsetsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei): void;
+  };
+
+  mdProto.multiDrawArraysWEBGL = function (
+    this: WebGLRenderingContext,
+    mode: GLenum, firsts: Int32List, firstsOffset: GLuint,
+    counts: Int32List, countsOffset: GLuint, drawcount: GLsizei,
+  ): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const firstsArr = toList(firsts, Int32Array, 'Int32List');
+    const countsArr = toList(counts, Int32Array, 'Int32List');
+    const dc = drawcount | 0;
+    if (dc < 0) { ctx._errors.push(C1.INVALID_VALUE); return; }
+    if (dc === 0) return; // NO_ERROR no-op
+    const fo = firstsOffset >>> 0;
+    const co = countsOffset >>> 0;
+    if (fo + dc > firstsArr.length || co + dc > countsArr.length) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    try { executeMultiDrawArrays(ctx, mode, firstsArr, fo, countsArr, co, dc); }
+    catch { ctx._errors.push(C1.INVALID_OPERATION); }
+  };
+
+  mdProto.multiDrawElementsWEBGL = function (
+    this: WebGLRenderingContext,
+    mode: GLenum, counts: Int32List, countsOffset: GLuint,
+    type: GLenum, offsets: Int32List, offsetsOffset: GLuint, drawcount: GLsizei,
+  ): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const countsArr = toList(counts, Int32Array, 'Int32List');
+    const offsetsArr = toList(offsets, Int32Array, 'Int32List');
+    const dc = drawcount | 0;
+    if (dc < 0) { ctx._errors.push(C1.INVALID_VALUE); return; }
+    if (dc === 0) return; // NO_ERROR no-op
+    const co = countsOffset >>> 0;
+    const oo = offsetsOffset >>> 0;
+    if (co + dc > countsArr.length || oo + dc > offsetsArr.length) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    try { executeMultiDrawElements(ctx, mode, countsArr, co, type, offsetsArr, oo, dc); }
+    catch { ctx._errors.push(C1.INVALID_OPERATION); }
+  };
+
+  mdProto.multiDrawArraysInstancedWEBGL = function (
+    this: WebGLRenderingContext,
+    mode: GLenum, firsts: Int32List, firstsOffset: GLuint,
+    counts: Int32List, countsOffset: GLuint,
+    instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei,
+  ): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const firstsArr = toList(firsts, Int32Array, 'Int32List');
+    const countsArr = toList(counts, Int32Array, 'Int32List');
+    const instArr = toList(instanceCounts, Int32Array, 'Int32List');
+    const dc = drawcount | 0;
+    if (dc < 0) { ctx._errors.push(C1.INVALID_VALUE); return; }
+    if (dc === 0) return; // NO_ERROR no-op
+    const fo = firstsOffset >>> 0;
+    const co = countsOffset >>> 0;
+    const io = instanceCountsOffset >>> 0;
+    if (fo + dc > firstsArr.length || co + dc > countsArr.length || io + dc > instArr.length) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    try { executeMultiDrawArraysInstanced(ctx, mode, firstsArr, fo, countsArr, co, instArr, io, dc); }
+    catch { ctx._errors.push(C1.INVALID_OPERATION); }
+  };
+
+  mdProto.multiDrawElementsInstancedWEBGL = function (
+    this: WebGLRenderingContext,
+    mode: GLenum, counts: Int32List, countsOffset: GLuint,
+    type: GLenum, offsets: Int32List, offsetsOffset: GLuint,
+    instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei,
+  ): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const countsArr = toList(counts, Int32Array, 'Int32List');
+    const offsetsArr = toList(offsets, Int32Array, 'Int32List');
+    const instArr = toList(instanceCounts, Int32Array, 'Int32List');
+    const dc = drawcount | 0;
+    if (dc < 0) { ctx._errors.push(C1.INVALID_VALUE); return; }
+    if (dc === 0) return; // NO_ERROR no-op
+    const co = countsOffset >>> 0;
+    const oo = offsetsOffset >>> 0;
+    const io = instanceCountsOffset >>> 0;
+    if (co + dc > countsArr.length || oo + dc > offsetsArr.length || io + dc > instArr.length) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    try { executeMultiDrawElementsInstanced(ctx, mode, countsArr, co, type, offsetsArr, oo, instArr, io, dc); }
+    catch { ctx._errors.push(C1.INVALID_OPERATION); }
+  };
 }

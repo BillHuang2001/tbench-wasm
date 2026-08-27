@@ -172,10 +172,10 @@ export interface OES_draw_buffers_indexed {
   colorMaskiOES(buf: GLuint, r: GLboolean, g: GLboolean, b: GLboolean, a: GLboolean): void;
 }
 export interface WEBGL_multi_draw {
-  multiDrawArraysWEBGL(mode: GLenum, firsts: Int32List, counts: Int32List, drawcount: GLsizei): void;
-  multiDrawElementsWEBGL(mode: GLenum, counts: Int32List, type: GLenum, offsets: Int32List, drawcount: GLsizei): void;
-  multiDrawArraysInstancedWEBGL(mode: GLenum, firsts: Int32List, counts: Int32List, instanceCounts: Int32List, drawcount: GLsizei): void;
-  multiDrawElementsInstancedWEBGL(mode: GLenum, counts: Int32List, type: GLenum, offsets: Int32List, instanceCounts: Int32List, drawcount: GLsizei): void;
+  multiDrawArraysWEBGL(mode: GLenum, firsts: Int32List, firstsOffset: GLuint, counts: Int32List, countsOffset: GLuint, drawcount: GLsizei): void;
+  multiDrawElementsWEBGL(mode: GLenum, counts: Int32List, countsOffset: GLuint, type: GLenum, offsets: Int32List, offsetsOffset: GLuint, drawcount: GLsizei): void;
+  multiDrawArraysInstancedWEBGL(mode: GLenum, firsts: Int32List, firstsOffset: GLuint, counts: Int32List, countsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei): void;
+  multiDrawElementsInstancedWEBGL(mode: GLenum, counts: Int32List, countsOffset: GLuint, type: GLenum, offsets: Int32List, offsetsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei): void;
 }
 export interface WEBGL_clip_cull_distance {
   readonly MAX_CLIP_DISTANCES_WEBGL: GLenum;
