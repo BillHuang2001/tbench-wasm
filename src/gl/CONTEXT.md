@@ -74,6 +74,9 @@ The complete WebGL 1.0 (`WebGLRenderingContext`) and WebGL 2.0 (`WebGL2Rendering
 - `getParameter(EXTENSIONS)` is INVALID_ENUM per spec (use getSupportedExtensions) — do not "fix" to return strings.
 - deqp suite (optional, `tests/deqp/`) counts millions of reportResults calls in-process — never route results through the DOM (root CONTEXT.md).
 
+## Notes for Agents
+- **CTS failure messages**: the conformance runner's JSON report does NOT surface per-assertion failure messages (only counts; the harness shim stores them in `window.__softglCts.messages`). To see WHY a page fails, run `npx tsx src/gl/debug-contextlost.ts <url...>` (loads pages via the tests/conformance server + renderer shim, dumps failing assertions + pageerrors/console). Gotcha: the shell env may set `WEBGL_SOFTWARE_RENDERER` to a stub path — always pass `--renderer` explicitly to the runner.
+
 ## Routing Table
 - `webgl1.ts` → WebGLRenderingContext class: signatures + arity + installConstants/installAll wiring
 - `webgl2.ts` → WebGL2RenderingContext class: WebGL2 additions + wiring
