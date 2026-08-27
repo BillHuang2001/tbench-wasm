@@ -45,7 +45,7 @@ import type { WebGLRenderingContext } from '../webgl1';
 import type { WebGL2RenderingContext } from '../webgl2';
 import { C1, C2 } from '../constants';
 import { WebGLUniformLocation } from '../objects';
-import { programModels, linkGen, locGen, elementSlots } from './programs';
+import { programModels, linkGen, locGen, elementSlots, getUniformLocationInfo } from './programs';
 import type { Float32List, GLboolean, GLfloat, GLint, GLuint, Int32List, Uint32List } from '../types';
 
 // FLOAT_MAT2x3..FLOAT_MAT4x3 missing from constants.ts (owned elsewhere) —
@@ -188,6 +188,8 @@ interface WriteTarget {
   pm: import('../../glsl').Program;
   uniform: import('../../glsl').Program['uniforms'][number];
   slots: number;
+  /** Array element the location points at (0 for a bare array name / scalar). */
+  elem: number;
 }
 
 /**
@@ -221,7 +223,10 @@ function prepareUniform(ctx: WebGLRenderingContext, loc: unknown): WriteTarget |
     ctx._errors.push(C1.INVALID_OPERATION); // block members are not settable here
     return null;
   }
-  return { program, pm, uniform, slots: elementSlots(uniform) };
+  // The location's array element (same info getUniform reads back) — writes
+  // MUST target that element, not element 0.
+  const info = getUniformLocationInfo(loc);
+  return { program, pm, uniform, slots: elementSlots(uniform), elem: info.elem };
 }
 
 /**
@@ -289,13 +294,16 @@ function uniformScalar(ctx: WebGLRenderingContext, location: WebGLUniformLocatio
     }
   }
   const isBool = isBoolType(t.uniform.type);
+  // Element base in float units (scalar/sampler 1, vector 4); the location may
+  // point at an array element ≠ 0.
+  const base = t.elem * t.slots;
   for (let c = 0; c < k; c++) {
     const v = vals[c];
     if (family === 'f') {
-      if (isBool) writeIntAt(t, 0, c, v, 'boolf');
-      else writeFloatAt(t, 0, c, v);
-    } else if (family === 'i') writeIntAt(t, 0, c, v, isBool ? 'bool' : 'int');
-    else writeIntAt(t, 0, c, v, 'uint');
+      if (isBool) writeIntAt(t, base, c, v, 'boolf');
+      else writeFloatAt(t, base, c, v);
+    } else if (family === 'i') writeIntAt(t, base, c, v, isBool ? 'bool' : 'int');
+    else writeIntAt(t, base, c, v, 'uint');
   }
 }
 
@@ -357,9 +365,12 @@ function uniformVector(
     }
   }
   const isBool = isBoolType(t.uniform.type);
-  const total = Math.min(count, t.uniform.size * k); // extra values ignored
+  // The value run starts at the location's array element (elem), never before
+  // the array start; extra values beyond the array end are ignored (WebGL spec
+  // §5.14.10 — and must NOT spill into the next uniform's store).
+  const total = Math.min(count, (t.uniform.size - t.elem) * k);
   for (let i = 0; i < total; i++) {
-    const element = Math.floor(i / k);
+    const element = Math.floor(i / k) + t.elem;
     const comp = i % k;
     const v = values[off + i];
     // element offset = element * elementSlots() (float stride: scalar 1,
@@ -420,9 +431,12 @@ function uniformMatrix(
     ctx._errors.push(C1.INVALID_VALUE);
     return;
   }
-  const total = Math.min(count, t.uniform.size * n); // extra matrices ignored
+  // The value run starts at the location's array element (elem); extra
+  // matrices beyond the array end are ignored (must not spill into the next
+  // uniform's store).
+  const total = Math.min(count, (t.uniform.size - t.elem) * n);
   for (let i = 0; i < total; i++) {
-    const element = Math.floor(i / n);
+    const element = Math.floor(i / n) + t.elem;
     const col = Math.floor((i % n) / rows);
     const row = i % rows;
     // Column-major: value index i = column col, row row; float offset =

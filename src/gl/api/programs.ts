@@ -98,6 +98,16 @@ export const linkGen = new WeakMap<WebGLProgram, number>();
 export const locGen = new WeakMap<WebGLUniformLocation, number>();
 /** Array-element + whole-array info per WebGLUniformLocation (getUniform). */
 const uniformLocInfo = new WeakMap<WebGLUniformLocation, { elem: number; whole: boolean }>();
+
+/**
+ * Array-element + whole-array info per WebGLUniformLocation, shared with the
+ * uniform* write paths (api/uniforms.ts). Locations from a previous link are
+ * rejected before this is consulted (locGen/linkGen), so the entry is always
+ * current. Default: element 0, whole array (bare-name locations).
+ */
+export function getUniformLocationInfo(loc: WebGLUniformLocation): { elem: number; whole: boolean } {
+  return uniformLocInfo.get(loc) ?? { elem: 0, whole: true };
+}
 /** validateProgram result per WebGLProgram (VALIDATE_STATUS). */
 const validateStatus = new WeakMap<WebGLProgram, boolean>();
 /** uniformBlockBinding: blockIndex → binding point (default 0), per program. */
