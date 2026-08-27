@@ -758,8 +758,8 @@ function makeTexStub(): Record<string, any> {
          int s = sz.x;
          ivec2 P = ivec2(gl_FragCoord.xy);
          ivec4 tv = texelFetch(is, P, 0);
-         oColor.x = s;
-         oColor.y = tv.x;
+         oColor.x = float(s);
+         oColor.y = float(tv.x);
        }`,
       layout,
     );
