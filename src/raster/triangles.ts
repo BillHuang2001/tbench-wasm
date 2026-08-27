@@ -143,7 +143,9 @@ export function rasterizeTriangle(
   const tl2 = y0 < y2 || (y0 === y2 && x0 < x2);
 
   // Barycentric weights: the edge functions sum to area2 (= 2× signed area)
-  // at every point, so λi = ei/area2.
+  // at every point. By cyclicity of the signed area, λ0 (weight of vertex 0)
+  // = area(p,v1,v2)/area(v0,v1,v2) = e1/area2, λ1 = e2/area2, λ2 = e0/area2 —
+  // i.e. the weights are rotated: l0=λ2, l1=λ0, l2=λ1 (see computePixel).
   const invArea = 1 / area2;
   const invW0 = 1 / w0, invW1 = 1 / w1, invW2 = 1 / w2;
 
@@ -187,24 +189,26 @@ export function rasterizeTriangle(
       && (e2 > 0 || (e2 === 0 && tl2));
     if (!fill) return inside;
     const l0 = e0 * invArea, l1 = e1 * invArea, l2 = e2 * invArea;
-    const wDenom = l0 * invW0 + l1 * invW1 + l2 * invW2;
+    // Weight rotation: e0 = E(v0→v1) pairs with vertex 2, e1 = E(v1→v2) with
+    // vertex 0, e2 = E(v2→v0) with vertex 1 (see the barycentric comment).
+    const wDenom = l1 * invW0 + l2 * invW1 + l0 * invW2;
     const base = slot * n;
     if (isFinite(wDenom) && Math.abs(wDenom) >= 1e-15) {
       const w = 1 / wDenom;
       for (let c = 0; c < n; c++) {
-        quadV[base + c] = (l0 * buf[vary0 + c] * invW0
-          + l1 * buf[vary1 + c] * invW1
-          + l2 * buf[vary2 + c] * invW2) * w;
+        quadV[base + c] = (l1 * buf[vary0 + c] * invW0
+          + l2 * buf[vary1 + c] * invW1
+          + l0 * buf[vary2 + c] * invW2) * w;
       }
       quadW[slot] = w;
     } else {
       // Degenerate perspective denominator: plain barycentric mix.
       for (let c = 0; c < n; c++) {
-        quadV[base + c] = l0 * buf[vary0 + c] + l1 * buf[vary1 + c] + l2 * buf[vary2 + c];
+        quadV[base + c] = l1 * buf[vary0 + c] + l2 * buf[vary1 + c] + l0 * buf[vary2 + c];
       }
       quadW[slot] = 1;
     }
-    quadDepth[slot] = l0 * z0 + l1 * z1 + l2 * z2 + polyOffset;
+    quadDepth[slot] = l1 * z0 + l2 * z1 + l0 * z2 + polyOffset;
     quadPC[slot * 2] = 0;
     quadPC[slot * 2 + 1] = 0;
     return inside;
