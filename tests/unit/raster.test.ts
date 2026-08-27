@@ -330,33 +330,25 @@ describe("applyViewportTransform", () => {
 
 describe("pointIsVisible", () => {
   const stride = RECORD_HEADER_FLOATS;
-
-  it("accepts points inside -w ≤ x,y,z ≤ w (boundaries inclusive)", () => {
+  it("accepts points inside -w ≤ z ≤ w with w > 0, including x/y-outside centers", () => {
+    // GLES 2.0 §2.13: points are clipped ONLY against near/far; x/y-outside
+    // centers pass (the point square is clamped to the viewport instead).
     const buf = makeRecordBuffer(1, stride);
     for (const [x, y, z, w] of [
-      [0, 0, 0, 1],
-      [1, 0, 0, 1],   // x = +w boundary
-      [-1, 0, 0, 1],  // x = -w boundary
-      [0, 1, 0, 1],   // y = +w boundary
-      [0, 0, 1, 1],   // z = +w boundary
-      [2, 1, -3, 4],
+      [0, 0, 0, 1], [1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1], [0, 0, -1, 1],
+      [2, 0, 0, 1], [0, 2, 0, 1], [-2, -2, 0.5, 1], [2, 1, -3, 4],
     ]) {
       writeRecord(buf, 0, x, y, z, w, 1);
-      expect(pointIsVisible(buf, 0, stride)).toBe(true);
+      expect(pointIsVisible(buf, 0, stride), `(${x},${y},${z},${w})`).toBe(true);
     }
   });
-
-  it("rejects points outside any clip plane", () => {
+  it("rejects points outside the near/far planes or with w <= 0", () => {
     const buf = makeRecordBuffer(1, stride);
     for (const [x, y, z, w] of [
-      [2, 0, 0, 1],   // x > w
-      [-2, 0, 0, 1],  // x < -w
-      [0, 2, 0, 1],   // y > w
-      [0, 0, 2, 1],   // z > w
-      [0, 0, 0, -1],  // w < 0: -w ≤ 0 ≤ w is empty
+      [0, 0, 2, 1], [0, 0, -2, 1], [0, 0, 0, -1], [0, 0, 0, 0],
     ]) {
       writeRecord(buf, 0, x, y, z, w, 1);
-      expect(pointIsVisible(buf, 0, stride)).toBe(false);
+      expect(pointIsVisible(buf, 0, stride), `(${x},${y},${z},${w})`).toBe(false);
     }
   });
 });

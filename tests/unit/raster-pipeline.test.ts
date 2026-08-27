@@ -32,6 +32,7 @@ import {
   type Surface,
 } from "../../src/raster/index";
 import { GL, expectArrayClose } from "./helpers";
+import { compileShader, linkProgram, type VertexExecCtx } from "../../src/glsl/index";
 
 /* ================================================================== */
 /* Harness (mirrors the deleted src/raster/__selfcheck.ts)             */
@@ -252,6 +253,177 @@ describe("occlusion counting (sampleCountRef)", () => {
     }));
     expect(count.value).toBe(0);
     expectAllPx(s, [0, 0, 0, 0]); // and nothing was drawn
+  });
+});
+
+/* ================================================================== */
+/* 3b. Barycentric interpolation pairing (BUG 1)                       */
+/* ================================================================== */
+
+describe("barycentric interpolation pairing (BUG 1)", () => {
+  it("pairs each varying value with the correct barycentric weight", () => {
+    const s = createSurface(GL.RGBA8, 4, 4);
+    // Window triangle (0,0),(4,0),(0,4) with per-vertex colors red/green/blue.
+    // Pixel (1,1)'s center (1.5,1.5) has λ0 = 0.25, λ1 = λ2 = 0.375 — NOT the
+    // centroid (4/3,4/3) where all weights are 1/3 and a rotated varying↔
+    // weight pairing is invisible. Correct: c = 0.25·red + 0.375·green +
+    // 0.375·blue → round(255·0.25)=64, round(255·0.375)=96. The buggy rotated
+    // pairing yields [96,64,96,255] instead.
+    draw(dc({
+      count: 3,
+      vertexStride: VARYINGS_OFFSET + 4,
+      vertices: verts(
+        [...winVert(0, 0), 1, 0, 0, 1],
+        [...winVert(4, 0), 0, 1, 0, 1],
+        [...winVert(0, 4), 0, 0, 1, 1],
+      ),
+      program: prog((ctx) => { ctx.out.color[0].set(ctx.varyings[0].v); }, {
+        varyings: [{ name: "c", type: GL.FLOAT, components: 4, flat: false }],
+      }),
+      fb: fb(s),
+    }));
+    expectArrayClose(px(s, 1, 1), [64, 96, 96, 255], 1);
+  });
+});
+
+/* ================================================================== */
+/* 3c. Quad fill with cull disabled (BUG 6 raster-side verdict)        */
+/* ================================================================== */
+
+describe("quad fill with cull disabled (BUG 6 raster-side verdict)", () => {
+  const red = prog((ctx) => { ctx.out.color[0].set([1, 0, 0, 1]); });
+  const green = prog((ctx) => { ctx.out.color[0].set([0, 1, 0, 1]); });
+  // T1 = window (0,0),(4,0),(0,4): area +16 (CCW), covers x+y ≤ 4.
+  // T2 = window (4,0),(4,4),(0,4): area +16 (CCW), covers x+y ≥ 4.
+  const t1 = () => verts(winVert(0, 0), winVert(4, 0), winVert(0, 4));
+  const t2 = () => verts(winVert(4, 0), winVert(4, 4), winVert(0, 4));
+  // Reversed T2: signed area −16 (CW) → BACK-facing under frontFace CCW.
+  const t2Reversed = () => verts(winVert(0, 4), winVert(4, 4), winVert(4, 0));
+
+  it("fills both halves with culling disabled (default state)", () => {
+    const s = createSurface(GL.RGBA8, 4, 4);
+    draw(dc({ count: 3, vertices: t1(), program: red, fb: fb(s) }));
+    draw(dc({ count: 3, vertices: t2(), program: green, fb: fb(s) }));
+    // Centers (1.5,1.5) and (2.5,2.5) are off the shared diagonal x+y=4.
+    expect(px(s, 1, 1)).toEqual([255, 0, 0, 255]);
+    expect(px(s, 2, 2)).toEqual([0, 255, 0, 255]);
+  });
+
+  it("fills both CCW halves under BACK culling with frontFace CCW", () => {
+    const s = createSurface(GL.RGBA8, 4, 4);
+    const cull = { enabled: true, face: GL.BACK, frontFace: GL.CCW };
+    draw(dc({ count: 3, vertices: t1(), program: red, fb: fb(s), cull }));
+    draw(dc({ count: 3, vertices: t2(), program: green, fb: fb(s), cull }));
+    expect(px(s, 1, 1)).toEqual([255, 0, 0, 255]);
+    expect(px(s, 2, 2)).toEqual([0, 255, 0, 255]);
+  });
+
+  it("culls reversed-winding T2 under BACK+CCW, draws it under FRONT+CCW", () => {
+    const s = createSurface(GL.RGBA8, 4, 4);
+    draw(dc({
+      count: 3, vertices: t2Reversed(), program: red, fb: fb(s),
+      cull: { enabled: true, face: GL.BACK, frontFace: GL.CCW },
+    }));
+    expect(px(s, 2, 2)).toEqual([0, 0, 0, 0]);
+    draw(dc({
+      count: 3, vertices: t2Reversed(), program: red, fb: fb(s),
+      cull: { enabled: true, face: 0x0404 /* GL_FRONT */, frontFace: GL.CCW },
+    }));
+    expect(px(s, 2, 2)).toEqual([255, 0, 0, 255]);
+  });
+});
+
+/* ================================================================== */
+/* 3d. Barycentric pairing through glsl codegen (BUG 1)                */
+/* ================================================================== */
+
+describe("barycentric pairing through glsl codegen (BUG 1)", () => {
+  type Shader = Parameters<typeof linkProgram>[0];
+
+  function compileOk(src: string, type: "VERTEX" | "FRAGMENT"): Shader {
+    const res = compileShader(src, { type, version: 100 });
+    if (!res.ok) {
+      throw new Error(`expected compile to succeed: ${JSON.stringify(res.errors)}`);
+    }
+    return res.shader;
+  }
+
+  function linkOk(vs: Shader, fs: Shader) {
+    const res = linkProgram(vs, fs);
+    if (!res.ok) {
+      throw new Error(`expected link to succeed: ${res.log}`);
+    }
+    return res.program;
+  }
+
+  it("produces the same off-centroid color through a compiled program", () => {
+    const program = linkOk(
+      compileOk(`attribute vec4 a_position;
+attribute vec4 a_color;
+varying vec4 v_color;
+void main() { gl_Position = a_position; v_color = a_color; }`, "VERTEX"),
+      compileOk(`precision mediump float;
+varying vec4 v_color;
+void main() { gl_FragColor = v_color; }`, "FRAGMENT"),
+    );
+
+    // Dense per-attribute arrays; attribIndices[loc] = fetch index (glsl
+    // codegen reads attribs[loc][attribIndices[loc] * components + c]).
+    // NOTE: winVert() returns [x,y,z,w, pointSize] — the vertex-shader input
+    // is just the vec4 position, so slice off the pointSize element.
+    const positions = new Float32Array([
+      ...winVert(0, 0).slice(0, 4), ...winVert(4, 0).slice(0, 4),
+      ...winVert(0, 4).slice(0, 4),
+    ]);
+    const colors = new Float32Array([
+      1, 0, 0, 1,
+      0, 1, 0, 1,
+      0, 0, 1, 1,
+    ]);
+    const locPos = program.attributes.find((a) => a.name === "a_position")?.location ?? 0;
+    const locCol = program.attributes.find((a) => a.name === "a_color")?.location ?? 0;
+    const attribs: (Float32Array | number)[] = [];
+    attribs[locPos] = positions;
+    attribs[locCol] = colors;
+
+    const ctx: VertexExecCtx = {
+      attribs,
+      attribIndices: new Int32Array(attribs.length),
+      uniforms: program.floatStore,
+      intUniforms: program.intStore,
+      blockStores: [],
+      blockIntStores: [],
+      textures: [],
+      samplerStates: [],
+      scratch: new Float32Array(Math.max(program.scratchSize, 16)),
+      intScratch: new Int32Array(Math.max(program.intScratchSize, 16)),
+      vertexId: 0,
+      instanceId: 0,
+      out: {
+        position: new Float32Array(4),
+        pointSize: 1,
+        varyings: new Float32Array(4),
+      },
+    };
+
+    const records: number[][] = [];
+    for (let i = 0; i < 3; i++) {
+      ctx.attribIndices[locPos] = i;
+      ctx.attribIndices[locCol] = i;
+      program.vertex.run(ctx);
+      records.push([...ctx.out.position, ctx.out.pointSize, ...ctx.out.varyings]);
+    }
+
+    const s = createSurface(GL.RGBA8, 4, 4);
+    draw(dc({
+      count: 3,
+      vertexStride: VARYINGS_OFFSET + 4,
+      vertices: verts(...records),
+      program: program as unknown as RasterProgram,
+      fb: fb(s),
+    }));
+    // Same expectation as the hand-built records test above.
+    expectArrayClose(px(s, 1, 1), [64, 96, 96, 255], 1);
   });
 });
 
