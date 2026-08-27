@@ -66,6 +66,7 @@ import {
   LocalVar,
   convertScalar,
   flatComponents,
+  flatFloatness,
   foldPre,
   scalarBaseOf,
 } from './env.js';
@@ -123,6 +124,8 @@ interface InlineCtx {
 interface OutArg {
   paramIndex: number;
   targets: string[];
+  /** Caller-lvalue dual slots per component (null = no dual planes). */
+  dualTargets: ([string, string] | null)[] | null;
   copyBack?: string;
 }
 
@@ -148,7 +151,7 @@ function inlineCall(
 
     /* ---------- 1. args left-to-right (GLSL evaluation order) ---------- */
     const lines: string[] = [];
-    const argTemps: string[][] = []; // per param: one temp per flat component
+    const argTemps: Value[][] = []; // per param: one temp Value per flat component
     const outArgs: OutArg[] = [];
     for (let i = 0; i < params.length; i++) {
       const p = params[i];
@@ -162,17 +165,17 @@ function inlineCall(
         if (lv.prelude) lines.push(lv.prelude);
         if (storage === 'inout') {
           const temps = conv.map((v) => toTemp(v, env));
-          for (const t of temps) lines.push(`${t.pre![0]};`);
-          argTemps.push(temps.map((t) => t.v));
+          for (const t of temps) for (const p of t.pre!) lines.push(`${p};`);
+          argTemps.push(temps);
         } else {
           argTemps.push([]); // out: no in-value
         }
-        outArgs.push({ paramIndex: i, targets: lv.targets, copyBack: lv.copyBack });
+        outArgs.push({ paramIndex: i, targets: lv.targets, dualTargets: lv.dualTargets ?? null, copyBack: lv.copyBack });
       } else {
         // in (or const-in): read the value at this arg position.
         const temps = conv.map((v) => toTemp(v, env));
-        for (const t of temps) lines.push(`${t.pre![0]};`);
-        argTemps.push(temps.map((t) => t.v));
+        for (const t of temps) for (const p of t.pre!) lines.push(`${p};`);
+        argTemps.push(temps);
       }
     }
 
@@ -192,31 +195,63 @@ function inlineCall(
         const store = lv.int ? 'ctx.intScratch' : 'ctx.scratch';
         const temps = argTemps[i];
         for (let c = 0; c < temps.length; c++) {
-          bindLines.push(`${store}[${lv.scratchBase} + ${c}] = ${temps[c]};`);
+          bindLines.push(`${store}[${lv.scratchBase} + ${c}] = ${temps[c].v};`);
         }
         continue;
       }
       const names = lv.compNames!;
       if (storage === 'out') {
-        // 'out': no in-value — declare uninitialized.
-        bindLines.push(`var ${names.join(', ')};`);
+        // 'out': no in-value — declare uninitialized. Dual mode: declare the
+        // float params' `_dx`/`_dy` names too (the body's assignments write
+        // the full triple; write-back reads them).
+        if (env.dual && lv.dxNames) {
+          const all: string[] = [];
+          names.forEach((nm, c) => {
+            all.push(nm);
+            if (lv.dxNames![c]) all.push(lv.dxNames![c], `${nm}_dy`);
+          });
+          bindLines.push(`var ${all.join(', ')};`);
+        } else {
+          bindLines.push(`var ${names.join(', ')};`);
+        }
       } else {
         // 'in' and 'inout' both carry an in-value temp from the arg phase.
+        // Dual mode: bind the float params' dx/dy from the arg temp triples.
         const temps = argTemps[i];
-        bindLines.push(`var ${names.map((n, c) => `${n} = ${temps[c]}`).join(', ')};`);
+        if (env.dual && lv.dxNames) {
+          const parts: string[] = [];
+          names.forEach((nm, c) => {
+            parts.push(`${nm} = ${temps[c].v}`);
+            if (lv.dxNames![c]) {
+              parts.push(`${lv.dxNames![c]} = ${temps[c].dx ?? '0'}`);
+              parts.push(`${nm}_dy = ${temps[c].dy ?? '0'}`);
+            }
+          });
+          bindLines.push(`var ${parts.join(', ')};`);
+        } else {
+          bindLines.push(`var ${names.map((n, c) => `${n} = ${temps[c].v}`).join(', ')};`);
+        }
       }
     }
 
     /* ---------- 3. return temps ---------- */
     const retType = fn.prototype.returnType.resolved ?? { kind: 'scalar', base: 'float' };
     const nRet = flatComponents(retType);
+    // Dual mode: float return components get a [dx, dy] temp pair so the
+    // returned triple survives the IIFE boundary.
+    const retFloatness = env.dual ? flatFloatness(retType) : null;
     const retTemps: string[] = [];
-    for (let c = 0; c < nRet; c++) retTemps.push(env.allocTemp());
+    const retDualTemps: ([string, string] | null)[] = [];
+    for (let c = 0; c < nRet; c++) {
+      retTemps.push(env.allocTemp());
+      retDualTemps.push(retFloatness && retFloatness[c] ? [env.allocTemp(), env.allocTemp()] : null);
+    }
 
     /* ---------- 4. inlined body ---------- */
     const label = ctx.label();
     const bodyLines = emitStatements(fn.body.body, env, {
       retTemps,
+      retDualTemps,
       epilogueLabel: label,
       retType,
     });
@@ -229,11 +264,39 @@ function inlineCall(
       const n = Math.min(o.targets.length, flatComponents(lv.type));
       if (lv.kind === 'scratch') {
         const store = lv.int ? 'ctx.intScratch' : 'ctx.scratch';
+        const bs = flatComponents(lv.type);
         for (let c = 0; c < n; c++) {
-          wbLines.push(`${o.targets[c]} = ${store}[${lv.scratchBase} + ${c}];`);
+          // Dual mode: read the param's three scratch planes back into the
+          // caller lvalue's three planes.
+          if (env.dual && !lv.int && o.dualTargets?.[c]) {
+            wbLines.push(
+              `${env.dualWrite(o.targets[c], o.dualTargets[c], {
+                v: `${store}[${lv.scratchBase} + ${c}]`,
+                dx: `${store}[${lv.scratchBase} + ${bs} + ${c}]`,
+                dy: `${store}[${lv.scratchBase} + ${2 * bs} + ${c}]`,
+              })};`,
+            );
+          } else {
+            wbLines.push(`${o.targets[c]} = ${store}[${lv.scratchBase} + ${c}];`);
+          }
         }
       } else {
-        for (let c = 0; c < n; c++) wbLines.push(`${o.targets[c]} = ${lv.compNames![c]};`);
+        for (let c = 0; c < n; c++) {
+          // Dual mode: write the param local's full triple back to the
+          // caller lvalue (dualWrite skips the planes when the caller side
+          // has none — e.g. an output argument).
+          if (env.dual && o.dualTargets?.[c] && lv.dxNames?.[c]) {
+            wbLines.push(
+              `${env.dualWrite(o.targets[c], o.dualTargets[c], {
+                v: lv.compNames![c],
+                dx: `${lv.compNames![c]}_dx`,
+                dy: `${lv.compNames![c]}_dy`,
+              })};`,
+            );
+          } else {
+            wbLines.push(`${o.targets[c]} = ${lv.compNames![c]};`);
+          }
+        }
       }
       if (o.copyBack) wbLines.push(o.copyBack);
     }
@@ -245,7 +308,14 @@ function inlineCall(
     inner.push(...lines);
     if (nRet > 0) {
       // Defensive fall-off-the-end init (semantics should enforce coverage).
-      for (const t of retTemps) inner.push(`${t} = 0;`);
+      for (let c = 0; c < retTemps.length; c++) {
+        inner.push(`${retTemps[c]} = 0;`);
+        const d = retDualTemps[c];
+        if (d) {
+          inner.push(`${d[0]} = 0;`);
+          inner.push(`${d[1]} = 0;`);
+        }
+      }
     }
     inner.push(`${label}: {`);
     inner.push(...indent([...bindLines, ...bodyLines]));
@@ -259,7 +329,10 @@ function inlineCall(
       return [{ v: '0', pre: [iife] }];
     }
     const pre = [iife];
-    return retTemps.map((t) => ({ v: t, pre }));
+    return retTemps.map((t, c) => {
+      const d = retDualTemps[c];
+      return d ? { v: t, dx: d[0], dy: d[1], pre } : { v: t, pre };
+    });
   } finally {
     env.popParamFrame();
   }
@@ -295,9 +368,26 @@ function convertArg(vals: Value[], from: GLSLType, to: GLSLType): Value[] {
 
 /** Materialize ONE value into a fresh temp — ALWAYS, even without pre, so
  *  side-effectful arg expressions (assignments) run at their exact arg
- *  position (left-to-right interleaving with later args' preludes). */
+ *  position (left-to-right interleaving with later args' preludes).
+ *  Dual mode: float values temp all THREE planes (3 temps; the pre lines run
+ *  in order: v first, then dx/dy — the dx/dy strings may reference temps
+ *  set by the v line's folded pre). */
 function toTemp(v: Value, env: CodegenEnv): Value {
   const t = env.allocTemp();
+  if (env.dual && v.dx !== undefined && v.dy !== undefined) {
+    const td = env.allocTemp();
+    const td2 = env.allocTemp();
+    return {
+      v: t,
+      dx: td,
+      dy: td2,
+      pre: [
+        `${t} = ${v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v}`,
+        `${td} = ${v.dx}`,
+        `${td2} = ${v.dy}`,
+      ],
+    };
+  }
   return { v: t, pre: [`${t} = ${v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v}`] };
 }
 

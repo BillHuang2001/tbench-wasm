@@ -41,6 +41,8 @@ import {
   isUintType,
   isIntType,
   isFloatType,
+  isFloatLeaf,
+  hasFloatLeaves,
   isIntegralFamily,
   wrapInt,
   wrapUint,
@@ -165,6 +167,80 @@ function leafRead(p: P, env: CodegenEnv, c: number): string {
   throw new Error('codegen: empty path');
 }
 
+/**
+ * Dual-mode READ planes for one flat component of a float leaf: [dx, dy]
+ * JS expressions (null = the component carries no duals). Mirror of
+ * leafRead — same swizzle/offset/dyn resolution; the caller gates on
+ * isFloatLeaf(p.type) (int/bool leaves never reach here).
+ * - flat locals: the registered `_dx`/`_dy` JS names (env convention);
+ * - float scratch locals: the dx plane at base+blockSize, dy at
+ *   base+2*blockSize (allocScratch charged 3× in dual mode);
+ * - uniform/block reads, outputs: constants (dx=dy=0);
+ * - fragment varyings: env.varyingReadDual (`.ddx[c]`/`.ddy[c]` reads,
+ *   no guards — the raster supplies them whenever usesDerivatives; flat
+ *   varyings read 0,0);
+ * - gl_FragCoord: x → (1,0), y → (0,1), z/w → (0,0); gl_PointCoord and
+ *   other float builtins → (0,0).
+ */
+function leafDual(p: P, env: CodegenEnv, c: number): [string, string] | null {
+  if (!env.dual) return null;
+  const cc = p.swz ? p.swz[c] : c;
+  if (p.local) {
+    const lv = p.local;
+    const idx = p.flatOff + cc;
+    if (lv.kind === 'flat') {
+      const dx = lv.dxNames?.[idx];
+      if (!dx) return null;
+      return [dx, `${lv.compNames![idx]}_dy`];
+    }
+    if (lv.int) return null;
+    const n = flatComponents(lv.type);
+    const dyn = p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.elemSlots}` : '';
+    return [
+      `ctx.scratch[${lv.scratchBase} + ${n} + ${p.flatOff}${dyn} + ${cc}]`,
+      `ctx.scratch[${lv.scratchBase} + ${2 * n} + ${p.flatOff}${dyn} + ${cc}]`,
+    ];
+  }
+  if (p.storage) {
+    const st = p.storage;
+    const flatC = p.flatOff + cc;
+    switch (st.kind) {
+      case 'uniform':
+      case 'block':
+        return ['0', '0'];
+      case 'varying': {
+        if (env.stage !== 'FRAGMENT') return null; // vertex: no duals
+        const vl = env.lookupVarying(st.key);
+        if (!vl) throw new Error(`codegen: missing varying layout for '${st.key}'`);
+        const comp = p.dyn ? `(${p.dyn.temp}) * ${p.dyn.stride} + ${flatC}` : String(flatC);
+        return env.varyingReadDual(vl.index, comp, vl.flat);
+      }
+      case 'attrib':
+        return null;
+      case 'output':
+        return ['0', '0'];
+    }
+  }
+  if (p.builtin) {
+    const i = p.flatOff + cc;
+    switch (p.builtin) {
+      case 'gl_FragCoord':
+        // Screen-space derivatives of the fragment coordinate.
+        return i === 0 ? ['1', '0'] : i === 1 ? ['0', '1'] : ['0', '0'];
+      case 'gl_PointCoord':
+      case 'gl_FragColor':
+      case 'gl_FragDepth':
+      case 'gl_FragDepthEXT':
+        return ['0', '0'];
+      default:
+        // gl_Position/gl_PointSize (vertex) — never dual; gl_FrontFacing is
+        // bool (caller-gated). Constant duals are a safe fallback.
+        return ['0', '0'];
+    }
+  }
+  return null;
+}
+
 function leafWrite(p: P, env: CodegenEnv, c: number): string {
   const cc = p.swz ? p.swz[c] : c;
   if (p.local) {
@@ -212,15 +288,72 @@ function leafWrite(p: P, env: CodegenEnv, c: number): string {
   throw new Error('codegen: empty path');
 }
 
+/**
+ * Dual-mode WRITE slots for one flat component: [dx, dy] lvalues (null =
+ * no dual planes — int/bool components, outputs, gl_FragDepth). Mirror of
+ * leafWrite (same swizzle/offset/dyn resolution). The assignment emitters
+ * pass the pair to env.dualWrite (v-plane target + this pair + RHS Value).
+ */
+function leafDualWrite(p: P, env: CodegenEnv, c: number): [string, string] | null {
+  if (!env.dual) return null;
+  const cc = p.swz ? p.swz[c] : c;
+  if (p.local) {
+    const lv = p.local;
+    const idx = p.flatOff + cc;
+    if (lv.kind === 'flat') {
+      const dx = lv.dxNames?.[idx];
+      if (!dx) return null;
+      return [dx, `${lv.compNames![idx]}_dy`];
+    }
+    if (lv.int) return null;
+    const n = flatComponents(lv.type);
+    const dyn = p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.elemSlots}` : '';
+    return [
+      `ctx.scratch[${lv.scratchBase} + ${n} + ${p.flatOff}${dyn} + ${cc}]`,
+      `ctx.scratch[${lv.scratchBase} + ${2 * n} + ${p.flatOff}${dyn} + ${cc}]`,
+    ];
+  }
+  if (p.storage) {
+    switch (p.storage.kind) {
+      case 'uniform':
+      case 'block':
+      case 'attrib':
+        throw new Error('codegen: read-only storage');
+      case 'varying':
+        if (env.stage !== 'VERTEX') throw new Error('codegen: fragment varyings are read-only');
+        return null; // vertex stage never runs dual mode
+      case 'output':
+        return null; // outputs have no dual planes (v-only write)
+    }
+  }
+  if (p.builtin) {
+    switch (p.builtin) {
+      case 'gl_Position':
+      case 'gl_PointSize':
+      case 'gl_FragDepth':
+      case 'gl_FragDepthEXT':
+      case 'gl_FragColor':
+        return null; // no dual planes
+      default:
+        throw new Error(`codegen: '${p.builtin}' is read-only`);
+    }
+  }
+  return null;
+}
+
 /* ------------------------------------------------------------------ */
 /* Flat component enumeration (struct/array recursion)                 */
 /* ------------------------------------------------------------------ */
 
-/** All flat read strings for p (recursing struct members / array elements). */
-function reads(p: P, env: CodegenEnv): string[] {
+/** All flat component VALUES for p (recursing struct members / array
+ *  elements). Dual mode: float leaves carry (v, dx, dy) — locals read the
+ *  `_dx`/`_dy` names or the scratch planes, storage reads constant or
+ *  varying-derived duals (see leafDual). Non-dual: {v} only, byte-identical
+ *  to the pre-dual strings. */
+function reads(p: P, env: CodegenEnv): Value[] {
   const t = p.type;
   if (t.kind === 'struct') {
-    const out: string[] = [];
+    const out: Value[] = [];
     let off = 0;
     for (const m of t.members) {
       out.push(...reads(subP(p, m.name, m.type, off, env), env));
@@ -229,19 +362,26 @@ function reads(p: P, env: CodegenEnv): string[] {
     return out;
   }
   if (t.kind === 'array') {
-    const out: string[] = [];
+    const out: Value[] = [];
     const n = t.size ?? 0;
     for (let k = 0; k < n; k++) {
       out.push(...reads(subPIdx(p, k, t.element, env), env));
     }
     return out;
   }
-  const out: string[] = [];
+  const out: Value[] = [];
   const n = flatComponents(t);
-  const pre = p.pre.length ? foldPre(p.pre, '') : null;
+  const dual = env.dual && isFloatLeaf(t);
+  const hasPre = p.pre.length > 0;
   for (let c = 0; c < n; c++) {
     const s = leafRead(p, env, c);
-    out.push(pre ? `(${p.pre.join(', ')}, ${s})` : s);
+    const v = hasPre ? `(${p.pre.join(', ')}, ${s})` : s;
+    if (dual) {
+      const d = leafDual(p, env, c);
+      out.push(d ? { v, dx: d[0], dy: d[1] } : { v });
+    } else {
+      out.push({ v });
+    }
   }
   return out;
 }
@@ -267,6 +407,31 @@ function writes(p: P, env: CodegenEnv): string[] {
   const out: string[] = [];
   const n = flatComponents(t);
   for (let c = 0; c < n; c++) out.push(leafWrite(p, env, c));
+  return out;
+}
+
+/** All dual write slots for p (parallel to writes(); null per component =
+ *  no dual planes). Only meaningful in dual mode. */
+function dualWrites(p: P, env: CodegenEnv): ([string, string] | null)[] {
+  const t = p.type;
+  if (t.kind === 'struct') {
+    const out: ([string, string] | null)[] = [];
+    let off = 0;
+    for (const m of t.members) {
+      out.push(...dualWrites(subP(p, m.name, m.type, off, env), env));
+      off += flatComponents(m.type);
+    }
+    return out;
+  }
+  if (t.kind === 'array') {
+    const out: ([string, string] | null)[] = [];
+    const n = t.size ?? 0;
+    for (let k = 0; k < n; k++) out.push(...dualWrites(subPIdx(p, k, t.element, env), env));
+    return out;
+  }
+  const out: ([string, string] | null)[] = [];
+  const n = flatComponents(t);
+  for (let c = 0; c < n; c++) out.push(leafDualWrite(p, env, c));
   return out;
 }
 
@@ -567,6 +732,9 @@ export function swizzleComponents(size: number, name: string): number[] {
 export interface LValue {
   type: GLSLType;
   targets: string[];
+  /** Dual-mode write slots per component: [dx, dy] lvalues (null = no dual
+   *  planes — int/bool components, outputs). Absent in non-dual mode. */
+  dualTargets?: ([string, string] | null)[];
   /** Statements that must run BEFORE the writes (dynamic-index temps, spill copy-in). */
   prelude?: string;
   /** Statements that must run AFTER the writes (spill copy-out). */
@@ -578,8 +746,10 @@ export function emitExpr(e: Expr, env: CodegenEnv): Value[] {
   const t = e.resolvedType;
   if (!t) throw new Error('codegen: expression lacks resolvedType (semantics must run first)');
   // Scalar constants fold (const globals, folded subexpressions, literals).
+  // Dual mode: float constants are constant duals (dx=dy=0).
   if (e.constValue !== undefined && t.kind === 'scalar') {
-    return [{ v: env.emitConstNumber(e.constValue, t) }];
+    const v = env.emitConstNumber(e.constValue, t);
+    return env.dual && t.base === 'float' ? [{ v, dx: '0', dy: '0' }] : [{ v }];
   }
   switch (e.kind) {
     case 'literal': {
@@ -591,13 +761,14 @@ export function emitExpr(e: Expr, env: CodegenEnv): Value[] {
             : e.literalType === 'bool'
               ? { kind: 'scalar', base: 'bool' }
               : { kind: 'scalar', base: 'float' };
-      return [{ v: env.emitConstNumber(e.value, lt) }];
+      const v = env.emitConstNumber(e.value, lt);
+      return env.dual && lt.base === 'float' ? [{ v, dx: '0', dy: '0' }] : [{ v }];
     }
     case 'identifier':
     case 'member':
     case 'index': {
       const p = walk(e, env);
-      return reads(p, env).map((v) => ({ v }));
+      return reads(p, env);
     }
     case 'unary':
       return emitUnary(e, env);
@@ -624,6 +795,7 @@ export function emitLValue(e: Expr, env: CodegenEnv): LValue {
   return {
     type: p.type,
     targets,
+    dualTargets: env.dual ? dualWrites(p, env) : undefined,
     prelude: p.pre.length ? p.pre.join('; ') + ';' : undefined,
     copyBack: p.post.length ? p.post.join('; ') + ';' : undefined,
   };
@@ -697,10 +869,15 @@ function emitUnary(e: Extract<Expr, { kind: 'unary' }>, env: CodegenEnv): Value[
     const x = v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v;
     switch (op) {
       case '+':
-        return { v: `(${x})` };
+        // Unary plus is the identity — duals pass through unchanged.
+        return env.dual && v.dx !== undefined ? { v: `(${x})`, dx: v.dx, dy: v.dy } : { v: `(${x})` };
       case '-':
         if (base === 'uint') return { v: `((0 - (${x})) >>> 0)` };
         if (base === 'int') return { v: `((-(${x})) | 0)` };
+        // Float: negation is linear — negate the duals too.
+        if (env.dual && v.dx !== undefined) {
+          return { v: `(-(${x}))`, dx: `(-(${v.dx}))`, dy: `(-(${v.dy}))` };
+        }
         return { v: `(-(${x}))` };
       case '!':
         return { v: `(!(${x}))` };
@@ -822,6 +999,12 @@ function emitArith(
   rt: GLSLType,
   t: GLSLType,
 ): Value[] {
+  // Dual mode: float arithmetic needs the arithmetic dual templates
+  // (product/quotient rule etc.) — C5a2. Throw rather than silently drop
+  // the duals (int/uint arithmetic is unaffected — no duals).
+  if (env.dual && hasFloatLeaves(t)) {
+    throw new Error(`codegen: dual-mode arithmetic '${e.op}' requires arithmetic dual templates (C5a2)`);
+  }
   const op = e.op;
   const lb = scalarBaseOf(lt);
   const rb = scalarBaseOf(rt);
@@ -980,11 +1163,16 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
     for (let c = 0; c < n; c++) {
       const cp = conv[c].pre;
       const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
+      // Dual mode: write the whole triple; the comma expression ends with
+      // the v read so the value of the assignment is the assigned v.
       // Prelude (dyn-index temps / spill copy-in) must run BEFORE the write,
       // the spill copy-back AFTER it — and the expression's VALUE must be the
       // assigned value. Semicolons are invalid inside parens, so fold copyBack
       // as comma terms via a temp: (t = (target = rv), cb, t).
-      let v = `(${lv.targets[c]} = ${rv})`;
+      let v =
+        env.dual && lv.dualTargets
+          ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv })
+          : `(${lv.targets[c]} = ${rv})`;
       if (post) {
         const t = env.allocTemp();
         v = `(${t} = ${v}, ${post}, ${t})`;
@@ -1001,7 +1189,14 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
   for (let c = 0; c < n; c++) {
     const cp = conv[c].pre;
     const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
-    let v = compoundOp(cop, lv.targets[c], rv, base);
+    // Dual mode, float target: linear ops (+=, -=) update all three planes
+    // via dualWrite; non-linear compounds throw (C5a2 templates).
+    let v: string;
+    if (env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]) {
+      v = env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }, cop);
+    } else {
+      v = compoundOp(cop, lv.targets[c], rv, base);
+    }
     if (post) {
       const t = env.allocTemp();
       v = `(${t} = ${v}, ${post}, ${t})`;
@@ -1012,6 +1207,11 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
 }
 
 function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Value[] {
+  // Dual mode: a float-typed ternary needs the triple materialization seam
+  // (C5a2). Int/bool ternaries carry no duals and stay legal.
+  if (env.dual && hasFloatLeaves(e.resolvedType!)) {
+    throw new Error('codegen: dual-mode ternary requires materialize triples (C5a2)');
+  }
   const cond = materialize(emitExpr(e.cond, env), env)[0];
   const a = materialize(emitExpr(e.whenTrue, env), env);
   const b = materialize(emitExpr(e.whenFalse, env), env);
@@ -1035,7 +1235,12 @@ function emitComma(e: Extract<Expr, { kind: 'comma' }>, env: CodegenEnv): Value[
   }
   if (pre.length === 0) return last;
   const prelude = `(${pre.join(', ')}, `;
-  return last.map((v) => ({ v: `${prelude}${v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v})` }));
+  // Dual mode: the comma's value is the LAST expr — propagate its duals
+  // (they are pure reads/temps independent of the leading prelude terms).
+  return last.map((v) => {
+    const s = `${prelude}${v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v})`;
+    return env.dual ? { v: s, dx: v.dx, dy: v.dy } : { v: s };
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -1059,6 +1264,11 @@ function emitCall(e: Extract<Expr, { kind: 'call' }>, env: CodegenEnv): Value[] 
     const t = e.resolvedType!;
     const elem = t.kind === 'array' ? t.element : undefined;
     if (!elem) throw new Error('codegen: indexed callee is not an array constructor');
+    // Dual mode: array ctors need the dual-aware value flow (C5a2) — a
+    // v-only flattening would silently zero the element derivatives.
+    if (env.dual && hasFloatLeaves(elem)) {
+      throw new Error('codegen: dual-mode array constructors require C5a2 (constructors)');
+    }
     return emitArrayCtor(e.args, elem, t, env);
   }
   throw new Error('codegen: unsupported call callee');

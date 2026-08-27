@@ -74,6 +74,10 @@ import type { Value } from './index.js';
 export interface FnEmitContext {
   /** One temp per return-value component (empty for void). */
   retTemps: string[];
+  /** Dual-mode return slots per component: [dx, dy] temp names (null for
+   *  non-float components / non-dual mode). The inliner allocates them so
+   *  float return values carry their derivative triple. */
+  retDualTemps?: ([string, string] | null)[];
   /** e.g. 'EP_3' — return compiles to `break EP_3;`. */
   epilogueLabel: string;
   /**
@@ -203,10 +207,21 @@ function emitDeclStmt(s: DeclStmt, env: CodegenEnv, out: string[]): void {
     if (d.init === null) {
       // Keep the declaration explicit even when uninitialized (flat locals
       // have JS bindings; scratch arrays are link-time allocations, nothing
-      // to emit).
+      // to emit). Dual mode: float locals also declare their `_dx`/`_dy`
+      // JS names (the env registered them; uninitialized duals are stale
+      // until first written — GLSL locals are undefined until assigned too).
       if (lv.kind === 'flat') {
         const names = lv.compNames!.slice(0, flatComponents(type));
-        out.push(`var ${names.join(', ')};`);
+        if (env.dual && lv.dxNames) {
+          const all: string[] = [];
+          names.forEach((nm, c) => {
+            all.push(nm);
+            if (lv.dxNames![c]) all.push(lv.dxNames![c], `${nm}_dy`);
+          });
+          out.push(`var ${all.join(', ')};`);
+        } else {
+          out.push(`var ${names.join(', ')};`);
+        }
       }
       continue;
     }
@@ -214,12 +229,34 @@ function emitDeclStmt(s: DeclStmt, env: CodegenEnv, out: string[]): void {
     emitPres(out, vals);
     if (lv.kind === 'scratch') {
       const store = lv.int ? 'ctx.intScratch' : 'ctx.scratch';
-      for (let c = 0; c < vals.length; c++) {
-        out.push(`${store}[${lv.scratchBase} + ${c}] = ${vals[c].v};`);
+      if (env.dual && !lv.int) {
+        // Dual planes: v at base, dx at base+blockSize, dy at base+2*blockSize.
+        const n = flatComponents(lv.type);
+        for (let c = 0; c < vals.length; c++) {
+          out.push(`${store}[${lv.scratchBase} + ${c}] = ${vals[c].v};`);
+          out.push(`${store}[${lv.scratchBase} + ${n} + ${c}] = ${vals[c].dx ?? '0'};`);
+          out.push(`${store}[${lv.scratchBase} + ${2 * n} + ${c}] = ${vals[c].dy ?? '0'};`);
+        }
+      } else {
+        for (let c = 0; c < vals.length; c++) {
+          out.push(`${store}[${lv.scratchBase} + ${c}] = ${vals[c].v};`);
+        }
       }
     } else {
       const names = lv.compNames!.slice(0, vals.length);
-      out.push(`var ${names.map((n, c) => `${n} = ${vals[c].v}`).join(', ')};`);
+      if (env.dual && lv.dxNames) {
+        const parts: string[] = [];
+        names.forEach((nm, c) => {
+          parts.push(`${nm} = ${vals[c].v}`);
+          if (lv.dxNames![c]) {
+            parts.push(`${lv.dxNames![c]} = ${vals[c].dx ?? '0'}`);
+            parts.push(`${nm}_dy = ${vals[c].dy ?? '0'}`);
+          }
+        });
+        out.push(`var ${parts.join(', ')};`);
+      } else {
+        out.push(`var ${names.map((n, c) => `${n} = ${vals[c].v}`).join(', ')};`);
+      }
     }
   }
 }
@@ -325,7 +362,14 @@ function emitReturn(
     if (fn && fn.retType) vals = convertPreserving(vals, s.value.resolvedType!, fn.retType);
     emitPres(out, vals);
     if (fn && vals.length === fn.retTemps.length) {
-      for (let c = 0; c < vals.length; c++) out.push(`${fn.retTemps[c]} = ${vals[c].v};`);
+      for (let c = 0; c < vals.length; c++) {
+        out.push(`${fn.retTemps[c]} = ${vals[c].v};`);
+        const d = fn.retDualTemps?.[c];
+        if (d) {
+          out.push(`${d[0]} = ${vals[c].dx ?? '0'};`);
+          out.push(`${d[1]} = ${vals[c].dy ?? '0'};`);
+        }
+      }
     } else {
       // main is void / defensive mismatch: emit the value lines, discard them.
       for (const v of vals) out.push(`${v.v};`);
@@ -403,7 +447,13 @@ function emitAssignStmt(
   if (lv.prelude) out.push(lv.prelude);
   if (op === '=') {
     for (let c = 0; c < lv.targets.length; c++) {
-      out.push(`${lv.targets[c]} = ${conv[c].v};`);
+      // Dual mode: write the whole triple as one comma statement
+      // `(vslot = vv, dxslot = dxv, dyslot = dyv, vslot);`.
+      if (env.dual && lv.dualTargets && lv.dualTargets[c]) {
+        out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c])};`);
+      } else {
+        out.push(`${lv.targets[c]} = ${conv[c].v};`);
+      }
     }
   } else {
     const base = scalarBaseOf(lv.type);
@@ -412,7 +462,13 @@ function emitAssignStmt(
     }
     const cop = op.replace('=', '');
     for (let c = 0; c < lv.targets.length; c++) {
-      out.push(`${compoundOpExpr(cop, lv.targets[c], conv[c].v, base)};`);
+      // Dual mode, float target: linear ops (+=, -=) update all three planes
+      // via dualWrite; non-linear compounds throw (C5a2 templates).
+      if (env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]) {
+        out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c], cop)};`);
+      } else {
+        out.push(`${compoundOpExpr(cop, lv.targets[c], conv[c].v, base)};`);
+      }
     }
   }
   if (lv.copyBack) out.push(lv.copyBack);
@@ -518,7 +574,22 @@ function updateString(e: Expr, env: CodegenEnv): string {
     for (let c = 0; c < lv.targets.length; c++) {
       const cv = conv[c];
       const rv = cv.pre && cv.pre.length > 0 ? foldPre(cv.pre, cv.v) : cv.v;
-      parts.push(e.op === '=' ? `${lv.targets[c]} = ${rv}` : compoundOpExpr(e.op.replace('=', ''), lv.targets[c], rv, base));
+      // Dual mode, float target: dualWrite emits the triple update as one
+      // comma term (linear ops only; non-linear compounds throw — C5a2).
+      if (e.op === '=') {
+        parts.push(
+          env.dual && lv.dualTargets && lv.dualTargets[c]
+            ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...cv, v: rv })
+            : `${lv.targets[c]} = ${rv}`,
+        );
+      } else {
+        const cop = e.op.replace('=', '');
+        parts.push(
+          env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]
+            ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...cv, v: rv }, cop)
+            : compoundOpExpr(cop, lv.targets[c], rv, base),
+        );
+      }
     }
   } else {
     const delta = e.op === '++' ? '1' : '-1';
