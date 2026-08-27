@@ -365,6 +365,63 @@ describe("instancing (vertex addressing first + i·count + j)", () => {
 });
 
 /* ================================================================== */
+/* 6b. TRIANGLE_STRIP winding (GLES 2.0 §2.3: odd triangles swap)      */
+/* ================================================================== */
+
+describe("TRIANGLE_STRIP winding (odd triangles swap first two vertices)", () => {
+  it("draws both strip triangles under BACK culling with frontFace CCW", () => {
+    const s = createSurface(GL.RGBA8, 4, 4);
+    // Strip vertices (window): (0,0),(4,0),(0,4),(4,4). Triangle 0 = (0,0),
+    // (4,0),(0,4) — area +16, CCW. Triangle 1 (odd j) must be (0,4),(4,0),
+    // (4,4) — area +16, CCW — via the GLES odd-j vertex swap; without it,
+    // triangle 1 is (4,0),(0,4),(4,4) — area −32, CW — and gets BACK-culled.
+    draw(dc({
+      mode: 0x0005, // TRIANGLE_STRIP
+      count: 4,
+      vertices: verts(winVert(0, 0), winVert(4, 0), winVert(0, 4), winVert(4, 4)),
+      program: prog((ctx) => { ctx.out.color[0].set([1, 0, 0, 1]); }),
+      fb: fb(s),
+      cull: { enabled: true, face: GL.BACK, frontFace: GL.CCW },
+    }));
+    // (1,1) center (1.5,1.5): x+y=3<4 → inside T0. (2,2) center (2.5,2.5):
+    // x+y=5>4 → inside T1. Neither center lies on the shared diagonal x+y=4.
+    expect(px(s, 1, 1)).toEqual([255, 0, 0, 255]);
+    expect(px(s, 2, 2)).toEqual([255, 0, 0, 255]);
+  });
+});
+
+/* ================================================================== */
+/* 6c. POINTS record stride (multi-point draws)                        */
+/* ================================================================== */
+
+describe("POINTS draw with per-vertex varyings (record stride)", () => {
+  it("gives each point its own record's varyings", () => {
+    const s = createSurface(GL.RGBA8, 4, 4);
+    // Two size-1 points centered at (1.5,1.5) and (2.5,2.5): half-open square
+    // coverage [x−0.5, x+0.5) makes them cover pixels (1,1) and (2,2) exactly.
+    // Records are [x,y,z,w,ps, c0,c1,c2] (stride 8): the second point must be
+    // copied from srcBase = ia*stride, not ia (the buggy offset lands mid-way
+    // through the first point's record).
+    draw(dc({
+      mode: 0x0000, // POINTS
+      count: 2,
+      vertexStride: VARYINGS_OFFSET + 3,
+      vertices: verts(
+        [...winVert(1.5, 1.5), 1, 0, 0],
+        [...winVert(2.5, 2.5), 0, 1, 0],
+      ),
+      program: prog((ctx) => {
+        ctx.out.color[0].set(ctx.varyings[0].v);
+        ctx.out.color[0][3] = 1;
+      }, { varyings: [{ name: "c", type: GL.FLOAT, components: 3, flat: false }] }),
+      fb: fb(s),
+    }));
+    expect(px(s, 1, 1)).toEqual([255, 0, 0, 255]);
+    expect(px(s, 2, 2)).toEqual([0, 255, 0, 255]);
+  });
+});
+
+/* ================================================================== */
 /* 7. Scissor + colorMask                                             */
 /* ================================================================== */
 
