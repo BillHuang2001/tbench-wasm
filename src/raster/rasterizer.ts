@@ -163,11 +163,11 @@ export function draw(dc: DrawCall): void {
         }
         break;
       case TRIANGLE_STRIP:
-        // The window-space signed area flips sign on odd triangles, so facing
-        // and culling work off the computed area — no parity bookkeeping.
+        // Odd triangles swap the first two vertices per GLES 2.0 §2.3 so the
+        // winding stays consistent across the strip.
         for (let j = 0; j + 2 < count; j++) {
           emitTriangle(dc, rs, primBuf, clipA, clipB, stride, flatRanges,
-            runBase + j, runBase + j + 1, runBase + j + 2);
+            runBase + j + (j & 1), runBase + j + 1 - (j & 1), runBase + j + 2);
         }
         break;
       case TRIANGLE_FAN:
@@ -347,7 +347,9 @@ function emitTriangle(
   applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange);
 
   // Facing + culling in window space (after clipping AND viewport transform).
-  const area = signedArea2(clipB, 0, 1, 2, stride);
+  // signedArea2 expects FLOAT offsets into the packed record buffer (record k
+  // lives at k*stride) — matching the rasterizeTriangle fan-loop calls below.
+  const area = signedArea2(clipB, 0, stride, 2 * stride, stride);
   const frontFacing = (dc.cull.frontFace === CCW) ? area > 0 : area < 0;
   if (dc.cull.enabled) {
     const face = dc.cull.face;
@@ -390,7 +392,7 @@ function emitPoint(
   dc: DrawCall, rs: RasterState, primBuf: Float32Array,
   stride: number, ia: number,
 ): void {
-  copyRecord(dc.vertices, ia, primBuf, 0, stride);
+  copyRecord(dc.vertices, ia * stride, primBuf, 0, stride);
 
   // Points are not polygon-clipped; only the 6-plane visibility test applies.
   if (!pointIsVisible(primBuf, 0, stride)) return;
