@@ -23,15 +23,27 @@ export type SceneResult = {
 };
 
 /**
+ * Gate message recorded when a page ran WITHOUT the software renderer
+ * (window.__createSoftwareWebGLContext missing -> native WebGL fallback).
+ * Mirrors the conformance runner's gate wording
+ * (tests/conformance/harness.ts RENDERER_INACTIVE_MSG).
+ */
+const RENDERER_INACTIVE_MSG =
+  "renderer bundle not active (window.__createSoftwareWebGLContext missing) — page ran WITHOUT the software renderer";
+
+/**
  * Runs one Babylon scene in a fresh browser context:
  *   1. injects the software renderer (via buildInterceptScript)
  *   2. loads empty.html and waits for the BABYLON global
- *   3. creates the engine (options mirror the upstream harness, minus
+ *   3. gates on renderer liveness (factory present) — a bundle that THROWS
+ *      at load never defines window.__createSoftwareWebGLContext, so the page
+ *      would silently run native WebGL; such pages FAIL deterministically
+ *   4. creates the engine (options mirror the upstream harness, minus
  *      failIfMajorPerformanceCaveat — a software renderer would trip it)
- *   4. prepares the scene (file kind: SceneLoader.LoadAsync; script kind:
+ *   5. prepares the scene (file kind: SceneLoader.LoadAsync; script kind:
  *      fetch + asset rewrites + eval, ported verbatim from upstream)
- *   5. renders `renderCount` frames until the scene is ready
- *   6. screenshots the page
+ *   6. renders `renderCount` frames until the scene is ready
+ *   7. screenshots the page
  *
  * The whole flow races against `opts.sceneTimeoutMs`; the context is always
  * closed (try/finally) and the timeout timer is always cleaned up. In stub
@@ -126,6 +138,24 @@ export function runScene(
         await page.goto(serverUrl + "/empty.html", { timeout: 30_000, waitUntil: "load" });
         await page.waitForSelector("#babylon-canvas");
         await page.waitForFunction(() => (window as any).BABYLON !== undefined);
+
+        // Renderer-liveness gate (mirrors the conformance runner): a bundle
+        // that THROWS at load never defines window.__createSoftwareWebGLContext,
+        // so getContext silently falls through to NATIVE WebGL with zero error
+        // signal. Check the factory BEFORE engine creation — a missing factory
+        // fails the page deterministically and skips the screenshot comparison
+        // (a native-rendered frame could otherwise MATCH the golden and mask
+        // the dead bundle). This also covers the RENDERER_NOT_FOUND stub case
+        // (the stub never defines the factory).
+        const rendererActive = await page.evaluate(
+          () =>
+            typeof (window as unknown as { __createSoftwareWebGLContext?: unknown })
+              .__createSoftwareWebGLContext === "function"
+        );
+        if (!rendererActive) {
+          settle({ ok: false, ready: false, error: RENDERER_INACTIVE_MSG });
+          return;
+        }
 
         let error: string | undefined;
         let ready = false;
