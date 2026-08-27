@@ -271,6 +271,13 @@ export interface VertexExecCtx extends BaseExecCtx {
   attribIndices: Int32Array;
   vertexId: number;
   instanceId: number;
+  /**
+   * gl_DrawID (WEBGL_multi_draw / GL_ANGLE_multi_draw): the multi-draw
+   * subdraw index, constant for every vertex of the draw; 0 for single
+   * draws. Optional so selftest ctx literals that don't exercise gl_DrawID
+   * stay valid — gl/draw.ts ALWAYS sets it (req.drawId ?? 0) when executing.
+   */
+  drawId?: number;
   out: {
     /** Clip-space position [x, y, z, w] (preallocated; written per vertex). */
     position: Float32Array;
