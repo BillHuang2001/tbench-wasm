@@ -555,6 +555,255 @@ function dualLowerBuiltin(
       }
       return out;
     }
+
+    /* ---------------- §8.5 geometry ---------------- */
+    case 'length': {
+      // len = sqrt(Σ vi²); len' = (Σ vi·vi') / len.
+      const v = materialize(argVals[0], env);
+      const parts: string[] = [];
+      const dxs: string[] = [];
+      const dys: string[] = [];
+      for (let c = 0; c < argN[0]; c++) {
+        parts.push(`(${v[c].v} * ${v[c].v})`);
+        dxs.push(`((${v[c].v}) * (${v[c].dx ?? '0'}))`);
+        dys.push(`((${v[c].v}) * (${v[c].dy ?? '0'}))`);
+      }
+      const val = `Math.sqrt(${parts.join(' + ')})`;
+      const res: Value = {
+        v: val,
+        dx: `((${dxs.join(' + ')}) / (${val}))`,
+        dy: `((${dys.join(' + ')}) / (${val}))`,
+      };
+      const pre = mergePre(v);
+      if (pre) res.pre = pre;
+      return [res];
+    }
+    case 'distance': {
+      // distance(a, b) = length(a−b); (a−b)' = a' − b'.
+      const a = materialize(argVals[0], env);
+      const b = materialize(argVals[1], env);
+      const parts: string[] = [];
+      const dxs: string[] = [];
+      const dys: string[] = [];
+      for (let c = 0; c < argN[0]; c++) {
+        const d = `((${a[c].v}) - (${b[c].v}))`;
+        const ddx = `((${a[c].dx ?? '0'}) - (${b[c].dx ?? '0'}))`;
+        const ddy = `((${a[c].dy ?? '0'}) - (${b[c].dy ?? '0'}))`;
+        parts.push(`(${d} * ${d})`);
+        dxs.push(`(${d} * ${ddx})`);
+        dys.push(`(${d} * ${ddy})`);
+      }
+      const val = `Math.sqrt(${parts.join(' + ')})`;
+      const res: Value = {
+        v: val,
+        dx: `((${dxs.join(' + ')}) / (${val}))`,
+        dy: `((${dys.join(' + ')}) / (${val}))`,
+      };
+      const pre = mergePre([...a, ...b]);
+      if (pre) res.pre = pre;
+      return [res];
+    }
+    case 'dot': {
+      // dot(a, b) = Σ ai·bi; dot' = Σ (ai'·bi + ai·bi').
+      const a = argVals[0];
+      const b = argVals[1];
+      const parts: string[] = [];
+      const dxs: string[] = [];
+      const dys: string[] = [];
+      for (let c = 0; c < argN[0]; c++) {
+        parts.push(`(${a[c].v} * ${b[c].v})`);
+        dxs.push(`((${a[c].dx ?? '0'}) * (${b[c].v}) + (${a[c].v}) * (${b[c].dx ?? '0'}))`);
+        dys.push(`((${a[c].dy ?? '0'}) * (${b[c].v}) + (${a[c].v}) * (${b[c].dy ?? '0'}))`);
+      }
+      const res: Value = {
+        v: `(${parts.join(' + ')})`,
+        dx: `(${dxs.join(' + ')})`,
+        dy: `(${dys.join(' + ')})`,
+      };
+      const pre = mergePre([...a, ...b]);
+      if (pre) res.pre = pre;
+      return [res];
+    }
+    case 'cross': {
+      const a = argVals[0];
+      const b = argVals[1];
+      // result = (a1b2−a2b1, a2b0−a0b2, a0b1−a1b0); product rule per term.
+      const comp = (a1: number, a2: number, b1: number, b2: number): Value => ({
+        v: `((${a[a1].v}) * (${b[b2].v}) - (${a[a2].v}) * (${b[b1].v}))`,
+        dx: `((${a[a1].dx ?? '0'}) * (${b[b2].v}) + (${a[a1].v}) * (${b[b2].dx ?? '0'}) - (${a[a2].dx ?? '0'}) * (${b[b1].v}) - (${a[a2].v}) * (${b[b1].dx ?? '0'}))`,
+        dy: `((${a[a1].dy ?? '0'}) * (${b[b2].v}) + (${a[a1].v}) * (${b[b2].dy ?? '0'}) - (${a[a2].dy ?? '0'}) * (${b[b1].v}) - (${a[a2].v}) * (${b[b1].dy ?? '0'}))`,
+      });
+      const out = [comp(1, 2, 1, 2), comp(2, 0, 2, 0), comp(0, 1, 0, 1)];
+      const pre = mergePre([...a, ...b]);
+      if (pre) for (const o of out) o.pre = pre;
+      return out;
+    }
+    case 'normalize': {
+      // result = v/len; result_i' = (vi'·len − vi·len') / len².
+      const v = materialize(argVals[0], env);
+      const t = env.allocTemp();
+      const parts: string[] = [];
+      const dxs: string[] = [];
+      const dys: string[] = [];
+      for (let c = 0; c < argN[0]; c++) {
+        parts.push(`(${v[c].v} * ${v[c].v})`);
+        dxs.push(`((${v[c].v}) * (${v[c].dx ?? '0'}))`);
+        dys.push(`((${v[c].v}) * (${v[c].dy ?? '0'}))`);
+      }
+      const pre = mergePre(v) ?? [];
+      pre.push(`${t} = Math.sqrt(${parts.join(' + ')})`);
+      const dlenx = `((${dxs.join(' + ')}) / ${t})`;
+      const dleny = `((${dys.join(' + ')}) / ${t})`;
+      const out: Value[] = [];
+      for (let c = 0; c < argN[0]; c++) {
+        out.push({
+          v: `((${v[c].v}) / ${t})`,
+          dx: `(((${v[c].dx ?? '0'}) * ${t} - (${v[c].v}) * ${dlenx}) / (${t} * ${t}))`,
+          dy: `(((${v[c].dy ?? '0'}) * ${t} - (${v[c].v}) * ${dleny}) / (${t} * ${t}))`,
+          pre,
+        });
+      }
+      return out;
+    }
+    case 'faceforward': {
+      // result = dot(I, Ng) < 0 ? N : −N — selection, dual = selected sign.
+      const N = materialize(argVals[0], env);
+      const t = env.allocTemp();
+      const parts: string[] = [];
+      for (let c = 0; c < argN[0]; c++) {
+        parts.push(`(${use(argVals[1][c])} * ${use(argVals[2][c])})`);
+      }
+      const pre = mergePre(N) ?? [];
+      pre.unshift(`${t} = (${parts.join(' + ')})`);
+      const out: Value[] = [];
+      for (let c = 0; c < argN[0]; c++) {
+        out.push({
+          v: `((${t}) < 0 ? (${N[c].v}) : (-(${N[c].v})))`,
+          dx: `((${t}) < 0 ? (${N[c].dx ?? '0'}) : (-(${N[c].dx ?? '0'})))`,
+          dy: `((${t}) < 0 ? (${N[c].dy ?? '0'}) : (-(${N[c].dy ?? '0'})))`,
+          pre,
+        });
+      }
+      return out;
+    }
+    case 'reflect': {
+      // result = I − 2·dot(N,I)·N; result' = I' − 2·(dot'·N + dot·N').
+      const I = argVals[0];
+      const N = argVals[1];
+      const t = env.allocTemp();
+      const tdx = env.allocTemp();
+      const tdy = env.allocTemp();
+      const parts: string[] = [];
+      const dxs: string[] = [];
+      const dys: string[] = [];
+      for (let c = 0; c < argN[0]; c++) {
+        parts.push(`(${I[c].v} * ${N[c].v})`);
+        dxs.push(`((${I[c].dx ?? '0'}) * (${N[c].v}) + (${I[c].v}) * (${N[c].dx ?? '0'}))`);
+        dys.push(`((${I[c].dy ?? '0'}) * (${N[c].v}) + (${I[c].v}) * (${N[c].dy ?? '0'}))`);
+      }
+      const pre = mergePre([...I, ...N]) ?? [];
+      pre.push(`${t} = (${parts.join(' + ')})`, `${tdx} = (${dxs.join(' + ')})`, `${tdy} = (${dys.join(' + ')})`);
+      const out: Value[] = [];
+      for (let c = 0; c < argN[0]; c++) {
+        out.push({
+          v: `((${I[c].v}) - 2 * (${t}) * (${N[c].v}))`,
+          dx: `((${I[c].dx ?? '0'}) - 2 * ((${tdx}) * (${N[c].v}) + (${t}) * (${N[c].dx ?? '0'})))`,
+          dy: `((${I[c].dy ?? '0'}) - 2 * ((${tdy}) * (${N[c].v}) + (${t}) * (${N[c].dy ?? '0'})))`,
+          pre,
+        });
+      }
+      return out;
+    }
+    case 'refract': {
+      // result = k < 0 ? 0 : eta·I − (eta·d + sqrt(k))·N, k = 1 − eta²(1−d²),
+      // d = dot(N, I). Chain rule with the pre-computed d / d' / k / sqrt(k)
+      // temps (k' = −2·eta·eta'·(1−d²) + 2·eta²·d·d').
+      const eta = materialize(argVals[2], env)[0];
+      const I = argVals[0];
+      const N = argVals[1];
+      const td = env.allocTemp();
+      const tdx = env.allocTemp();
+      const tdy = env.allocTemp();
+      const tk = env.allocTemp();
+      const tks = env.allocTemp();
+      const parts: string[] = [];
+      const dxs: string[] = [];
+      const dys: string[] = [];
+      for (let c = 0; c < argN[0]; c++) {
+        parts.push(`(${I[c].v} * ${N[c].v})`);
+        dxs.push(`((${I[c].dx ?? '0'}) * (${N[c].v}) + (${I[c].v}) * (${N[c].dx ?? '0'}))`);
+        dys.push(`((${I[c].dy ?? '0'}) * (${N[c].v}) + (${I[c].v}) * (${N[c].dy ?? '0'}))`);
+      }
+      const pre = mergePre([...I, ...N, eta]) ?? [];
+      pre.push(
+        `${td} = (${parts.join(' + ')})`,
+        `${tdx} = (${dxs.join(' + ')})`,
+        `${tdy} = (${dys.join(' + ')})`,
+        `${tk} = (1 - (${eta.v}) * (${eta.v}) * (1 - (${td}) * (${td})))`,
+        `${tks} = Math.sqrt(${tk})`,
+      );
+      const out: Value[] = [];
+      for (let c = 0; c < argN[0]; c++) {
+        const dkx = `(-2 * (${eta.v}) * (${eta.dx}) * (1 - (${td}) * (${td})) + 2 * (${eta.v}) * (${eta.v}) * (${td}) * (${tdx}))`;
+        const dky = `(-2 * (${eta.v}) * (${eta.dy}) * (1 - (${td}) * (${td})) + 2 * (${eta.v}) * (${eta.v}) * (${td}) * (${tdy}))`;
+        out.push({
+          v: `(((${tk}) < 0) ? 0 : (${eta.v}) * (${I[c].v}) - (((${eta.v}) * (${td}) + ${tks}) * (${N[c].v})))`,
+          dx: `(((${tk}) < 0) ? 0 : (${eta.dx}) * (${I[c].v}) + (${eta.v}) * (${I[c].dx ?? '0'}) - (((${eta.dx}) * (${td}) + (${eta.v}) * (${tdx}) + (${dkx}) / (2 * ${tks})) * (${N[c].v}) + ((${eta.v}) * (${td}) + ${tks}) * (${N[c].dx ?? '0'})))`,
+          dy: `(((${tk}) < 0) ? 0 : (${eta.dy}) * (${I[c].v}) + (${eta.v}) * (${I[c].dy ?? '0'}) - (((${eta.dy}) * (${td}) + (${eta.v}) * (${tdy}) + (${dky}) / (2 * ${tks})) * (${N[c].v}) + ((${eta.v}) * (${td}) + ${tks}) * (${N[c].dy ?? '0'})))`,
+          pre,
+        });
+      }
+      return out;
+    }
+
+    /* ---------------- §8.6 matrix (component-wise only) ---------------- */
+    case 'matrixCompMult':
+      return dualPerComp(n, argVals, argTypes, ([a, b]) => ({
+        v: `(${a.v} * ${b.v})`,
+        dx: `((${a.dx}) * (${b.v}) + (${a.v}) * (${b.dx}))`,
+        dy: `((${a.dy}) * (${b.v}) + (${a.v}) * (${b.dy}))`,
+      }));
+    case 'outerProduct': {
+      const cv = materialize(argVals[0], env);
+      const rv = materialize(argVals[1], env);
+      const cols = argTypes[0].kind === 'vector' ? argTypes[0].size : 2;
+      const rows = argTypes[1].kind === 'vector' ? argTypes[1].size : 2;
+      const out: Value[] = [];
+      for (let c = 0; c < cols; c++) {
+        for (let r = 0; r < rows; r++) {
+          out.push({
+            v: `(${cv[c].v} * ${rv[r].v})`,
+            dx: `((${cv[c].dx ?? '0'}) * (${rv[r].v}) + (${cv[c].v}) * (${rv[r].dx ?? '0'}))`,
+            dy: `((${cv[c].dy ?? '0'}) * (${rv[r].v}) + (${cv[c].v}) * (${rv[r].dy ?? '0'}))`,
+          });
+        }
+      }
+      const pre = mergePre([...cv, ...rv]);
+      if (pre) for (const o of out) o.pre = pre;
+      return out;
+    }
+    case 'transpose': {
+      // Pure permutation — duals pass through unchanged.
+      if (argTypes[0].kind !== 'matrix') throw new Error('codegen: transpose requires a matrix');
+      const srcCols = argTypes[0].cols;
+      const srcRows = argTypes[0].rows;
+      const m = argVals[0];
+      const out: Value[] = [];
+      for (let c = 0; c < srcRows; c++) {
+        for (let r = 0; r < srcCols; r++) {
+          const s = m[r * srcCols + c];
+          out.push({ v: s.v, dx: s.dx ?? '0', dy: s.dy ?? '0' });
+        }
+      }
+      const pre = mergePre(m);
+      if (pre) for (const o of out) o.pre = pre;
+      return out;
+    }
+    case 'determinant':
+    case 'inverse':
+      throw new Error(
+        `codegen: dual-mode '${name}' has no derivative template (C5b) — matrix builtins unsupported in dual mode`,
+      );
     default:
       throw new Error(`codegen: dual-mode lowering of '${name}' has no derivative template (C5b)`);
   }
