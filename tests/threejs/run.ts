@@ -123,7 +123,11 @@ async function main(): Promise<void> {
   const wallSec = (Date.now() - startedAt) / 1000;
   const passed = report.pages.filter((r) => r.status === 'pass').length;
   const failed = report.pages.filter(
-    (r) => r.status === 'fail' || r.status === 'timeout' || r.status === 'error'
+    (r) =>
+      r.status === 'fail' ||
+      r.status === 'timeout' ||
+      r.status === 'error' ||
+      r.status === 'renderer-inactive'
   ).length;
   const skipped = report.pages.filter((r) => r.status === 'skipped').length;
   console.log(`Passed ${passed}/${report.pages.length} (failed ${failed}, skipped ${skipped}) in ${wallSec.toFixed(1)} s`);

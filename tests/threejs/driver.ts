@@ -14,12 +14,32 @@ import {
   type DiffStats,
 } from "./compare";
 
-export type PageStatus = "pass" | "fail" | "timeout" | "error" | "skipped";
+export type PageStatus =
+  | "pass"
+  | "fail"
+  | "timeout"
+  | "error"
+  | "skipped"
+  /** Renderer-liveness gate: the software renderer factory was missing or unverifiable. */
+  | "renderer-inactive";
+
+/**
+ * Gate message (identical wording to tests/conformance/harness.ts) for pages
+ * that ran WITHOUT the software renderer: a bundle that throws at load never
+ * defines window.__createSoftwareWebGLContext, so pages would silently grade
+ * NATIVE WebGL with zero error signal.
+ */
+export const RENDERER_INACTIVE_MSG =
+  "renderer bundle not active (window.__createSoftwareWebGLContext missing) — page ran WITHOUT the software renderer";
 
 export interface PageResult {
   name: string;
   status: PageStatus;
   skipReason?: string;
+  /** True when window.__createSoftwareWebGLContext was observed as a function. */
+  rendererActive: boolean;
+  /** Set when status === "renderer-inactive" (exact conformance wording). */
+  gateMessage?: string;
   /** attempts actually executed */
   attempts: number;
   /** total across attempts */
@@ -419,6 +439,7 @@ async function runPage(
       name,
       status: "skipped",
       skipReason: "missing html or golden",
+      rendererActive: false,
       attempts: 0,
       elapsedMs: 0,
       consoleErrors: [],
@@ -435,11 +456,17 @@ async function runPage(
   let allGotoTimeout = true;
   let elapsedMs = 0;
   let artifacts: PageResult["artifacts"] = null;
+  /** True once any attempt observed the renderer factory in the page. */
+  let rendererActive = false;
+  /** Set when the renderer-liveness gate failed (see RENDERER_INACTIVE_MSG). */
+  let gateMessage: string | undefined;
 
   for (let attempt = 0; attempt < attempts; attempt++) {
     const attemptStart = Date.now();
     const attemptPageErrors: string[] = [];
     let gotoTimeout = false;
+    /** Renderer-liveness gate failed on this attempt. */
+    let gateFailed = false;
     let diff: DiffStats | null = null;
     let screenshotOk = false;
     const actualPath = join(opts.reportDir, name + "-actual.png");
@@ -485,25 +512,56 @@ async function runPage(
       }
       if (!gotoTimeout) allGotoTimeout = false;
 
-      // On goto timeout we STILL attempt the screenshot below, then break.
-      try {
-        await page.evaluate(CLEAN_PAGE_SOURCE);
-        await page.waitForLoadState("networkidle");
-        await page.waitForTimeout(2000);
-        // Byte-proportional parse delay (mirrors three.js e2e "network tax":
-        // 1 s per MB of loaded bytes) before the single deterministic frame.
-        const parseDelayMs = Math.min(30000, (bytes / 1048576) * 1000);
-        if (parseDelayMs > 0) await page.waitForTimeout(parseDelayMs);
-        await page.evaluate(RENDER_WAIT_SOURCE);
-      } catch (e) {
-        attemptPageErrors.push("page setup failed: " + String(e));
+      // ---- Renderer-liveness gate (mirrors tests/conformance/runner.ts) ----
+      // A bundle that THROWS at load never defines window.__createSoftwareWebGLContext,
+      // and since bundle+wrapper are injected as ONE init script the getContext
+      // wrapper never installs either — pages would silently grade NATIVE WebGL
+      // with zero error signal. Check the factory right after a successful goto
+      // (before any screenshot/comparison); a missing factory fails the page with
+      // the exact conformance wording and skips the screenshot comparison. On goto
+      // timeout the check cannot run (rendererActive unknown) — fail with the same
+      // gate message unless a previous attempt already verified the factory.
+      if (!gotoTimeout) {
+        let attemptRendererActive = false;
+        try {
+          attemptRendererActive = await page.evaluate(
+            () =>
+              typeof (window as unknown as { __createSoftwareWebGLContext?: unknown })
+                .__createSoftwareWebGLContext === "function"
+          );
+        } catch {
+          attemptRendererActive = false; // evaluate failed; treat as not active
+        }
+        if (attemptRendererActive) {
+          rendererActive = true;
+        } else {
+          gateFailed = true;
+        }
+      } else if (!rendererActive) {
+        // Goto timed out and the factory was never verified: conservative fail.
+        gateFailed = true;
       }
 
-      try {
-        await page.screenshot({ path: actualPath });
-        screenshotOk = true;
-      } catch (e) {
-        attemptPageErrors.push("screenshot failed: " + String(e));
+      if (!gateFailed) {
+        try {
+          await page.evaluate(CLEAN_PAGE_SOURCE);
+          await page.waitForLoadState("networkidle");
+          await page.waitForTimeout(2000);
+          // Byte-proportional parse delay (mirrors three.js e2e "network tax":
+          // 1 s per MB of loaded bytes) before the single deterministic frame.
+          const parseDelayMs = Math.min(30000, (bytes / 1048576) * 1000);
+          if (parseDelayMs > 0) await page.waitForTimeout(parseDelayMs);
+          await page.evaluate(RENDER_WAIT_SOURCE);
+        } catch (e) {
+          attemptPageErrors.push("page setup failed: " + String(e));
+        }
+
+        try {
+          await page.screenshot({ path: actualPath });
+          screenshotOk = true;
+        } catch (e) {
+          attemptPageErrors.push("screenshot failed: " + String(e));
+        }
       }
     } finally {
       await page.close().catch(() => {});
@@ -540,6 +598,12 @@ async function runPage(
       if (!pageErrors.includes(e)) pageErrors.push(e);
     }
 
+    // Gate failure is context-wide (the init script either defines the factory
+    // or it does not) — retrying cannot change it, so stop after one attempt.
+    if (gateFailed) {
+      gateMessage = RENDERER_INACTIVE_MSG;
+      break;
+    }
     if (gotoTimeout) break;
     if (diff !== null && diff.pass) break;
   }
@@ -547,6 +611,8 @@ async function runPage(
   let status: PageStatus;
   if (attemptsExecuted === 0) {
     status = "error";
+  } else if (gateMessage !== undefined) {
+    status = "renderer-inactive";
   } else if (allGotoTimeout) {
     status = "timeout";
   } else if (consoleErrors.size > 0) {
@@ -564,6 +630,8 @@ async function runPage(
   return {
     name,
     status,
+    rendererActive,
+    gateMessage,
     attempts: attemptsExecuted,
     elapsedMs,
     diff: bestDiff ?? undefined,
@@ -613,6 +681,7 @@ export async function runSuite(pages: string[], opts: RunOptions): Promise<Repor
             const result: PageResult = {
               name,
               status: "error",
+              rendererActive: false,
               attempts: 0,
               elapsedMs: 0,
               consoleErrors: [],
@@ -649,6 +718,7 @@ function buildReport(
     return {
       name: pages[i],
       status: "error" as PageStatus,
+      rendererActive: false,
       attempts: 0,
       elapsedMs: 0,
       consoleErrors: [] as string[],
@@ -658,7 +728,11 @@ function buildReport(
   });
   const passed = pageResults.filter((r) => r.status === "pass").length;
   const failed = pageResults.filter(
-    (r) => r.status === "fail" || r.status === "timeout" || r.status === "error"
+    (r) =>
+      r.status === "fail" ||
+      r.status === "timeout" ||
+      r.status === "error" ||
+      r.status === "renderer-inactive"
   ).length;
   const skipped = pageResults.filter((r) => r.status === "skipped").length;
   return {
@@ -677,16 +751,31 @@ function printSummary(report: Report): void {
     timeout: "TIMEOUT",
     error: "ERROR",
     skipped: "SKIP",
+    "renderer-inactive": "FAIL",
   };
   for (const r of report.pages) {
     if (r.status === "skipped") {
       console.log(`${labels[r.status]} ${r.name} (${r.skipReason ?? "skipped"})`);
+    } else if (r.status === "renderer-inactive") {
+      console.log(
+        `${labels[r.status]} ${r.name} (${r.gateMessage ?? "renderer not active"}, ${(r.elapsedMs / 1000).toFixed(1)}s)`
+      );
     } else {
       const diffPct = r.diff !== undefined ? r.diff.diffPercent.toFixed(2) : "n/a";
       console.log(
         `${labels[r.status]} ${r.name} (diff ${diffPct}%, ${(r.elapsedMs / 1000).toFixed(1)}s)`
       );
     }
+  }
+
+  // Renderer-liveness gate warning (mirrors tests/conformance/runner.ts):
+  // error/skipped pages never ran the factory check, so only verified-inactive
+  // (or unverifiable) pages count.
+  const inactiveCount = report.pages.filter(
+    (r) => !r.rendererActive && r.status !== "error" && r.status !== "skipped"
+  ).length;
+  if (inactiveCount > 0) {
+    console.log(`WARNING: ${inactiveCount} pages ran without the software renderer (bundle likely dead)`);
   }
 }
 
