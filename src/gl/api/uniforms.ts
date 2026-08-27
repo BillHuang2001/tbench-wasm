@@ -27,7 +27,12 @@
  *    (gl-uniform-bool.html) — stored as 0/1.
  *  - uniform*v length: < k components or not a multiple of k → INVALID_VALUE;
  *    longer than the array needs → the extra values are ignored
- *    (min(len, size*k) written, no error).
+ *    (min(len, size*k) written, no error). WebGL2 adds srcOffset/srcLength
+ *    (WebGL 2.0 §3.7.6): elements [srcOffset, srcOffset+srcLength) of the
+ *    converted array are used (srcLength 0/omitted → to the end); INVALID_VALUE
+ *    if srcOffset > data length, srcOffset+srcLength out of bounds, 0 elements,
+ *    or a non-multiple count — nothing is written on failure. WebGL1 ignores
+ *    the extra arguments (not part of its IDL).
  *  - Sampler uniforms (uniform1i/1iv): EVERY value must be <
  *    MAX_COMBINED_TEXTURE_IMAGE_UNITS (all validated before any write) else
  *    INVALID_VALUE; values land in the int store.
@@ -291,8 +296,28 @@ function uniformScalar(ctx: WebGLRenderingContext, location: WebGLUniformLocatio
   }
 }
 
-/** {v} setter (uniform1fv..uniform4uiv). */
-function uniformVector(ctx: WebGLRenderingContext, location: WebGLUniformLocation | null, k: number, family: 'f' | 'i' | 'ui', values: Float32Array | Int32Array | Uint32Array): void {
+/**
+ * {v} setter (uniform1fv..uniform4uiv) with WebGL2 srcOffset/srcLength
+ * (WebGL 2.0 §3.7.6; CTS gl-uniform-arrays-sub-source.html).
+ *
+ * WebGL2: `values` is the WebIDL-converted array (JS arrays converted up
+ * front); the elements used are [srcOffset, srcOffset + srcLength) when
+ * srcLength > 0, else [srcOffset, values.length). INVALID_VALUE if
+ * srcOffset > values.length, srcOffset + srcLength > values.length (when
+ * srcLength > 0), the element count is 0, or it is not a multiple of the
+ * component count k. Nothing is written on failure.
+ * WebGL1: srcOffset/srcLength are NOT part of the API — ignored entirely
+ * (WebIDL drops the extra arguments; no WebGL1 test passes them).
+ */
+function uniformVector(
+  ctx: WebGLRenderingContext,
+  location: WebGLUniformLocation | null,
+  k: number,
+  family: 'f' | 'i' | 'ui',
+  values: Float32Array | Int32Array | Uint32Array,
+  srcOffset: GLuint,
+  srcLength: GLuint,
+): void {
   if (isLost(ctx)) return;
   const t = prepareUniform(ctx, location);
   if (t === null) return;
@@ -302,37 +327,65 @@ function uniformVector(ctx: WebGLRenderingContext, location: WebGLUniformLocatio
     ctx._errors.push(C1.INVALID_OPERATION);
     return;
   }
-  if (values.length < k || values.length % k !== 0) {
+  let off = 0;
+  let count = values.length;
+  if (ctx._version === 2) {
+    off = srcOffset >>> 0; // WebIDL GLuint (ToUint32) conversion
+    const len = srcLength >>> 0;
+    if (off > values.length || (len > 0 && off + len > values.length)) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    count = len === 0 ? values.length - off : len;
+    if (count === 0 || count % k !== 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+  } else if (values.length < k || values.length % k !== 0) {
     ctx._errors.push(C1.INVALID_VALUE);
     return;
   }
   if (family === 'i' && isSamplerType(t.uniform.type)) {
-    for (let i = 0; i < values.length; i++) {
-      if ((values[i] | 0) >= ctx._state.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS) {
+    for (let i = 0; i < count; i++) {
+      if ((values[off + i] | 0) >= ctx._state.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS) {
         ctx._errors.push(C1.INVALID_VALUE);
         return;
       }
     }
   }
   const isBool = isBoolType(t.uniform.type);
-  const total = Math.min(values.length, t.uniform.size * k); // extra values ignored
+  const total = Math.min(count, t.uniform.size * k); // extra values ignored
   for (let i = 0; i < total; i++) {
     const element = Math.floor(i / k);
     const comp = i % k;
-    const v = values[i];
+    const v = values[off + i];
     // element offset = element * elementSlots() (float stride: scalar 1,
     // vector 4, matrix cols*4 — see api/programs.ts elementSlots).
-    const off = element * t.slots;
+    const slotOff = element * t.slots;
     if (family === 'f') {
-      if (isBool) writeIntAt(t, off, comp, v, 'boolf');
-      else writeFloatAt(t, off, comp, v);
-    } else if (family === 'i') writeIntAt(t, off, comp, v, isBool ? 'bool' : 'int');
-    else writeIntAt(t, off, comp, v, 'uint');
+      if (isBool) writeIntAt(t, slotOff, comp, v, 'boolf');
+      else writeFloatAt(t, slotOff, comp, v);
+    } else if (family === 'i') writeIntAt(t, slotOff, comp, v, isBool ? 'bool' : 'int');
+    else writeIntAt(t, slotOff, comp, v, 'uint');
   }
 }
 
-/** Matrix setter (uniformMatrix*fv, incl. non-square). */
-function uniformMatrix(ctx: WebGLRenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List, cols: number, rows: number, typeConst: number): void {
+/**
+ * Matrix setter (uniformMatrix*fv, incl. non-square) with WebGL2
+ * srcOffset/srcLength — same semantics as uniformVector with n = cols*rows
+ * components per matrix (WebGL 2.0 §3.7.6; gl-uniform-arrays-sub-source.html).
+ */
+function uniformMatrix(
+  ctx: WebGLRenderingContext,
+  location: WebGLUniformLocation | null,
+  transpose: GLboolean,
+  value: Float32List,
+  cols: number,
+  rows: number,
+  typeConst: number,
+  srcOffset: GLuint,
+  srcLength: GLuint,
+): void {
   if (isLost(ctx)) return;
   const t = prepareUniform(ctx, location);
   if (t === null) return;
@@ -346,18 +399,32 @@ function uniformMatrix(ctx: WebGLRenderingContext, location: WebGLUniformLocatio
   }
   const values = toFloat32List(value);
   const n = cols * rows;
-  if (values.length < n || values.length % n !== 0) {
+  let off = 0;
+  let count = values.length;
+  if (ctx._version === 2) {
+    off = srcOffset >>> 0; // WebIDL GLuint (ToUint32) conversion
+    const len = srcLength >>> 0;
+    if (off > values.length || (len > 0 && off + len > values.length)) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    count = len === 0 ? values.length - off : len;
+    if (count === 0 || count % n !== 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+  } else if (values.length < n || values.length % n !== 0) {
     ctx._errors.push(C1.INVALID_VALUE);
     return;
   }
-  const total = Math.min(values.length, t.uniform.size * n); // extra matrices ignored
+  const total = Math.min(count, t.uniform.size * n); // extra matrices ignored
   for (let i = 0; i < total; i++) {
     const element = Math.floor(i / n);
     const col = Math.floor((i % n) / rows);
     const row = i % rows;
     // Column-major: value index i = column col, row row; float offset =
     // element*stride + col*4 (stride = cols*4 floats per element).
-    writeFloatAt(t, element * t.slots + col * 4, row, values[i]);
+    writeFloatAt(t, element * t.slots + col * 4, row, values[off + i]);
   }
 }
 
@@ -392,41 +459,43 @@ export function installUniformsApi(proto: WebGLRenderingContext): void {
     uniformScalar(this, location, 4, 'i', [x, y, z, w]);
   };
 
-  // ---- WebGL1 {v} setters ----
-  proto.uniform1fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Float32List): void {
-    uniformVector(this, location, 1, 'f', toFloat32List(v));
+  // ---- WebGL1 {v} setters (WebGL2 adds srcOffset/srcLength — optional
+  // defaults keep the declared arity: WebGL1 IDL (2 args) and WebGL2 IDL
+  // (2 required + 2 optional → function.length 2) both hold) ----
+  proto.uniform1fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Float32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+    uniformVector(this, location, 1, 'f', toFloat32List(v), srcOffset, srcLength);
   };
-  proto.uniform2fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Float32List): void {
-    uniformVector(this, location, 2, 'f', toFloat32List(v));
+  proto.uniform2fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Float32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+    uniformVector(this, location, 2, 'f', toFloat32List(v), srcOffset, srcLength);
   };
-  proto.uniform3fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Float32List): void {
-    uniformVector(this, location, 3, 'f', toFloat32List(v));
+  proto.uniform3fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Float32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+    uniformVector(this, location, 3, 'f', toFloat32List(v), srcOffset, srcLength);
   };
-  proto.uniform4fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Float32List): void {
-    uniformVector(this, location, 4, 'f', toFloat32List(v));
+  proto.uniform4fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Float32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+    uniformVector(this, location, 4, 'f', toFloat32List(v), srcOffset, srcLength);
   };
-  proto.uniform1iv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Int32List): void {
-    uniformVector(this, location, 1, 'i', toInt32List(v));
+  proto.uniform1iv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Int32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+    uniformVector(this, location, 1, 'i', toInt32List(v), srcOffset, srcLength);
   };
-  proto.uniform2iv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Int32List): void {
-    uniformVector(this, location, 2, 'i', toInt32List(v));
+  proto.uniform2iv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Int32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+    uniformVector(this, location, 2, 'i', toInt32List(v), srcOffset, srcLength);
   };
-  proto.uniform3iv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Int32List): void {
-    uniformVector(this, location, 3, 'i', toInt32List(v));
+  proto.uniform3iv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Int32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+    uniformVector(this, location, 3, 'i', toInt32List(v), srcOffset, srcLength);
   };
-  proto.uniform4iv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Int32List): void {
-    uniformVector(this, location, 4, 'i', toInt32List(v));
+  proto.uniform4iv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, v: Int32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+    uniformVector(this, location, 4, 'i', toInt32List(v), srcOffset, srcLength);
   };
 
   // ---- WebGL1 matrix setters ----
-  proto.uniformMatrix2fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List): void {
-    uniformMatrix(this, location, transpose, value, 2, 2, C1.FLOAT_MAT2);
+  proto.uniformMatrix2fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+    uniformMatrix(this, location, transpose, value, 2, 2, C1.FLOAT_MAT2, srcOffset, srcLength);
   };
-  proto.uniformMatrix3fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List): void {
-    uniformMatrix(this, location, transpose, value, 3, 3, C1.FLOAT_MAT3);
+  proto.uniformMatrix3fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+    uniformMatrix(this, location, transpose, value, 3, 3, C1.FLOAT_MAT3, srcOffset, srcLength);
   };
-  proto.uniformMatrix4fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List): void {
-    uniformMatrix(this, location, transpose, value, 4, 4, C1.FLOAT_MAT4);
+  proto.uniformMatrix4fv = function (this: WebGLRenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+    uniformMatrix(this, location, transpose, value, 4, 4, C1.FLOAT_MAT4, srcOffset, srcLength);
   };
 
   // ---- WebGL2 additions (gated: only present on the WebGL2 prototype) ----
@@ -445,36 +514,36 @@ export function installUniformsApi(proto: WebGLRenderingContext): void {
     p2.uniform4ui = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, x: GLuint, y: GLuint, z: GLuint, w: GLuint): void {
       uniformScalar(this, location, 4, 'ui', [x, y, z, w]);
     };
-    p2.uniform1uiv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, v: Uint32List): void {
-      uniformVector(this, location, 1, 'ui', toUint32List(v));
+    p2.uniform1uiv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, v: Uint32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+      uniformVector(this, location, 1, 'ui', toUint32List(v), srcOffset, srcLength);
     };
-    p2.uniform2uiv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, v: Uint32List): void {
-      uniformVector(this, location, 2, 'ui', toUint32List(v));
+    p2.uniform2uiv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, v: Uint32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+      uniformVector(this, location, 2, 'ui', toUint32List(v), srcOffset, srcLength);
     };
-    p2.uniform3uiv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, v: Uint32List): void {
-      uniformVector(this, location, 3, 'ui', toUint32List(v));
+    p2.uniform3uiv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, v: Uint32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+      uniformVector(this, location, 3, 'ui', toUint32List(v), srcOffset, srcLength);
     };
-    p2.uniform4uiv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, v: Uint32List): void {
-      uniformVector(this, location, 4, 'ui', toUint32List(v));
+    p2.uniform4uiv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, v: Uint32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+      uniformVector(this, location, 4, 'ui', toUint32List(v), srcOffset, srcLength);
     };
 
-    p2.uniformMatrix2x3fv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List): void {
-      uniformMatrix(this, location, transpose, value, 2, 3, FLOAT_MAT2x3);
+    p2.uniformMatrix2x3fv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+      uniformMatrix(this, location, transpose, value, 2, 3, FLOAT_MAT2x3, srcOffset, srcLength);
     };
-    p2.uniformMatrix2x4fv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List): void {
-      uniformMatrix(this, location, transpose, value, 2, 4, FLOAT_MAT2x4);
+    p2.uniformMatrix2x4fv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+      uniformMatrix(this, location, transpose, value, 2, 4, FLOAT_MAT2x4, srcOffset, srcLength);
     };
-    p2.uniformMatrix3x2fv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List): void {
-      uniformMatrix(this, location, transpose, value, 3, 2, FLOAT_MAT3x2);
+    p2.uniformMatrix3x2fv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+      uniformMatrix(this, location, transpose, value, 3, 2, FLOAT_MAT3x2, srcOffset, srcLength);
     };
-    p2.uniformMatrix3x4fv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List): void {
-      uniformMatrix(this, location, transpose, value, 3, 4, FLOAT_MAT3x4);
+    p2.uniformMatrix3x4fv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+      uniformMatrix(this, location, transpose, value, 3, 4, FLOAT_MAT3x4, srcOffset, srcLength);
     };
-    p2.uniformMatrix4x2fv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List): void {
-      uniformMatrix(this, location, transpose, value, 4, 2, FLOAT_MAT4x2);
+    p2.uniformMatrix4x2fv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+      uniformMatrix(this, location, transpose, value, 4, 2, FLOAT_MAT4x2, srcOffset, srcLength);
     };
-    p2.uniformMatrix4x3fv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List): void {
-      uniformMatrix(this, location, transpose, value, 4, 3, FLOAT_MAT4x3);
+    p2.uniformMatrix4x3fv = function (this: WebGL2RenderingContext, location: WebGLUniformLocation | null, transpose: GLboolean, value: Float32List, srcOffset: GLuint = 0, srcLength: GLuint = 0): void {
+      uniformMatrix(this, location, transpose, value, 4, 3, FLOAT_MAT4x3, srcOffset, srcLength);
     };
   }
 }
