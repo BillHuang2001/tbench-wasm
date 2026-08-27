@@ -54,7 +54,7 @@ interface ContextLike {
   _version: 1 | 2;
   _isLost: boolean;
   _canvas: unknown;
-  _attrs: { depth: boolean; stencil: boolean; alpha?: boolean };
+  _attrs: { depth: boolean; stencil: boolean; alpha?: boolean; premultipliedAlpha?: boolean };
   _state: State;
   _errors: ErrorQueue;
   _resources: { invalidateAll(): void };
@@ -242,7 +242,7 @@ function doRestore(ctx: ContextLike): void {
 export function initContextResources(ctx: ContextLike): void {
   // Present adapter (browser 2D blit / Node buffer). Stub-safe: null on throw.
   try {
-    ctx._presentSurface = createCanvasSurface(ctx._canvas);
+    ctx._presentSurface = createCanvasSurface(ctx._canvas, ctx._attrs);
   } catch {
     ctx._presentSurface = null;
   }
