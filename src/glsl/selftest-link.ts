@@ -21,8 +21,21 @@
  *      attribute auto-assigns first-free.
  *   6. user function + local array through the linked program (scratchSize>0).
  *   7. ES 3.00 flat ivec4 varying round-trip (small values).
- *   8. UBO declared → {ok:false} 'linker: uniform blocks not supported'
- *      (deferred to a later task — documents the deferral).
+ *   8. UBO declared → links with std140 block metadata (E5b1 lifted the
+ *      'uniform blocks not supported' deferral).
+ *   9. std140 layout + full run: {float a; vec3 b; mat4 c; float d[3]; int e;}
+ *      (a@0, b@16, c@32, d@96, e@108, size 112), float + int block stores,
+ *      UBO members in Program.uniforms (location -1) but NOT uniformMap.
+ *  10. same block in both stages → ONE shared index + run; layout mismatch
+ *      (float vs vec2 member) → link error.
+ *  11. instance-less block accessed by bare member name.
+ *  12. arrayed block `uniform B { vec4 v; } b[2]` with DYNAMIC instance index
+ *      b[i].v (i uniform; i=0 and i=1 verify the blockStride path).
+ *  13. nested struct members + member array inside a struct:
+ *      {S1 {vec2 x; float y;} s; S2 {vec2 x; float y[2];} t;} — x@0, y@8,
+ *      t@16, t.x@16, t.y@24, size 48.
+ *  14. limits: maxUniformBlockSize / maxVertexUniformBlocks /
+ *      maxCombinedUniformBlocks exceeded → link errors.
  *
  * Run: npx tsx src/glsl/selftest-link.ts
  * Prints "OK" and exits 0 on success.
@@ -97,7 +110,11 @@ function fragmentCtx(
 }
 
 const FLOAT_VEC4 = 0x8b52; // 35666
+const FLOAT_VEC3 = 0x8b51; // 35665
+const FLOAT_VEC2 = 0x8b50; // 35664
+const FLOAT_MAT4 = 0x8b5c; // 35676
 const FLOAT = 0x1406; // 5126
+const INT = 0x1404; // 5124
 
 /* ------------------------------------------------------------------ */
 /* 1. Trivial ES 1.00 pair + uniform write re-run                      */
@@ -443,7 +460,7 @@ const FLOAT = 0x1406; // 5126
 }
 
 /* ------------------------------------------------------------------ */
-/* 8. UBO declared → deferred (not supported)                          */
+/* 8. UBO declared → links with std140 metadata (E5b1)                 */
 /* ------------------------------------------------------------------ */
 
 {
@@ -461,8 +478,400 @@ const FLOAT = 0x1406; // 5126
     300,
   );
   const l = linkProgram(vs, fs);
-  check(!l.ok && l.log.includes('uniform blocks') && l.log.includes('not supported'),
-    `UBO deferred with 'linker: uniform blocks not supported' (${logOf(l)})`);
+  check(l.ok, `UBO pair links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    check(
+      p.uniformBlocks.length === 1 && p.uniformBlocks[0].name === 'Blocks' && p.uniformBlocks[0].index === 0 &&
+        p.uniformBlocks[0].size === 16 && p.uniformBlocks[0].activeUniforms.length === 1 &&
+        p.uniformBlocks[0].activeUniforms[0].name === 'b.u' && p.uniformBlocks[0].activeUniforms[0].offset === 0 &&
+        p.uniformBlocks[0].activeUniforms[0].type === FLOAT_VEC4,
+      `UBO metadata: one block 'Blocks' index 0 size 16, member b.u@0 FLOAT_VEC4 (got ${JSON.stringify(p.uniformBlocks)})`,
+    );
+    check(p.uniformMap.has('b.u') === false && p.uniformMap.has('u') === false,
+      `UBO members absent from uniformMap (getUniformLocation → null)`);
+    const m = p.uniforms.find((u) => u.name === 'b.u');
+    check(m !== undefined && m.blockIndex === 0 && m.location === -1,
+      `UBO member in Program.uniforms with blockIndex 0, location -1 (got ${JSON.stringify(m)})`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 9. UBO std140 layout + full read run (float + int block stores)     */
+/* ------------------------------------------------------------------ */
+
+{
+  const vs = compile(
+    `#version 300 es
+     uniform Blocks { float a; vec3 b; mat4 c; float d[3]; int e; } blk;
+     in vec4 aPos;
+     void main(){ gl_Position = aPos + vec4(blk.a, blk.b.x, blk.d[0], 0.0); }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision mediump float;
+     uniform Blocks { float a; vec3 b; mat4 c; float d[3]; int e; } blk;
+     out vec4 o;
+     void main(){ o = vec4(blk.a + blk.b.x + blk.c[0][0] + blk.d[0] + blk.d[1] + blk.d[2], blk.b.y, blk.b.z, float(blk.e)); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `std140 block links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    // std140 (computed by hand): a float@0 (4B) | b vec3@16 (align 16, 12B) |
+    // c mat4@32 (align 16, 64B, column stride 16) | d float[3]@96 (align 4,
+    // stride 4, 12B) | e int@108 → total 112, block size = roundUp(112,16)=112.
+    check(p.uniformBlocks.length === 1 && p.uniformBlocks[0].size === 112,
+      `block size 112 (got ${JSON.stringify(p.uniformBlocks.map((b) => b.size))})`);
+    const m = new Map(p.uniformBlocks[0].activeUniforms.map((u) => [u.name, u]));
+    check(
+      m.get('blk.a')?.offset === 0 && m.get('blk.b')?.offset === 16 && m.get('blk.c')?.offset === 32 &&
+        m.get('blk.d[0]')?.offset === 96 && m.get('blk.e')?.offset === 108,
+      `member offsets a@0 b@16 c@32 d@96 e@108 (got ${JSON.stringify([...m].map(([k, v]) => [k, v.offset]))})`,
+    );
+    check(
+      m.get('blk.b')?.type === FLOAT_VEC3 && m.get('blk.c')?.type === FLOAT_MAT4 && m.get('blk.c')?.matrixStride === 16 &&
+        m.get('blk.d[0]')?.size === 3 && m.get('blk.d[0]')?.arrayStride === 4 &&
+        m.get('blk.e')?.type === INT && m.get('blk.e')?.size === 1,
+      `member types/sizes: b FLOAT_VEC3, c FLOAT_MAT4 matrixStride 16, d[3] size 3 stride 4, e INT (got ${JSON.stringify([...m].map(([k, v]) => [k, v.type, v.size, v.arrayStride, v.matrixStride]))})`,
+    );
+    const um = p.uniforms.filter((u) => u.blockIndex === 0);
+    check(
+      um.length === 5 && um.every((u) => u.location === -1) &&
+        um.map((u) => u.name).join(',') === 'blk.a,blk.b,blk.c,blk.d[0],blk.e',
+      `block members in Program.uniforms (location -1, blockIndex 0) (got ${JSON.stringify(um)})`,
+    );
+    check(p.uniformMap.has('blk.a') === false && p.uniformMap.has('blk.d[0]') === false,
+      `block members NOT in uniformMap (got ${JSON.stringify([...p.uniformMap.keys()])})`);
+
+    // Block stores are FLOAT-indexed (generated code reads byteOffset/4):
+    // a@float 0 | b@4..6 | c@8..23 | d@24..26 | e@float 27 (INT store).
+    const store = new Float32Array(28); // 112 bytes / 4
+    store[0] = 1.5; // blk.a
+    store[4] = 2; store[5] = 3; store[6] = 4; // blk.b
+    store[8] = 0.5; // blk.c[0][0]
+    store[24] = 1; store[25] = 2; store[26] = 3; // blk.d
+    const istore = new Int32Array(28);
+    istore[27] = 7; // blk.e
+    const vctx = vertexCtx(p, {
+      blockStores: [store],
+      blockIntStores: [istore],
+      attribs: [new Float32Array([0, 0, 0, 1])],
+      attribIndices: new Int32Array([0]),
+    });
+    p.vertex.run(vctx);
+    check(
+      vctx.out.position[0] === 1.5 && vctx.out.position[1] === 2 && vctx.out.position[2] === 1,
+      `vertex reads block: position [1.5,2,1,...] (got [${Array.from(vctx.out.position).join(', ')}])`,
+    );
+    const fctx = fragmentCtx(p, [], { blockStores: [store], blockIntStores: [istore] });
+    p.fragment.run(fctx);
+    const c = fctx.out.color[0];
+    check(
+      c[0] === 10 && c[1] === 3 && c[2] === 4 && c[3] === 7,
+      `fragment reads block: color [10,3,4,7] (got [${Array.from(c).join(', ')}])`,
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 10. Same block in both stages → ONE shared index; mismatch → error  */
+/* ------------------------------------------------------------------ */
+
+{
+  const vs = compile(
+    `#version 300 es
+     uniform Shared { vec4 v; } s;
+     in vec4 aPos;
+     void main(){ gl_Position = aPos + s.v; }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision mediump float;
+     uniform Shared { vec4 v; } s;
+     out vec4 o;
+     void main(){ o = s.v; }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `shared block links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    check(p.uniformBlocks.length === 1 && p.uniformBlocks[0].index === 0,
+      `shared block: ONE entry index 0 (got ${JSON.stringify(p.uniformBlocks)})`);
+    const store = new Float32Array([3, 4, 5, 6]);
+    const vctx = vertexCtx(p, {
+      blockStores: [store],
+      attribs: [new Float32Array([0, 0, 0, 1])],
+      attribIndices: new Int32Array([0]),
+    });
+    p.vertex.run(vctx);
+    check(vctx.out.position[0] === 3 && vctx.out.position[1] === 4,
+      `vertex reads shared block (got [${Array.from(vctx.out.position).join(', ')}])`);
+    const fctx = fragmentCtx(p, [], { blockStores: [store] });
+    p.fragment.run(fctx);
+    check(fctx.out.color[0][0] === 3 && fctx.out.color[0][2] === 5,
+      `fragment reads shared block (got [${Array.from(fctx.out.color[0]).join(', ')}])`);
+  }
+
+  // Same block NAME but different member types (float vs vec2 — both at
+  // offset 0, so the offsets alone would not catch it) → link error.
+  const vs2 = compile(
+    `#version 300 es
+     uniform Shared { float v; } s;
+     void main(){ gl_Position = vec4(s.v); }`,
+    'VERTEX',
+    300,
+  );
+  const fs2 = compile(
+    `#version 300 es
+     precision mediump float;
+     uniform Shared { vec2 v; } s;
+     out vec4 o;
+     void main(){ o = vec4(s.v, 0.0, 1.0); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l2 = linkProgram(vs2, fs2);
+  check(!l2.ok && l2.log.includes(`uniform block 'Shared' layout mismatch`),
+    `layout mismatch link error (${logOf(l2)})`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 11. Instance-less block — bare member name access                   */
+/* ------------------------------------------------------------------ */
+
+{
+  const vs = compile(
+    `#version 300 es
+     uniform Inst { float f; };
+     in vec4 aPos;
+     void main(){ gl_Position = aPos + vec4(f); }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision mediump float;
+     uniform Inst { float f; };
+     out vec4 o;
+     void main(){ o = vec4(f, 0.0, 0.0, 1.0); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `instance-less block links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    check(
+      p.uniformBlocks.length === 1 && p.uniformBlocks[0].name === 'Inst' &&
+        p.uniformBlocks[0].activeUniforms[0].name === 'f' && p.uniformBlocks[0].activeUniforms[0].offset === 0,
+      `instance-less: block 'Inst', bare member 'f' (got ${JSON.stringify(p.uniformBlocks)})`,
+    );
+    const store = new Float32Array([2.5]);
+    const vctx = vertexCtx(p, {
+      blockStores: [store],
+      attribs: [new Float32Array([0, 0, 0, 1])],
+      attribIndices: new Int32Array([0]),
+    });
+    p.vertex.run(vctx);
+    check(vctx.out.position[0] === 2.5, `bare member read in vs (got ${vctx.out.position[0]})`);
+    const fctx = fragmentCtx(p, [], { blockStores: [store] });
+    p.fragment.run(fctx);
+    check(fctx.out.color[0][0] === 2.5, `bare member read in fs (got ${fctx.out.color[0][0]})`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 12. Arrayed block + DYNAMIC instance index (blockStride path)       */
+/* ------------------------------------------------------------------ */
+
+{
+  const vs = compile(
+    `#version 300 es
+     uniform B { vec4 v; } b[2];
+     uniform int i;
+     in vec4 aPos;
+     void main(){ gl_Position = aPos + b[i].v; }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision mediump float; out vec4 o; void main(){ o = vec4(1.0); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `arrayed block links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    // One UniformBlockInfo PER ELEMENT ('b[0]','b[1]'), shared index 0,
+    // size = one instance (16 bytes).
+    check(
+      p.uniformBlocks.length === 2 && p.uniformBlocks[0].name === 'b[0]' && p.uniformBlocks[1].name === 'b[1]' &&
+        p.uniformBlocks[0].index === 0 && p.uniformBlocks[1].index === 0 && p.uniformBlocks[0].size === 16,
+      `arrayed block: 'b[0]','b[1]' shared index 0 size 16 (got ${JSON.stringify(p.uniformBlocks)})`,
+    );
+    const iLoc = p.uniformMap.get('i')!.location;
+    // Two 16-byte instances: [1,0,0,0] and [2,0,0,0] in float index space.
+    const store = new Float32Array([1, 0, 0, 0, 2, 0, 0, 0]);
+    const vctx = vertexCtx(p, {
+      blockStores: [store],
+      attribs: [new Float32Array([0, 0, 0, 1])],
+      attribIndices: new Int32Array([0]),
+    });
+    p.intStore[iLoc] = 0;
+    p.vertex.run(vctx);
+    check(vctx.out.position[0] === 1, `dynamic instance i=0 → v=(1,...) (got ${vctx.out.position[0]})`);
+    p.intStore[iLoc] = 1;
+    p.vertex.run(vctx);
+    check(vctx.out.position[0] === 2, `dynamic instance i=1 → v=(2,...) (got ${vctx.out.position[0]})`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 13. Nested struct members + member array inside a struct            */
+/* ------------------------------------------------------------------ */
+
+{
+  const vs = compile(
+    `#version 300 es
+     struct S1 { vec2 x; float y; };
+     struct S2 { vec2 x; float y[2]; };
+     uniform B { S1 s; S2 t; };
+     in vec4 aPos;
+     void main(){ gl_Position = aPos + vec4(s.x.x, s.y, t.y[0], t.y[1]); }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision mediump float;
+     struct S1 { vec2 x; float y; };
+     struct S2 { vec2 x; float y[2]; };
+     uniform B { S1 s; S2 t; };
+     out vec4 o;
+     void main(){ o = vec4(s.x.x + s.y + t.y[0] + t.y[1], s.x.y, t.x.x, t.x.y); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `nested-struct block links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    // std140: s (S1)@0 — x@0 (vec2, 8B), y@8 (4B); S1 size roundUp(12,8)=16.
+    // t (S2): align 8 → @16 — x@16 (8B), y float[2]@24 (stride 4, 8B);
+    // S2 size roundUp(16,8)=16. Block: 16+16=32 → roundUp(32,16)=32.
+    check(p.uniformBlocks.length === 1 && p.uniformBlocks[0].size === 32,
+      `nested-struct block size 32 (got ${JSON.stringify(p.uniformBlocks.map((b) => b.size))})`);
+    const m = new Map(p.uniformBlocks[0].activeUniforms.map((u) => [u.name, u]));
+    check(
+      m.get('s.x')?.offset === 0 && m.get('s.y')?.offset === 8 && m.get('t.x')?.offset === 16 && m.get('t.y[0]')?.offset === 24,
+      `nested offsets s.x@0 s.y@8 t.x@16 t.y@24 (got ${JSON.stringify([...m].map(([k, v]) => [k, v.offset]))})`,
+    );
+    check(
+      m.get('t.y[0]')?.size === 2 && m.get('t.y[0]')?.arrayStride === 4 && m.get('s.x')?.type === FLOAT_VEC2 && m.get('t.y[0]')?.type === FLOAT,
+      `nested types/sizes: t.y float[2] stride 4, s.x vec2 (got ${JSON.stringify([...m].map(([k, v]) => [k, v.type, v.size, v.arrayStride]))})`,
+    );
+    // float space: s.x@0,1 | s.y@2 | t.x@4,5 | t.y[0]@6 | t.y[1]@7 (48B/4=12).
+    const store = new Float32Array(12);
+    store[0] = 1; store[1] = 2; // s.x
+    store[2] = 3; // s.y
+    store[4] = 4; store[5] = 5; // t.x
+    store[6] = 6; store[7] = 7; // t.y
+    const vctx = vertexCtx(p, {
+      blockStores: [store],
+      attribs: [new Float32Array([0, 0, 0, 1])],
+      attribIndices: new Int32Array([0]),
+    });
+    p.vertex.run(vctx);
+    check(
+      vctx.out.position[0] === 1 && vctx.out.position[1] === 3 && vctx.out.position[2] === 6 && vctx.out.position[3] === 8,
+      `vertex reads nested members (got [${Array.from(vctx.out.position).join(', ')}])`,
+    );
+    const fctx = fragmentCtx(p, [], { blockStores: [store] });
+    p.fragment.run(fctx);
+    const c = fctx.out.color[0];
+    check(
+      c[0] === 17 && c[1] === 2 && c[2] === 4 && c[3] === 5,
+      `fragment reads nested members: color [17,2,4,5] (got [${Array.from(c).join(', ')}])`,
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 14. Block limits: maxUniformBlockSize / per-stage / combined        */
+/* ------------------------------------------------------------------ */
+
+{
+  // maxUniformBlockSize: vec4 v[8] = 128 bytes > 16.
+  const vs = compile(
+    `#version 300 es
+     uniform Big { vec4 v[8]; } b;
+     void main(){ gl_Position = b.v[0]; }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(`#version 300 es
+     precision mediump float; out vec4 o; void main(){ o = vec4(1.0); }`, 'FRAGMENT', 300);
+  const l = linkProgram(vs, fs, { limits: { maxUniformBlockSize: 16 } });
+  check(!l.ok && l.log.includes(`uniform block 'Big' exceeds maxUniformBlockSize`),
+    `maxUniformBlockSize limit (${logOf(l)})`);
+
+  // maxVertexUniformBlocks: two blocks in the VS, max 1.
+  const vs2 = compile(
+    `#version 300 es
+     uniform A { vec4 a; } ba;
+     uniform C { vec4 c; } bc;
+     void main(){ gl_Position = ba.a + bc.c; }`,
+    'VERTEX',
+    300,
+  );
+  const fs2 = compile(`#version 300 es
+     precision mediump float; out vec4 o; void main(){ o = vec4(1.0); }`, 'FRAGMENT', 300);
+  const l2 = linkProgram(vs2, fs2, { limits: { maxVertexUniformBlocks: 1 } });
+  check(!l2.ok && l2.log.includes('too many vertex uniform blocks'),
+    `maxVertexUniformBlocks limit (${logOf(l2)})`);
+
+  // maxFragmentUniformBlocks: one block in each stage, max fragment 0.
+  const vs3 = compile(
+    `#version 300 es
+     uniform A { vec4 a; } ba;
+     void main(){ gl_Position = ba.a; }`,
+    'VERTEX',
+    300,
+  );
+  const fs3 = compile(`#version 300 es
+     precision mediump float;
+     uniform A { vec4 a; } ba;
+     out vec4 o; void main(){ o = ba.a; }`, 'FRAGMENT', 300);
+  const l3 = linkProgram(vs3, fs3, { limits: { maxFragmentUniformBlocks: 0 } });
+  check(!l3.ok && l3.log.includes('too many fragment uniform blocks'),
+    `maxFragmentUniformBlocks limit (${logOf(l3)})`);
+
+  // maxCombinedUniformBlocks: two blocks (vs+fs distinct), max combined 1.
+  const vs4 = compile(
+    `#version 300 es
+     uniform A { vec4 a; } ba;
+     void main(){ gl_Position = ba.a; }`,
+    'VERTEX',
+    300,
+  );
+  const fs4 = compile(`#version 300 es
+     precision mediump float;
+     uniform D { vec4 d; } bd;
+     out vec4 o; void main(){ o = bd.d; }`, 'FRAGMENT', 300);
+  const l4 = linkProgram(vs4, fs4, { limits: { maxCombinedUniformBlocks: 1 } });
+  check(!l4.ok && l4.log.includes('too many uniform blocks'),
+    `maxCombinedUniformBlocks limit (${logOf(l4)})`);
 }
 
 /* ------------------------------------------------------------------ */
