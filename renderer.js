@@ -1330,6 +1330,7 @@
       if (outCap2 < 2) return 0;
       const aIdx = base;
       const bIdx = base + stride;
+      if (buf[aIdx + X] === buf[bIdx + X] && buf[aIdx + Y] === buf[bIdx + Y] && buf[aIdx + Z] === buf[bIdx + Z] && buf[aIdx + W] === buf[bIdx + W]) return 0;
       let t0 = 0;
       let t1 = 1;
       for (let p = 0; p < CLIP_PLANES.length; p++) {
@@ -1344,7 +1345,7 @@
           const t = fa / (fa - fb);
           if (t < t1) t1 = t;
         }
-        if (t0 > t1) return 0;
+        if (t0 >= t1) return 0;
       }
       interpRecord(buf, aIdx, bIdx, t0, stride, out, outBase);
       interpRecord(buf, aIdx, bIdx, t1, stride, out, outBase + stride);
@@ -16853,7 +16854,9 @@
       flat: q.interpolation === "flat" || isIntegral(element),
       centroid: q.centroid === true,
       noperspective: q.interpolation === "noperspective",
-      invariant: q.invariant === true
+      invariant: q.invariant === true,
+      // Set to true by scanUses when the FRAGMENT shader reads the varying.
+      used: false
     };
   }
   function analyzeGlobalDecl(d, ctx, info) {
@@ -16983,7 +16986,9 @@
         flat: mq.interpolation === "flat" || isIntegral(element),
         centroid: mq.centroid === true,
         noperspective: mq.interpolation === "noperspective",
-        invariant: q.invariant === true
+        invariant: q.invariant === true,
+        // Set to true by scanUses when the FRAGMENT shader reads the member.
+        used: false
       });
     }
   }
@@ -17002,6 +17007,17 @@
       }
       if (node.kind === "index") {
         if (firstIndex === null) firstIndex = node.index;
+        node = node.object;
+        continue;
+      }
+      return null;
+    }
+  }
+  function baseIdentifier(e) {
+    let node = e;
+    for (; ; ) {
+      if (node.kind === "identifier") return node;
+      if (node.kind === "index") {
         node = node.object;
         continue;
       }
@@ -17060,6 +17076,12 @@
         default:
           break;
       }
+      markVaryingUsed(id.name);
+    };
+    const markVaryingUsed = (key) => {
+      if (ctx.stage !== "FRAGMENT") return;
+      const v2 = info.varyings.find((vv) => vv.name === key);
+      if (v2 !== void 0) v2.used = true;
     };
     const recordCall = (c) => {
       if (c.resolvedType === void 0 || c.callee.kind !== "identifier") return;
@@ -17081,7 +17103,6 @@
           if (e.op === "++" || e.op === "--") {
             const w = writeRoot(e.operand);
             if (w !== null) {
-              written.add(w.root);
               recordWrite(w.root, w.firstIndex);
             }
           }
@@ -17095,7 +17116,7 @@
         case "assign": {
           const w = writeRoot(e.target);
           if (w !== null) {
-            written.add(w.root);
+            if (e.op === "=") written.add(w.root);
             recordWrite(w.root, w.firstIndex);
           }
           visit(e.target);
@@ -17116,9 +17137,14 @@
           visit(e.object);
           visit(e.index);
           return;
-        case "member":
+        case "member": {
+          const base = baseIdentifier(e.object);
+          if (base !== null && !written.has(base)) {
+            markVaryingUsed(`${base.name}.${e.name}`);
+          }
           visit(e.object);
           return;
+        }
         case "comma":
           for (const x of e.exprs) visit(x);
           return;
@@ -23480,6 +23506,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     for (const f of fs.info.varyings) {
       const key = varyingMatchKey(f);
       fsByKey.set(key, f);
+      if (!f.used) continue;
       const v2 = vsByKey.get(key);
       if (!v2) return { error: `linker: varying '${f.name}' not matched` };
       if (!typeEquals(f.type, v2.type) || f.arraySize !== v2.arraySize) {
@@ -23507,7 +23534,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       let fsLeaves = null;
       if (v2.blockName !== null) {
         const f = fsByKey.get(varyingMatchKey(v2));
-        if (f !== void 0) {
+        if (f !== void 0 && f.used) {
           fsLeaves = [];
           if (f.type.kind === "struct") flattenVaryingStruct(f.name, f.type, fsLeaves);
           else fsLeaves.push({ key: f.name, type: f.type, arraySize: f.arraySize });
