@@ -421,8 +421,8 @@ void main() {
       `struct with array member equal == true (got [${r.ctx.out.color[0].join(',')}])`,
     );
     check(
-      r.ctx.out.color[0][1] === 0,
-      `struct with array member differing leaf != false (got [${r.ctx.out.color[0].join(',')}])`,
+      r.ctx.out.color[0][1] === 1,
+      `struct with array member differing leaf != true (got [${r.ctx.out.color[0].join(',')}])`,
     );
   }
 }
