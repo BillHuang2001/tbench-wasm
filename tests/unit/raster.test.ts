@@ -250,9 +250,10 @@ describe("clipPrimitive", () => {
   it("clips a LINE primitive (count 2) against a plane", () => {
     const stride = RECORD_HEADER_FLOATS;
     const buf = makeRecordBuffer(2, stride);
-    // Both endpoints outside (x < -w and x > w) → fully clipped.
-    writeRecord(buf, 0, -2, 0, 0, 1, 1);
-    writeRecord(buf, stride, 2, 0, 0, 1, 1);
+    // Both endpoints on the same side (x > w) → segment never enters the
+    // volume → fully clipped.
+    writeRecord(buf, 0, 2, 0, 0, 1, 1);
+    writeRecord(buf, stride, 3, 0, 0, 1, 1);
     const { outCount } = clipRecords(buf, stride, 2);
     expect(outCount).toBe(0);
     // One endpoint inside: crosses the x=w plane at t=0.5 → (1, 0, 0, 1).

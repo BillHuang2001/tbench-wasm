@@ -199,21 +199,80 @@ describe("linkProgram", () => {
     expect(program.varyings).toEqual([]);
   });
 
-  it("reports a link log on failure (mismatched varying)", () => {
+  it("reports a link log on failure (fragment varying not matched)", () => {
+    // Native-verified failing direction (probe case B): the FS reads a varying
+    // the VS never declares → link fails in both WebGL1 and WebGL2.
+    const vs = compileOk(VERT_SIMPLE, { type: "VERTEX", version: 100 });
+    const fs = compileOk(
+      `precision mediump float;
+varying vec2 v_uv;
+void main() { gl_FragColor = vec4(v_uv, 0.0, 1.0); }`,
+      { type: "FRAGMENT", version: 100 },
+    );
+    const res = linkProgram(vs, fs);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(typeof res.log).toBe("string");
+      expect(res.log).toContain("not matched");
+    }
+  });
+
+  it("links when the VS writes an extra varying the FS ignores (v100)", () => {
     const vs = compileOk(
       `attribute vec4 a_position;
 varying vec2 v_uv;
 void main() { v_uv = a_position.xy; gl_Position = a_position; }`,
       { type: "VERTEX", version: 100 },
     );
-    // Fragment declares no varying at all → linker error.
     const fs = compileOk(FRAG_SIMPLE, { type: "FRAGMENT", version: 100 });
-    const res = linkProgram(vs, fs);
-    expect(res.ok).toBe(false);
-    if (!res.ok) {
-      expect(typeof res.log).toBe("string");
-      expect(res.log.length).toBeGreaterThan(0);
-    }
+    expect(linkOk(vs, fs)).toBeTruthy();
+  });
+
+  it("links when the FS declares an unused varying the VS doesn't have (v100)", () => {
+    const vs = compileOk(VERT_SIMPLE, { type: "VERTEX", version: 100 });
+    const fs = compileOk(
+      `precision mediump float;
+varying vec2 v_uv;
+void main() { gl_FragColor = vec4(1.0); }`,
+      { type: "FRAGMENT", version: 100 },
+    );
+    expect(linkOk(vs, fs)).toBeTruthy();
+  });
+
+  it("links when the VS writes an `out` the FS doesn't declare (v300)", () => {
+    const vs = compileOk(
+      `#version 300 es
+in vec4 a_position;
+out vec2 v_uv;
+void main() { v_uv = a_position.xy; gl_Position = a_position; }`,
+      { type: "VERTEX", version: 300 },
+    );
+    const fs = compileOk(
+      `#version 300 es
+precision mediump float;
+out vec4 outColor;
+void main() { outColor = vec4(1.0, 0.5, 0.0, 1.0); }`,
+      { type: "FRAGMENT", version: 300 },
+    );
+    expect(linkOk(vs, fs)).toBeTruthy();
+  });
+
+  it("links when the FS declares an unused `in` the VS doesn't write (v300)", () => {
+    const vs = compileOk(
+      `#version 300 es
+in vec4 a_position;
+void main() { gl_Position = a_position; }`,
+      { type: "VERTEX", version: 300 },
+    );
+    const fs = compileOk(
+      `#version 300 es
+precision mediump float;
+in vec2 v_uv;
+out vec4 outColor;
+void main() { outColor = vec4(1.0); }`,
+      { type: "FRAGMENT", version: 300 },
+    );
+    expect(linkOk(vs, fs)).toBeTruthy();
   });
 });
 
