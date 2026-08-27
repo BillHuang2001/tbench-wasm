@@ -58,6 +58,7 @@ function uses(): ShaderUses {
     fragDepth: false,
     vertexId: false,
     instanceId: false,
+    drawId: false,
     derivatives: false,
   };
 }
@@ -84,8 +85,8 @@ const vg = (index: number, offset: number, components: number, elemComponents: n
 /* Driver: compileShader → generateStage → new Function → run          */
 /* ------------------------------------------------------------------ */
 
-function compile(src: string, stage: 'VERTEX' | 'FRAGMENT', version: 100 | 300): TranslationUnit {
-  const r = compileShader(src, { type: stage, version });
+function compile(src: string, stage: 'VERTEX' | 'FRAGMENT', version: 100 | 300, exts?: string[]): TranslationUnit {
+  const r = compileShader(src, { type: stage, version, extensions: exts !== undefined ? new Set(exts) : undefined });
   if (!r.ok) throw new Error(`compile failed: ${JSON.stringify(r.errors)}`);
   return r.shader.ast;
 }
@@ -103,8 +104,9 @@ function runStage(
   stage: 'VERTEX' | 'FRAGMENT',
   layout: CodegenLayout,
   ctxExtra: Record<string, unknown> = {},
+  exts?: string[],
 ): RunResult {
-  const ast = compile(src, stage, layout.version);
+  const ast = compile(src, stage, layout.version, exts);
   const res =
     stage === 'VERTEX' ? generateVertexStage(ast, layout) : generateFragmentStage(ast, layout);
   const fn = new Function('ctx', 'R', res.body);
@@ -286,20 +288,40 @@ function makeTex(): any {
 /* ------------------------------------------------------------------ */
 
 {
-  // gl_VertexID / gl_InstanceID are ES 3.00 builtins.
+  // gl_VertexID / gl_InstanceID are ES 3.00 builtins; gl_DrawID is
+  // extension-gated in ES 3.00 too (GL_ANGLE_multi_draw).
   const r = runStage(
     `#version 300 es
-     void main() { gl_PointSize = 3.0; gl_Position = vec4(float(gl_VertexID), float(gl_InstanceID), 0.0, 1.0); }`,
+     #extension GL_ANGLE_multi_draw : require
+     void main() { gl_PointSize = 3.0; gl_Position = vec4(float(gl_VertexID), float(gl_InstanceID), float(gl_DrawID), 1.0); }`,
     'VERTEX',
     baseLayout(300),
-    { vertexId: 5, instanceId: 7 },
+    { vertexId: 5, instanceId: 7, drawId: 9 },
+    ['GL_ANGLE_multi_draw'],
   );
   const p = r.ctx.out.position;
   check(
-    p[0] === 5 && p[1] === 7 && p[2] === 0 && p[3] === 1,
-    `gl_VertexID/gl_InstanceID read: [5,7,0,1] (got [${Array.from(p).join(', ')}])`,
+    p[0] === 5 && p[1] === 7 && p[2] === 9 && p[3] === 1,
+    `gl_VertexID/gl_InstanceID/gl_DrawID read: [5,7,9,1] (got [${Array.from(p).join(', ')}])`,
   );
   check(r.ctx.out.pointSize === 3, `gl_PointSize write (got ${r.ctx.out.pointSize})`);
+}
+{
+  // ES 1.00 gl_DrawID (the CTS webgl-multi-draw.html shaders are ES 1.00
+  // with `#extension GL_ANGLE_multi_draw : require`).
+  const r = runStage(
+    `#extension GL_ANGLE_multi_draw : require
+     void main() { gl_Position = vec4(float(gl_DrawID), 0.0, 0.0, 1.0); }`,
+    'VERTEX',
+    baseLayout(100),
+    { drawId: 4 },
+    ['GL_ANGLE_multi_draw'],
+  );
+  const p = r.ctx.out.position;
+  check(
+    p[0] === 4 && p[1] === 0 && p[2] === 0 && p[3] === 1,
+    `1.00 gl_DrawID read: [4,0,0,1] (got [${Array.from(p).join(', ')}])`,
+  );
 }
 
 /* ------------------------------------------------------------------ */

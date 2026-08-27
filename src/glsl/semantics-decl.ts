@@ -74,6 +74,7 @@ function analyzeDeclarations(ast: TranslationUnit, ctx: SemContext): ShaderInfo 
       fragDepth: false,
       vertexId: false,
       instanceId: false,
+      drawId: false,
       derivatives: false,
     },
   };
@@ -433,6 +434,9 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
         break;
       case 'gl_InstanceID':
         uses.instanceId = true;
+        break;
+      case 'gl_DrawID':
+        uses.drawId = true;
         break;
       default:
         break;

@@ -180,7 +180,13 @@ validateConstants(extensionConstants, 'ext');
 
 for (const s of builtinFunctions100) check(s.extension === undefined, `100: core signature ${sigKey(s)} has extension tag`);
 for (const s of builtinFunctions300) check(s.extension === undefined, `300: core signature ${sigKey(s)} has extension tag`);
-for (const v of [...builtinVariables100, ...builtinVariables300]) check(v.extension === undefined, `core variable ${v.name} has extension tag`);
+for (const v of [...builtinVariables100, ...builtinVariables300]) {
+  // gl_DrawID is the SOLE extension-tagged core-table entry — it must be
+  // extension-gated in ES 3.00 too (GL_ANGLE_multi_draw), unlike the other
+  // core variables (checked below).
+  if (v.name === 'gl_DrawID') continue;
+  check(v.extension === undefined, `core variable ${v.name} has extension tag`);
+}
 for (const c of [...builtinConstants100, ...builtinConstants300]) check(c.extension === undefined, `core constant ${c.name} has extension tag`);
 
 /* Every extension-gated entry carries an `extension` tag. */
@@ -241,6 +247,11 @@ check(matches('textureCubeLodEXT', extensionFunctions).length === 1, 'textureCub
 check(matches('texture2DShadowLodEXT', extensionFunctions).length === 1, 'texture2DShadowLodEXT must have 1 signature');
 check(matches('fwidth', extensionFunctions).length === 4, 'fwidth must have exactly 4 signatures');
 check(extensionVariables.some((v) => v.name === 'gl_FragDepthEXT' && v.extension === 'GL_EXT_frag_depth' && v.writable), 'gl_FragDepthEXT must be writable GL_EXT_frag_depth');
+/* gl_DrawID (GL_ANGLE_multi_draw / WEBGL_multi_draw): read-only VERTEX int,
+ * extension-gated in BOTH ES 1.00 (extensionVariables) and ES 3.00 (the
+ * sole extension-tagged core-table entry). */
+check(extensionVariables.some((v) => v.name === 'gl_DrawID' && v.extension === 'GL_ANGLE_multi_draw' && v.stage === 'VERTEX' && !v.writable), 'ext: gl_DrawID must be read-only VERTEX GL_ANGLE_multi_draw');
+check(builtinVariables300.some((v) => v.name === 'gl_DrawID' && v.extension === 'GL_ANGLE_multi_draw' && v.stage === 'VERTEX' && !v.writable), '300: gl_DrawID must be read-only VERTEX GL_ANGLE_multi_draw');
 
 /* ------------------------------------------------------------------ */
 /* 5. ES 3.00 checks                                                   */

@@ -57,7 +57,7 @@ function baseLayout(version: 100 | 300, derivatives = false): CodegenLayout {
     outputLocations: new Map([['gl_FragColor', 0], ['color', 0]]),
     uses: {
       pointSize: false, fragCoord: false, frontFacing: false, pointCoord: false,
-      fragDepth: false, vertexId: false, instanceId: false, derivatives,
+      fragDepth: false, vertexId: false, instanceId: false, drawId: false, derivatives,
     },
   };
 }

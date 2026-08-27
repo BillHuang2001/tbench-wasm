@@ -310,6 +310,27 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   const vs2 = okInfo('#version 300 es\nin vec4 p;\nvoid main() { gl_Position = p; gl_PointSize = float(gl_VertexID) + float(gl_InstanceID); }', 300, 'VERTEX');
   check(vs2.uses.vertexId === true && vs2.uses.instanceId === true, 'gl_VertexID/gl_InstanceID reads');
 
+  // gl_DrawID (GL_ANGLE_multi_draw / WEBGL_multi_draw): extension-gated in
+  // BOTH ES 1.00 and ES 3.00 (CTS webgl-multi-draw.html: vshaderIllegalDrawID
+  // uses gl_DrawID with NO directive and must fail; vshaderDrawIDZero /
+  // vshaderWithDrawID use `#extension GL_ANGLE_multi_draw : require`).
+  const did1 = okInfo('#version 300 es\n#extension GL_ANGLE_multi_draw : require\nvoid main() { gl_Position = vec4(float(gl_DrawID)); }', 300, 'VERTEX', ['GL_ANGLE_multi_draw']);
+  check(did1.uses.drawId === true && did1.uses.instanceId === false && did1.uses.vertexId === false, '3.00 gl_DrawID + extension → drawId (not instanceId/vertexId)');
+
+  const errDid1 = errs('#version 300 es\nvoid main() { gl_Position = vec4(float(gl_DrawID)); }', 300, 'VERTEX');
+  check(hasErr(errDid1, 2, "'gl_DrawID' : undeclared identifier"), '3.00 gl_DrawID without extension → undeclared');
+
+  const did2 = okInfo('#extension GL_ANGLE_multi_draw : require\nattribute vec4 p;\nvoid main() { gl_Position = p + vec4(float(gl_DrawID)); }', 100, 'VERTEX', ['GL_ANGLE_multi_draw']);
+  check(did2.uses.drawId === true && did2.uses.instanceId === false, '1.00 gl_DrawID + extension → drawId (vshaderDrawIDZero/vshaderWithDrawID)');
+
+  const errDid2 = errs('attribute vec4 p;\nvoid main() { gl_Position = p + vec4(float(gl_DrawID)); }', 100, 'VERTEX');
+  check(hasErr(errDid2, 2, "'gl_DrawID' : undeclared identifier"), '1.00 gl_DrawID without extension → undeclared (vshaderIllegalDrawID)');
+
+  // `#extension GL_ANGLE_multi_draw : require` defines the macro to 1 (spec);
+  // the #error fires (and compile fails) if the macro is missing or != 1.
+  const did3 = okInfo('#extension GL_ANGLE_multi_draw : require\n#if GL_ANGLE_multi_draw != 1\n#error "GL_ANGLE_multi_draw macro != 1"\n#endif\nattribute vec4 p;\nvoid main() { gl_Position = p; }', 100, 'VERTEX', ['GL_ANGLE_multi_draw']);
+  check(did3.uses.drawId === false, 'GL_ANGLE_multi_draw macro defined to 1 by #extension require');
+
   const fs = okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = texture(s, uv) + vec4(gl_FragCoord.xy, gl_FrontFacing ? 1.0 : 0.0, gl_PointCoord.x); }', 300, 'FRAGMENT');
   check(fs.uses.fragCoord === true && fs.uses.frontFacing === true && fs.uses.pointCoord === true, 'fragCoord/frontFacing/pointCoord reads');
   check(fs.uses.derivatives === true, 'implicit texture() → derivatives');

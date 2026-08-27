@@ -56,6 +56,7 @@ function dualUses(): ShaderUses {
     fragDepth: false,
     vertexId: false,
     instanceId: false,
+    drawId: false,
     derivatives: true,
   };
 }

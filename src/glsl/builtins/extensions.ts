@@ -24,6 +24,7 @@ import {
   F,
   gen,
   genType,
+  I,
   sig,
   smp,
   V2,
@@ -96,6 +97,16 @@ export const extensionVariables: BuiltinVariable[] = [
     stage: 'FRAGMENT',
     writable: true,
     extension: 'GL_EXT_draw_buffers',
+  },
+  // GL_ANGLE_multi_draw (WEBGL_multi_draw): gl_DrawID — the multi-draw
+  // subdraw index, constant for every vertex of the draw (0 for single
+  // draws). Available in BOTH ES 1.00 and ES 3.00 with the extension.
+  {
+    name: 'gl_DrawID',
+    type: I,
+    stage: 'VERTEX',
+    writable: false,
+    extension: 'GL_ANGLE_multi_draw',
   },
 ];
 

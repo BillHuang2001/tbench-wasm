@@ -555,7 +555,13 @@ export function declareVariables(
  * gl_FragDepthEXT). */
 function registerBuiltins(scope: Scope, ctx: SemContext): void {
   const vars = new Map<string, BuiltinVariable>();
-  for (const v of builtinVariables(ctx.version)) vars.set(v.name, v);
+  for (const v of builtinVariables(ctx.version)) {
+    // Core-table entries may carry an `extension` tag (gl_DrawID →
+    // GL_ANGLE_multi_draw); they are only visible when the shader enables
+    // the extension, exactly like extensionVariables entries.
+    if (v.extension !== undefined && !ctx.enabledExtensions.has(v.extension)) continue;
+    vars.set(v.name, v);
+  }
   for (const v of extensionVariables) {
     if (v.extension !== undefined && ctx.enabledExtensions.has(v.extension)) vars.set(v.name, v);
   }
