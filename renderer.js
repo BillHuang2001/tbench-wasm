@@ -7138,14 +7138,14 @@
   };
 
   // src/gl/objects/aux.ts
-  var WebGLUniformLocation2 = class {
+  var WebGLUniformLocation = class {
     constructor(program, index, name) {
       this._program = program;
       this._index = index;
       this._name = name;
     }
   };
-  var WebGLActiveInfo2 = class {
+  var WebGLActiveInfo = class {
     constructor(size, type, name) {
       __publicField(this, "size");
       __publicField(this, "type");
@@ -7155,7 +7155,7 @@
       this.name = name;
     }
   };
-  var WebGLShaderPrecisionFormat2 = class {
+  var WebGLShaderPrecisionFormat = class {
     constructor(rangeMin, rangeMax, precision) {
       __publicField(this, "rangeMin");
       __publicField(this, "rangeMax");
@@ -24305,11 +24305,11 @@ ${inner.map((l) => "  " + l).join("\n")}
         case C1.LOW_FLOAT:
         case C1.MEDIUM_FLOAT:
         case C1.HIGH_FLOAT:
-          return new WebGLShaderPrecisionFormat2(127, 127, 23);
+          return new WebGLShaderPrecisionFormat(127, 127, 23);
         case C1.LOW_INT:
         case C1.MEDIUM_INT:
         case C1.HIGH_INT:
-          return new WebGLShaderPrecisionFormat2(31, 30, 0);
+          return new WebGLShaderPrecisionFormat(31, 30, 0);
         default:
           ctx._errors.push(C1.INVALID_ENUM);
           return null;
@@ -24518,7 +24518,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (elem >= u.size) return null;
       }
       const idx = pm.uniforms.indexOf(u);
-      const loc = new WebGLUniformLocation2(p, idx, u.name);
+      const loc = new WebGLUniformLocation(p, idx, u.name);
       locGen.set(loc, (_a2 = linkGen.get(p)) != null ? _a2 : 0);
       uniformLocInfo.set(loc, { elem, whole });
       return loc;
@@ -24552,7 +24552,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
       const a = pm.attributes[index];
       const name = a.size > 1 ? `${a.name}[0]` : a.name;
-      return new WebGLActiveInfo2(a.size, a.type, name);
+      return new WebGLActiveInfo(a.size, a.type, name);
     };
     proto.getActiveUniform = function(program, index) {
       const ctx = this;
@@ -24565,7 +24565,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         return null;
       }
       const u = pm.uniforms[index];
-      return new WebGLActiveInfo2(u.size, u.type, u.name);
+      return new WebGLActiveInfo(u.size, u.type, u.name);
     };
     proto.getUniform = function(program, location) {
       var _a2, _b, _c;
@@ -24573,7 +24573,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       if (isLost7(ctx)) return null;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return null;
-      if (!(location instanceof WebGLUniformLocation2)) throw new TypeError(`Argument is not of type 'WebGLUniformLocation'`);
+      if (!(location instanceof WebGLUniformLocation)) throw new TypeError(`Argument is not of type 'WebGLUniformLocation'`);
       if (location._program !== p) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return null;
@@ -24626,7 +24626,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           return null;
         }
         const v2 = pm.transformFeedbackVaryings[index];
-        return new WebGLActiveInfo2(v2.size, v2.type, v2.name);
+        return new WebGLActiveInfo(v2.size, v2.type, v2.name);
       };
       p2.getUniformBlockIndex = function(program, uniformBlockName) {
         const ctx = this;
@@ -24929,7 +24929,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   function prepareUniform(ctx, loc) {
     var _a2, _b;
     if (loc === null || loc === void 0) return null;
-    if (!(loc instanceof WebGLUniformLocation2)) throw new TypeError(`Argument is not of type 'WebGLUniformLocation'`);
+    if (!(loc instanceof WebGLUniformLocation)) throw new TypeError(`Argument is not of type 'WebGLUniformLocation'`);
     const program = ctx._state.currentProgram;
     if (program === null || program._deleted) {
       ctx._errors.push(C1.INVALID_OPERATION);
