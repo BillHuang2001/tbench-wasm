@@ -49,6 +49,7 @@ Pure-JS software rasterization for WebGL 1.0/2.0 (no GPU, zero deps, no per-frag
 - **formats decode/encode take an `out` param** (deviation from the illustrative `→ [r,g,b,a]` in contract §3 — required by the no-allocation rule). Decode is a correctness path only; the sampler reads raw typed arrays with format-class fast paths.
 
 ## Known Issues / Gotchas
+- **`isIntegerPackType` (formats-convert.ts ~line 501) wrongly includes UNSIGNED_BYTE (also BYTE/SHORT/UNSIGNED_SHORT/INT/UNSIGNED_INT)**: `getPackConverter(RGBA8, RGBA, UNSIGNED_BYTE)` — the single most common readPixels combo — fails the color-pack gate (`!INTEGER_PACK_FORMATS.has(packFormat) && !isIntegerPackType(packType)`) and returns NULL, so gl/ falls back to its local pack, which yields the constant (0,0,0,255) for every pixel (see src/gl/CONTEXT.md Known Issues). Fix: UNSIGNED_BYTE is a valid NORMAL pack type — remove it from `isIntegerPackType` (integer-buffer UNSIGNED_BYTE matching is handled inside buildIntegerPack's own tables) or gate the color branch on a positive normal-pack-type set.
 - Compressed formats (S3TC/ETC/ASTC/PVRTC) are OUT OF SCOPE initially — extension tests skip when getExtension returns null; three.js/Babylon degrade gracefully. Do not block on them.
 - deqp exactness tests (lines/points) are optional (not in the 2,071 graded count); the graded CTS line/point tests are tolerant, but three.js wireframes ARE graded by screenshot diff — diamond-exit must be genuinely implemented, not approximated.
 - `gl_FragCoord.w` = 1/w_clip (perspective-correct interpolation of 1/w).
