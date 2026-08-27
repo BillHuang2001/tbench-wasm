@@ -112,6 +112,12 @@ function clipPlanePass(
  * corruption). `buf`/`scratch`/`out` must be distinct; triangle passes
  * ping-pong buf → scratch → out[0..] → scratch → out[outBase..], the final
  * pass reads scratch, so there is never read/write aliasing (even outBase 0).
+ *
+ * The count == 2 (line) path uses a segment-parameter clip instead of S-H:
+ * the visible portion is tracked as a per-plane parameter interval [t0, t1]
+ * along the segment (required for segments whose endpoints are both outside
+ * while the interior crosses the volume). A zero-length segment (identical
+ * positions) or a collapsed interval (t0 >= t1) yields 0 vertices.
  */
 export function clipPrimitive(
   buf: Float32Array, base: number, stride: number, count: number,
@@ -126,6 +132,11 @@ export function clipPrimitive(
     if (outCap < 2) return 0;
     const aIdx = base;
     const bIdx = base + stride;
+    // Zero-length segment (identical positions): nothing to rasterize.
+    if (buf[aIdx + X] === buf[bIdx + X] &&
+        buf[aIdx + Y] === buf[bIdx + Y] &&
+        buf[aIdx + Z] === buf[bIdx + Z] &&
+        buf[aIdx + W] === buf[bIdx + W]) return 0;
     let t0 = 0;
     let t1 = 1;
     for (let p = 0; p < CLIP_PLANES.length; p++) {
@@ -140,7 +151,7 @@ export function clipPrimitive(
         const t = fa / (fa - fb);
         if (t < t1) t1 = t;
       }
-      if (t0 > t1) return 0;
+      if (t0 >= t1) return 0; // collapsed (tangent/point-touch): zero-length result
     }
     interpRecord(buf, aIdx, bIdx, t0, stride, out, outBase);
     interpRecord(buf, aIdx, bIdx, t1, stride, out, outBase + stride);
