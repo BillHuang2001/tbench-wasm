@@ -1,0 +1,105 @@
+{
+  "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/147.0.7727.15 Safari/537.36",
+  "results": [
+    {
+      "case": "A",
+      "context": "webgl",
+      "vsCompileOk": true,
+      "vsLog": "",
+      "fsCompileOk": true,
+      "fsLog": "",
+      "linkStatus": true,
+      "linkLog": ""
+    },
+    {
+      "case": "A",
+      "context": "webgl2",
+      "vsCompileOk": true,
+      "vsLog": "",
+      "fsCompileOk": true,
+      "fsLog": "",
+      "linkStatus": true,
+      "linkLog": ""
+    },
+    {
+      "case": "B",
+      "context": "webgl",
+      "vsCompileOk": true,
+      "vsLog": "",
+      "fsCompileOk": true,
+      "fsLog": "",
+      "linkStatus": false,
+      "linkLog": "FRAGMENT varying v_uv does not match any VERTEX varying"
+    },
+    {
+      "case": "B",
+      "context": "webgl2",
+      "vsCompileOk": true,
+      "vsLog": "",
+      "fsCompileOk": true,
+      "fsLog": "",
+      "linkStatus": false,
+      "linkLog": "FRAGMENT varying v_uv does not match any VERTEX varying"
+    },
+    {
+      "case": "C",
+      "context": "webgl",
+      "vsCompileOk": true,
+      "vsLog": "",
+      "fsCompileOk": true,
+      "fsLog": "",
+      "linkStatus": true,
+      "linkLog": ""
+    },
+    {
+      "case": "C",
+      "context": "webgl2",
+      "vsCompileOk": true,
+      "vsLog": "",
+      "fsCompileOk": true,
+      "fsLog": "",
+      "linkStatus": true,
+      "linkLog": ""
+    },
+    {
+      "case": "D",
+      "context": "webgl2",
+      "vsCompileOk": true,
+      "vsLog": "",
+      "fsCompileOk": true,
+      "fsLog": "",
+      "linkStatus": true,
+      "linkLog": ""
+    },
+    {
+      "case": "E",
+      "context": "webgl2",
+      "vsCompileOk": true,
+      "vsLog": "",
+      "fsCompileOk": true,
+      "fsLog": "",
+      "linkStatus": false,
+      "linkLog": "FRAGMENT varying v_uv does not match any VERTEX varying"
+    },
+    {
+      "case": "F",
+      "context": "webgl2",
+      "vsCompileOk": true,
+      "vsLog": "",
+      "fsCompileOk": true,
+      "fsLog": "",
+      "linkStatus": true,
+      "linkLog": ""
+    },
+    {
+      "case": "CONTROL",
+      "context": "webgl",
+      "vsCompileOk": true,
+      "vsLog": "",
+      "fsCompileOk": true,
+      "fsLog": "",
+      "linkStatus": true,
+      "linkLog": ""
+    }
+  ]
+}
