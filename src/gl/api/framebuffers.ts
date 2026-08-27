@@ -622,10 +622,12 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
     if (ctx._version === 2 && target === C2.READ_FRAMEBUFFER) {
       s.readFramebuffer = fbo;
     } else {
-      // FRAMEBUFFER (and DRAW_FRAMEBUFFER on W2) bind the draw slot; W2
-      // FRAMEBUFFER binds BOTH slots (ES3 glBindFramebuffer).
+      // FRAMEBUFFER (and DRAW_FRAMEBUFFER on W2) bind the draw slot; the
+      // FRAMEBUFFER target binds BOTH slots (GLES2 §4.4.1 — the bound
+      // framebuffer is used for both reading and writing; WebGL1 only has
+      // FRAMEBUFFER, WebGL2 keeps the ES3 both-slot behavior).
       s.drawFramebuffer = fbo;
-      if (ctx._version === 2 && target === C1.FRAMEBUFFER) s.readFramebuffer = fbo;
+      if (target === C1.FRAMEBUFFER) s.readFramebuffer = fbo;
     }
     if (fbo) fbo._isBound = true;
   };
