@@ -320,6 +320,21 @@ export interface DrawCall {
   fb: FramebufferTarget;
   viewport: Viewport;
   depthRange: DepthRange;
+  /**
+   * EXT_clip_control clip origin: LOWER_LEFT_EXT (0x8ca1) or UPPER_LEFT_EXT
+   * (0x8ca2). Absent → LOWER_LEFT_EXT (spec default). UPPER_LEFT_EXT flips the
+   * window y axis (the y origin moves to the top of the viewport; the polygon
+   * facing computation compensates per EXT_clip_control §13.7.1, so front
+   * faces are unchanged).
+   */
+  clipOrigin?: GLenum;
+  /**
+   * EXT_clip_control depth mode: NEGATIVE_ONE_TO_ONE_EXT (0x935e) or
+   * ZERO_TO_ONE_EXT (0x935f). Absent → NEGATIVE_ONE_TO_ONE_EXT (spec default).
+   * ZERO_TO_ONE_EXT clips z ∈ [0, w] and maps NDC z directly (unscaled) into
+   * [near, far].
+   */
+  clipDepthMode?: GLenum;
   scissor: ScissorState;
   cull: CullState;
   polygonOffset: PolygonOffsetState;

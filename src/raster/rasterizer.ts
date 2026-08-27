@@ -29,6 +29,7 @@ import {
   POINTS, LINES, LINE_LOOP, LINE_STRIP, TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN,
   FRONT, BACK, FRONT_AND_BACK, CW, CCW,
   NEAREST_MIPMAP_LINEAR, LINEAR, REPEAT, NONE, LEQUAL,
+  UPPER_LEFT_EXT,
 } from './gl-enums';
 import { clipPrimitive, pointIsVisible, applyViewportTransform, MAX_CLIPPED_VERTICES } from './clip';
 import { rasterizeTriangle, signedArea2 } from './triangles';
@@ -342,14 +343,18 @@ function emitTriangle(
 
   applyFlatFixup(primBuf, 0, 3, stride, dc.varyingsOffset, flatRanges);
 
-  const nv = clipPrimitive(primBuf, 0, stride, 3, clipA, clipB, 0);
+  const nv = clipPrimitive(primBuf, 0, stride, 3, clipA, clipB, 0, dc.clipDepthMode);
   if (nv === 0) return;
-  applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange);
+  applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange, dc.clipOrigin, dc.clipDepthMode);
 
   // Facing + culling in window space (after clipping AND viewport transform).
   // signedArea2 expects FLOAT offsets into the packed record buffer (record k
   // lives at k*stride) — matching the rasterizeTriangle fan-loop calls below.
-  const area = signedArea2(clipB, 0, stride, 2 * stride, stride);
+  // EXT_clip_control §13.7.1: with UPPER_LEFT_EXT the facing area is the
+  // window-space area multiplied by -1 (the y flip already negates it, so the
+  // factor cancels: front faces are unchanged by the clip origin).
+  let area = signedArea2(clipB, 0, stride, 2 * stride, stride);
+  if (dc.clipOrigin === UPPER_LEFT_EXT) area = -area;
   const frontFacing = (dc.cull.frontFace === CCW) ? area > 0 : area < 0;
   if (dc.cull.enabled) {
     const face = dc.cull.face;
@@ -379,9 +384,9 @@ function emitLine(
 
   applyFlatFixup(primBuf, 0, 2, stride, dc.varyingsOffset, flatRanges);
 
-  const nv = clipPrimitive(primBuf, 0, stride, 2, clipA, clipB, 0);
+  const nv = clipPrimitive(primBuf, 0, stride, 2, clipA, clipB, 0, dc.clipDepthMode);
   if (nv === 0) return;
-  applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange);
+  applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange, dc.clipOrigin, dc.clipDepthMode);
 
   rs.frontFacing = false; // undefined for lines
   rasterizeLine(clipB, 0, stride, stride, rs);
@@ -395,8 +400,8 @@ function emitPoint(
   copyRecord(dc.vertices, ia * stride, primBuf, 0, stride);
 
   // Points are not polygon-clipped; only the 6-plane visibility test applies.
-  if (!pointIsVisible(primBuf, 0, stride)) return;
-  applyViewportTransform(primBuf, 0, stride, 1, dc.viewport, dc.depthRange);
+  if (!pointIsVisible(primBuf, 0, stride, dc.clipDepthMode)) return;
+  applyViewportTransform(primBuf, 0, stride, 1, dc.viewport, dc.depthRange, dc.clipOrigin, dc.clipDepthMode);
 
   rs.frontFacing = false; // undefined for points
   rasterizePoint(primBuf, 0, stride, rs);

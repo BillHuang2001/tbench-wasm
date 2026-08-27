@@ -64,6 +64,7 @@ import type { GLenum, GLint, GLintptr, GLsizei, GLuint } from './types';
 import { C1, C2 } from './constants';
 import { resolveFramebufferTarget, resolveReadSurface, getAttachmentSurface } from './framebuffer-util';
 import { handleCanvasResize } from './lost';
+import { getClipControl } from './extensions/clip-state';
 import {
   computeVertexStride,
   RECORD_HEADER_FLOATS,
@@ -862,6 +863,7 @@ function buildDrawCall(
 ): DrawCall {
   const s = ctx._state;
   const { colorMask, drawBuffers } = buildOutputMaps(ctx, pm);
+  const clipControl = getClipControl(ctx);
   const blend0 = s.blendPerDrawBuffer.get(0);
   const blend = {
     enabled: s.caps.BLEND,
@@ -885,6 +887,8 @@ function buildDrawCall(
     fb,
     viewport: { x: s.viewport.x, y: s.viewport.y, w: s.viewport.w, h: s.viewport.h },
     depthRange: { near: s.depth.range[0], far: s.depth.range[1] },
+    clipOrigin: clipControl.origin,
+    clipDepthMode: clipControl.depth,
     scissor: {
       enabled: s.caps.SCISSOR_TEST,
       x: s.scissor.x, y: s.scissor.y, w: s.scissor.w, h: s.scissor.h,
