@@ -12,7 +12,7 @@ compileShader(source: string, opts: {
 linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions)
   → { ok: true; program: Program } | { ok: false; log: string }
 ```
-- `compiler.ts`: compileShader (preprocess→lexer→parse→analyze, errors capped at MAX_COMPILE_ERRORS) + linkProgram (delegates to linker.ts), `Shader`/`ShaderInfo` (`AttributeDecl`/`VaryingDecl`/`UniformDecl`/`UniformBlockDecl`/`OutputDecl`/`ShaderUses` — note `VaryingDecl.blockName: string | null`, additive, for interface-block members), `LinkOptions`/`LinkLimits`/`TransformFeedbackSpec`.
+- `compiler.ts`: compileShader (preprocess→lexer→parse→analyze, errors capped at MAX_COMPILE_ERRORS) + linkProgram (delegates to linker.ts), `Shader`/`ShaderInfo` (`AttributeDecl`/`VaryingDecl`/`UniformDecl`/`UniformBlockDecl`/`OutputDecl`/`ShaderUses` — note `VaryingDecl.blockName: string | null` (interface-block members) and `VaryingDecl.used` (fragment read-tracking; the linker matches only USED fragment varyings)), `LinkOptions`/`LinkLimits`/`TransformFeedbackSpec`.
 - `program.ts`: `Program` + info interfaces (`AttribInfo`/`UniformInfo`/`UniformBlockInfo`/`UniformBlockMemberInfo`/`VaryingInfo`) + exec contexts (`BaseExecCtx`/`VertexExecCtx`/`FragmentExecCtx`) — the linker builds plain objects matching these interfaces.
 - `types.ts`: `GLSLType` tagged union, `Precision`, qualifiers (incl. `'inout'` — ADDED to StorageClass, additive), declared helpers (toGLenum with exact GLenum values, typeComponents = matrix ROWS, typeSize, typeEquals, typeName, isIntegral/isFloat/isSampler).
 - `ast.ts` / `index.ts`: complete.
