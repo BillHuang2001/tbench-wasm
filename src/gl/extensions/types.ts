@@ -135,7 +135,12 @@ export interface EXT_disjoint_timer_query {
 // WebGL2-only extensions
 // ---------------------------------------------------------------------------
 export interface EXT_color_buffer_float { }
-export interface EXT_color_buffer_half_float { }
+export interface EXT_color_buffer_half_float {
+  readonly RGB16F_EXT: GLenum;
+  readonly RGBA16F_EXT: GLenum;
+  readonly FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT: GLenum;
+  readonly UNSIGNED_NORMALIZED_EXT: GLenum;
+}
 export interface EXT_float_blend { }
 export interface EXT_texture_norm16 {
   readonly R16_EXT: GLenum;
