@@ -20,12 +20,19 @@
  *    accept any value ≥ 0 and are INVALID_ENUM on WebGL1. Integer pnames are
  *    WebIDL-long converted
  *    (param|0) before range checks.
- *  - lineWidth: ALIASED_LINE_WIDTH_RANGE is [1,1] — only 1.0 is accepted;
- *    any other value generates INVALID_VALUE (WebGL spec lineWidth).
- *  - depthRange: zNear/zFar are clamped to [0,1] (GLclampf conversion) and if
- *    the clamped zNear > clamped zFar an INVALID_OPERATION is generated.
+ *  - lineWidth: only width ≤ 0 or NaN generate INVALID_VALUE (the CTS checks
+ *    zero, negative and NaN); any other value — including values above
+ *    ALIASED_LINE_WIDTH_RANGE [1,1] — is stored RAW (getParameter returns the
+ *    unclamped value per spec; the rasterizer clamps at draw time, draw.ts).
+ *  - depthRange: INVALID_OPERATION if zNear > zFar (RAW comparison — the CTS
+ *    expects depthRange(20, 10) to error even though both clamp to 1); on
+ *    store both values are clamped to [0,1] (GLclampf conversion).
  *  - blendFunc: src factors include SRC_ALPHA_SATURATE, dst factors do not
- *    (both sets include the CONSTANT_* factors).
+ *    (both sets include the CONSTANT_* factors). Per GLES2 §4.1.7, pairing a
+ *    CONSTANT_COLOR/ONE_MINUS_CONSTANT_COLOR factor with a
+ *    CONSTANT_ALPHA/ONE_MINUS_CONSTANT_ALPHA factor across (src, dst) is
+ *    INVALID_OPERATION (webgl-specific.html); blendFuncSeparate applies the
+ *    same rule to the (srcRGB, dstRGB) and (srcAlpha, dstAlpha) pairs.
  *  - blendEquation: FUNC_ADD/FUNC_SUBTRACT/FUNC_REVERSE_SUBTRACT (+ MIN/MAX on
  *    WebGL2).
  *  - hint: GENERATE_MIPMAP_HINT (both versions) + FRAGMENT_SHADER_DERIVATIVE_HINT
@@ -125,6 +132,28 @@ function blendFactorSets(ctx: WebGLRenderingContext): { src: number[]; dst: numb
     dst = [...dst, C1.SRC_ALPHA_SATURATE, ...SRC1_BLEND_FACTORS];
   }
   return { src, dst };
+}
+
+/** CONSTANT_COLOR / ONE_MINUS_CONSTANT_COLOR factor check. */
+function isConstColorFactor(f: number): boolean {
+  return f === GL_CONSTANT_COLOR || f === GL_ONE_MINUS_CONSTANT_COLOR;
+}
+
+/** CONSTANT_ALPHA / ONE_MINUS_CONSTANT_ALPHA factor check. */
+function isConstAlphaFactor(f: number): boolean {
+  return f === GL_CONSTANT_ALPHA || f === GL_ONE_MINUS_CONSTANT_ALPHA;
+}
+
+/**
+ * GLES2 §4.1.7: a CONSTANT_*_COLOR factor may not be paired with a
+ * CONSTANT_*_ALPHA factor across a blend (src, dst) pair → INVALID_OPERATION
+ * (webgl-specific.html). SRC1_* and other factors are unaffected.
+ */
+function constFactorPairInvalid(src: number, dst: number): boolean {
+  return (
+    (isConstColorFactor(src) && isConstAlphaFactor(dst)) ||
+    (isConstAlphaFactor(src) && isConstColorFactor(dst))
+  );
 }
 
 /** Blend equation set per context (EXT_blend_minmax widens WebGL1). */
@@ -245,6 +274,10 @@ export function installStateApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
     }
+    if (constFactorPairInvalid(sfactor, dfactor)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     ctx._state.blend.srcRGB = sfactor;
     ctx._state.blend.dstRGB = dfactor;
     ctx._state.blend.srcAlpha = sfactor;
@@ -262,6 +295,10 @@ export function installStateApi(proto: WebGLRenderingContext): void {
       !dst.includes(dstAlpha)
     ) {
       ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    if (constFactorPairInvalid(srcRGB, dstRGB) || constFactorPairInvalid(srcAlpha, dstAlpha)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
     ctx._state.blend.srcRGB = srcRGB;
@@ -323,13 +360,14 @@ export function installStateApi(proto: WebGLRenderingContext): void {
   proto.depthRange = function (this: WebGLRenderingContext, zNear: GLclampf, zFar: GLclampf): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    const zn = clamp01(zNear);
-    const zf = clamp01(zFar);
-    if (zn > zf) {
+    // GLES2 §2.11.1: INVALID_OPERATION if zNear > zFar. The comparison is on
+    // the RAW values (webgl-specific.html expects depthRange(20, 10) to
+    // error even though both clamp to 1); clamping happens on store.
+    if (zNear > zFar) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
-    ctx._state.depth.range = [zn, zf];
+    ctx._state.depth.range = [clamp01(zNear), clamp01(zFar)];
   };
 
   proto.disable = function (this: WebGLRenderingContext, cap: GLenum): void {
@@ -414,12 +452,15 @@ export function installStateApi(proto: WebGLRenderingContext): void {
   proto.lineWidth = function (this: WebGLRenderingContext, width: GLfloat): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    // ALIASED_LINE_WIDTH_RANGE is [1,1] — the only supported width is 1.0.
-    if (width !== 1) {
+    // Only width ≤ 0 or NaN generate INVALID_VALUE (CTS limits/gl-line-width
+    // checks zero, negative and NaN). Any other value is stored RAW — the
+    // rasterizer clamps to ALIASED_LINE_WIDTH_RANGE at draw time (draw.ts),
+    // and getParameter must return the unclamped value per spec.
+    if (!(width > 0)) {
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
-    ctx._state.lineWidth = 1;
+    ctx._state.lineWidth = width;
   };
 
   proto.pixelStorei = function (this: WebGLRenderingContext, pname: GLenum, param: GLint): void {

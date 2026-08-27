@@ -105,9 +105,15 @@ export const CONTEXT_TOKEN: unique symbol = Symbol('software-webgl-context');
 
 let nextContextId = 1;
 
-/** Drawing-buffer dimension: max(1, canvas.width/height); 0 when absent (mocks). */
-function drawingBufferDim(v: unknown): GLsizei {
-  return typeof v === 'number' ? Math.max(1, v) : 0;
+/**
+ * Drawing-buffer dimension: max(1, canvas.width/height), clamped to the max
+ * viewport dims (spec: the drawing buffer is capped at MAX_VIEWPORT_DIMS — CTS
+ * canvas/drawingbuffer-static-canvas-test.html asserts drawingBufferWidth <=
+ * getParameter(MAX_VIEWPORT_DIMS)[0] for oversized canvases); 0 when absent (mocks).
+ */
+function drawingBufferDim(v: unknown, max: number): GLsizei {
+  const d = typeof v === 'number' ? Math.max(1, v) : 0;
+  return max > 0 && d > max ? max : d;
 }
 
 export class WebGLRenderingContext {
@@ -166,8 +172,8 @@ export class WebGLRenderingContext {
     // Drawing-buffer dimensions: max(1, canvas.width/height) — a 0-size canvas
     // yields a 1×1 buffer (CTS context/zero-sized-canvas.html); stored value is
     // the fallback for width-less mocks (the getters are live, see below).
-    this._drawingBufferWidth = drawingBufferDim(canvas.width);
-    this._drawingBufferHeight = drawingBufferDim(canvas.height);
+    this._drawingBufferWidth = drawingBufferDim(canvas.width, this._state.limits.MAX_VIEWPORT_DIMS[0]);
+    this._drawingBufferHeight = drawingBufferDim(canvas.height, this._state.limits.MAX_VIEWPORT_DIMS[1]);
     // Present adapter + default framebuffer + default VAO + initial viewport are
     // initialized by lifecycle.createContext via initContextResources() — the
     // ONLY construction site (CONTEXT_TOKEN gate), called AFTER the final
@@ -184,10 +190,36 @@ export class WebGLRenderingContext {
    * context/zero-sized-canvas.html: immediate update after width set, 0 → 1).
    */
   get drawingBufferWidth(): GLsizei {
-    return drawingBufferDim(this._canvas.width);
+    return drawingBufferDim(this._canvas.width, this._state.limits.MAX_VIEWPORT_DIMS[0]);
   }
   get drawingBufferHeight(): GLsizei {
-    return drawingBufferDim(this._canvas.height);
+    return drawingBufferDim(this._canvas.height, this._state.limits.MAX_VIEWPORT_DIMS[1]);
+  }
+  /**
+   * Drawing-buffer color space ('srgb' default), unpack color space, and drawing
+   * buffer format (RGBA8). These shadow the NATIVE WebIDL accessors: after
+   * chainToNative() re-chains our prototypes under the native ones, the native
+   * accessors would otherwise run on our non-native `this` and throw
+   * "Illegal invocation" (WebIDL brand check). three.js/Babylon read AND assign
+   * these unguarded, so the setters must never throw (the renderer stays sRGB
+   * regardless of what is assigned — native enum validation is deliberately
+   * skipped to avoid crashing engines).
+   */
+  get drawingBufferColorSpace(): string {
+    return 'srgb';
+  }
+  set drawingBufferColorSpace(_value: string) {
+    // no-op — software renderer always outputs sRGB
+  }
+  get unpackColorSpace(): string {
+    return 'srgb';
+  }
+  set unpackColorSpace(_value: string) {
+    // no-op — image uploads are interpreted as sRGB
+  }
+  /** Format of the drawing buffer: RGBA8 (0x8058). */
+  get drawingBufferFormat(): GLenum {
+    return C1.RGBA8;
   }
 
   // ---- Context attributes & lifecycle ----

@@ -223,10 +223,12 @@ installConstants(WebGL2RenderingContext.prototype, C2);
 // installAll; WebGL1 methods arrive via the prototype chain from webgl1.ts).
 installAll(WebGL2RenderingContext.prototype);
 
-// The class-body getters (canvas, drawingBufferWidth/Height) live ONLY on
-// WebGLRenderingContext.prototype (installAll installs methods, not these
-// getters) — copy them so they survive the re-chaining below.
-for (const name of ['canvas', 'drawingBufferWidth', 'drawingBufferHeight'] as const) {
+// The class-body getters (canvas, drawingBufferWidth/Height, and the color-
+// space/format accessors) live ONLY on WebGLRenderingContext.prototype
+// (installAll installs methods, not these getters) — copy them so they survive
+// the re-chaining below (and keep shadowing the native WebIDL accessors, whose
+// getters would throw "Illegal invocation" on our non-native `this`).
+for (const name of ['canvas', 'drawingBufferWidth', 'drawingBufferHeight', 'drawingBufferColorSpace', 'unpackColorSpace', 'drawingBufferFormat'] as const) {
   const desc = Object.getOwnPropertyDescriptor(WebGLRenderingContext.prototype, name);
   if (desc) Object.defineProperty(WebGL2RenderingContext.prototype, name, desc);
 }
