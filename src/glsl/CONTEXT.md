@@ -100,7 +100,7 @@ linkProgram:    uniform merge → attrib locations → varying match/pack → un
 - `semantics.ts` → scopes, type checking, overload resolution, const folding; `semantics-expr.ts` → expressions; `semantics-stmt.ts` → statements; `semantics-decl.ts` → declarations, precision/extension rules, interface blocks, ShaderInfo
 - `builtins/` → builtin signature/variable/constant tables: `100.ts`, `300.ts`, `extensions.ts`, `index.ts`
 - `codegen/` → `index.ts` (CodegenLayout seam, Value, stage entry), `env.ts` (CodegenEnv, dualWrite), `expressions.ts` (+`expr-builtins.ts`, `expr-ctor.ts`), `statements.ts`, `functions.ts` (inliner), `vertex.ts`, `fragment.ts`, `runtime.ts` (R helpers; imports raster/texture-sampler.ts)
-- `selftest-*.ts` → the 13 committed tsx validation scripts (see Test Strategy)
+- `selftest-*.ts` → the 14 committed tsx validation scripts (see Test Strategy)
 - `../raster/texture-sampler.ts` → texture sampling runtime + TextureImage/SamplerState types (sibling — READ-ONLY from here; writes escalate to `../`)
 - `../gl/` → consumer of Program/Shader (sibling — read-only)
 
