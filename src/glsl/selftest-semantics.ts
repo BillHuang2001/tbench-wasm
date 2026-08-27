@@ -241,7 +241,9 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   check(lights.members[0].name === 'pos' && lights.members[1].name === 'm' && lights.members[2].name === 'colors', 'block member names in order');
   checkType(lights.members[0].type, V4, 'block member pos type');
   checkType(lights.members[1].type, M4, 'block member m type');
-  checkType(lights.members[2].type, V3, 'block member colors type');
+  // Member arrays keep their dims: vec3 colors[3] → array of 3 vec3 (GLSL ES
+  // 3.00 §4.3.7 allows arrays of built-in types as block members).
+  checkType(lights.members[2].type, { kind: 'array', element: V3, size: 3 }, 'block member colors type vec3[3]');
   check(lights.members[0].precision === 'mediump', 'block member precision from default');
   const mat = info.uniformBlocks[1];
   check(mat.name === 'Mat' && mat.instanceName === null && mat.binding === 5, 'block Mat: no instance, binding 5');

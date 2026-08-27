@@ -384,7 +384,12 @@ function resolveStructDef(def: StructDefinition, scope: Scope, ctx: SemContext):
       continue;
     }
     if (m.type.qualifiers.precision === undefined) checkFloatPrecision(ctx, m.loc.line, mt, m.name === '' ? null : m.name);
-    members.push({ name: m.name, type: mt });
+    // Member arrays (`float a[3]`): the dims are NOT part of the TypeSpec —
+    // wrap here and cache the FULL member type on the TypeSpec so later
+    // consumers (analyzeInterfaceBlock, codegen member walks) see it.
+    const full = m.arrayDims.length > 0 ? wrapArrayDims(mt, m.arrayDims, scope, ctx, false, m.loc.line) : mt;
+    m.type.resolved = full;
+    members.push({ name: m.name, type: full });
   }
   return { kind: 'struct', name: def.name, members };
 }
@@ -700,7 +705,10 @@ function registerInterfaceBlock(d: InterfaceBlockDecl, scope: Scope, ctx: SemCon
     const mt = resolveTypeSpec(m.type, scope, ctx);
     if (mt !== null && mt.kind !== 'void') {
       if (m.type.qualifiers.precision === undefined) checkFloatPrecision(ctx, m.loc.line, mt, m.name === '' ? null : m.name);
-      members.push({ name: m.name, type: mt });
+      // Member arrays (same wrap as resolveStructDef — cache the full type).
+      const full = m.arrayDims.length > 0 ? wrapArrayDims(mt, m.arrayDims, scope, ctx, false, m.loc.line) : mt;
+      m.type.resolved = full;
+      members.push({ name: m.name, type: full });
     }
   }
   const blockType: GLSLType = { kind: 'struct', name: d.blockName, members };
@@ -708,6 +716,13 @@ function registerInterfaceBlock(d: InterfaceBlockDecl, scope: Scope, ctx: SemCon
   if (d.instanceName !== null && d.instanceName !== '') {
     const t = wrapArrayDims(blockType, d.arrayDims, scope, ctx, false, d.loc.line);
     scope.declare({ kind: 'var', name: d.instanceName, type: t, storage: 'uniform' }, ctx, d.loc.line);
+  } else {
+    // Instance-less block: members are accessed by BARE name (GLSL ES 3.00
+    // §4.3.7) — register them as global read-only uniforms so expression
+    // analysis resolves them. The linker keeps them OUT of the default block.
+    for (const m of members) {
+      scope.declare({ kind: 'var', name: m.name, type: m.type, storage: 'uniform' }, ctx, d.loc.line);
+    }
   }
 }
 

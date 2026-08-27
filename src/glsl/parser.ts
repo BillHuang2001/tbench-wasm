@@ -639,7 +639,7 @@ function parseStructMembers(p: Parser): StructMemberDecl[] {
     const nameT = p.expectIdentifier();
     const arrayDims = parseArrayDims(p, false);
     p.expectOp(';', "expected ';' after struct member");
-    members.push({ kind: 'struct-member', name: nameT ? nameT.name : '', type, loc: locOf(start) });
+    members.push({ kind: 'struct-member', name: nameT ? nameT.name : '', type, arrayDims, loc: locOf(start) });
   }
   return members;
 }
