@@ -3,10 +3,11 @@
  * scripts/diag-page.ts — diagnostic CLI: open ONE CTS test page with the
  * software renderer injected and dump the page's full failure detail.
  *
- * The key output is the text of the #description DOM node: js-test-pre.js /
- * js-test-post.js write every subtest line there (testFailed messages) and
- * finish with the "TEST COMPLETE: N PASS, M FAIL" summary line. Console
- * errors and page errors are collected alongside.
+ * Key output: the #description DOM node (js-test-post.js appends the
+ * "TEST COMPLETE: N PASS, M FAIL" summary there) plus the #console div, which
+ * js-test-pre.js fills with every per-subtest PASS/FAIL line (including
+ * "FAIL ... (expected: ...)" messages and shader info logs). Console errors
+ * and page errors are collected alongside.
  *
  * Usage:
  *   npx tsx scripts/diag-page.ts <test-path> [options]
