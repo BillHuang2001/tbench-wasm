@@ -187,6 +187,16 @@ export function getExtensionObject(ctx: WebGLRenderingContext | WebGL2RenderingC
   if (existing !== undefined) return existing;
   const ext = createExtension(ctx, spec);
   cache.set(spec.name, ext);
+  // OES_texture_half_float spec: "Upon activation of this extension,
+  // implementations supporting EXT_color_buffer_half_float shall implicitly
+  // enable it" — the CTS relies on this (ext-color-buffer-half-float.html runs
+  // render-target tests with only OES_texture_half_float requested).
+  if (spec.name === 'OES_texture_half_float') {
+    const cb = SPEC_BY_NAME.get('EXT_color_buffer_half_float');
+    if (cb && cb.status === 'implement' && cb.versions.includes(version) && !cache.has('EXT_color_buffer_half_float')) {
+      cache.set('EXT_color_buffer_half_float', createExtension(ctx, cb));
+    }
+  }
   return ext;
 }
 
