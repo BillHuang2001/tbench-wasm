@@ -939,13 +939,22 @@ function handleExtension(args: PToken[], line: number, st: State): void {
     }
     return;
   }
-  if (behavior === 'require' || behavior === 'enable') {
+  if (behavior === 'require') {
+    // Only `require` of an unsupported extension is an error (GLSL ES §3.4).
     if (!st.opts.extensions || !st.opts.extensions.has(name)) {
       st.errors.push({ line: remap(st, line), message: `extension '${name}' is not supported` });
     } else {
       st.macros.set(name, simpleMacro(name, '1'));
+      st.extState.set(name, behavior);
     }
-    st.extState.set(name, behavior);
+  } else if (behavior === 'enable') {
+    // `enable` of an unsupported extension is a warning per GLSL ES §3.4 (the
+    // preprocessor has no warning channel, so accept silently) and the
+    // extension is NOT enabled: no macro, no enabled-extensions entry.
+    if (st.opts.extensions && st.opts.extensions.has(name)) {
+      st.macros.set(name, simpleMacro(name, '1'));
+      st.extState.set(name, behavior);
+    }
   } else if (behavior === 'warn') {
     st.extState.set(name, 'warn');
   } else {
