@@ -5117,11 +5117,13 @@
         isSRGB: false,
         normalized: false,
         decode(src, byteOffset, out) {
+          out = out != null ? out : new Float32Array(4);
           const d = src[byteOffset >> 2];
           out[0] = d;
           out[1] = d;
           out[2] = d;
           out[3] = 1;
+          return out;
         },
         encode(src, byteOffset, r) {
           src[byteOffset >> 2] = r;
@@ -5143,11 +5145,13 @@
         isSRGB: false,
         normalized: false,
         decode(src, byteOffset, out) {
+          out = out != null ? out : new Float32Array(4);
           const s = src[byteOffset];
           out[0] = s;
           out[1] = s;
           out[2] = s;
           out[3] = 1;
+          return out;
         },
         encode(src, byteOffset, r) {
           src[byteOffset] = r & 255;
@@ -5168,11 +5172,13 @@
       isSRGB: false,
       normalized: true,
       decode(src, byteOffset, out) {
+        out = out != null ? out : new Float32Array(4);
         const u = src;
         out[0] = u[byteOffset] / 255;
         out[1] = u[byteOffset + 1] / 255;
         out[2] = u[byteOffset + 2] / 255;
         out[3] = u[byteOffset + 3] / 255;
+        return out;
       },
       encode(src, byteOffset, r, g2, b, a) {
         const u = src;
@@ -5928,7 +5934,7 @@
     }
     return { colorMask, drawBuffers };
   }
-  function buildDrawCall(ctx, pm, req, records, stride, fb, env) {
+  function buildDrawCall(ctx, pm, req, records, stride, fb, env, floatStore, uniformBlocks) {
     var _a2, _b, _c, _d, _e, _f;
     const s = ctx._state;
     const { colorMask, drawBuffers } = buildOutputMaps(ctx, pm);
@@ -5995,7 +6001,9 @@
       rasterizerDiscard: s.caps.RASTERIZER_DISCARD,
       lineWidth: s.lineWidth,
       textures: env.bindings,
-      drawBuffers
+      drawBuffers,
+      uniforms: floatStore,
+      uniformBlocks
     };
   }
   function primitiveInfo(mode, count) {
@@ -6243,7 +6251,9 @@
       captureTransformFeedback(ctx, tf, prog, pm, records, stride, req);
       return;
     }
-    const dc = buildDrawCall(ctx, pm, req, records, stride, fb, env);
+    const uniformBlocks = {};
+    for (let bi = 0; bi < blocks.length; bi++) uniformBlocks[blocks[bi].name] = blockStores[bi];
+    const dc = buildDrawCall(ctx, pm, req, records, stride, fb, env, floatStore, blocks.length > 0 ? uniformBlocks : void 0);
     if (activeQuery) {
       dc.sampleCountRef = { value: 0 };
     }
@@ -6852,6 +6862,14 @@
     return ext;
   }
 
+  // src/gl/native-chain.ts
+  function chainToNative(ourProto, nativeGlobalName) {
+    const Native = globalThis[nativeGlobalName];
+    if (typeof Native === "function" && Native.prototype != null) {
+      Object.setPrototypeOf(ourProto, Native.prototype);
+    }
+  }
+
   // src/gl/objects/webgl-object.ts
   var WebGLObject = class {
     constructor(context) {
@@ -7119,14 +7137,14 @@
   };
 
   // src/gl/objects/aux.ts
-  var WebGLUniformLocation = class {
+  var WebGLUniformLocation2 = class {
     constructor(program, index, name) {
       this._program = program;
       this._index = index;
       this._name = name;
     }
   };
-  var WebGLActiveInfo = class {
+  var WebGLActiveInfo2 = class {
     constructor(size, type, name) {
       __publicField(this, "size");
       __publicField(this, "type");
@@ -7136,7 +7154,7 @@
       this.name = name;
     }
   };
-  var WebGLShaderPrecisionFormat = class {
+  var WebGLShaderPrecisionFormat2 = class {
     constructor(rangeMin, rangeMax, precision) {
       __publicField(this, "rangeMin");
       __publicField(this, "rangeMax");
@@ -7171,6 +7189,20 @@
   function createObject(ctx, ctor) {
     return ctx._resources.track(new ctor(ctx));
   }
+  chainToNative(WebGLBuffer.prototype, "WebGLBuffer");
+  chainToNative(WebGLTexture.prototype, "WebGLTexture");
+  chainToNative(WebGLProgram.prototype, "WebGLProgram");
+  chainToNative(WebGLShader.prototype, "WebGLShader");
+  chainToNative(WebGLFramebuffer.prototype, "WebGLFramebuffer");
+  chainToNative(WebGLRenderbuffer.prototype, "WebGLRenderbuffer");
+  chainToNative(WebGLVertexArrayObject.prototype, "WebGLVertexArrayObject");
+  chainToNative(WebGLSampler.prototype, "WebGLSampler");
+  chainToNative(WebGLQuery.prototype, "WebGLQuery");
+  chainToNative(WebGLSync.prototype, "WebGLSync");
+  chainToNative(WebGLTransformFeedback.prototype, "WebGLTransformFeedback");
+  chainToNative(WebGLUniformLocation.prototype, "WebGLUniformLocation");
+  chainToNative(WebGLActiveInfo.prototype, "WebGLActiveInfo");
+  chainToNative(WebGLShaderPrecisionFormat.prototype, "WebGLShaderPrecisionFormat");
 
   // src/gl/extensions/vao.ts
   var VAOCtor = ctorOf(WebGLVertexArrayObject);
@@ -10362,7 +10394,11 @@
       isInteger: spec.isInteger,
       isSRGB: spec.isSRGB,
       normalized: spec.normalized,
-      decode: (data, byteOffset, out) => spec.unpack(data, byteOffset, out),
+      decode: (data, byteOffset, out) => {
+        const o = out != null ? out : new Float32Array(4);
+        spec.unpack(data, byteOffset, o);
+        return o;
+      },
       encode: (data, byteOffset, r, g2, b, a) => spec.pack(data, byteOffset, r, g2, b, a)
     };
   }
@@ -24242,11 +24278,11 @@ ${inner.map((l) => "  " + l).join("\n")}
         case C1.LOW_FLOAT:
         case C1.MEDIUM_FLOAT:
         case C1.HIGH_FLOAT:
-          return new WebGLShaderPrecisionFormat(127, 127, 23);
+          return new WebGLShaderPrecisionFormat2(127, 127, 23);
         case C1.LOW_INT:
         case C1.MEDIUM_INT:
         case C1.HIGH_INT:
-          return new WebGLShaderPrecisionFormat(31, 30, 0);
+          return new WebGLShaderPrecisionFormat2(31, 30, 0);
         default:
           ctx._errors.push(C1.INVALID_ENUM);
           return null;
@@ -24455,7 +24491,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (elem >= u.size) return null;
       }
       const idx = pm.uniforms.indexOf(u);
-      const loc = new WebGLUniformLocation(p, idx, u.name);
+      const loc = new WebGLUniformLocation2(p, idx, u.name);
       locGen.set(loc, (_a2 = linkGen.get(p)) != null ? _a2 : 0);
       uniformLocInfo.set(loc, { elem, whole });
       return loc;
@@ -24489,7 +24525,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
       const a = pm.attributes[index];
       const name = a.size > 1 ? `${a.name}[0]` : a.name;
-      return new WebGLActiveInfo(a.size, a.type, name);
+      return new WebGLActiveInfo2(a.size, a.type, name);
     };
     proto.getActiveUniform = function(program, index) {
       const ctx = this;
@@ -24502,7 +24538,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         return null;
       }
       const u = pm.uniforms[index];
-      return new WebGLActiveInfo(u.size, u.type, u.name);
+      return new WebGLActiveInfo2(u.size, u.type, u.name);
     };
     proto.getUniform = function(program, location) {
       var _a2, _b, _c;
@@ -24510,7 +24546,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       if (isLost7(ctx)) return null;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return null;
-      if (!(location instanceof WebGLUniformLocation)) throw new TypeError(`Argument is not of type 'WebGLUniformLocation'`);
+      if (!(location instanceof WebGLUniformLocation2)) throw new TypeError(`Argument is not of type 'WebGLUniformLocation'`);
       if (location._program !== p) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return null;
@@ -24563,7 +24599,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           return null;
         }
         const v2 = pm.transformFeedbackVaryings[index];
-        return new WebGLActiveInfo(v2.size, v2.type, v2.name);
+        return new WebGLActiveInfo2(v2.size, v2.type, v2.name);
       };
       p2.getUniformBlockIndex = function(program, uniformBlockName) {
         const ctx = this;
@@ -24866,7 +24902,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   function prepareUniform(ctx, loc) {
     var _a2, _b;
     if (loc === null || loc === void 0) return null;
-    if (!(loc instanceof WebGLUniformLocation)) throw new TypeError(`Argument is not of type 'WebGLUniformLocation'`);
+    if (!(loc instanceof WebGLUniformLocation2)) throw new TypeError(`Argument is not of type 'WebGLUniformLocation'`);
     const program = ctx._state.currentProgram;
     if (program === null || program._deleted) {
       ctx._errors.push(C1.INVALID_OPERATION);
@@ -25443,8 +25479,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         return colorDesc(4, "u8", 4);
     }
   }
-  var noopDecode = (_data, _byteOffset, _out) => {
-  };
+  var noopDecode = (_data, _byteOffset, out) => out != null ? out : new Float32Array(4);
   var noopEncode = (_data, _byteOffset, _r, _g, _b, _a2) => {
   };
   function syntheticInfo(format, d) {
@@ -28160,6 +28195,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   };
   installConstants(WebGLRenderingContext.prototype, C1);
   installAll(WebGLRenderingContext.prototype);
+  chainToNative(WebGLRenderingContext.prototype, "WebGLRenderingContext");
 
   // src/gl/webgl2.ts
   var WebGL2RenderingContext = class extends WebGLRenderingContext {
@@ -28449,8 +28485,14 @@ ${inner.map((l) => "  " + l).join("\n")}
       throw new Error("GL stub");
     }
   };
+  installConstants(WebGL2RenderingContext.prototype, C1);
   installConstants(WebGL2RenderingContext.prototype, C2);
   installAll(WebGL2RenderingContext.prototype);
+  for (const name of ["canvas", "drawingBufferWidth", "drawingBufferHeight"]) {
+    const desc = Object.getOwnPropertyDescriptor(WebGLRenderingContext.prototype, name);
+    if (desc) Object.defineProperty(WebGL2RenderingContext.prototype, name, desc);
+  }
+  chainToNative(WebGL2RenderingContext.prototype, "WebGL2RenderingContext");
 
   // src/gl/lifecycle.ts
   var registry = /* @__PURE__ */ new WeakMap();
