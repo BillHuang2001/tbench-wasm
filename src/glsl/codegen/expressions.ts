@@ -1277,6 +1277,28 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
         conv = conv.map((v, i) => (i === c ? { ...v, pre: src.pre } : v));
       }
     }
+    if (env.dual && lv.dualTargets) {
+      // Dual mode: the write itself is the shared `pre` — one comma
+      // expression per component `(vslot = rv, dxslot = dxv, dyslot = dyv,
+      // vslot)` (the RHS pres fold into rv, so they run exactly when the
+      // composite runs — even when only the dx/dy planes are consumed, e.g.
+      // dFdx(t = v)). Prelude lines (dyn-index temps / spill copy-in) run
+      // first, copyBack (spill copy-out) after all composites. The VALUE of
+      // the assignment is the target read back; its duals are the RHS duals
+      // (pure — they reference temps the composites' folded pres set).
+      const pre: string[] = [];
+      if (preludes.length > 0) pre.push(...preludes);
+      for (let c = 0; c < n; c++) {
+        const cp = conv[c].pre;
+        const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
+        pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }));
+      }
+      if (post) pre.push(...post.split(', '));
+      for (let c = 0; c < n; c++) {
+        out.push({ v: lv.targets[c], dx: conv[c].dx ?? '0', dy: conv[c].dy ?? '0', pre });
+      }
+      return out;
+    }
     for (let c = 0; c < n; c++) {
       const cp = conv[c].pre;
       const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
@@ -1303,6 +1325,29 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
   if (!base) throw new Error('codegen: cannot compound-assign a non-scalar-shaped value');
   const conv = convertValue(rhs, e.value.resolvedType!, t);
   const cop = e.op.slice(0, -1); // parser emits '+=' — compoundOp switches on '+'
+  if (env.dual && lv.dualTargets && base === 'float') {
+    // Dual mode, float target: the compound composite (updates all three
+    // planes — dualWrite) is the shared `pre`; the expression's value reads
+    // the target back and its duals are the post-write slot reads (valid
+    // after the composite ran). Prelude/copyBack order as in the '=' path.
+    const pre: string[] = [];
+    if (preludes.length > 0) pre.push(...preludes);
+    for (let c = 0; c < n; c++) {
+      const cp = conv[c].pre;
+      const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
+      if (lv.dualTargets[c]) {
+        pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }, cop));
+      } else {
+        pre.push(`(${lv.targets[c]} = ${rv})`);
+      }
+    }
+    if (post) pre.push(...post.split(', '));
+    for (let c = 0; c < n; c++) {
+      const d = lv.dualTargets[c];
+      out.push({ v: lv.targets[c], dx: d ? d[0] : conv[c].dx ?? '0', dy: d ? d[1] : conv[c].dy ?? '0', pre });
+    }
+    return out;
+  }
   for (let c = 0; c < n; c++) {
     const cp = conv[c].pre;
     const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
@@ -1324,18 +1369,36 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
 }
 
 function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Value[] {
-  // Dual mode: a float-typed ternary needs the triple materialization seam
-  // (C5a2). Int/bool ternaries carry no duals and stay legal.
-  if (env.dual && hasFloatLeaves(e.resolvedType!)) {
-    throw new Error('codegen: dual-mode ternary requires materialize triples (C5a2)');
-  }
   const cond = materialize(emitExpr(e.cond, env), env)[0];
   const a = materialize(emitExpr(e.whenTrue, env), env);
   const b = materialize(emitExpr(e.whenFalse, env), env);
   const n = flatComponents(e.resolvedType!);
   const out: Value[] = [];
+  // Dual mode, float-typed ternary: BOTH arms carry triples — materialize
+  // (which temps all three planes of pre-carrying values) hoists their pres,
+  // then each plane is a plain `cond ? a : b` select. The cond is bool
+  // (v-only); its pres join the result's pre so materialized cond temps are
+  // set even when only the dx/dy planes are consumed (dFdx(cond ? a : b)).
+  const dual = env.dual && hasFloatLeaves(e.resolvedType!);
   for (let c = 0; c < n; c++) {
-    out.push({ v: `(${cond.v} ? (${a[c].v}) : (${b[c].v}))` });
+    if (dual) {
+      const pre: string[] = [];
+      const cp = cond.pre;
+      if (cp) pre.push(...cp);
+      const ap = a[c].pre;
+      if (ap) pre.push(...ap);
+      const bp = b[c].pre;
+      if (bp && bp !== ap) pre.push(...bp);
+      const val: Value = {
+        v: `(${cond.v} ? (${a[c].v}) : (${b[c].v}))`,
+        dx: `(${cond.v} ? (${a[c].dx ?? '0'}) : (${b[c].dx ?? '0'}))`,
+        dy: `(${cond.v} ? (${a[c].dy ?? '0'}) : (${b[c].dy ?? '0'}))`,
+      };
+      if (pre.length > 0) val.pre = pre;
+      out.push(val);
+    } else {
+      out.push({ v: `(${cond.v} ? (${a[c].v}) : (${b[c].v}))` });
+    }
   }
   return out;
 }
