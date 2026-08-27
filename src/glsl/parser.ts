@@ -368,6 +368,9 @@ interface TypeSpecCtx {
   param: boolean;
   /** Struct/interface-block member context: precision only. */
   member: boolean;
+  /** Interface-block member context (GLSL ES 3.00 §4.3.9: in/out block
+   *  members may carry interpolation + centroid qualifiers). */
+  block?: boolean;
 }
 
 const STORAGE_MAP: Readonly<Record<string, StorageClass>> = {
@@ -450,8 +453,13 @@ export function parseTypeSpec(p: Parser, ctx: TypeSpecCtx): TypeSpec {
           p.next();
           continue;
         }
-        if (ctx.member || ctx.param) {
-          p.error(t.line, `'${name}' : interpolation qualifiers are not allowed on ${ctx.member ? 'struct or block members' : 'function parameters'}`);
+        if (ctx.member && !ctx.block) {
+          p.error(t.line, `'${name}' : interpolation qualifiers are not allowed on ${ctx.member ? 'struct members or block members' : 'function parameters'}`);
+          p.next();
+          continue;
+        }
+        if (ctx.param) {
+          p.error(t.line, `'${name}' : interpolation qualifiers are not allowed on function parameters`);
           p.next();
           continue;
         }
@@ -463,8 +471,13 @@ export function parseTypeSpec(p: Parser, ctx: TypeSpecCtx): TypeSpec {
         continue;
       }
       case 'centroid': {
-        if (ctx.member || ctx.param) {
-          p.error(t.line, `'centroid' : invalid qualifier on ${ctx.member ? 'struct or block member' : 'function parameter'}`);
+        if (ctx.member && !ctx.block) {
+          p.error(t.line, `'centroid' : invalid qualifier on struct member`);
+          p.next();
+          continue;
+        }
+        if (ctx.param) {
+          p.error(t.line, `'centroid' : invalid qualifier on function parameter`);
           p.next();
           continue;
         }
@@ -631,11 +644,11 @@ function parseStructDefinition(p: Parser): StructDefinition {
 }
 
 /** Struct / interface-block member list: `type name [dims] ;` */
-function parseStructMembers(p: Parser): StructMemberDecl[] {
+function parseStructMembers(p: Parser, block = false): StructMemberDecl[] {
   const members: StructMemberDecl[] = [];
   while (!p.atOp('}') && !p.atEof()) {
     const start = p.peek();
-    const type = parseTypeSpec(p, { param: false, member: true });
+    const type = parseTypeSpec(p, { param: false, member: true, block });
     const nameT = p.expectIdentifier();
     const arrayDims = parseArrayDims(p, false);
     p.expectOp(';', "expected ';' after struct member");
@@ -768,7 +781,7 @@ function parseInterfaceBlock(p: Parser, type: TypeSpec): InterfaceBlockDecl {
     };
   }
   p.expectOp('{');
-  const members = parseStructMembers(p);
+  const members = parseStructMembers(p, true);
   p.expectOp('}');
   let instanceName: string | null = null;
   const instT = p.peek();

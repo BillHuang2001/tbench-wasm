@@ -44,8 +44,8 @@
  * flatten to per-member leaves ('v.m'), each with its own (index, offset).
  */
 import type { TranslationUnit } from './ast.js';
-import type { LinkLimits, LinkOptions, LinkResult, Shader, ShaderUses, UniformBlockDecl, UniformDecl } from './compiler.js';
-import type { AttribInfo, FragmentExecCtx, Program, UniformBlockInfo, UniformBlockMemberInfo, UniformInfo, VaryingInfo, VertexExecCtx } from './program.js';
+import type { LinkLimits, LinkOptions, LinkResult, Shader, ShaderUses, TransformFeedbackSpec, UniformBlockDecl, UniformDecl } from './compiler.js';
+import type { AttribInfo, FragmentExecCtx, Program, TransformFeedbackVarying, UniformBlockInfo, UniformBlockMemberInfo, UniformInfo, VaryingInfo, VertexExecCtx } from './program.js';
 import { generateFragmentStage, generateVertexStage, R } from './codegen/index.js';
 import type { BlockMemberLayout, CodegenLayout, StageCodegenResult, UniformSlot, VaryingLayout } from './codegen/index.js';
 import { flatComponents, isIntegralFamily } from './codegen/env.js';
@@ -791,16 +791,39 @@ interface VaryingLayoutResult {
   infos: VaryingInfo[];
 }
 
+/** The linker-side match identity of one varying: plain varyings match by
+ *  NAME; varying-interface-block members match by (blockName, memberName) —
+ *  instance names may differ between stages (`out VS_OUT { vec4 c; } a;` vs
+ *  `in VS_OUT { vec4 c; } b;`). ':' cannot appear in GLSL identifiers, so the
+ *  composite keys never collide. */
+function varyingMatchKey(v: { blockName: string | null; name: string }): string {
+  if (v.blockName === null) return `v:${v.name}`;
+  const idx = v.name.lastIndexOf('.');
+  const member = idx >= 0 ? v.name.slice(idx + 1) : v.name;
+  return `b:${v.blockName}:${member}`;
+}
+
 /** Match every fragment input against a vertex output (name / element type /
- *  array size / flat) and pack in VERTEX declaration order (dense flat
- *  components, cumulative offsets). Extra vertex outputs are packed too —
- *  they are active varyings (raster interpolates the whole record). Struct
- *  varyings flatten to per-member leaves, each with its own (index, offset). */
+ *  array size / flat; block members by (blockName, memberName)) and pack in
+ *  VERTEX declaration order (dense flat components, cumulative offsets).
+ *  Extra vertex outputs are packed too — they are active varyings (raster
+ *  interpolates the whole record). Struct varyings flatten to per-member
+ *  leaves, each with its own (index, offset).
+ *
+ *  VaryingLayout keys: plain varyings + instance-less block members use their
+ *  bare name; named block members use the FULL '<instance>.<member>' path.
+ *  Because block instance names may differ between stages, every matched block
+ *  member emits layout entries for BOTH the vertex key (write side) and the
+ *  fragment key (read side), sharing one (index, offset) — Program.varyings
+ *  keeps ONE entry per vertex leaf. */
 function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayoutResult | { error: string } {
-  const vsByName = new Map<string, typeof vs.info.varyings[number]>();
-  for (const v of vs.info.varyings) vsByName.set(v.name, v);
+  const vsByKey = new Map<string, typeof vs.info.varyings[number]>();
+  for (const v of vs.info.varyings) vsByKey.set(varyingMatchKey(v), v);
+  const fsByKey = new Map<string, typeof fs.info.varyings[number]>();
   for (const f of fs.info.varyings) {
-    const v = vsByName.get(f.name);
+    const key = varyingMatchKey(f);
+    fsByKey.set(key, f);
+    const v = vsByKey.get(key);
     if (!v) return { error: `linker: varying '${f.name}' not matched` };
     if (!typeEquals(f.type, v.type) || f.arraySize !== v.arraySize) {
       return { error: `linker: varying '${f.name}' type mismatch (${typeName(v.type)} vs ${typeName(f.type)})` };
@@ -818,8 +841,8 @@ function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayo
     if (v.type.kind === 'struct') {
       if (v.arraySize > 1) {
         // Struct-array varyings need a codegen-side element-offset channel
-        // (subP resets the const-index flatOff on member descent) — deferred
-        // with the varying-interface-block work.
+        // (subP resets the const-index flatOff on member descent) — the
+        // codegen walker cannot resolve them today.
         return { error: `linker: struct-array varying '${v.name}' not supported` };
       }
       leaves = [];
@@ -827,10 +850,30 @@ function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayo
     } else {
       leaves = [{ key: v.name, type: v.type, arraySize: v.arraySize }];
     }
-    for (const leaf of leaves) {
+    // Fragment-side twin leaves (block members only — the fs instance name may
+    // differ; the matched decl's types equal the vertex's, so the leaf shapes
+    // agree).
+    let fsLeaves: VaryingLeaf[] | null = null;
+    if (v.blockName !== null) {
+      const f = fsByKey.get(varyingMatchKey(v));
+      if (f !== undefined) {
+        fsLeaves = [];
+        if (f.type.kind === 'struct') flattenVaryingStruct(f.name, f.type, fsLeaves);
+        else fsLeaves.push({ key: f.name, type: f.type, arraySize: f.arraySize });
+        if (fsLeaves.length !== leaves.length) {
+          // Struct type equality is BY NAME — same-named structs with
+          // different members would flatten differently; treat as a mismatch.
+          return { error: `linker: varying '${v.name}' struct layout mismatch` };
+        }
+      }
+    }
+    for (let li = 0; li < leaves.length; li++) {
+      const leaf = leaves[li];
       const elemComps = leaf.type.kind === 'array' ? flatComponents(leaf.type.element) : flatComponents(leaf.type);
       const comps = flatComponents(leaf.type) * leaf.arraySize;
-      map.set(leaf.key, { index: infos.length, offset, components: comps, elemComponents: elemComps, flat: v.flat });
+      const layout: VaryingLayout = { index: infos.length, offset, components: comps, elemComponents: elemComps, flat: v.flat };
+      map.set(leaf.key, layout);
+      if (fsLeaves !== null) map.set(fsLeaves[li].key, layout);
       infos.push({ name: leaf.key, type: toGLenum(leaf.type), components: comps, flat: v.flat });
       offset += comps;
       vectors += Math.ceil(comps / 4);
@@ -840,6 +883,124 @@ function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayo
     return { error: `linker: too many varying vectors (${vectors}, max ${limits.maxVaryingVectors})` };
   }
   return { map, infos };
+}
+
+/* ------------------------------------------------------------------ */
+/* Transform feedback (WebGL2, opts.transformFeedback)                 */
+/* ------------------------------------------------------------------ */
+
+const GL_FLOAT_VEC4 = 0x8b52;
+
+/**
+ * Validate the transform-feedback capture spec and compute
+ * `Program.transformFeedbackVaryings`. Every name must be an ACTIVE vertex
+ * varying (block members accept the full '<instance>.<member>' path or the
+ * bare member name — the instance prefix is stripped; arrays capture the
+ * whole array) or 'gl_Position'. SEPARATE_ATTRIBS: count ≤
+ * maxTransformFeedbackSeparateAttribs and each varying's total components ≤
+ * maxTransformFeedbackSeparateComponents. INTERLEAVED_ATTRIBS: total
+ * components ≤ maxTransformFeedbackInterleavedComponents.
+ */
+function layoutTransformFeedback(
+  vs: Shader,
+  spec: TransformFeedbackSpec | undefined,
+  limits: LinkLimits,
+): { varyings: TransformFeedbackVarying[] } | { error: string } {
+  if (spec === undefined) return { varyings: [] };
+  if (vs.version !== 300) {
+    return { error: 'linker: transform feedback requires GLSL ES 3.00' };
+  }
+  const captured: TransformFeedbackVarying[] = [];
+  let totalComponents = 0;
+  for (const name of spec.varyings) {
+    // Arrays may be specified with or without the '[0]' suffix (GL practice).
+    const base = name.endsWith('[0]') ? name.slice(0, -3) : name;
+    let found: (typeof vs.info.varyings)[number] | 'gl_Position' | null = null;
+    if (base === 'gl_Position') {
+      found = 'gl_Position';
+    } else {
+      for (const v of vs.info.varyings) {
+        if (v.blockName === null) {
+          if (v.name === base) {
+            found = v;
+            break;
+          }
+        } else {
+          // Block member: accept the full '<instance>.<member>' key or the
+          // bare member name (instance prefix stripped).
+          const idx = v.name.lastIndexOf('.');
+          const member = idx >= 0 ? v.name.slice(idx + 1) : v.name;
+          if (v.name === base || member === base) {
+            found = v;
+            break;
+          }
+        }
+      }
+    }
+    if (found === null) {
+      return { error: `linker: transform feedback varying '${name}' is not an active vertex varying` };
+    }
+    const type = found === 'gl_Position' ? GL_FLOAT_VEC4 : toGLenum(found.type);
+    const size = found === 'gl_Position' ? 1 : found.arraySize;
+    const components = found === 'gl_Position' ? 4 : flatComponents(found.type) * found.arraySize;
+    if (spec.bufferMode === 'SEPARATE_ATTRIBS') {
+      if (captured.length >= limits.maxTransformFeedbackSeparateAttribs) {
+        return {
+          error: `linker: transform feedback separate attribs exceed maxTransformFeedbackSeparateAttribs (${limits.maxTransformFeedbackSeparateAttribs})`,
+        };
+      }
+      if (components > limits.maxTransformFeedbackSeparateComponents) {
+        return {
+          error: `linker: transform feedback varying '${name}' exceeds maxTransformFeedbackSeparateComponents (${components}, max ${limits.maxTransformFeedbackSeparateComponents})`,
+        };
+      }
+    }
+    totalComponents += components;
+    captured.push({ name, type, size });
+  }
+  if (spec.bufferMode === 'INTERLEAVED_ATTRIBS' && totalComponents > limits.maxTransformFeedbackInterleavedComponents) {
+    return {
+      error: `linker: transform feedback interleaved components exceed maxTransformFeedbackInterleavedComponents (${totalComponents}, max ${limits.maxTransformFeedbackInterleavedComponents})`,
+    };
+  }
+  return { varyings: captured };
+}
+
+/* ------------------------------------------------------------------ */
+/* Sampler explicit-binding conflicts (ES 3.00 layout(binding=))       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Two ACTIVE samplers of DIFFERENT types with the SAME EXPLICIT binding
+ * (`UniformDecl.binding` non-null) are a link error (a texture unit cannot
+ * serve two sampler kinds). Samplers WITHOUT an explicit binding default to
+ * unit 0 — the strict GLSL ES 3.00 rule would flag two such samplers as
+ * conflicting too, but WebGL practice (and the CTS) only rejects EXPLICIT
+ * binding conflicts, so default-0 samplers link fine here. Also enforces
+ * maxCombinedTextureImageUnits (arrays occupy `size` units).
+ * "Active" is approximated as "declared" — no usage analysis exists.
+ */
+function checkSamplerBindings(merged: MergedUniform[], limits: LinkLimits): string | null {
+  const byBinding = new Map<number, { type: GLSLType; name: string }>();
+  let totalUnits = 0;
+  for (const u of merged) {
+    if (!isSampler(u.decl.type)) continue;
+    const t = u.decl.type;
+    const elem = t.kind === 'array' ? t.element : t;
+    totalUnits += t.kind === 'array' ? (t.size ?? 1) : 1;
+    const binding = u.decl.binding;
+    if (binding !== null) {
+      const ex = byBinding.get(binding);
+      if (ex !== undefined && !typeEquals(ex.type, elem)) {
+        return `linker: sampler binding conflict: units ${binding} (${ex.name} vs ${u.decl.name})`;
+      }
+      if (ex === undefined) byBinding.set(binding, { type: elem, name: u.decl.name });
+    }
+  }
+  if (totalUnits > limits.maxCombinedTextureImageUnits) {
+    return `linker: too many texture units (${totalUnits}, max ${limits.maxCombinedTextureImageUnits})`;
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -980,15 +1141,28 @@ function mergeUses(vs: Shader, fs: Shader): ShaderUses {
   };
 }
 
-/** Features explicitly deferred to later tasks: return a short feature name
- *  (the caller emits 'linker: <feature> not supported') or null. */
-function deferredFeature(vs: Shader, fs: Shader, opts?: LinkOptions): string | null {
-  if (opts?.transformFeedback !== undefined) return 'transform feedback';
-  for (const ast of [vs.ast, fs.ast]) {
-    for (const d of ast.declarations) {
-      if (d.kind === 'interface-block') {
-        const storage = d.qualifiers.storage;
-        if (storage === 'out' || storage === 'in') return 'varying interface blocks';
+/** Varying interface blocks (ES 3.00 `out`/`in`): reject the combos the
+ *  packer/codegen do not support — vertex `in` blocks, fragment `out` blocks,
+ *  and ARRAYED blocks (block arrays: the codegen walker loses const element
+ *  indices on member descent (subP resets flatOff), so `a[i].c` cannot be
+ *  packed correctly without codegen changes). Plain (non-arrayed) vertex
+ *  `out` / fragment `in` blocks are fully supported. */
+function varyingBlockError(vs: Shader, fs: Shader): string | null {
+  const stages: [Shader, 'VERTEX' | 'FRAGMENT'][] = [
+    [vs, 'VERTEX'],
+    [fs, 'FRAGMENT'],
+  ];
+  for (const [shader, stage] of stages) {
+    for (const d of shader.ast.declarations) {
+      if (d.kind !== 'interface-block') continue;
+      const storage = d.qualifiers.storage;
+      if (storage !== 'out' && storage !== 'in') continue;
+      const valid = (stage === 'VERTEX' && storage === 'out') || (stage === 'FRAGMENT' && storage === 'in');
+      if (!valid) {
+        return `linker: ${stage === 'VERTEX' ? 'vertex input' : 'fragment output'} interface blocks not supported`;
+      }
+      if (d.arrayDims.length > 0) {
+        return `linker: arrayed varying interface blocks not supported`;
       }
     }
   }
@@ -1010,13 +1184,15 @@ export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkRes
   if (vs.version !== fs.version) {
     return { ok: false, log: 'linker: vertex and fragment shader versions differ' };
   }
-  const feat = deferredFeature(vs, fs, opts);
-  if (feat !== null) return { ok: false, log: `linker: ${feat} not supported` };
+  const vbe = varyingBlockError(vs, fs);
+  if (vbe !== null) return { ok: false, log: vbe };
 
   const limits = resolveLimits(vs.version, opts);
 
   const merged = mergeUniforms(vs, fs);
   if ('error' in merged) return { ok: false, log: merged.error };
+  const sb = checkSamplerBindings(merged, limits);
+  if (sb !== null) return { ok: false, log: sb };
   const ul = layoutUniforms(merged, limits);
   if ('error' in ul) return { ok: false, log: ul.error };
 
@@ -1025,6 +1201,9 @@ export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkRes
 
   const vl = layoutVaryings(vs, fs, limits);
   if ('error' in vl) return { ok: false, log: vl.error };
+
+  const tf = layoutTransformFeedback(vs, opts?.transformFeedback, limits);
+  if ('error' in tf) return { ok: false, log: tf.error };
 
   const al = layoutAttributes(vs, opts ?? {}, limits);
   if ('error' in al) return { ok: false, log: al.error };
@@ -1084,7 +1263,7 @@ export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkRes
       intStore: new Int32Array(ul.intMax),
       scratchSize: Math.max(vsRes.scratchSize, fsRes.scratchSize),
       intScratchSize: Math.max(vsRes.intScratchSize, fsRes.intScratchSize),
-      transformFeedbackVaryings: [],
+      transformFeedbackVaryings: tf.varyings,
     },
   };
 }

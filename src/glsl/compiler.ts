@@ -110,9 +110,17 @@ export interface AttributeDecl {
  * `flat` = flat-qualified OR integral element type (integral varyings are
  * flat-only — link error otherwise). `centroid`/`noperspective`/`invariant`
  * are carried for completeness (invariant affects nothing in software).
+ *
+ * VARYING INTERFACE BLOCK MEMBERS (ES 3.00 `out`/`in` blocks): `blockName` is
+ * the interface BLOCK's name (null for plain varyings) and `name` is the
+ * '<instance>.<member>' path (bare member name for instance-less blocks).
+ * Instance names may differ between stages — the linker matches block members
+ * by (blockName, memberName) and emits layout keys for BOTH stages' paths.
  */
 export interface VaryingDecl {
   name: string;
+  /** Interface block name for block members; null for plain varyings. */
+  blockName: string | null;
   type: GLSLType; // element type
   arraySize: number;
   flat: boolean;

@@ -875,6 +875,243 @@ const INT = 0x1404; // 5124
 }
 
 /* ------------------------------------------------------------------ */
+/* 15. Varying interface blocks (E5b2): matching + packing             */
+/* ------------------------------------------------------------------ */
+
+{
+  // Different instance names between stages must still link (matching is by
+  // (blockName, memberName)); the layout carries BOTH stages' keys.
+  const vs = compile(
+    `#version 300 es
+     out VS_OUT { vec4 c; } a;
+     in vec4 aPos;
+     void main() { a.c = aPos; gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision mediump float;
+     in VS_OUT { vec4 c; } b;
+     out vec4 o;
+     void main() { o = b.c; }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `diff-instance block pair links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    check(
+      p.varyings.length === 1 && p.varyings[0].name === 'a.c' && p.varyings[0].components === 4,
+      `block varying 'a.c' packed (got ${JSON.stringify(p.varyings)})`,
+    );
+    const vctx = vertexCtx(p, { attribs: [new Float32Array([1, 2, 3, 4])], attribIndices: new Int32Array([0]) });
+    p.vertex.run(vctx);
+    const vg = vctx.out.varyings;
+    check(vg[0] === 1 && vg[1] === 2 && vg[2] === 3 && vg[3] === 4,
+      `vertex packs a.c (got [${Array.from(vg.slice(0, 4)).join(', ')}])`);
+    const fctx = fragmentCtx(p, [vg]);
+    p.fragment.run(fctx);
+    const c = fctx.out.color[0];
+    check(c[0] === 1 && c[1] === 2 && c[2] === 3 && c[3] === 4,
+      `fragment reads b.c → color [1,2,3,4] (got [${Array.from(c).join(', ')}])`);
+  }
+
+  // Two-member block: cumulative offset packing (vec4 c; float d;).
+  const vs2 = compile(
+    `#version 300 es
+     out VS_OUT { vec4 c; float d; } a;
+     in vec4 aPos;
+     void main() { a.c = aPos; a.d = aPos.x; gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs2 = compile(
+    `#version 300 es
+     precision mediump float;
+     in VS_OUT { vec4 c; float d; } b;
+     out vec4 o;
+     void main() { o = b.c + vec4(b.d); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l2 = linkProgram(vs2, fs2);
+  check(l2.ok, `two-member block links (${l2.ok ? '' : l2.log})`);
+  if (l2.ok) {
+    const p = l2.program;
+    check(
+      p.varyings.length === 2 && p.varyings[0].name === 'a.c' && p.varyings[0].components === 4 &&
+        p.varyings[1].name === 'a.d' && p.varyings[1].components === 1,
+      `two-member leaves a.c(4) a.d(1) (got ${JSON.stringify(p.varyings)})`,
+    );
+    const vctx = vertexCtx(p, { attribs: [new Float32Array([1, 2, 3, 4])], attribIndices: new Int32Array([0]) });
+    p.vertex.run(vctx);
+    check(vctx.out.varyings[4] === 1, `a.d packed at offset 4 (got [${Array.from(vctx.out.varyings.slice(0, 6)).join(', ')}])`);
+    const fctx = fragmentCtx(p, [vctx.out.varyings.slice(0, 4), vctx.out.varyings.slice(4, 5)]);
+    p.fragment.run(fctx);
+    const c = fctx.out.color[0];
+    check(c[0] === 2 && c[1] === 3 && c[2] === 4 && c[3] === 5,
+      `two-member round-trip [2,3,4,5] (got [${Array.from(c).join(', ')}])`);
+  }
+
+  // Instance-less block: bare member names in both stages.
+  const vs3 = compile(
+    `#version 300 es
+     out VS_OUT { vec4 c; };
+     in vec4 aPos;
+     void main() { c = aPos; gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs3 = compile(
+    `#version 300 es
+     precision mediump float;
+     in VS_OUT { vec4 c; };
+     out vec4 o;
+     void main() { o = c; }`,
+    'FRAGMENT',
+    300,
+  );
+  const l3 = linkProgram(vs3, fs3);
+  check(l3.ok, `instance-less block links (${l3.ok ? '' : l3.log})`);
+  if (l3.ok) {
+    const p = l3.program;
+    check(p.varyings.length === 1 && p.varyings[0].name === 'c', `bare member 'c' packed (got ${JSON.stringify(p.varyings)})`);
+    const vctx = vertexCtx(p, { attribs: [new Float32Array([5, 6, 7, 8])], attribIndices: new Int32Array([0]) });
+    p.vertex.run(vctx);
+    const fctx = fragmentCtx(p, [vctx.out.varyings]);
+    p.fragment.run(fctx);
+    check(fctx.out.color[0][0] === 5 && fctx.out.color[0][3] === 8,
+      `instance-less round-trip [5,..,8] (got [${Array.from(fctx.out.color[0]).join(', ')}])`);
+  }
+
+  // flat mismatch between stages → link error.
+  const vs4 = compile(
+    `#version 300 es
+     out VS_OUT { flat vec4 c; } a;
+     in vec4 aPos;
+     void main() { a.c = aPos; gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs4 = compile(
+    `#version 300 es
+     precision mediump float;
+     in VS_OUT { vec4 c; } b;
+     out vec4 o;
+     void main() { o = b.c; }`,
+    'FRAGMENT',
+    300,
+  );
+  const l4 = linkProgram(vs4, fs4);
+  check(!l4.ok && l4.log.includes('flat qualifier mismatch'), `block flat mismatch error (${logOf(l4)})`);
+
+  // Fragment block member absent from the vertex block → link error.
+  const vs5 = compile(
+    `#version 300 es
+     out VS_OUT { vec4 c; } a;
+     in vec4 aPos;
+     void main() { a.c = aPos; gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs5 = compile(
+    `#version 300 es
+     precision mediump float;
+     in VS_OUT { vec4 c; vec2 t; } b;
+     out vec4 o;
+     void main() { o = b.c + vec4(b.t, 0.0, 0.0); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l5 = linkProgram(vs5, fs5);
+  check(!l5.ok && l5.log.includes('not matched'), `fs-only block member error (${logOf(l5)})`);
+
+  // Mismatched member types → link error.
+  const vs6 = compile(
+    `#version 300 es
+     out VS_OUT { vec4 c; } a;
+     in vec4 aPos;
+     void main() { a.c = aPos; gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs6 = compile(
+    `#version 300 es
+     precision mediump float;
+     in VS_OUT { vec2 c; } b;
+     out vec4 o;
+     void main() { o = vec4(b.c, 0.0, 1.0); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l6 = linkProgram(vs6, fs6);
+  check(!l6.ok && l6.log.includes('type mismatch'), `block member type mismatch error (${logOf(l6)})`);
+
+  // Struct member inside a block: flattened per sub-member leaf.
+  const vs7 = compile(
+    `#version 300 es
+     struct S { vec2 x; float y; };
+     out VS_OUT { S s; } a;
+     in vec4 aPos;
+     void main() { a.s.x = aPos.xy; a.s.y = aPos.z; gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs7 = compile(
+    `#version 300 es
+     precision mediump float;
+     struct S { vec2 x; float y; };
+     in VS_OUT { S s; } b;
+     out vec4 o;
+     void main() { o = vec4(b.s.x.x, b.s.x.y, b.s.y, 1.0); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l7 = linkProgram(vs7, fs7);
+  check(l7.ok, `struct-member block links (${l7.ok ? '' : l7.log})`);
+  if (l7.ok) {
+    const p = l7.program;
+    check(
+      p.varyings.length === 2 && p.varyings[0].name === 'a.s.x' && p.varyings[1].name === 'a.s.y',
+      `struct member flattened (got ${JSON.stringify(p.varyings)})`,
+    );
+    const vctx = vertexCtx(p, { attribs: [new Float32Array([1, 2, 3, 4])], attribIndices: new Int32Array([0]) });
+    p.vertex.run(vctx);
+    const vg = vctx.out.varyings;
+    const fctx = fragmentCtx(p, [vg.slice(0, 2), vg.slice(2, 3)]);
+    p.fragment.run(fctx);
+    const c = fctx.out.color[0];
+    check(c[0] === 1 && c[1] === 2 && c[2] === 3,
+      `struct-member round-trip [1,2,3] (got [${Array.from(c).join(', ')}])`);
+  }
+
+  // Arrayed varying blocks: the codegen walker cannot resolve element
+  // indices on member descent → clear link rejection.
+  const vs8 = compile(
+    `#version 300 es
+     out VS_OUT { vec4 c; } a[2];
+     in vec4 aPos;
+     void main() { a[0].c = aPos; gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs8 = compile(
+    `#version 300 es
+     precision mediump float;
+     in VS_OUT { vec4 c; } b[2];
+     out vec4 o;
+     void main() { o = b[0].c; }`,
+    'FRAGMENT',
+    300,
+  );
+  const l8 = linkProgram(vs8, fs8);
+  check(!l8.ok && l8.log.includes('arrayed varying interface blocks not supported'),
+    `arrayed block rejected (${logOf(l8)})`);
+}
+
+/* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
 

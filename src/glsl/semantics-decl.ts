@@ -164,6 +164,7 @@ function attrOf(name: string, element: GLSLType, arraySize: number, q: TypeQuali
 function varyingOf(name: string, element: GLSLType, arraySize: number, q: TypeQualifiers): VaryingDecl {
   return {
     name,
+    blockName: null,
     type: element,
     arraySize,
     // Integral varyings are flat-only (checked above); record flat as implied.
@@ -248,14 +249,28 @@ function analyzeGlobalDecl(d: GlobalVarDecl, ctx: SemContext, info: ShaderInfo):
   }
 }
 
-/** ShaderInfo for an ES 3.00 uniform block. */
+/** ShaderInfo for an ES 3.00 interface block.
+ *  - `uniform` storage (or absent storage): the UBO path — one UniformBlockDecl.
+ *  - `out` (vertex) / `in` (fragment): a VARYING interface block — one
+ *    ShaderInfo.varyings entry PER MEMBER, keyed '<instance>.<member>'
+ *    (bare member name for instance-less blocks) with blockName = block name,
+ *    so the linker can match members across stages whose instance names
+ *    differ. These must NOT land in uniformBlocks.
+ *  - other storage/stage combos (vertex `in`, fragment `out` blocks): recorded
+ *    nowhere — the linker rejects them via the AST scan. */
 function analyzeInterfaceBlock(d: InterfaceBlockDecl, ctx: SemContext, info: ShaderInfo): void {
   const q = d.qualifiers;
-  const members: { name: string; type: GLSLType; precision: Precision | null }[] = [];
+  const members: { name: string; type: GLSLType; precision: Precision | null; qualifiers: TypeQualifiers; line: number }[] = [];
   for (const m of d.members) {
     const mt = m.type.resolved;
     if (mt === undefined || mt.kind === 'void') continue; // error already reported
-    members.push({ name: m.name, type: mt, precision: precisionOf(m.type.qualifiers, mt, ctx) });
+    members.push({
+      name: m.name,
+      type: mt,
+      precision: precisionOf(m.type.qualifiers, mt, ctx),
+      qualifiers: m.type.qualifiers,
+      line: m.loc.line,
+    });
   }
   let arraySize = 1;
   if (d.instanceName !== null && d.instanceName !== '') {
@@ -263,14 +278,45 @@ function analyzeInterfaceBlock(d: InterfaceBlockDecl, ctx: SemContext, info: Sha
     const v = dim?.constValue;
     if (typeof v === 'number' && v > 0) arraySize = v;
   }
-  const blk: UniformBlockDecl = {
-    name: d.blockName,
-    instanceName: d.instanceName,
-    arraySize,
-    binding: q.layout?.binding ?? null,
-    members,
-  };
-  info.uniformBlocks.push(blk);
+  const storage = q.storage;
+  const isVaryingBlock =
+    (storage === 'out' && ctx.stage === 'VERTEX') || (storage === 'in' && ctx.stage === 'FRAGMENT');
+  if (!isVaryingBlock) {
+    // Uniform blocks (or unsupported combos — recorded nowhere, linker rejects).
+    if (storage === 'uniform' || storage === undefined) {
+      const blk: UniformBlockDecl = {
+        name: d.blockName,
+        instanceName: d.instanceName,
+        arraySize,
+        binding: q.layout?.binding ?? null,
+        members: members.map((m) => ({ name: m.name, type: m.type, precision: m.precision })),
+      };
+      info.uniformBlocks.push(blk);
+    }
+    return;
+  }
+  // Varying block: per-member varying entries (integral members must be flat).
+  const prefix = d.instanceName !== null && d.instanceName !== '' ? `${d.instanceName}.` : '';
+  for (const m of members) {
+    let element = m.type;
+    let memberArraySize = 1;
+    while (element.kind === 'array') {
+      memberArraySize *= element.size ?? 1;
+      element = element.element;
+    }
+    const mq = m.qualifiers;
+    checkFlatIntegral(ctx, m.name, element, mq, m.line);
+    info.varyings.push({
+      name: prefix + m.name,
+      blockName: d.blockName,
+      type: element,
+      arraySize: arraySize * memberArraySize,
+      flat: mq.interpolation === 'flat' || isIntegral(element),
+      centroid: mq.centroid === true,
+      noperspective: mq.interpolation === 'noperspective',
+      invariant: q.invariant === true,
+    });
+  }
 }
 
 /* ------------------------------------------------------------------ */
