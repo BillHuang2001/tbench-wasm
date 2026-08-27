@@ -187,6 +187,20 @@ export function getExtensionObject(ctx: WebGLRenderingContext | WebGL2RenderingC
   if (existing !== undefined) return existing;
   const ext = createExtension(ctx, spec);
   cache.set(spec.name, ext);
+  // extension.xml (WEBGL_multi_draw): "When this extension is enabled, the
+  // following extensions are enabled implicitly: ANGLE_instanced_arrays".
+  // Cache the ANGLE singleton on WebGL1 so the implicit enable is observable
+  // exactly like a real getExtension call: getVertexAttrib(...,
+  // VERTEX_ATTRIB_ARRAY_DIVISOR_ANGLE) stops erroring (CTS webgl-multi-draw.html
+  // testSideEffects) and extSupported('ANGLE_instanced_arrays') is true. On
+  // WebGL2 ANGLE_instanced_arrays is core (registry versions [1]) — nothing to
+  // enable.
+  if (spec.name === 'WEBGL_multi_draw' && version === 1 && !cache.has('ANGLE_instanced_arrays')) {
+    const angleSpec = SPEC_BY_NAME.get('ANGLE_instanced_arrays');
+    if (angleSpec && angleSpec.status === 'implement') {
+      cache.set(angleSpec.name, createExtension(ctx, angleSpec));
+    }
+  }
   return ext;
 }
 

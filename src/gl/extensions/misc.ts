@@ -26,8 +26,10 @@
  *    reading/writing clip-state.ts.
  *  - WEBGL_multi_draw: the four multi-draw methods. The canonical
  *    implementations are installed on the context prototypes by the draw agent
- *    (api/draw.ts); this factory's copies delegate to them (try/catch → the
- *    Phase-1 stub throw degrades to INVALID_OPERATION instead of crashing).
+ *    (api/draw.ts); this factory's copies delegate to them with the FULL spec
+ *    signatures (per-list *Offset args, instanceCounts on the instanced
+ *    variants) — WebIDL conversion failures propagate as TypeErrors, all GL
+ *    validation/execution lives in the prototype methods + the draw.ts engine.
  */
 
 import type { WebGLRenderingContext } from '../webgl1';
@@ -157,40 +159,49 @@ export function createWEBGLClipCullDistance(ctx: WebGLRenderingContext): object 
 // WEBGL_multi_draw
 // ---------------------------------------------------------------------------
 
-/** Invoke an installed prototype multi-draw method (stub-safe). */
+/**
+ * Delegate an extension call to the installed prototype method (single source
+ * of truth: api/draw.ts installs the canonical implementations on both context
+ * prototypes unconditionally). No try/catch — WebIDL conversion failures
+ * (TypeError from null lists etc.) must propagate to the page like every other
+ * API method; the prototype method guards isLost itself, so the extension-level
+ * guard here only avoids the dispatch entirely while lost.
+ */
 function callInstalled(ctx: WebGLRenderingContext, name: string, args: unknown[]): void {
   const fn = (ctx as unknown as Record<string, unknown>)[name];
   if (typeof fn === 'function') {
-    try {
-      (fn as (...a: unknown[]) => void).apply(ctx, args);
-    } catch {
-      // Phase-1 stub throw (api/draw.ts parallel agent) — spec-shaped error.
-      ctx._errors.push(C1.INVALID_OPERATION);
-    }
+    (fn as (...a: unknown[]) => void).apply(ctx, args);
   } else {
-    // Method not installed yet — same degraded behavior.
+    // Method not installed (should not happen — installDrawApi runs at module
+    // load) — degrade to a spec-shaped error instead of crashing the page.
     ctx._errors.push(C1.INVALID_OPERATION);
   }
 }
 
-/** WEBGL_multi_draw factory — methods delegate to the prototype implementations. */
+/**
+ * WEBGL_multi_draw factory — methods delegate to the prototype implementations
+ * with the FULL spec signatures (per extension.xml IDL): each list argument is
+ * paired with an ELEMENT offset (*Offset) into it, and the instanced variants
+ * carry instanceCounts (+offset). drawcount/list-length validation lives in the
+ * prototype methods; per-subdraw validation in the engine (draw.ts).
+ */
 export function createWEBGLMultiDraw(ctx: WebGLRenderingContext): object {
   return buildExtension({}, {
-    multiDrawArraysWEBGL: (mode: number, firsts: unknown, counts: unknown, drawcount: number): void => {
+    multiDrawArraysWEBGL: (mode: number, firsts: unknown, firstsOffset: number, counts: unknown, countsOffset: number, drawcount: number): void => {
       if (isLost(ctx)) return;
-      callInstalled(ctx, 'multiDrawArraysWEBGL', [mode, firsts, counts, drawcount]);
+      callInstalled(ctx, 'multiDrawArraysWEBGL', [mode, firsts, firstsOffset, counts, countsOffset, drawcount]);
     },
-    multiDrawElementsWEBGL: (mode: number, counts: unknown, type: number, offsets: unknown, drawcount: number): void => {
+    multiDrawElementsWEBGL: (mode: number, counts: unknown, countsOffset: number, type: number, offsets: unknown, offsetsOffset: number, drawcount: number): void => {
       if (isLost(ctx)) return;
-      callInstalled(ctx, 'multiDrawElementsWEBGL', [mode, counts, type, offsets, drawcount]);
+      callInstalled(ctx, 'multiDrawElementsWEBGL', [mode, counts, countsOffset, type, offsets, offsetsOffset, drawcount]);
     },
-    multiDrawArraysInstancedWEBGL: (mode: number, firsts: unknown, counts: unknown, instanceCounts: unknown, drawcount: number): void => {
+    multiDrawArraysInstancedWEBGL: (mode: number, firsts: unknown, firstsOffset: number, counts: unknown, countsOffset: number, instanceCounts: unknown, instanceCountsOffset: number, drawcount: number): void => {
       if (isLost(ctx)) return;
-      callInstalled(ctx, 'multiDrawArraysInstancedWEBGL', [mode, firsts, counts, instanceCounts, drawcount]);
+      callInstalled(ctx, 'multiDrawArraysInstancedWEBGL', [mode, firsts, firstsOffset, counts, countsOffset, instanceCounts, instanceCountsOffset, drawcount]);
     },
-    multiDrawElementsInstancedWEBGL: (mode: number, counts: unknown, type: number, offsets: unknown, instanceCounts: unknown, drawcount: number): void => {
+    multiDrawElementsInstancedWEBGL: (mode: number, counts: unknown, countsOffset: number, type: number, offsets: unknown, offsetsOffset: number, instanceCounts: unknown, instanceCountsOffset: number, drawcount: number): void => {
       if (isLost(ctx)) return;
-      callInstalled(ctx, 'multiDrawElementsInstancedWEBGL', [mode, counts, type, offsets, instanceCounts, drawcount]);
+      callInstalled(ctx, 'multiDrawElementsInstancedWEBGL', [mode, counts, countsOffset, type, offsets, offsetsOffset, instanceCounts, instanceCountsOffset, drawcount]);
     },
   });
 }
