@@ -107,4 +107,4 @@ export function generateFragmentStage(ast: TranslationUnit, layout: CodegenLayou
 }
 
 /** The shared runtime object passed as the 2nd arg of new Function('ctx','R', body). */
-export const R: Readonly<Record<string, Function>> = {};
+export { R } from './runtime.js';
