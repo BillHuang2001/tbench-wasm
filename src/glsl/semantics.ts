@@ -33,9 +33,9 @@ import { analyzeExpr, convertible } from './semantics-expr.js';
 import { analyzeStatement } from './semantics-stmt.js';
 import {
   builtinConstants, builtinSignatures, builtinVariables,
-  extensionConstants, extensionFunctions, extensionVariables,
+  extensionConstants, extensionFunctions, extensionVariables, matches,
 } from './builtins/index.js';
-import type { BuiltinVariable } from './builtins/index.js';
+import type { BuiltinSignature, BuiltinVariable } from './builtins/index.js';
 
 export { analyzeExpr, analyzeStatement, convertible };
 
@@ -246,9 +246,19 @@ export class Scope {
    * Declare `sym`. GLSL ES forbids shadowing: if the name exists in this
    * scope or any enclosing scope → error `'name' : redefinition` and the
    * symbol is NOT registered. Returns true on success.
+   *
+   * Exception (GLSL ES single namespace): a builtin FUNCTION name that no
+   * user code has claimed yet (the pre-pass placeholder FnSymbol with no user
+   * overloads attached) does not reserve the name — user variables/structs
+   * may reuse it. The placeholder is replaced in this scope's map (a later
+   * function decl with the same name then hits the variable and errors
+   * 'redefinition', which is the correct GLSL behavior). Once a user
+   * function overload claims the name, or the existing symbol is a builtin
+   * VARIABLE (gl_*) or gl_Max* constant, the name is NOT free.
    */
   declare(sym: Symbol, ctx: SemContext, line: number): boolean {
-    if (this.lookup(sym.name) !== undefined) {
+    const existing = this.lookup(sym.name);
+    if (existing !== undefined && !isFreeBuiltinFnName(existing)) {
       ctx.error(line, `'${sym.name}' : redefinition`);
       return false;
     }
@@ -270,6 +280,17 @@ export class Scope {
   pop(): Scope | null {
     return this.parent;
   }
+}
+
+/**
+ * True when `sym` is the builtin FUNCTION placeholder with NO user overloads
+ * attached (its siblings are all builtin placeholders — i.e. just itself): a
+ * user variable/struct may still claim the name (GLSL ES single namespace).
+ * Once a user function overload exists, the name is claimed by user code →
+ * a later var/struct decl with the same name is a redefinition.
+ */
+function isFreeBuiltinFnName(sym: Symbol): boolean {
+  return sym.kind === 'fn' && sym.builtin && sym.siblings.every((s) => s.builtin);
 }
 
 /* ------------------------------------------------------------------ */
@@ -621,6 +642,33 @@ function sameParamType(a: GLSLType, b: GLSLType): boolean {
   return false;
 }
 
+/**
+ * The builtin signatures visible for `name` in this shader: the version's
+ * core table plus extension-gated signatures whose extension is enabled —
+ * the SAME sources the builtin pre-pass uses to reserve names.
+ */
+function enabledBuiltinSigs(name: string, ctx: SemContext): BuiltinSignature[] {
+  const out = matches(name, builtinSignatures(ctx.version));
+  for (const s of extensionFunctions) {
+    if (s.name === name && s.extension !== undefined && ctx.enabledExtensions.has(s.extension)) out.push(s);
+  }
+  return out;
+}
+
+/**
+ * Does the user function signature (name is already known to match) collide
+ * with one builtin signature row? GLSL identifies a function by its name and
+ * PARAMETER types — the return type cannot be overloaded, so a param-list
+ * match is a same-signature redefinition regardless of the return type.
+ */
+function builtinSigExact(s: BuiltinSignature, params: ParamInfo[]): boolean {
+  if (s.params.length !== params.length) return false;
+  for (let i = 0; i < s.params.length; i++) {
+    if (!sameParamType(s.params[i], params[i].type)) return false;
+  }
+  return true;
+}
+
 /** Register a function prototype (no body). Duplicate prototypes are OK; new
  * signatures become overloads; colliding builtin names error. */
 function registerPrototype(d: FunctionPrototype, scope: Scope, ctx: SemContext): void {
@@ -640,10 +688,17 @@ function registerPrototype(d: FunctionPrototype, scope: Scope, ctx: SemContext):
     return;
   }
   if (existing.builtin) {
-    ctx.error(d.loc.line, `'${d.name}' : redefinition of built-in function`);
-    return;
+    // GLSL ES: a user function may reuse a builtin name when its signature
+    // differs from EVERY visible builtin signature; a same-signature match is
+    // a redefinition error. Compare against the builtin TABLES — never the
+    // placeholder itself (void return, no params).
+    if (enabledBuiltinSigs(d.name, ctx).some((s) => builtinSigExact(s, params))) {
+      ctx.error(d.loc.line, `'${d.name}' : redefinition of built-in function`);
+      return;
+    }
   }
   for (const sig of existing.siblings) {
+    if (sig.builtin) continue; // the placeholder carries no real signature
     if (sameSignature(sig, retType, params)) return; // repeated prototype: OK
   }
   const sym = makeFnSymbol(d.name, retType, params, false, d.loc.line);
@@ -674,10 +729,16 @@ function registerDefinition(d: FunctionDefinition, scope: Scope, ctx: SemContext
     return null;
   }
   if (existing.builtin) {
-    ctx.error(d.loc.line, `'${proto.name}' : redefinition of built-in function`);
-    return null;
+    // User function with a builtin name: allowed only with a signature that
+    // differs from every visible builtin signature (compare against the
+    // builtin TABLES, never the void/[] placeholder itself).
+    if (enabledBuiltinSigs(proto.name, ctx).some((s) => builtinSigExact(s, params))) {
+      ctx.error(d.loc.line, `'${proto.name}' : redefinition of built-in function`);
+      return null;
+    }
   }
   for (const sig of existing.siblings) {
+    if (sig.builtin) continue; // the placeholder carries no real signature
     if (sameSignature(sig, retType, params)) {
       if (sig.defined) {
         ctx.error(d.loc.line, `'${proto.name}' : redefinition of function`);
