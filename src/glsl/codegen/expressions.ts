@@ -384,7 +384,7 @@ function walk(e: Expr, env: CodegenEnv): P {
       if (ot.kind === 'vector') {
         const sel = swizzleComponents(ot.size, e.name);
         const dup = new Set(sel).size !== sel.length;
-        p.type = { kind: 'vector', base: ot.base, size: sel.length };
+        p.type = { kind: 'vector', base: ot.base, size: sel.length as 2 | 3 | 4 };
         p.swz = p.swz ? sel.map((i) => p.swz![i]) : sel;
         if (dup) p.lvalue = false; // v.xx = ... is illegal
         return p;
@@ -724,8 +724,10 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
       const bv = convertValue(emitExpr(e.right, env), rt, ct);
       const parts: string[] = [];
       for (let c = 0; c < flatComponents(lt); c++) {
-        const a = av[c].pre && av[c].pre.length ? foldPre(av[c].pre, av[c].v) : av[c].v;
-        const b = bv[c].pre && bv[c].pre.length ? foldPre(bv[c].pre, bv[c].v) : bv[c].v;
+        const ap = av[c].pre;
+        const bp = bv[c].pre;
+        const a = ap && ap.length ? foldPre(ap, av[c].v) : av[c].v;
+        const b = bp && bp.length ? foldPre(bp, bv[c].v) : bv[c].v;
         parts.push(op === '==' ? `(${a} === (${b}))` : `(${a} !== (${b}))`);
       }
       return [{ v: `(${parts.join(op === '==' ? ' && ' : ' || ')})` }];
@@ -939,7 +941,8 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
   if (e.op === '=') {
     const conv = convertValue(rhs, e.value.resolvedType!, t);
     for (let c = 0; c < n; c++) {
-      const rv = conv[c].pre && conv[c].pre.length ? foldPre(conv[c].pre, conv[c].v) : conv[c].v;
+      const cp = conv[c].pre;
+      const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
       out.push({ v: `(${pre} ${lv.targets[c]} = ${rv}${post ? ' ' + post : ''})` });
     }
     return out;
@@ -949,7 +952,8 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
   if (!base) throw new Error('codegen: cannot compound-assign a non-scalar-shaped value');
   const conv = convertValue(rhs, e.value.resolvedType!, t);
   for (let c = 0; c < n; c++) {
-    const rv = conv[c].pre && conv[c].pre.length ? foldPre(conv[c].pre, conv[c].v) : conv[c].v;
+    const cp = conv[c].pre;
+    const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
     const s = compoundOp(e.op, lv.targets[c], rv, base);
     out.push({ v: `(${pre} ${s}${post ? ' ' + post : ''})` });
   }
