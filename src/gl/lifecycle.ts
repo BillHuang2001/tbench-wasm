@@ -72,6 +72,29 @@ function slotKey(type: ContextType): 'webgl' | 'webgl2' {
 }
 
 /**
+ * Re-define the context's own properties as non-enumerable. The engine's
+ * internal state lives in underscore-prefixed instance fields, which class-field
+ * initializers and constructor assignments create ENUMERABLE. The CTS pages
+ * `conformance/context/constants-and-properties.html` and
+ * `conformance2/context/constants-and-properties-2.html` enumerate the context
+ * with `for (var i in gl)` and fail on ANY non-function property outside the
+ * spec's constant list — internal fields must be hidden so the public constant
+ * surface matches native Chromium exactly. All fields are pre-declared before
+ * this runs (class body + constructor), so later reassignments (resize,
+ * lose/restore) preserve the non-enumerable descriptor.
+ */
+function hideInternalFields(ctx: WebGLRenderingContext): void {
+  for (const key of Object.keys(ctx)) {
+    Object.defineProperty(ctx, key, {
+      value: (ctx as unknown as Record<string, unknown>)[key],
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+}
+
+/**
  * Create (or fetch) a context for a canvas. Mirrors `canvas.getContext(type, attrs)`:
  * returns the existing context when the slot matches, null on slot conflict.
  * attrs are only applied at creation; subsequent calls return the existing context.
@@ -96,12 +119,14 @@ export function createContext(
     if (slot.webgl) return null; // WebGL1 context already on this canvas
     slot.webgl2 = new WebGL2RenderingContext(canvas, attrs, type, CONTEXT_TOKEN);
     initContextResources(slot.webgl2);
+    hideInternalFields(slot.webgl2);
     return slot.webgl2;
   }
   if (slot.webgl) return slot.webgl;
   if (slot.webgl2) return null; // WebGL2 context already on this canvas
   slot.webgl = new WebGLRenderingContext(canvas, attrs, type, CONTEXT_TOKEN);
   initContextResources(slot.webgl);
+  hideInternalFields(slot.webgl);
   return slot.webgl;
 }
 
