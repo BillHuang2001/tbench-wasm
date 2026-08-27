@@ -256,8 +256,9 @@ function isValidRenderbufferFormat(ctx: WebGLRenderingContext, format: GLenum): 
       format === C1.DEPTH_COMPONENT16 || format === C1.STENCIL_INDEX8
     ) return true;
     if (format === CExt.SRGB_ALPHA_EXT && ctx._extensions.has('EXT_sRGB')) return true;
-    if ((format === C1.DEPTH_COMPONENT || format === C1.DEPTH_STENCIL) &&
-        ctx._extensions.has('WEBGL_depth_texture')) return true;
+    // DEPTH_COMPONENT/DEPTH_STENCIL are core WebGL1 renderbuffer formats
+    // (WEBGL_depth_texture gates only the *texture* side of depth formats).
+    if (format === C1.DEPTH_COMPONENT || format === C1.DEPTH_STENCIL) return true;
     // EXT_color_buffer_half_float (WebGL1): RGB16F + RGBA16F renderbuffers.
     if ((format === C2.RGB16F || format === C2.RGBA16F) &&
         ctx._extensions.has('EXT_color_buffer_half_float')) return true;
@@ -281,10 +282,10 @@ function isValidRenderbufferFormat(ctx: WebGLRenderingContext, format: GLenum): 
 
 /** WebGL2 core renderbuffer formats (RGB16F/RGB32F are NOT legal — see above). */
 const W2_RB_FORMATS: ReadonlySet<GLenum> = new Set<GLenum>([
-  C2.R8, C2.R32F, C2.R8UI, C2.R8I, C2.R16UI, C2.R16I, C2.R32UI, C2.R32I,
-  C2.RG8, C2.RG32F, C2.RG8UI, C2.RG8I, C2.RG16UI, C2.RG16I, C2.RG32UI, C2.RG32I,
+  C2.R8, C2.R8UI, C2.R8I, C2.R16UI, C2.R16I, C2.R32UI, C2.R32I,
+  C2.RG8, C2.RG8UI, C2.RG8I, C2.RG16UI, C2.RG16I, C2.RG32UI, C2.RG32I,
   C2.RGB8, C2.RGB8UI, C2.RGB8I, C2.RGB16UI, C2.RGB16I, C2.RGB32UI, C2.RGB32I,
-  C2.RGBA8, C2.RGBA32F, C2.RGBA8UI, C2.RGBA8I, C2.RGBA16UI, C2.RGBA16I,
+  C2.RGBA8, C2.RGBA8UI, C2.RGBA8I, C2.RGBA16UI, C2.RGBA16I,
   C2.RGBA32UI, C2.RGBA32I,
   C2.RGB10_A2, C1.RGBA4, C1.RGB5_A1, C1.RGB565, C2.SRGB8_ALPHA8,
   C1.DEPTH_COMPONENT16, C2.DEPTH_COMPONENT24, C2.DEPTH_COMPONENT32F,

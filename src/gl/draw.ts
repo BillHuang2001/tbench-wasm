@@ -76,6 +76,7 @@ import {
   blitDepthStencilSurface,
   getPackConverter,
   getFormat,
+  floatToHalf,
 } from '../raster';
 import type {
   DrawCall, FramebufferTarget, SamplerState, Surface, TextureImage, TextureUnitBinding,
@@ -1374,6 +1375,15 @@ function makeLocalPack(surf: Surface, format: GLenum, type: GLenum): ((src: Arra
         decodeSurfaceTexel(surf, so, tmp);
         const df = dst as Float32Array;
         for (let c = 0; c < comps; c++) df[(d >> 2) + c] = tmp[c];
+      };
+    }
+    case 0x140b /* HALF_FLOAT */:
+    case 0x8d61 /* HALF_FLOAT_OES */: {
+      const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
+      return (_src, so, dst, d) => {
+        decodeSurfaceTexel(surf, so, tmp);
+        const dh = dst as Uint16Array;
+        for (let c = 0; c < comps; c++) dh[(d >> 1) + c] = floatToHalf(tmp[c]);
       };
     }
     case C1.UNSIGNED_INT: // DEPTH_COMPONENT / integer formats

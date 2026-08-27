@@ -125,6 +125,9 @@ function floatUnpack(comps: number, mode: ChannelMode): FormatSpec['unpack'] {
       case 'rgb': out[0] = v; out[1] = d[e + 1]; out[2] = d[e + 2]; out[3] = 1; break;
       case 'rg': out[0] = v; out[1] = d[e + 1]; out[2] = 0; out[3] = 1; break;
       case 'red': out[0] = v; out[1] = 0; out[2] = 0; out[3] = 1; break;
+      case 'luminance': out[0] = v; out[1] = v; out[2] = v; out[3] = 1; break;
+      case 'alpha': out[0] = 0; out[1] = 0; out[2] = 0; out[3] = v; break;
+      case 'lumalpha': out[0] = v; out[1] = v; out[2] = v; out[3] = d[e + 1]; break;
       default: out[0] = out[1] = out[2] = 0; out[3] = 1;
     }
     void comps;
@@ -435,6 +438,38 @@ function resolveStorageSpec(internalformat: GLenum): FormatSpec | null {
     };
   }
   return local;
+}
+
+/**
+ * Float-promoted storage spec for a WebGL1 UNSIZED color format uploaded with
+ * FLOAT / HALF_FLOAT_OES (OES_texture_float / OES_texture_half_float): the
+ * level stores f32 texels regardless of the unsized GLenum. Used so the
+ * storage spec, img.info.isFloat and the raster decode all agree the level is
+ * floating-point (readPixels FLOAT, FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE).
+ * Returns null for non-unsized formats.
+ */
+function floatSpecFor(internalformat: GLenum): FormatSpec | null {
+  switch (internalformat) {
+    case C.RGBA: return buildSpec({ format: C.RGBA, components: 4, bytesPerPixel: 16, storage: 'f32', ctor: F32, isColor: true, isFloat: true, mode: 'rgba' });
+    case C.RGB: return buildSpec({ format: C.RGB, components: 3, bytesPerPixel: 12, storage: 'f32', ctor: F32, isColor: true, isFloat: true, mode: 'rgb' });
+    case C.LUMINANCE: return buildSpec({ format: C.LUMINANCE, components: 1, bytesPerPixel: 4, storage: 'f32', ctor: F32, isColor: true, isFloat: true, mode: 'luminance' });
+    case C.LUMINANCE_ALPHA: return buildSpec({ format: C.LUMINANCE_ALPHA, components: 2, bytesPerPixel: 8, storage: 'f32', ctor: F32, isColor: true, isFloat: true, mode: 'lumalpha' });
+    case C.ALPHA: return buildSpec({ format: C.ALPHA, components: 1, bytesPerPixel: 4, storage: 'f32', ctor: F32, isColor: true, isFloat: true, mode: 'alpha' });
+    default: return null;
+  }
+}
+
+/**
+ * Storage spec of an existing texture level: float-storage levels (incl. the
+ * W1 unsized float-promoted ones, where resolveStorageSpec would map e.g.
+ * RGBA → RGBA8 and mis-encode) keep their f32 spec; everything else resolves
+ * normally.
+ */
+function specForImage(img: NonNullable<WebGLTexture['_image']>): FormatSpec | null {
+  if (img.info?.isFloat) {
+    return floatSpecFor(img.internalFormat) ?? resolveStorageSpec(img.internalFormat);
+  }
+  return resolveStorageSpec(img.internalFormat);
 }
 
 /** Build the PixelFormatInfo stored on `_image.info` (raster-compatible). */
@@ -914,7 +949,16 @@ export function uploadTexImage(
 ): void {
   void border;
   if (texture._immutable) return;
-  const spec = resolveStorageSpec(internalformat);
+  // W1 unsized float upload (OES_texture_float / OES_texture_half_float): the
+  // level stores f32 texels under the unsized GLenum — resolveStorageSpec
+  // would map e.g. RGBA → RGBA8 (u8 normalized) and mis-encode raw values.
+  const isW1UnsizedFloat =
+    (internalformat === C.RGBA || internalformat === C.RGB ||
+     internalformat === C.LUMINANCE || internalformat === C.LUMINANCE_ALPHA ||
+     internalformat === C.ALPHA) &&
+    (type === C.FLOAT || type === CExt.HALF_FLOAT_OES);
+  const spec = isW1UnsizedFloat ? (floatSpecFor(internalformat) ?? resolveStorageSpec(internalformat))
+    : resolveStorageSpec(internalformat);
   if (!spec) return;
   const img = ensureImage(texture, target);
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
@@ -957,7 +1001,7 @@ export function uploadTexSubImage(
   if (!img) return;
   const levelData = img.levels[level];
   if (!levelData) return;
-  const spec = resolveStorageSpec(img.internalFormat);
+  const spec = specForImage(img);
   if (!spec) return;
   copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset);
   updateCompleteness(texture, ctx._version);
@@ -1060,6 +1104,9 @@ export function copyTexImage(
 ): void {
   void border;
   if (texture._immutable) return;
+  // The destination is a FRESH level: its storage comes from the copyTexImage2D
+  // internalformat argument (copyTexImage2D has no type parameter — no float
+  // promotion possible here; W1 unsized dests store normalized u8).
   const spec = resolveStorageSpec(internalformat);
   if (!spec) return;
   const img = ensureImage(texture, target);
@@ -1096,7 +1143,7 @@ export function copyTexSubImage(
   if (!img) return;
   const levelData = img.levels[level];
   if (!levelData) return;
-  const spec = resolveStorageSpec(img.internalFormat);
+  const spec = specForImage(img);
   if (!spec) return;
   // Copy into the (xoffset, yoffset) region of a temporary of the sub size,
   // then blit — simpler: read directly with a dst offset via a temp level.
@@ -1152,7 +1199,7 @@ export function generateMipmap(ctx: WebGLRenderingContext, texture: WebGLTexture
   if (!img) return;
   const base = img.levels[0];
   if (!base) return;
-  const spec = resolveStorageSpec(img.internalFormat);
+  const spec = specForImage(img);
   if (!spec) return;
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
   const isArray = img.target === C.TEXTURE_2D_ARRAY;

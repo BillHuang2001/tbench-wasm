@@ -565,6 +565,13 @@ function checkAttachment(
     }
     if (lvl.width === 0 || lvl.height === 0) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
     format = image.internalFormat;
+    // WebGL1: float-storage LUMINANCE/LUMINANCE_ALPHA/ALPHA textures are NOT
+    // color-renderable (EXT_color_buffer_half_float spec; CTS copyTex matrix
+    // hard-asserts FRAMEBUFFER_INCOMPLETE_ATTACHMENT for these).
+    if (ctx._version === 1 && image.info?.isFloat &&
+        (format === 0x1909 /* LUMINANCE */ || format === 0x190a /* LUMINANCE_ALPHA */ || format === 0x1906 /* ALPHA */)) {
+      return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+    }
   }
 
   switch (kind) {

@@ -29,8 +29,9 @@
 
 import type { WebGLRenderingContext } from '../webgl1';
 import { C1, C2, CExt } from '../constants';
-import type { WebGLTexture } from '../objects';
+import type { WebGLFramebuffer, WebGLTexture } from '../objects';
 import type { GLenum, GLint, GLsizei, TexImageSource } from '../types';
+import { checkFramebufferStatus } from '../framebuffer-util';
 import {
   allocateImmutableStorage,
   compressedTexImage,
@@ -304,7 +305,7 @@ function w1ValidateFormatType(
     ctx._errors.push(C1.INVALID_OPERATION);
     return false;
   }
-  if (!w1ComboAllowsType(ctx, internalformat, combo, type)) {
+  if (!w1ComboAllowsType(ctx, combo, type)) {
     ctx._errors.push(C1.INVALID_OPERATION);
     return false;
   }
@@ -327,17 +328,18 @@ function w1ValidateFormatType(
 /**
  * WebGL1 (internalformat, type) combo legality: the static W1_COMBOS table
  * plus the extension-gated additions — OES_texture_float adds FLOAT to
- * RGBA/RGB (RGBA32F/RGB32F), OES_texture_half_float adds HALF_FLOAT_OES to
- * RGBA/RGB (RGBA16F/RGB16F) — legal only while the extension is ENABLED.
+ * ALL unsized color formats (RGBA/RGB/LUMINANCE/LUMINANCE_ALPHA/ALPHA →
+ * float storage), OES_texture_half_float adds HALF_FLOAT_OES to the same —
+ * legal only while the extension is ENABLED (ext specs add the type to every
+ * unsized internalformat; CTS ext-color-buffer-half-float.html exercises
+ * LUMINANCE/LUMINANCE_ALPHA/ALPHA + HALF_FLOAT_OES).
  */
 function w1ComboAllowsType(
   ctx: WebGLRenderingContext,
-  internalformat: GLenum,
   combo: { format: number; types: number[] },
   type: GLenum,
 ): boolean {
   if (combo.types.includes(type)) return true;
-  if (internalformat !== C1.RGBA && internalformat !== C1.RGB) return false;
   if (type === C1.FLOAT) return ctx._extensions.has('OES_texture_float');
   if (type === HALF_FLOAT_OES) return ctx._extensions.has('OES_texture_half_float');
   return false;
@@ -1135,6 +1137,7 @@ const W2_COPY_INTERNALFORMATS: number[] = [
   C2.SRGB8_ALPHA8,
   C2.R16F,
   C2.RG16F,
+  C2.RGB16F,
   C2.RGBA16F,
   C2.R11F_G11F_B10F,
   C2.R8I, C2.R8UI, C2.R16I, C2.R16UI, C2.R32I, C2.R32UI,
@@ -1146,9 +1149,67 @@ const W2_COPY_INTERNALFORMATS: number[] = [
 function isW2CopyInternalFormatValid(ctx: WebGLRenderingContext, fmt: GLenum): boolean {
   if (W2_COPY_INTERNALFORMATS.includes(fmt)) return true;
   if (fmt === C2.R32F || fmt === C2.RG32F || fmt === C2.RGBA32F) {
-    return ctx.getExtension('EXT_color_buffer_float') !== null;
+    return ctx._extensions.has('EXT_color_buffer_float');
   }
   return false;
+}
+
+/** Component count of an internal format (copyTexImage2D src/dest rules). */
+function internalFormatComponents(fmt: GLenum): number {
+  switch (fmt) {
+    case C1.RGBA: case C1.RGBA8: case C2.RGBA16F: case C2.RGBA32F: case C1.RGBA4:
+    case C1.RGB5_A1: case C2.RGB10_A2: case C2.RGB10_A2UI: case C2.SRGB8_ALPHA8:
+    case C2.RGBA8_SNORM: case C2.RGBA8I: case C2.RGBA8UI: case C2.RGBA16I: case C2.RGBA16UI:
+    case C2.RGBA32I: case C2.RGBA32UI:
+      return 4;
+    case C1.RGB: case C1.RGB8: case C2.RGB16F: case C2.RGB32F: case C1.RGB565:
+    case C2.RGB8_SNORM: case C2.R11F_G11F_B10F: case C2.RGB9_E5: case C2.SRGB8:
+    case C2.RGB8I: case C2.RGB8UI: case C2.RGB16I: case C2.RGB16UI: case C2.RGB32I: case C2.RGB32UI:
+      return 3;
+    case C1.LUMINANCE_ALPHA: case C2.RG: case C2.RG8: case C2.RG16F: case C2.RG32F:
+    case C2.RG8_SNORM: case C2.RG8I: case C2.RG8UI: case C2.RG16I: case C2.RG16UI:
+    case C2.RG32I: case C2.RG32UI:
+      return 2;
+    case C1.LUMINANCE: case C1.ALPHA: case C2.RED: case C2.R8: case C2.R16F: case C2.R32F:
+    case C2.R8_SNORM: case C2.R8I: case C2.R8UI: case C2.R16I: case C2.R16UI:
+    case C2.R32I: case C2.R32UI:
+      return 1;
+    default: return 4; // unknown / default-framebuffer RGBA8
+  }
+}
+
+/** W1 copyTex source "kind" (GLES2 copyTex conversion table semantics). */
+function w1SrcKind(fmt: GLenum): 'rgba' | 'rgb' | 'la' | 'lum' | 'alpha' {
+  switch (fmt) {
+    case C1.RGBA: return 'rgba';
+    case C1.RGB: return 'rgb';
+    case C1.LUMINANCE_ALPHA: return 'la';
+    case C1.LUMINANCE: return 'lum';
+    case C1.ALPHA: return 'alpha';
+    default: {
+      const comps = internalFormatComponents(fmt);
+      return comps === 4 ? 'rgba' : comps === 3 ? 'rgb' : comps === 2 ? 'la' : 'lum';
+    }
+  }
+}
+
+/**
+ * WebGL1 copyTexImage2D dest/source conversion rule (GLES2 "CopyTexImage
+ * conversions" table, as exercised by CTS ext-color-buffer-half-float.html):
+ * dest RGBA requires src RGBA; dest RGB requires src RGB|RGBA; dest LUMINANCE
+ * requires src LUMINANCE|RGB|RGBA; dest LUMINANCE_ALPHA requires src
+ * LUMINANCE_ALPHA|RGBA; dest ALPHA requires src ALPHA|RGBA; else INVALID_OPERATION.
+ */
+function w1CopyDestAllowed(srcFmt: GLenum, destFmt: GLenum): boolean {
+  const kind = w1SrcKind(srcFmt);
+  switch (destFmt) {
+    case C1.RGBA: return kind === 'rgba';
+    case C1.RGB: return kind === 'rgb' || kind === 'rgba';
+    case C1.LUMINANCE: return kind === 'lum' || kind === 'rgb' || kind === 'rgba';
+    case C1.LUMINANCE_ALPHA: return kind === 'la' || kind === 'rgba';
+    case C1.ALPHA: return kind === 'alpha' || kind === 'rgba';
+    default: return true; // sized dests (extension formats) are unconstrained in W1
+  }
 }
 
 function copyTexImage2DImpl(
@@ -1208,6 +1269,33 @@ function copyTexImage2DImpl(
   } else if (!w1InternalformatValid(ctx, internalformat)) {
     ctx._errors.push(C1.INVALID_ENUM);
     return;
+  }
+  // Spec: copyTexImage2D from an incomplete framebuffer → INVALID_FRAMEBUFFER_OPERATION
+  // (fbo === null → the default framebuffer is always complete).
+  if (checkFramebufferStatus(ctx, ctx._state.readFramebuffer as WebGLFramebuffer) !== C1.FRAMEBUFFER_COMPLETE) {
+    ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
+    return;
+  }
+  // Dest/source component rules (EXT_color_buffer_half_float CTS matrix).
+  const readFbo = ctx._state.readFramebuffer;
+  if (readFbo !== null) {
+    const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
+    const att = readFbo._attachments.get(readPoint);
+    if (att) {
+      const srcFmt = att.type === 'renderbuffer'
+        ? att.renderbuffer._internalformat
+        : (att.texture._image?.internalFormat ?? 0);
+      if (ctx._version === 2) {
+        // W2: the destination may not have more components than the source.
+        if (internalFormatComponents(internalformat) > internalFormatComponents(srcFmt)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+      } else if (!w1CopyDestAllowed(srcFmt, internalformat)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+    }
   }
   // The engine wraps resolveReadSurface (framebuffer-util stub) in try/catch and
   // silently no-ops when the read surface is unavailable — report INVALID_OPERATION
