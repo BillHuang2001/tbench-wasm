@@ -19,6 +19,7 @@ Verification of the software WebGL renderer against the Khronos CTS (primary gat
 - Result capture: inject `window.webglTestHarness = { reportResults(url, success, msg, skipped), notifyFinished(url) }` via addInitScript BEFORE page scripts (js-test-pre.js caches `window.parent.webglTestHarness` at load). Poll for completion (notifyFinished or DOM "TEST COMPLETE" fallback), timeout → fail. Aggregate subtests: pass = failures 0 AND not timed out; skipped subtests do not fail the test.
 - URL: `http://127.0.0.1:<port>/sdk/tests/<path>?webglVersion=<1|2>` (conformance → 1; conformance2/deqp → 2) + `&imgUrl=http://localhost:<port>/<logo>` (same port, opposite loopback hostname — cross-origin) where needed.
 - Report: JSON + summary table; track per-test history for regression hunting (results dir, gitignored).
+- **Renderer-active gate**: every result carries `rendererActive` (factory presence, polled per page). A page that completes or times out while `window.__createSoftwareWebGLContext` is missing is forced FAIL (`renderer bundle not active (window.__createSoftwareWebGLContext missing) — page ran WITHOUT the software renderer`), and the summary prints `WARNING: N pages ran without the software renderer (bundle likely dead)` — a dead bundle can never silently pass as native WebGL again.
 - The runner must work even with a stub renderer (all tests fail with clear RENDERER_NOT_FOUND-style errors) — plumbing is validated independently of renderer progress.
 
 ## three.js suite (tests/threejs/)
