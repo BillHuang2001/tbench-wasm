@@ -24,9 +24,19 @@
  *  - getActiveAttrib/Uniform return WebGLActiveInfo {size, type, name};
  *    getUniformLocation supports array-name suffixes ('u[2]'); getUniform
  *    reads the uniform store back (types per WebGL spec).
- *  - KHR_parallel_shader_compile: COMPLETION_STATUS_KHR (0x91B1) reports true
- *    (synchronous compile) for both shaders and programs when the extension is
- *    exposed, INVALID_ENUM otherwise.
+ *  - KHR_parallel_shader_compile: when the extension is ENABLED (getExtension
+ *    called — the singleton cache `ctx._extensions` is the gate, NOT
+ *    getExtension() which would self-fulfill), compileShader/linkProgram become
+ *    ASYNC: the work is chunked into per-stage macrotasks by
+ *    api/parallel-compile.ts (shader: preprocess/tokenize/parse/analyze+finalize
+ *    = 4 chunks; link: 1 chunk that first finishes the snapshot shaders'
+ *    pending compiles) and COMPLETION_STATUS_KHR (0x91B1) reports the boolean
+ *    "no pending work" WITHOUT triggering anything. Every other query/draw/
+ *    uniform-write triggers the pending work synchronously (ensureShaderCompiled/
+ *    ensureProgramLinked). While the context is lost, COMPLETION_STATUS_KHR
+ *    returns true (checked before the lost/validation guards — the objects were
+ *    created before loss and are invalidated). When the extension is not
+ *    exposed: INVALID_ENUM + null (unchanged).
  *
  * UNIFORM STORE LAYOUT (single source of truth, matches src/glsl/program.ts):
  * glsl Program.floatStore (Float32Array) / intStore (Int32Array) hold the
@@ -81,8 +91,43 @@ import {
 import type { ProgramModel } from '../objects';
 import { validateObject, requireString } from '../validation';
 import { compileShader, linkProgram } from '../../glsl';
-import type { Shader as GlslShader, Program as GlslProgram, LinkOptions } from '../../glsl';
+import type { Shader as GlslShader, Program as GlslProgram, LinkOptions, CompileResult } from '../../glsl';
+import { preprocess } from '../../glsl/preprocessor';
+import type { PreprocessResult } from '../../glsl/preprocessor';
+import { tokenize } from '../../glsl/lexer';
+import type { Token } from '../../glsl/lexer';
+import { parse } from '../../glsl/parser';
+import type { TranslationUnit } from '../../glsl/ast';
+import { analyze } from '../../glsl/semantics';
+import {
+  enqueueShaderCompile,
+  enqueueProgramLink,
+  isShaderPending,
+  isProgramPending,
+  cancelPendingShader,
+  ensureShaderCompiled,
+  ensureProgramLinked,
+} from './parallel-compile';
+import type { PendingItem } from './parallel-compile';
 import type { GLboolean, GLenum, GLint, GLuint } from '../types';
+
+// Re-export the KHR trigger helpers for the other trigger sites (draw.ts,
+// api/uniforms.ts, api/webgl2.ts, extensions/misc.ts).
+export { isShaderPending, isProgramPending, ensureShaderCompiled, ensureProgramLinked } from './parallel-compile';
+
+/**
+ * MAX_COMPILE_ERRORS: the glsl compiler caps per-stage error lists at 20
+ * (src/glsl/compiler.ts — not exported; hardcoded here to mirror it for the
+ * deferred path's per-stage slicing).
+ */
+const MAX_COMPILE_ERRORS = 20;
+
+/** KHR_parallel_shader_compile enabled? Gate on the singleton CACHE (only
+ * getExtensionObject populates it) — getExtension() would create the singleton
+ * and self-fulfill the COMPLETION_STATUS_KHR queries. */
+function khrEnabled(ctx: WebGLRenderingContext): boolean {
+  return ctx._extensions.has('KHR_parallel_shader_compile');
+}
 
 // ---- Module-level per-program / per-shader state (objects files are pinned; keep here) ----
 
@@ -325,13 +370,36 @@ export function elementSlots(uniform: { type: number; components: number }): num
 // Shaders
 // ---------------------------------------------------------------------------
 
-/** Shared compileShader body — also resets state on shaderSource. */
-function doCompileShader(ctx: WebGLRenderingContext, shader: WebGLShader): void {
+/** Reset compile state (compileShader entry + shaderSource). */
+function resetShaderCompileState(shader: WebGLShader): void {
   shader._compileStatus = false;
   shader._infoLog = '';
   shader._compiled = null;
   shader._translatedSource = null;
   shaderResults.delete(shader);
+}
+
+/**
+ * Shared compile finalize — replicates doCompileShader's observable state
+ * writes exactly. Used by the sync path AND the deferred path (async chunks
+ * and the ensureShaderCompiled trigger run the SAME step closures, so both
+ * produce identical results).
+ */
+function finalizeShaderCompile(shader: WebGLShader, source: string, result: CompileResult): void {
+  if (result.ok) {
+    shader._compileStatus = true;
+    shader._compiled = { ok: true };
+    shader._translatedSource = source; // WEBGL_debug_shaders (no real translation)
+    shaderResults.set(shader, result.shader);
+  } else {
+    shader._infoLog = result.errors.map((e) => `ERROR: 0:${e.line}: ${e.message}`).join('\n');
+    shader._compiled = { ok: false, errors: result.errors };
+    shader._translatedSource = '';
+  }
+}
+
+/** Synchronous compile from the shader's current source (extension disabled — unchanged behavior). */
+function doCompileShader(ctx: WebGLRenderingContext, shader: WebGLShader): void {
   let result: ReturnType<typeof compileShader>;
   try {
     result = compileShader(shader._source, {
@@ -341,21 +409,107 @@ function doCompileShader(ctx: WebGLRenderingContext, shader: WebGLShader): void 
       extensions: new Set(ctx.getSupportedExtensions()),
     });
   } catch (e) {
-    // glsl/ is stubbed in the parallel wave — never let the exception reach
-    // the page: behave as a compile failure with a diagnostic info log.
+    // glsl/ must never let the exception reach the page: behave as a compile
+    // failure with a diagnostic info log.
     shader._infoLog = `internal compiler error: ${e instanceof Error ? e.message : String(e)}`;
     return;
   }
-  if (result.ok) {
-    shader._compileStatus = true;
-    shader._compiled = { ok: true };
-    shader._translatedSource = shader._source; // WEBGL_debug_shaders (no real translation)
-    shaderResults.set(shader, result.shader);
-  } else {
-    shader._infoLog = result.errors.map((e) => `ERROR: 0:${e.line}: ${e.message}`).join('\n');
-    shader._compiled = { ok: false, errors: result.errors };
-    shader._translatedSource = '';
-  }
+  finalizeShaderCompile(shader, shader._source, result);
+}
+
+/** Deferred compile inputs, snapshotted at compileShader call time. */
+interface ShaderCompileSnapshot {
+  source: string;
+  type: 'VERTEX' | 'FRAGMENT';
+  version: 100 | 300;
+  defines: Record<string, string>;
+  extensions: Set<string>;
+}
+
+/**
+ * Enqueue the 4-chunk deferred compile (extension enabled): preprocess →
+ * tokenize → parse → analyze+finalize, sharing one `inter` object. The stage
+ * orchestration mirrors src/glsl/compiler.ts compileShader exactly (per-stage
+ * errors sliced to MAX_COMPILE_ERRORS); a stage failure finalizes early
+ * (item.complete). A glsl-stage exception → onError (only _infoLog set,
+ * _compileStatus stays false — mirroring doCompileShader's catch).
+ */
+function enqueueCompile(ctx: WebGLRenderingContext, shader: WebGLShader): void {
+  const snapshot: ShaderCompileSnapshot = {
+    source: shader._source,
+    type: shader._type === C1.VERTEX_SHADER ? 'VERTEX' : 'FRAGMENT',
+    version: ctx._version === 2 ? 300 : 100,
+    defines: {},
+    extensions: new Set(ctx.getSupportedExtensions()),
+  };
+  const inter: {
+    pp?: Extract<PreprocessResult, { ok: true }>;
+    tokens?: Token[];
+    ast?: TranslationUnit;
+  } = {};
+  // Steps only ever run AFTER enqueueShaderCompile assigns `item` (the
+  // scheduler is macrotask-based; triggers run later), so the capture is safe.
+  let item: PendingItem;
+  const finish = (result: CompileResult): void => {
+    finalizeShaderCompile(shader, snapshot.source, result);
+    item.complete = true;
+  };
+  item = enqueueShaderCompile(
+    ctx,
+    shader,
+    [
+      () => {
+        if (item.complete) return;
+        const pp = preprocess(snapshot.source, { version: snapshot.version, defines: snapshot.defines, extensions: snapshot.extensions });
+        if (!pp.ok) {
+          finish({ ok: false, errors: pp.errors.slice(0, MAX_COMPILE_ERRORS) });
+          return;
+        }
+        inter.pp = pp;
+      },
+      () => {
+        if (item.complete) return;
+        const lex = tokenize(inter.pp!.tokens, inter.pp!.version);
+        if (!lex.ok) {
+          finish({ ok: false, errors: lex.errors.slice(0, MAX_COMPILE_ERRORS) });
+          return;
+        }
+        inter.tokens = lex.tokens;
+      },
+      () => {
+        if (item.complete) return;
+        const parsed = parse(inter.tokens!, { version: inter.pp!.version, extensionDirectives: inter.pp!.extensionDirectives });
+        if (!parsed.ok) {
+          finish({ ok: false, errors: parsed.errors.slice(0, MAX_COMPILE_ERRORS) });
+          return;
+        }
+        inter.ast = parsed.ast;
+      },
+      () => {
+        if (item.complete) return;
+        const analyzed = analyze(inter.ast!, { type: snapshot.type, extensions: new Set(inter.pp!.extensions) });
+        if (!analyzed.ok) {
+          finish({ ok: false, errors: analyzed.errors });
+          return;
+        }
+        finish({
+          ok: true,
+          shader: {
+            type: snapshot.type,
+            version: inter.ast!.version,
+            source: snapshot.source,
+            infoLog: '',
+            extensions: new Set(inter.pp!.extensions),
+            ast: inter.ast!,
+            info: analyzed.info,
+          },
+        });
+      },
+    ],
+    (e) => {
+      shader._infoLog = `internal compiler error: ${e instanceof Error ? e.message : String(e)}`;
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -405,35 +559,26 @@ function failLink(p: WebGLProgram, log: string): void {
   programModels.delete(p);
 }
 
-function doLinkProgram(ctx: WebGLRenderingContext, p: WebGLProgram): void {
-  linkGen.set(p, (linkGen.get(p) ?? 0) + 1); // invalidate old uniform locations
-  const shaders = [...p._attachedShaders];
-  const vs = shaders.find((s) => s._type === C1.VERTEX_SHADER);
-  const fs = shaders.find((s) => s._type === C1.FRAGMENT_SHADER);
-  const vsR = vs !== undefined ? shaderResults.get(vs) : undefined;
-  const fsR = fs !== undefined ? shaderResults.get(fs) : undefined;
-  if (vs === undefined || fs === undefined || !vs._compileStatus || !fs._compileStatus || !vsR || !fsR) {
-    failLink(p, 'missing vertex/fragment shader');
-    return;
-  }
-  const opts: LinkOptions = { limits: buildLinkLimits(ctx), attribBindings: p._bindAttribLocations };
-  if (p._transformFeedbackVaryings !== null) {
-    opts.transformFeedback = {
-      varyings: p._transformFeedbackVaryings,
-      bufferMode: p._tfBufferMode === C2.SEPARATE_ATTRIBS ? 'SEPARATE_ATTRIBS' : 'INTERLEAVED_ATTRIBS',
-    };
-  }
-  let result: ReturnType<typeof linkProgram>;
-  try {
-    result = linkProgram(vsR, fsR, opts);
-  } catch (e) {
-    failLink(p, `internal compiler error: ${e instanceof Error ? e.message : String(e)}`);
-    return;
-  }
-  if (!result.ok) {
-    failLink(p, result.log);
-    return;
-  }
+/** Snapshot of link inputs at linkProgram call time (deferred link). */
+interface LinkSnapshot {
+  shaders: WebGLShader[];
+  attribBindings: Map<string, number>;
+  transformFeedback: LinkOptions['transformFeedback'];
+}
+
+/** Build the LinkOptions for a snapshot (context limits read at execution time). */
+function linkOptsFrom(ctx: WebGLRenderingContext, snap: LinkSnapshot): LinkOptions {
+  const opts: LinkOptions = { limits: buildLinkLimits(ctx), attribBindings: snap.attribBindings };
+  if (snap.transformFeedback !== undefined) opts.transformFeedback = snap.transformFeedback;
+  return opts;
+}
+
+/**
+ * Shared link success finalize — replicates doLinkProgram's success writes
+ * exactly (both the sync path and the deferred link step call this, so their
+ * observable results are identical).
+ */
+function finalizeLinkSuccess(p: WebGLProgram, vsR: GlslShader, fsR: GlslShader, result: { ok: true; program: GlslProgram }): void {
   const pm = result.program;
   p._program = pm as unknown as ProgramModel;
   p._linkStatus = true;
@@ -455,6 +600,77 @@ function doLinkProgram(ctx: WebGLRenderingContext, p: WebGLProgram): void {
     fmap.set(o.name, o.location ?? 0);
   }
   fragDataMaps.set(p, fmap);
+}
+
+/** Execute a link from a snapshot + finalize — shared by the sync path and the deferred link step. */
+function executeLink(ctx: WebGLRenderingContext, p: WebGLProgram, snap: LinkSnapshot): void {
+  const vs = snap.shaders.find((s) => s._type === C1.VERTEX_SHADER);
+  const fs = snap.shaders.find((s) => s._type === C1.FRAGMENT_SHADER);
+  const vsR = vs !== undefined ? shaderResults.get(vs) : undefined;
+  const fsR = fs !== undefined ? shaderResults.get(fs) : undefined;
+  if (vs === undefined || fs === undefined || !vs._compileStatus || !fs._compileStatus || !vsR || !fsR) {
+    failLink(p, 'missing vertex/fragment shader');
+    return;
+  }
+  let result: ReturnType<typeof linkProgram>;
+  try {
+    result = linkProgram(vsR, fsR, linkOptsFrom(ctx, snap));
+  } catch (e) {
+    failLink(p, `internal compiler error: ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  if (!result.ok) {
+    failLink(p, result.log);
+    return;
+  }
+  finalizeLinkSuccess(p, vsR, fsR, result);
+}
+
+/** Synchronous link (extension disabled — unchanged behavior). */
+function doLinkProgram(ctx: WebGLRenderingContext, p: WebGLProgram): void {
+  linkGen.set(p, (linkGen.get(p) ?? 0) + 1); // invalidate old uniform locations
+  executeLink(ctx, p, {
+    shaders: [...p._attachedShaders],
+    attribBindings: new Map(p._bindAttribLocations),
+    transformFeedback: p._transformFeedbackVaryings !== null
+      ? {
+          varyings: p._transformFeedbackVaryings,
+          bufferMode: p._tfBufferMode === C2.SEPARATE_ATTRIBS ? 'SEPARATE_ATTRIBS' : 'INTERLEAVED_ATTRIBS',
+        }
+      : undefined,
+  });
+}
+
+/** Enqueue the 1-chunk deferred link (extension enabled). */
+function enqueueLink(ctx: WebGLRenderingContext, p: WebGLProgram): void {
+  const snap: LinkSnapshot = {
+    shaders: [...p._attachedShaders],
+    attribBindings: new Map(p._bindAttribLocations),
+    transformFeedback: p._transformFeedbackVaryings !== null
+      ? {
+          varyings: [...p._transformFeedbackVaryings],
+          bufferMode: p._tfBufferMode === C2.SEPARATE_ATTRIBS ? 'SEPARATE_ATTRIBS' : 'INTERLEAVED_ATTRIBS',
+        }
+      : undefined,
+  };
+  enqueueProgramLink(
+    ctx,
+    p,
+    [
+      () => {
+        // Ordering guarantee (CTS: program-true implies shader-true): finish
+        // the snapshot shaders' in-flight compiles BEFORE linking.
+        for (const s of snap.shaders) ensureShaderCompiled(ctx, s);
+        // linkGen bumps at link EXECUTION time (not call time) for the
+        // deferred path.
+        linkGen.set(p, (linkGen.get(p) ?? 0) + 1);
+        executeLink(ctx, p, snap);
+      },
+    ],
+    (e) => {
+      failLink(p, `internal compiler error: ${e instanceof Error ? e.message : String(e)}`);
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -627,12 +843,9 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     const s = validateShaderQuery(ctx, shader);
     if (s === null) return;
     const src = requireString(source, 'source'); // WebIDL DOMString (TypeError for null/undefined)
+    cancelPendingShader(ctx, s); // drop any in-flight deferred compile (new source)
     s._source = src;
-    s._compileStatus = false;
-    s._infoLog = '';
-    s._compiled = null;
-    s._translatedSource = null;
-    shaderResults.delete(s);
+    resetShaderCompileState(s);
   };
 
   proto.compileShader = function (this: WebGLRenderingContext, shader: WebGLShader): void {
@@ -640,25 +853,42 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return;
     const s = validateShaderQuery(ctx, shader);
     if (s === null) return;
-    doCompileShader(ctx, s);
+    resetShaderCompileState(s);
+    if (khrEnabled(ctx)) {
+      enqueueCompile(ctx, s); // deferred: 4 chunks, COMPLETION_STATUS_KHR stays false meanwhile
+    } else {
+      doCompileShader(ctx, s); // synchronous (unchanged)
+    }
   };
 
   proto.getShaderParameter = function (this: WebGLRenderingContext, shader: WebGLShader, pname: GLenum): any {
     const ctx = this;
+    // KHR: COMPLETION_STATUS_KHR is TRUE while the context is lost — checked
+    // BEFORE the lost/validation guards (the objects were created before loss
+    // and are invalidated; the pending work is moot).
+    if (pname === CExt.COMPLETION_STATUS_KHR && ctx._isLost) return true;
     if (isLost(ctx)) return null;
     const s = validateShaderQuery(ctx, shader);
     if (s === null) return null;
     switch (pname) {
       case C1.COMPILE_STATUS:
+        ensureShaderCompiled(ctx, s); // trigger: status reflects real compilation
         return s._compileStatus;
       case C1.DELETE_STATUS:
+        ensureShaderCompiled(ctx, s);
         return s._deleted;
       case C1.SHADER_TYPE:
+        ensureShaderCompiled(ctx, s);
         return s._type;
       case CExt.COMPLETION_STATUS_KHR:
-        if (ctx.getExtension('KHR_parallel_shader_compile') !== null) return true;
-        ctx._errors.push(C1.INVALID_ENUM);
-        return null;
+        // Boolean "no pending work" — MUST NOT trigger anything (the CTS page
+        // measures query latency ≤ 100ms). Extension not enabled →
+        // INVALID_ENUM + null (checked BEFORE getExtension is called).
+        if (!khrEnabled(ctx)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        }
+        return !isShaderPending(s);
       default:
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
@@ -670,6 +900,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return null;
     const s = validateShaderQuery(ctx, shader);
     if (s === null) return null;
+    ensureShaderCompiled(ctx, s); // trigger: log reflects real compilation
     return s._infoLog;
   };
 
@@ -756,6 +987,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return null;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return null;
+      ensureProgramLinked(ctx, p);
       return Array.from(p._attachedShaders);
     };
 
@@ -772,6 +1004,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     }
     const p = validateProgram(ctx, program);
     if (p === null) return;
+    ensureProgramLinked(ctx, p); // trigger: only a linked program can be used
     if (!p._linkStatus || p._program === null) {
       // Spec: useProgram on a program that has not been successfully linked
       // generates INVALID_OPERATION (ES 2.0 §2.10.3 / WebGL spec).
@@ -832,7 +1065,11 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return;
     const p = validateProgram(ctx, program);
     if (p === null) return;
-    doLinkProgram(ctx, p);
+    if (khrEnabled(ctx)) {
+      enqueueLink(ctx, p); // deferred: 1 chunk, COMPLETION_STATUS_KHR stays false meanwhile
+    } else {
+      doLinkProgram(ctx, p); // synchronous (unchanged)
+    }
   };
 
   proto.validateProgram = function (this: WebGLRenderingContext, program: WebGLProgram): void {
@@ -840,6 +1077,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return;
     const p = validateProgram(ctx, program);
     if (p === null) return;
+    ensureProgramLinked(ctx, p); // trigger: VALIDATE_STATUS reflects real link state
     // Software renderer: VALIDATE_STATUS reflects the same link preconditions
     // the draw path enforces (linked program with both stages attached).
     const ok = p._linkStatus && p._program !== null && p._attachedShaders.size > 0;
@@ -848,40 +1086,56 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
 
   proto.getProgramParameter = function (this: WebGLRenderingContext, program: WebGLProgram, pname: GLenum): any {
     const ctx = this;
+    if (pname === CExt.COMPLETION_STATUS_KHR && ctx._isLost) return true;
     if (isLost(ctx)) return null;
     const p = validateProgramQuery(ctx, program);
     if (p === null) return null;
     switch (pname) {
       case C1.DELETE_STATUS:
+        ensureProgramLinked(ctx, p);
         return p._deleted;
       case C1.LINK_STATUS:
+        // Trigger: the CTS growth loop measures REAL link duration via this
+        // query — the deferred work must run synchronously here.
+        ensureProgramLinked(ctx, p);
         return p._linkStatus;
       case C1.VALIDATE_STATUS:
+        ensureProgramLinked(ctx, p);
         return validateStatus.get(p) ?? false;
       case C1.ATTACHED_SHADERS:
+        ensureProgramLinked(ctx, p);
         return p._attachedShaders.size;
       case C1.ACTIVE_ATTRIBUTES: {
+        ensureProgramLinked(ctx, p);
         const pm = programModels.get(p);
         return pm === undefined ? 0 : pm.attributes.length;
       }
       case C1.ACTIVE_UNIFORMS: {
+        ensureProgramLinked(ctx, p);
         const pm = programModels.get(p);
         return pm === undefined ? 0 : pm.uniforms.length;
       }
       case C2.ACTIVE_UNIFORM_BLOCKS: {
+        ensureProgramLinked(ctx, p);
         const pm = programModels.get(p);
         return pm === undefined ? 0 : pm.uniformBlocks.length;
       }
       case C2.TRANSFORM_FEEDBACK_VARYINGS: {
+        ensureProgramLinked(ctx, p);
         const pm = programModels.get(p);
         return pm === undefined ? 0 : pm.transformFeedbackVaryings.length;
       }
       case C2.TRANSFORM_FEEDBACK_BUFFER_MODE:
+        ensureProgramLinked(ctx, p);
         return p._tfBufferMode;
       case CExt.COMPLETION_STATUS_KHR:
-        if (ctx.getExtension('KHR_parallel_shader_compile') !== null) return true;
-        ctx._errors.push(C1.INVALID_ENUM);
-        return null;
+        // Boolean "no pending work" — MUST NOT trigger anything. Extension not
+        // enabled → INVALID_ENUM + null.
+        if (!khrEnabled(ctx)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+        }
+        return !isProgramPending(p);
       default:
         // INFO_LOG_LENGTH / ACTIVE_*_MAX_LENGTH removed from WebGL (CTS
         // program-test expects INVALID_ENUM + null for these).
@@ -895,6 +1149,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return null;
     const p = validateProgramQuery(ctx, program);
     if (p === null) return null;
+    ensureProgramLinked(ctx, p); // trigger: log reflects real link
     return p._infoLog;
   };
 
@@ -903,6 +1158,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return -1;
     const p = validateProgramQuery(ctx, program);
     if (p === null) return -1;
+    ensureProgramLinked(ctx, p); // trigger before reading link state
     if (!p._linkStatus || p._program === null) {
       ctx._errors.push(C1.INVALID_OPERATION); // not linked (spec §5.14.10)
       return -1;
@@ -923,6 +1179,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return null;
     const p = validateProgramQuery(ctx, program);
     if (p === null) return null;
+    ensureProgramLinked(ctx, p); // trigger before reading link state
     if (!p._linkStatus || p._program === null) {
       ctx._errors.push(C1.INVALID_OPERATION); // not linked (spec §5.14.10)
       return null;
@@ -986,6 +1243,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return null;
     const p = validateProgramQuery(ctx, program);
     if (p === null) return null;
+    ensureProgramLinked(ctx, p); // trigger before reading the program model
     const pm = programModels.get(p);
     if (pm === undefined || index >= pm.attributes.length) {
       ctx._errors.push(C1.INVALID_VALUE); // out of range (spec §5.14.10)
@@ -1001,6 +1259,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return null;
     const p = validateProgramQuery(ctx, program);
     if (p === null) return null;
+    ensureProgramLinked(ctx, p); // trigger before reading the program model
     const pm = programModels.get(p);
     if (pm === undefined || index >= pm.uniforms.length) {
       ctx._errors.push(C1.INVALID_VALUE); // out of range (spec §5.14.10)
@@ -1021,6 +1280,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_OPERATION); // location from a different program
       return null;
     }
+    ensureProgramLinked(ctx, p); // trigger before reading link state
     if (!p._linkStatus || p._program === null) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return null;
@@ -1071,6 +1331,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return null;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return null;
+      ensureProgramLinked(ctx, p); // trigger before reading the program model
       const pm = programModels.get(p);
       if (pm === undefined || index >= pm.transformFeedbackVaryings.length) {
         ctx._errors.push(C1.INVALID_VALUE); // out of range (GLES 3.0 §2.12.8)
@@ -1085,6 +1346,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return C2.INVALID_INDEX;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return C2.INVALID_INDEX;
+      ensureProgramLinked(ctx, p); // trigger before reading the program model
       const nm = requireString(uniformBlockName, 'uniformBlockName');
       if (nameTooLong(ctx, nm) || badNameChars(ctx, nm)) return C2.INVALID_INDEX;
       const pm = programModels.get(p);
@@ -1099,6 +1361,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return null;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return null;
+      ensureProgramLinked(ctx, p); // trigger before reading the program model
       const pm = programModels.get(p);
       if (pm === undefined || uniformBlockIndex >= pm.uniformBlocks.length) {
         ctx._errors.push(C1.INVALID_VALUE); // not an active block (spec §5.14.10)
@@ -1138,6 +1401,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return null;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return null;
+      ensureProgramLinked(ctx, p); // trigger before reading the program model
       const pm = programModels.get(p);
       if (pm === undefined || uniformBlockIndex >= pm.uniformBlocks.length) {
         ctx._errors.push(C1.INVALID_VALUE);
@@ -1151,6 +1415,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return;
       const p = validateProgram(ctx, program);
       if (p === null) return;
+      ensureProgramLinked(ctx, p); // trigger before reading the program model
       const pm = programModels.get(p);
       if (pm === undefined || uniformBlockIndex >= pm.uniformBlocks.length) {
         ctx._errors.push(C1.INVALID_VALUE); // GLES 3.0 §2.12.6.5
@@ -1169,6 +1434,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return null;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return null;
+      ensureProgramLinked(ctx, p); // trigger before reading the program model
       const pm = programModels.get(p);
       if (pm === undefined) return null;
       const names = Array.from(uniformNames ?? []).map((n) => requireString(n, 'uniformNames'));
@@ -1202,6 +1468,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return null;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return null;
+      ensureProgramLinked(ctx, p); // trigger before reading the program model
       const pm = programModels.get(p);
       if (pm === undefined) return null;
       switch (pname) {
@@ -1276,6 +1543,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return -1;
       const p = validateProgramQuery(ctx, program);
       if (p === null) return -1;
+      ensureProgramLinked(ctx, p); // trigger before reading the program model
       const nm = requireString(name, 'name');
       if (nameTooLong(ctx, nm) || badNameChars(ctx, nm)) return -1;
       const pm = programModels.get(p);

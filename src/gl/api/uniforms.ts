@@ -45,7 +45,7 @@ import type { WebGLRenderingContext } from '../webgl1';
 import type { WebGL2RenderingContext } from '../webgl2';
 import { C1, C2 } from '../constants';
 import { WebGLUniformLocation } from '../objects';
-import { programModels, linkGen, locGen, elementSlots, getUniformLocationInfo } from './programs';
+import { programModels, linkGen, locGen, elementSlots, getUniformLocationInfo, ensureProgramLinked } from './programs';
 import type { Float32List, GLboolean, GLfloat, GLint, GLuint, Int32List, Uint32List } from '../types';
 
 // FLOAT_MAT2x3..FLOAT_MAT4x3 missing from constants.ts (owned elsewhere) —
@@ -213,6 +213,7 @@ function prepareUniform(ctx: WebGLRenderingContext, loc: unknown): WriteTarget |
     ctx._errors.push(C1.INVALID_OPERATION); // location from a previous link
     return null;
   }
+  ensureProgramLinked(ctx, program); // KHR: finish any deferred link before writing
   const pm = programModels.get(program);
   if (pm === undefined || program._program === null || !program._linkStatus) {
     ctx._errors.push(C1.INVALID_OPERATION);

@@ -36,6 +36,7 @@ import { WebGLShader } from '../objects';
 import { loseContext, restoreContext } from '../lost';
 import { setClipControl } from './clip-state';
 import { buildExtension, isLost } from './util';
+import { ensureShaderCompiled } from '../api/parallel-compile';
 
 // ---------------------------------------------------------------------------
 // WEBGL_lose_context
@@ -84,6 +85,7 @@ export function createWEBGLDebugShaders(ctx: WebGLRenderingContext): object {
       const gl = ctx;
       const s = requireShader(gl, shader);
       if (s === null) return null;
+      ensureShaderCompiled(gl, s); // KHR: finish any deferred compile first
       // The translated source is the source at last compile (programs agent
       // fills _translatedSource at compileShader). '' before any compilation;
       // fall back to _source only once a compile actually succeeded.

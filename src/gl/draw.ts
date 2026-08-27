@@ -84,6 +84,7 @@ import type { VertexExecCtx, AttribSource } from '../glsl/program';
 import type { WebGLProgram } from './objects';
 import type { ProgramModel } from './objects';
 import type { WebGLBuffer, WebGLQuery, WebGLTexture, WebGLTransformFeedback } from './objects';
+import { ensureProgramLinked } from './api/programs';
 
 /** A fully validated, assembled draw request (before rasterizer call). */
 export interface DrawRequest {
@@ -1037,6 +1038,7 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
 
   // 1. Cheap preconditions (full validation in api/draw.ts).
   const prog = s.currentProgram;
+  if (prog !== null) ensureProgramLinked(ctx, prog); // KHR: finish any deferred link
   if (!prog || !prog._linkStatus || !prog._program) {
     pushError(ctx, C1.INVALID_OPERATION);
     return;
@@ -1691,6 +1693,7 @@ function indexTypeSize(type: GLenum): number {
 function validateCommonDraw(ctx: WebGLRenderingContext, mode: GLenum): boolean {
   const s = ctx._state;
   const prog = s.currentProgram;
+  if (prog !== null) ensureProgramLinked(ctx, prog); // KHR: finish any deferred link
   if (!prog || !prog._linkStatus || !prog._program) {
     pushError(ctx, C1.INVALID_OPERATION);
     return false;

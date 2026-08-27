@@ -86,6 +86,7 @@ import {
 } from '../objects';
 import type { WebGLObject } from '../objects';
 import { validateObject } from '../validation';
+import { ensureProgramLinked } from './programs';
 import { defaultVAOState } from '../state';
 import type { VAOState } from '../state';
 import type { GLbitfield, GLboolean, GLenum, GLfloat, GLint, GLuint, GLuint64 } from '../types';
@@ -867,6 +868,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         return;
       }
       const program = s.currentProgram;
+      if (program !== null) ensureProgramLinked(ctx, program); // KHR: finish any deferred link
       if (program === null || !program._linkStatus) {
         ctx._errors.push(C1.INVALID_OPERATION); // no linked program in use
         return;
