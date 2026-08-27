@@ -1382,11 +1382,9 @@
     return n;
   }
   function pointIsVisible(buf, base, stride) {
-    const x = buf[base + X];
-    const y = buf[base + Y];
     const z = buf[base + Z];
     const w = buf[base + W];
-    return -w <= x && x <= w && -w <= y && y <= w && -w <= z && z <= w;
+    return w > 0 && z >= -w && z <= w;
   }
   function applyViewportTransform(buf, base, stride, count, viewport, depthRange) {
     for (let i = 0; i < count; i++) {
@@ -2995,21 +2993,21 @@
       const inside = px <= maxX && py <= maxY && (e0 > 0 || e0 === 0 && tl0) && (e1 > 0 || e1 === 0 && tl1) && (e2 > 0 || e2 === 0 && tl2);
       if (!fill) return inside;
       const l0 = e0 * invArea, l1 = e1 * invArea, l2 = e2 * invArea;
-      const wDenom = l0 * invW0 + l1 * invW1 + l2 * invW2;
+      const wDenom = l1 * invW0 + l2 * invW1 + l0 * invW2;
       const base = slot * n;
       if (isFinite(wDenom) && Math.abs(wDenom) >= 1e-15) {
         const w = 1 / wDenom;
         for (let c = 0; c < n; c++) {
-          quadV[base + c] = (l0 * buf[vary0 + c] * invW0 + l1 * buf[vary1 + c] * invW1 + l2 * buf[vary2 + c] * invW2) * w;
+          quadV[base + c] = (l1 * buf[vary0 + c] * invW0 + l2 * buf[vary1 + c] * invW1 + l0 * buf[vary2 + c] * invW2) * w;
         }
         quadW[slot] = w;
       } else {
         for (let c = 0; c < n; c++) {
-          quadV[base + c] = l0 * buf[vary0 + c] + l1 * buf[vary1 + c] + l2 * buf[vary2 + c];
+          quadV[base + c] = l1 * buf[vary0 + c] + l2 * buf[vary1 + c] + l0 * buf[vary2 + c];
         }
         quadW[slot] = 1;
       }
-      quadDepth[slot] = l0 * z0 + l1 * z1 + l2 * z2 + polyOffset;
+      quadDepth[slot] = l1 * z0 + l2 * z1 + l0 * z2 + polyOffset;
       quadPC[slot * 2] = 0;
       quadPC[slot * 2 + 1] = 0;
       return inside;
@@ -3494,20 +3492,24 @@
       return;
     }
     if (isUniformStorage(info)) {
-      const n = info.components;
-      const cs = compSize(info.storage);
-      if (info.normalized) {
-        const div = normDivisor(info.storage);
-        const isSigned = info.isSigned;
-        for (let c = 0; c < n; c++) {
-          const raw = readComp(entry, info.storage, byteOffset + c * cs);
-          const x = raw / div;
-          out[c] = isSigned ? x < -1 ? -1 : x : x;
-        }
+      if (info.format === ALPHA || info.format === LUMINANCE || info.format === LUMINANCE_ALPHA) {
+        info.decode(entry, byteOffset, out);
       } else {
-        for (let c = 0; c < n; c++) out[c] = readComp(entry, info.storage, byteOffset + c * cs);
+        const n = info.components;
+        const cs = compSize(info.storage);
+        if (info.normalized) {
+          const div = normDivisor(info.storage);
+          const isSigned = info.isSigned;
+          for (let c = 0; c < n; c++) {
+            const raw = readComp(entry, info.storage, byteOffset + c * cs);
+            const x = raw / div;
+            out[c] = isSigned ? x < -1 ? -1 : x : x;
+          }
+        } else {
+          for (let c = 0; c < n; c++) out[c] = readComp(entry, info.storage, byteOffset + c * cs);
+        }
+        for (let c = n; c < 4; c++) out[c] = c === 3 ? 1 : 0;
       }
-      for (let c = n; c < 4; c++) out[c] = c === 3 ? 1 : 0;
     } else {
       info.decode(entry, byteOffset, out);
     }
@@ -4297,8 +4299,8 @@
               clipB,
               stride,
               flatRanges,
-              runBase + j,
-              runBase + j + 1,
+              runBase + j + (j & 1),
+              runBase + j + 1 - (j & 1),
               runBase + j + 2
             );
           }
@@ -4436,7 +4438,7 @@
     const nv = clipPrimitive(primBuf, 0, stride, 3, clipA, clipB, 0);
     if (nv === 0) return;
     applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange);
-    const area = signedArea2(clipB, 0, 1, 2, stride);
+    const area = signedArea2(clipB, 0, stride, 2 * stride, stride);
     const frontFacing = dc.cull.frontFace === CCW ? area > 0 : area < 0;
     if (dc.cull.enabled) {
       const face = dc.cull.face;
@@ -4461,7 +4463,7 @@
     rasterizeLine(clipB, 0, stride, stride, rs);
   }
   function emitPoint(dc, rs, primBuf, stride, ia) {
-    copyRecord2(dc.vertices, ia, primBuf, 0, stride);
+    copyRecord2(dc.vertices, ia * stride, primBuf, 0, stride);
     if (!pointIsVisible(primBuf, 0, stride)) return;
     applyViewportTransform(primBuf, 0, stride, 1, dc.viewport, dc.depthRange);
     rs.frontFacing = false;
@@ -5444,7 +5446,7 @@
   }
   function extSupported(ctx, name) {
     try {
-      return ctx.getExtension(name) !== null;
+      return ctx._extensions.has(name);
     } catch {
       return false;
     }
@@ -5825,6 +5827,8 @@
     const attribs = new Array(maxAttribs);
     const plans = new Array(maxAttribs);
     const attrs = (_a2 = pm.attributes) != null ? _a2 : [];
+    const extract = [];
+    const totals = { floatPool: 0, intPool: 0, uintPool: 0 };
     for (const pa of attrs) {
       const loc = pa.location;
       if (loc < 0 || loc >= maxAttribs) continue;
@@ -5851,42 +5855,88 @@
         const comps = pa.components;
         const elemCount = a.divisor > 0 ? Math.ceil(req.instanceCount / a.divisor) : req.count;
         const colOffset = col * (dims ? dims.rows * typeSize : 0);
-        const dv = new DataView(data);
-        if (a.integer) {
-          const unsigned = a.type === C1.UNSIGNED_BYTE || a.type === C1.UNSIGNED_SHORT || a.type === C1.UNSIGNED_INT;
-          const need = elemCount * comps;
-          ensurePool(sc, unsigned ? "uintPool" : "intPool", need);
-          const dst = unsigned ? new Uint32Array(sc.uintPool.buffer, 0, need) : new Int32Array(sc.intPool.buffer, 0, need);
-          for (let e = 0; e < elemCount; e++) {
-            const element = a.divisor > 0 ? e : indices ? indices[e] : req.firstOrOffset + e;
-            const byteOff = a.offset + element * stride + colOffset;
-            for (let c = 0; c < comps; c++) {
-              let v2 = 0;
-              if (c < a.size && byteOff + c * typeSize + typeSize <= data.byteLength) {
-                v2 = readIntComponent(dv, a.type, byteOff + c * typeSize);
-              }
-              dst[e * comps + c] = c < a.size ? v2 : c === 3 ? 1 : 0;
+        const need = elemCount * comps;
+        const integer = a.integer;
+        const unsigned = integer && (a.type === C1.UNSIGNED_BYTE || a.type === C1.UNSIGNED_SHORT || a.type === C1.UNSIGNED_INT);
+        const pool = integer ? unsigned ? "uintPool" : "intPool" : "floatPool";
+        totals[pool] += need;
+        extract.push({
+          l,
+          pool,
+          need,
+          elemCount,
+          comps,
+          data,
+          dv: new DataView(data),
+          typeSize,
+          stride,
+          colOffset,
+          divisor: a.divisor,
+          integer,
+          unsigned,
+          normalized: a.normalized,
+          aSize: a.size,
+          aType: a.type,
+          aOffset: a.offset
+        });
+      }
+    }
+    if (totals.floatPool > 0) ensurePool(sc, "floatPool", totals.floatPool);
+    if (totals.intPool > 0) ensurePool(sc, "intPool", totals.intPool);
+    if (totals.uintPool > 0) ensurePool(sc, "uintPool", totals.uintPool);
+    let floatBase = 0, intBase = 0, uintBase = 0;
+    for (const ex of extract) {
+      const {
+        l,
+        pool,
+        need,
+        elemCount,
+        comps,
+        data,
+        dv,
+        typeSize,
+        stride,
+        colOffset,
+        divisor,
+        integer,
+        unsigned,
+        normalized,
+        aSize,
+        aType,
+        aOffset
+      } = ex;
+      if (integer) {
+        const base = unsigned ? uintBase : intBase;
+        const dst = unsigned ? new Uint32Array(sc.uintPool.buffer, base * 4, need) : new Int32Array(sc.intPool.buffer, base * 4, need);
+        if (unsigned) uintBase += need;
+        else intBase += need;
+        for (let e = 0; e < elemCount; e++) {
+          const element = divisor > 0 ? e : indices ? indices[e] : req.firstOrOffset + e;
+          const byteOff = aOffset + element * stride + colOffset;
+          for (let c = 0; c < comps; c++) {
+            let v2 = 0;
+            if (c < aSize && byteOff + c * typeSize + typeSize <= data.byteLength) {
+              v2 = readIntComponent(dv, aType, byteOff + c * typeSize);
             }
+            dst[e * comps + c] = c < aSize ? v2 : c === 3 ? 1 : 0;
           }
-          attribs[l] = dst;
-        } else {
-          const need = elemCount * comps;
-          ensurePool(sc, "floatPool", need);
-          const dst = new Float32Array(sc.floatPool.buffer, 0, need);
-          const normalized = a.normalized;
-          for (let e = 0; e < elemCount; e++) {
-            const element = a.divisor > 0 ? e : indices ? indices[e] : req.firstOrOffset + e;
-            const byteOff = a.offset + element * stride + colOffset;
-            for (let c = 0; c < comps; c++) {
-              let v2 = 0;
-              if (c < a.size && byteOff + c * typeSize + typeSize <= data.byteLength) {
-                v2 = readFloatComponent(dv, a.type, byteOff + c * typeSize, normalized);
-              }
-              dst[e * comps + c] = c < a.size ? v2 : c === 3 ? 1 : 0;
-            }
-          }
-          attribs[l] = dst;
         }
+        attribs[l] = dst;
+      } else {
+        const dst = new Float32Array(sc.floatPool.buffer, floatBase * 4, need);
+        floatBase += need;
+        for (let e = 0; e < elemCount; e++) {
+          const element = divisor > 0 ? e : indices ? indices[e] : req.firstOrOffset + e;
+          const byteOff = aOffset + element * stride + colOffset;
+          for (let c = 0; c < comps; c++) {
+            let v2 = 0;
+            if (c < aSize && byteOff + c * typeSize + typeSize <= data.byteLength) {
+              v2 = readFloatComponent(dv, aType, byteOff + c * typeSize, normalized);
+            }
+            dst[e * comps + c] = c < aSize ? v2 : c === 3 ? 1 : 0;
+          }
+        }
+        attribs[l] = dst;
       }
     }
     for (let l = 0; l < maxAttribs; l++) {
@@ -6009,7 +6059,7 @@
     };
   }
   function buildTextureEnv(ctx, pm) {
-    var _a2, _b;
+    var _a2, _b, _c;
     const s = ctx._state;
     const numUnits = s.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS;
     const images = new Array(numUnits).fill(null);
@@ -6022,17 +6072,20 @@
     if (intStore) {
       for (const u of uniforms) {
         if (!u.sampler) continue;
-        const unit = (_b = intStore[u.location]) != null ? _b : 0;
-        if (unit < 0 || unit >= numUnits) continue;
-        const key = samplerTargetKey(u.type);
-        const unitState = s.textureUnits[unit];
-        const tex2 = unitState[key];
-        if (!tex2 || !tex2._image) continue;
-        const img = tex2._image;
-        const st = effectiveSamplerState(tex2, unitState.sampler);
-        images[unit] = img;
-        samplerStates[unit] = st;
-        bindings[unit] = { img, state: st };
+        const size = (_b = u.size) != null ? _b : 1;
+        for (let e = 0; e < size; e++) {
+          const unit = (_c = intStore[u.location + e]) != null ? _c : 0;
+          if (unit < 0 || unit >= numUnits) continue;
+          const key = samplerTargetKey(u.type);
+          const unitState = s.textureUnits[unit];
+          const tex2 = unitState[key];
+          if (!tex2 || !tex2._image) continue;
+          const img = tex2._image;
+          const st = effectiveSamplerState(tex2, unitState.sampler);
+          images[unit] = img;
+          samplerStates[unit] = st;
+          bindings[unit] = { img, state: st };
+        }
       }
     }
     return { images, samplerStates, bindings };
@@ -9272,6 +9325,9 @@
     if (ctx._version !== 2) return false;
     return usage === GL_STREAM_READ || usage === GL_STREAM_COPY || usage === GL_STATIC_READ || usage === GL_STATIC_COPY || usage === GL_DYNAMIC_READ || usage === GL_DYNAMIC_COPY;
   }
+  function isSharedArrayBuffer(v2) {
+    return typeof SharedArrayBuffer !== "undefined" && v2 instanceof SharedArrayBuffer;
+  }
   function tfBindingAtIndex(ctx, index) {
     for (const obj of ctx._resources.all) {
       if (obj instanceof WebGLBuffer) {
@@ -9563,24 +9619,13 @@
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
-      if (typeof size === "number") {
-        if (size < 0) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        const n = Math.trunc(size);
-        let data;
-        try {
-          data = new ArrayBuffer(n);
-        } catch {
-          ctx._errors.push(C1.OUT_OF_MEMORY);
-          return;
-        }
-        buf._data = data;
-        buf._size = n;
-      } else {
+      if (size === null || size === void 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (size instanceof ArrayBuffer || ArrayBuffer.isView(size) || isSharedArrayBuffer(size)) {
         const data = requireBufferData(size, "size");
-        const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        const bytes = isSharedArrayBuffer(data) ? new Uint8Array(data) : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
         let copy;
         try {
           copy = new ArrayBuffer(bytes.byteLength);
@@ -9591,6 +9636,22 @@
         new Uint8Array(copy).set(bytes);
         buf._data = copy;
         buf._size = bytes.byteLength;
+      } else {
+        const raw = Number(size);
+        const n = Number.isFinite(raw) ? Math.trunc(raw) : 0;
+        if (n < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        let data;
+        try {
+          data = new ArrayBuffer(n);
+        } catch {
+          ctx._errors.push(C1.OUT_OF_MEMORY);
+          return;
+        }
+        buf._data = data;
+        buf._size = n;
       }
       buf._usage = usage;
     };
@@ -13696,13 +13757,18 @@
       }
       return;
     }
-    if (behavior === "require" || behavior === "enable") {
+    if (behavior === "require") {
       if (!st.opts.extensions || !st.opts.extensions.has(name)) {
         st.errors.push({ line: remap(st, line), message: `extension '${name}' is not supported` });
       } else {
         st.macros.set(name, simpleMacro(name, "1"));
+        st.extState.set(name, behavior);
       }
-      st.extState.set(name, behavior);
+    } else if (behavior === "enable") {
+      if (st.opts.extensions && st.opts.extensions.has(name)) {
+        st.macros.set(name, simpleMacro(name, "1"));
+        st.extState.set(name, behavior);
+      }
     } else if (behavior === "warn") {
       st.extState.set(name, "warn");
     } else {
@@ -14899,7 +14965,7 @@
             p.next();
             continue;
           }
-          if (p.version === 100 && (name === "in" || name === "out" || name === "inout")) {
+          if (p.version === 100 && (name === "in" || name === "out" || name === "inout") && !ctx.param) {
             p.error(t.line, `'${name}' is reserved in GLSL ES 1.00`);
             p.next();
             continue;
@@ -15301,6 +15367,19 @@
     return all;
   };
   var rel = (name) => [2, 3, 4].map((n) => sig(name, [vec(n), vec(n)], { kind: "vector", base: "bool", size: n }));
+  var bvecN = (n) => ({ kind: "vector", base: "bool", size: n });
+  var relational100 = [
+    ...[2, 3, 4].flatMap((n) => [
+      sig("lessThan", [ivec(n), ivec(n)], bvecN(n)),
+      sig("lessThanEqual", [ivec(n), ivec(n)], bvecN(n)),
+      sig("greaterThan", [ivec(n), ivec(n)], bvecN(n)),
+      sig("greaterThanEqual", [ivec(n), ivec(n)], bvecN(n)),
+      sig("equal", [ivec(n), ivec(n)], bvecN(n)),
+      sig("equal", [bvec(n), bvec(n)], bvecN(n)),
+      sig("notEqual", [ivec(n), ivec(n)], bvecN(n)),
+      sig("notEqual", [bvec(n), bvec(n)], bvecN(n))
+    ])
+  ];
   var boolFn = (name) => [2, 3, 4].map((n) => sig(name, [{ kind: "vector", base: "bool", size: n }], { kind: "vector", base: "bool", size: n }));
   var boolToScalar = (name) => [2, 3, 4].map((n) => sig(name, [{ kind: "vector", base: "bool", size: n }], B));
   var builtinFunctions100 = [
@@ -15374,7 +15453,9 @@
     ...[2, 3, 4].map((n) => sig("determinant", [mat(n)], F)),
     ...[2, 3, 4].map((n) => sig("inverse", [mat(n)], mat(n))),
     /* ------------------------------------------------------------------ */
-    /* §8.6 Vector Relational Functions (float vectors only in ES 1.00)    */
+    /* §8.6 Vector Relational Functions — FLOAT variants only here (the     */
+    /* ES 1.00 int/bool variants live in `relational100`, merged by          */
+    /* builtinSignatures(100); see the `rel` helper comment).                */
     /* ------------------------------------------------------------------ */
     ...rel("lessThan"),
     ...rel("lessThanEqual"),
@@ -15405,6 +15486,15 @@
     // bias
     sig("textureCubeLod", [smp("samplerCube"), V3, F], V4, { stage: "VERTEX" })
   ];
+  var depthRangeParams = {
+    kind: "struct",
+    name: "gl_DepthRangeParameters",
+    members: [
+      { name: "near", type: F },
+      { name: "far", type: F },
+      { name: "diff", type: F }
+    ]
+  };
   var builtinVariables100 = [
     { name: "gl_Position", type: V4, stage: "VERTEX", writable: true },
     { name: "gl_PointSize", type: F, stage: "VERTEX", writable: true },
@@ -15414,7 +15504,14 @@
     { name: "gl_FragColor", type: V4, stage: "FRAGMENT", writable: true },
     // Core ES 1.00: size = gl_MaxDrawBuffers (1 in WebGL 1.0). GL_EXT_draw_buffers
     // overrides this entry with a size-4 array (extensions.ts).
-    { name: "gl_FragData", type: arr(V4, 1), stage: "FRAGMENT", writable: true }
+    { name: "gl_FragData", type: arr(V4, 1), stage: "FRAGMENT", writable: true },
+    // Core ES 1.00 §7.6 built-in uniform state (usable in BOTH stages):
+    // `uniform gl_DepthRangeParameters { float near; float far; float diff; }
+    //  gl_DepthRange;`. Member reads (gl_DepthRange.near) resolve via the struct
+    // type (semantics analyzeMember). NOTE: codegen has no gl_DepthRange
+    // lowering yet (codegen/env.ts builtinRef + the member walker) — LINK of a
+    // shader reading it is not supported; compile is.
+    { name: "gl_DepthRange", type: depthRangeParams, stage: "BOTH", writable: false }
   ];
   var builtinConstants100 = [
     { name: "gl_MaxVertexAttribs", value: 16 },
@@ -15714,6 +15811,15 @@
     ...integer300,
     ...texture300
   ];
+  var depthRangeParams2 = {
+    kind: "struct",
+    name: "gl_DepthRangeParameters",
+    members: [
+      { name: "near", type: F },
+      { name: "far", type: F },
+      { name: "diff", type: F }
+    ]
+  };
   var builtinVariables300 = [
     { name: "gl_Position", type: V4, stage: "VERTEX", writable: true },
     { name: "gl_PointSize", type: F, stage: "VERTEX", writable: true },
@@ -15722,7 +15828,14 @@
     { name: "gl_PointCoord", type: V2, stage: "FRAGMENT", writable: false },
     { name: "gl_VertexID", type: I, stage: "VERTEX", writable: false },
     { name: "gl_InstanceID", type: I, stage: "VERTEX", writable: false },
-    { name: "gl_FragDepth", type: F, stage: "FRAGMENT", writable: true }
+    { name: "gl_FragDepth", type: F, stage: "FRAGMENT", writable: true },
+    // GLSL ES 3.00 §7.7 built-in uniform state (usable in BOTH stages):
+    // `uniform gl_DepthRangeParameters { float near; float far; float diff; }
+    //  gl_DepthRange;`. Member reads (gl_DepthRange.near) resolve via the struct
+    // type (semantics analyzeMember). NOTE: codegen has no gl_DepthRange
+    // lowering yet (codegen/env.ts builtinRef + the member walker) — LINK of a
+    // shader reading it is not supported; compile is.
+    { name: "gl_DepthRange", type: depthRangeParams2, stage: "BOTH", writable: false }
   ];
   var builtinConstants300 = [
     { name: "gl_MaxVertexAttribs", value: 16 },
@@ -15748,9 +15861,396 @@
   ];
 
   // src/glsl/builtins/index.ts
-  var builtinSignatures = (version) => version === 300 ? builtinFunctions300 : builtinFunctions100;
+  var builtinSignatures100 = [...builtinFunctions100, ...relational100];
+  var builtinSignatures = (version) => version === 300 ? builtinFunctions300 : builtinSignatures100;
   var builtinVariables = (version) => version === 300 ? builtinVariables300 : builtinVariables100;
   var builtinConstants = (version) => version === 300 ? builtinConstants300 : builtinConstants100;
+
+  // src/glsl/semantics-const.ts
+  function flatSize(t) {
+    var _a2;
+    switch (t.kind) {
+      case "scalar":
+        return 1;
+      case "vector":
+        return t.size;
+      case "matrix":
+        return t.cols * t.rows;
+      case "struct": {
+        let n = 0;
+        for (const m of t.members) n += flatSize(m.type);
+        return n;
+      }
+      case "array":
+        return ((_a2 = t.size) != null ? _a2 : 0) * flatSize(t.element);
+      default:
+        return 0;
+    }
+  }
+  function baseOf(t) {
+    return t.kind === "scalar" || t.kind === "vector" ? t.base : "float";
+  }
+  function evalConstExpr(e, scope, ctx) {
+    var _a2;
+    switch (e.kind) {
+      case "literal":
+        return [e.value];
+      case "identifier":
+        return evalConstIdentifier(e, scope);
+      case "member": {
+        const ot = e.object.resolvedType;
+        if (ot === void 0) return void 0;
+        const obj = evalConstExpr(e.object, scope, ctx);
+        if (obj === void 0) return void 0;
+        if (ot.kind === "struct") {
+          let off = 0;
+          for (const m of ot.members) {
+            const sz = flatSize(m.type);
+            if (m.name === e.name) return obj.slice(off, off + sz);
+            off += sz;
+          }
+          return void 0;
+        }
+        if (ot.kind === "vector") {
+          const idx = swizzleIndices(ot.size, e.name);
+          if (idx === null) return void 0;
+          return idx.map((i) => obj[i]);
+        }
+        return void 0;
+      }
+      case "index": {
+        const ot = e.object.resolvedType;
+        if (ot === void 0) return void 0;
+        const obj = evalConstExpr(e.object, scope, ctx);
+        if (obj === void 0) return void 0;
+        const iv = evalConstExpr(e.index, scope, ctx);
+        if (iv === void 0 || iv.length !== 1 || typeof iv[0] !== "number" || !Number.isInteger(iv[0])) {
+          return void 0;
+        }
+        const i = iv[0];
+        switch (ot.kind) {
+          case "vector":
+            if (i < 0 || i >= ot.size) return void 0;
+            return [obj[i]];
+          case "matrix": {
+            if (i < 0 || i >= ot.cols) return void 0;
+            return obj.slice(i * ot.rows, i * ot.rows + ot.rows);
+          }
+          case "array": {
+            const esz = flatSize(ot.element);
+            if (i < 0 || i >= ((_a2 = ot.size) != null ? _a2 : 0)) return void 0;
+            return obj.slice(i * esz, (i + 1) * esz);
+          }
+          default:
+            return void 0;
+        }
+      }
+      case "unary": {
+        const ot = e.operand.resolvedType;
+        if (ot === void 0) return void 0;
+        const op = evalConstExpr(e.operand, scope, ctx);
+        if (op === void 0) return void 0;
+        switch (e.op) {
+          case "+":
+            return op;
+          case "-": {
+            const base = baseOf(ot);
+            const out = [];
+            for (const v2 of op) {
+              if (typeof v2 !== "number") return void 0;
+              out.push(base === "uint" ? -v2 >>> 0 : base === "int" ? -v2 | 0 : -v2);
+            }
+            return out;
+          }
+          case "~": {
+            const base = baseOf(ot);
+            const out = [];
+            for (const v2 of op) {
+              if (typeof v2 !== "number") return void 0;
+              out.push(base === "uint" ? ~v2 >>> 0 : ~v2 | 0);
+            }
+            return out;
+          }
+          case "!": {
+            if (op.length !== 1 || typeof op[0] !== "boolean") return void 0;
+            return [!op[0]];
+          }
+          default:
+            return void 0;
+        }
+      }
+      case "binary":
+        return evalConstBinary(e, scope, ctx);
+      case "ternary": {
+        const c = evalConstExpr(e.cond, scope, ctx);
+        if (c === void 0 || c.length !== 1 || typeof c[0] !== "boolean") return void 0;
+        return evalConstExpr(c[0] ? e.whenTrue : e.whenFalse, scope, ctx);
+      }
+      case "comma": {
+        const last = e.exprs[e.exprs.length - 1];
+        return last === void 0 ? void 0 : evalConstExpr(last, scope, ctx);
+      }
+      case "call":
+        return evalConstCall(e, scope, ctx);
+      default:
+        return void 0;
+    }
+  }
+  function evalConstIdentifier(e, scope) {
+    const sym = scope.lookup(e.name);
+    if (sym === void 0) return void 0;
+    switch (sym.kind) {
+      case "var":
+        if (sym.storage !== "const") return void 0;
+        if (sym.constData !== void 0) return sym.constData;
+        if (sym.constValue !== void 0) return [sym.constValue];
+        return void 0;
+      case "builtin-const":
+        return [sym.value];
+      default:
+        return void 0;
+    }
+  }
+  function swizzleIndices(size, name) {
+    if (name.length === 0 || name.length > 4) return null;
+    let set = null;
+    const out = [];
+    for (const ch of name) {
+      let found = false;
+      for (const s of SWIZZLE_SETS) {
+        const i = s.indexOf(ch);
+        if (i >= 0) {
+          if (set !== null && set !== s) return null;
+          set = s;
+          if (i >= size) return null;
+          out.push(i);
+          found = true;
+          break;
+        }
+      }
+      if (!found) return null;
+    }
+    return out;
+  }
+  function evalConstBinary(e, scope, ctx) {
+    const lt = e.left.resolvedType;
+    const rt = e.right.resolvedType;
+    if (lt === void 0 || rt === void 0) return void 0;
+    const lv = evalConstExpr(e.left, scope, ctx);
+    const rv = evalConstExpr(e.right, scope, ctx);
+    if (lv === void 0 || rv === void 0) return void 0;
+    const op = e.op;
+    if (op === "*") {
+      if (lt.kind === "matrix" && rt.kind === "matrix") {
+        const aRows = lt.rows;
+        const aCols = lt.cols;
+        const bRows = rt.rows;
+        const out2 = [];
+        for (let c = 0; c < rt.cols; c++) {
+          for (let r = 0; r < aRows; r++) {
+            let s = 0;
+            for (let k = 0; k < aCols; k++) {
+              s += lv[k * aRows + r] * rv[c * bRows + k];
+            }
+            out2.push(s);
+          }
+        }
+        return out2;
+      }
+      if (lt.kind === "matrix" && rt.kind === "vector") {
+        const R2 = lt.rows;
+        const C3 = lt.cols;
+        const out2 = [];
+        for (let r = 0; r < R2; r++) {
+          let s = 0;
+          for (let c = 0; c < C3; c++) s += lv[c * R2 + r] * rv[c];
+          out2.push(s);
+        }
+        return out2;
+      }
+      if (lt.kind === "vector" && rt.kind === "matrix") {
+        const R2 = rt.rows;
+        const C3 = rt.cols;
+        const out2 = [];
+        for (let c = 0; c < C3; c++) {
+          let s = 0;
+          for (let r = 0; r < R2; r++) s += lv[r] * rv[c * R2 + r];
+          out2.push(s);
+        }
+        return out2;
+      }
+    }
+    if (op === "&&" || op === "||" || op === "^^" || op === "<" || op === ">" || op === "<=" || op === ">=") {
+      if (lv.length !== 1 || rv.length !== 1) return void 0;
+      const r = foldBinary(op, lt, rt, lv[0], rv[0], ctx.version);
+      return r === void 0 ? void 0 : [r];
+    }
+    if (op === "==" || op === "!=") {
+      if (lv.length === 1 && rv.length === 1) {
+        const r = foldBinary(op, lt, rt, lv[0], rv[0], ctx.version);
+        return r === void 0 ? void 0 : [r];
+      }
+      if (lv.length !== rv.length) return void 0;
+      let eq = true;
+      for (let i = 0; i < lv.length; i++) {
+        const p = foldBinary("==", lt, rt, lv[i], rv[i], ctx.version);
+        if (typeof p !== "boolean") return void 0;
+        if (!p) eq = false;
+      }
+      return [op === "==" ? eq : !eq];
+    }
+    const n = Math.max(lv.length, rv.length);
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      if (lv.length !== 1 && i >= lv.length) return void 0;
+      if (rv.length !== 1 && i >= rv.length) return void 0;
+      const a = lv.length === 1 ? lv[0] : lv[i];
+      const b = rv.length === 1 ? rv[0] : rv[i];
+      const r = foldBinary(op, lt, rt, a, b, ctx.version);
+      if (r === void 0) return void 0;
+      out.push(r);
+    }
+    return out;
+  }
+  function evalConstCall(e, scope, ctx) {
+    const t = e.resolvedType;
+    if (t === void 0) return void 0;
+    const callee = e.callee;
+    if (callee.kind === "index") {
+      if (t.kind !== "array") return void 0;
+      return evalArrayCtor(e, t, scope, ctx);
+    }
+    if (callee.kind !== "identifier") return void 0;
+    const name = callee.name;
+    if (builtinType(name, ctx.version) !== void 0 || isStructName(name, scope)) {
+      return evalCtor(e, t, scope, ctx);
+    }
+    if (e.constValue !== void 0) return [e.constValue];
+    return void 0;
+  }
+  function isStructName(name, scope) {
+    const s = scope.lookup(name);
+    return s !== void 0 && s.kind === "struct";
+  }
+  function evalCtor(e, t, scope, ctx) {
+    switch (t.kind) {
+      case "scalar": {
+        const a = e.args[0];
+        const at = a !== void 0 ? a.resolvedType : void 0;
+        if (at === void 0) return void 0;
+        const av = evalConstExpr(a, scope, ctx);
+        if (av === void 0 || av.length === 0) return void 0;
+        return [convertConst(av[0], baseOf(at), t.base)];
+      }
+      case "vector":
+        return evalVectorCtor(e, t, scope, ctx);
+      case "matrix":
+        return evalMatrixCtor(e, t, scope, ctx);
+      case "struct":
+        return evalStructCtor(e, t, scope, ctx);
+      case "array":
+        return evalArrayCtor(e, t, scope, ctx);
+      default:
+        return void 0;
+    }
+  }
+  function evalVectorCtor(e, t, scope, ctx) {
+    var _a2;
+    const n = t.size;
+    const args = e.args;
+    if (args.length === 1 && ((_a2 = args[0].resolvedType) == null ? void 0 : _a2.kind) === "scalar") {
+      const at = args[0].resolvedType;
+      const av = evalConstExpr(args[0], scope, ctx);
+      if (av === void 0) return void 0;
+      const c = convertConst(av[0], at.base, t.base);
+      const out = [];
+      for (let i = 0; i < n; i++) out.push(c);
+      return out;
+    }
+    const flat = [];
+    for (const a of args) {
+      const at = a.resolvedType;
+      if (at === void 0) return void 0;
+      const av = evalConstExpr(a, scope, ctx);
+      if (av === void 0) return void 0;
+      const from = at.kind === "scalar" || at.kind === "vector" ? at.base : "float";
+      for (const v2 of av) flat.push(convertConst(v2, from, t.base));
+    }
+    if (flat.length < n) return void 0;
+    return flat.slice(0, n);
+  }
+  function evalMatrixCtor(e, t, scope, ctx) {
+    const cols = t.cols;
+    const rows = t.rows;
+    const total = cols * rows;
+    const args = e.args;
+    if (args.length === 1) {
+      const at = args[0].resolvedType;
+      if (at === void 0) return void 0;
+      const av = evalConstExpr(args[0], scope, ctx);
+      if (av === void 0) return void 0;
+      if (at.kind === "scalar") {
+        const c = convertConst(av[0], at.base, "float");
+        const out2 = [];
+        for (let c2 = 0; c2 < cols; c2++) {
+          for (let r = 0; r < rows; r++) out2.push(c2 === r ? c : 0);
+        }
+        return out2;
+      }
+      if (at.kind === "matrix") {
+        const out2 = [];
+        for (let c2 = 0; c2 < cols; c2++) {
+          for (let r = 0; r < rows; r++) {
+            if (c2 < at.cols && r < at.rows) out2.push(av[c2 * at.rows + r]);
+            else out2.push(c2 === r ? 1 : 0);
+          }
+        }
+        return out2;
+      }
+    }
+    const flat = [];
+    for (const a of args) {
+      const at = a.resolvedType;
+      if (at === void 0) return void 0;
+      const av = evalConstExpr(a, scope, ctx);
+      if (av === void 0) return void 0;
+      const from = at.kind === "scalar" || at.kind === "vector" ? at.base : "float";
+      for (const v2 of av) flat.push(convertConst(v2, from, "float"));
+    }
+    if (flat.length < total) return void 0;
+    const out = [];
+    for (let k = 0; k < total; k++) {
+      if (k < flat.length) out.push(flat[k]);
+      else out.push(Math.floor(k / rows) === k % rows ? 1 : 0);
+    }
+    return out;
+  }
+  function evalStructCtor(e, t, scope, ctx) {
+    if (e.args.length !== t.members.length) return void 0;
+    const out = [];
+    for (let i = 0; i < t.members.length; i++) {
+      const at = e.args[i].resolvedType;
+      if (at === void 0) return void 0;
+      const av = evalConstExpr(e.args[i], scope, ctx);
+      if (av === void 0) return void 0;
+      if (av.length !== flatSize(t.members[i].type)) return void 0;
+      out.push(...av);
+    }
+    return out;
+  }
+  function evalArrayCtor(e, t, scope, ctx) {
+    var _a2;
+    const n = (_a2 = t.size) != null ? _a2 : 0;
+    if (e.args.length !== n) return void 0;
+    const esz = flatSize(t.element);
+    const out = [];
+    for (const a of e.args) {
+      const av = evalConstExpr(a, scope, ctx);
+      if (av === void 0 || av.length !== esz) return void 0;
+      out.push(...av);
+    }
+    return out;
+  }
 
   // src/glsl/semantics-expr.ts
   function commonBase(a, b, version) {
@@ -15763,13 +16263,13 @@
     if (a === "int" && b === "uint" || a === "uint" && b === "int") return "uint";
     return null;
   }
+  function sameBase(a, b, version) {
+    void version;
+    return a === b ? a : null;
+  }
   function convertible(from, to, version) {
-    if (typeEquals(from, to)) return true;
-    if (from.kind === "scalar" && to.kind === "scalar") return commonBase(from.base, to.base, version) === to.base;
-    if (from.kind === "vector" && to.kind === "vector" && from.size === to.size) {
-      return commonBase(from.base, to.base, version) === to.base;
-    }
-    return false;
+    void version;
+    return typeEquals(from, to);
   }
   function convertConst(v2, from, to) {
     if (typeof v2 === "boolean") {
@@ -15824,20 +16324,20 @@
   function sameShapeType(lt, rt, version) {
     if (!isNumericScalarOrVector(lt) || !isNumericScalarOrVector(rt)) return null;
     if (lt.kind === "scalar" && rt.kind === "scalar") {
-      const b = commonBase(lt.base, rt.base, version);
+      const b = sameBase(lt.base, rt.base, version);
       return b === null ? null : { kind: "scalar", base: b };
     }
     if (lt.kind === "vector" && rt.kind === "vector") {
       if (lt.size !== rt.size) return null;
-      const b = commonBase(lt.base, rt.base, version);
+      const b = sameBase(lt.base, rt.base, version);
       return b === null ? null : { kind: "vector", base: b, size: lt.size };
     }
     if (lt.kind === "vector" && rt.kind === "scalar") {
-      const b = commonBase(lt.base, rt.base, version);
+      const b = sameBase(lt.base, rt.base, version);
       return b === null ? null : { kind: "vector", base: b, size: lt.size };
     }
     if (lt.kind === "scalar" && rt.kind === "vector") {
-      const b = commonBase(rt.base, lt.base, version);
+      const b = sameBase(rt.base, lt.base, version);
       return b === null ? null : { kind: "vector", base: b, size: rt.size };
     }
     return null;
@@ -15847,8 +16347,8 @@
     if (ss !== null) return ss;
     if (lt.kind === "matrix" || rt.kind === "matrix") {
       if (op === "*") {
-        if (lt.kind === "scalar" && rt.kind === "matrix") return rt;
-        if (lt.kind === "matrix" && rt.kind === "scalar") return lt;
+        if (lt.kind === "scalar" && rt.kind === "matrix") return lt.base === "float" ? rt : null;
+        if (lt.kind === "matrix" && rt.kind === "scalar") return rt.base === "float" ? lt : null;
         if (lt.kind === "matrix" && rt.kind === "matrix") {
           if (lt.rows !== rt.cols) return null;
           return { kind: "matrix", cols: rt.cols, rows: lt.rows };
@@ -15867,8 +16367,8 @@
         if (lt.cols !== rt.cols || lt.rows !== rt.rows) return null;
         return lt;
       }
-      if (lt.kind === "matrix" && rt.kind === "scalar") return rt.base === "bool" ? null : lt;
-      if (lt.kind === "scalar" && rt.kind === "matrix") return lt.base === "bool" ? null : rt;
+      if (lt.kind === "matrix" && rt.kind === "scalar") return rt.base === "float" ? lt : null;
+      if (lt.kind === "scalar" && rt.kind === "matrix") return lt.base === "float" ? rt : null;
       return null;
     }
     return null;
@@ -16149,6 +16649,9 @@
         e.resolvedType = sym.type;
         e.lvalue = sym.storage !== "const";
         if (sym.constValue !== void 0) e.constValue = sym.constValue;
+        if (sym.constData !== void 0 && sym.type.kind !== "scalar" && isGlobalSymbol(sym, scope)) {
+          mutateConstUse(e, sym.type, sym.constData);
+        }
         return;
       case "builtin-var":
         if (sym.stage !== "BOTH" && sym.stage !== ctx.stage) {
@@ -16279,8 +16782,7 @@
           ctx.error(e.loc.line, `'${e.op}' : relational operators require scalar numeric operands`);
           return;
         }
-        const b = commonBase(lt.base, rt.base, ctx.version);
-        if (b === null) {
+        if (lt.base !== rt.base) {
           ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(lt)}' and '${typeName(rt)}' are incompatible`);
           return;
         }
@@ -16293,10 +16795,11 @@
       case "==":
       case "!=": {
         let ok = false;
-        if (lt.kind === "scalar" && rt.kind === "scalar") ok = commonBase(lt.base, rt.base, ctx.version) !== null;
+        if (lt.kind === "scalar" && rt.kind === "scalar") ok = sameBase(lt.base, rt.base, ctx.version) !== null;
         else if (lt.kind === "vector" && rt.kind === "vector" && lt.size === rt.size) {
-          ok = commonBase(lt.base, rt.base, ctx.version) !== null;
+          ok = sameBase(lt.base, rt.base, ctx.version) !== null;
         } else if (lt.kind === "matrix" && rt.kind === "matrix" && lt.cols === rt.cols && lt.rows === rt.rows) ok = true;
+        else if (lt.kind === "struct" && rt.kind === "struct") ok = typeEquals(lt, rt);
         if (!ok) {
           ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(lt)}' and '${typeName(rt)}' cannot be compared`);
           return;
@@ -16304,6 +16807,11 @@
         e.resolvedType = { kind: "scalar", base: "bool" };
         if (e.left.constValue !== void 0 && e.right.constValue !== void 0) {
           e.constValue = foldBinary(e.op, lt, rt, e.left.constValue, e.right.constValue, ctx.version);
+        } else if (lt.kind === "struct") {
+          const data = evalConstExpr(e, scope, ctx);
+          if (data !== void 0 && data.length === 1 && typeof data[0] === "boolean") {
+            e.constValue = data[0];
+          }
         }
         return;
       }
@@ -16407,11 +16915,9 @@
     }
     let t = null;
     if (tt.kind === "scalar" && ft.kind === "scalar") {
-      const b = commonBase(tt.base, ft.base, ctx.version);
-      if (b !== null) t = { kind: "scalar", base: b };
+      if (typeEquals(tt, ft)) t = tt;
     } else if (tt.kind === "vector" && ft.kind === "vector" && tt.size === ft.size) {
-      const b = commonBase(tt.base, ft.base, ctx.version);
-      if (b !== null) t = { kind: "vector", base: b, size: tt.size };
+      if (typeEquals(tt, ft)) t = tt;
     }
     if (t === null) {
       ctx.error(e.loc.line, `'?:' : operands of type '${typeName(tt)}' and '${typeName(ft)}' are incompatible`);
@@ -16444,7 +16950,7 @@
         }
         e.resolvedType = ot.element;
         e.lvalue = e.object.lvalue === true;
-        return;
+        break;
       }
       case "vector": {
         if (constIdx !== null && (constIdx < 0 || constIdx >= ot.size)) {
@@ -16453,7 +16959,7 @@
         }
         e.resolvedType = { kind: "scalar", base: ot.base };
         e.lvalue = e.object.lvalue === true;
-        return;
+        break;
       }
       case "matrix": {
         if (constIdx !== null && (constIdx < 0 || constIdx >= ot.cols)) {
@@ -16462,11 +16968,13 @@
         }
         e.resolvedType = { kind: "vector", base: "float", size: ot.rows };
         e.lvalue = e.object.lvalue === true;
-        return;
+        break;
       }
       default:
         ctx.error(e.loc.line, `'[' : cannot index a value of type '${typeName(ot)}'`);
+        return;
     }
+    foldConstRead(e, scope, ctx);
   }
   var SWIZZLE_SETS = ["xyzw", "rgba", "stpq"];
   function swizzleInfo(base, size, name) {
@@ -16510,9 +17018,7 @@
       }
       e.resolvedType = m.type;
       e.lvalue = e.object.lvalue === true;
-      return;
-    }
-    if (ot.kind === "vector") {
+    } else if (ot.kind === "vector") {
       const r = swizzleInfo(ot.base, ot.size, e.name);
       if ("error" in r) {
         ctx.error(e.loc.line, r.error);
@@ -16520,9 +17026,123 @@
       }
       e.resolvedType = r.type;
       e.lvalue = r.noDupes && e.object.lvalue === true;
+    } else {
+      ctx.error(e.loc.line, `'.' : cannot access a member of type '${typeName(ot)}'`);
       return;
     }
-    ctx.error(e.loc.line, `'.' : cannot access a member of type '${typeName(ot)}'`);
+    foldConstRead(e, scope, ctx);
+  }
+  function isGlobalSymbol(sym, scope) {
+    let s = scope;
+    while (s !== null && s.parent !== null) s = s.parent;
+    return s !== null && s.lookupLocal(sym.name) === sym;
+  }
+  function foldConstRead(e, scope, ctx) {
+    if (e.resolvedType === void 0) return;
+    const data = evalConstExpr(e, scope, ctx);
+    if (data === void 0) return;
+    const t = e.resolvedType;
+    if (t.kind === "scalar") {
+      e.constValue = data[0];
+    } else if (t.kind === "vector" || t.kind === "matrix" || t.kind === "struct" || t.kind === "array") {
+      mutateConstUse(e, t, data);
+    }
+  }
+  function mutateConstUse(e, type, data) {
+    var _a2;
+    const loc = e.loc;
+    const callee = type.kind === "array" ? {
+      kind: "index",
+      loc,
+      object: { kind: "identifier", name: typeName(type.element), loc },
+      index: { kind: "literal", value: (_a2 = type.size) != null ? _a2 : 0, literalType: "int", loc }
+    } : { kind: "identifier", name: typeName(type), loc };
+    const call = {
+      kind: "call",
+      loc,
+      callee,
+      args: buildConstCtorArgs(type, data, loc),
+      resolvedType: type,
+      lvalue: false
+    };
+    Object.assign(e, call);
+  }
+  function buildConstCtorArgs(type, data, loc) {
+    var _a2;
+    switch (type.kind) {
+      case "scalar":
+        return [constLiteral(data[0], type.base, loc)];
+      case "vector": {
+        const args = [];
+        for (let i = 0; i < type.size; i++) args.push(constLiteral(data[i], type.base, loc));
+        return args;
+      }
+      case "matrix": {
+        const args = [];
+        for (let i = 0; i < type.cols * type.rows; i++) args.push(constLiteral(data[i], "float", loc));
+        return args;
+      }
+      case "struct": {
+        const args = [];
+        let off = 0;
+        for (const m of type.members) {
+          const sz = flatSize(m.type);
+          args.push(buildConstValueNode(m.type, data.slice(off, off + sz), loc));
+          off += sz;
+        }
+        return args;
+      }
+      case "array": {
+        const args = [];
+        const sz = flatSize(type.element);
+        for (let i = 0; i < ((_a2 = type.size) != null ? _a2 : 0); i++) {
+          args.push(buildConstValueNode(type.element, data.slice(i * sz, (i + 1) * sz), loc));
+        }
+        return args;
+      }
+      default:
+        return [];
+    }
+  }
+  function buildConstValueNode(type, data, loc) {
+    var _a2;
+    switch (type.kind) {
+      case "scalar":
+        return constLiteral(data[0], type.base, loc);
+      case "vector":
+      case "matrix":
+      case "struct":
+      case "array": {
+        const callee = type.kind === "array" ? {
+          kind: "index",
+          loc,
+          object: { kind: "identifier", name: typeName(type.element), loc },
+          index: { kind: "literal", value: (_a2 = type.size) != null ? _a2 : 0, literalType: "int", loc }
+        } : { kind: "identifier", name: typeName(type), loc };
+        const call = {
+          kind: "call",
+          loc,
+          callee,
+          args: buildConstCtorArgs(type, data, loc),
+          resolvedType: type,
+          lvalue: false
+        };
+        return call;
+      }
+      default:
+        return constLiteral(0, "int", loc);
+    }
+  }
+  function constLiteral(v2, base, loc) {
+    return {
+      kind: "literal",
+      value: v2,
+      literalType: base,
+      loc,
+      resolvedType: { kind: "scalar", base },
+      constValue: v2,
+      lvalue: false
+    };
   }
   function isTypeName(name, scope, ctx) {
     if (builtinType(name, ctx.version) !== void 0) return true;
@@ -16558,6 +17178,10 @@
       const sym = scope.lookup(name);
       if (sym !== void 0 && sym.kind === "fn" && !sym.builtin) {
         analyzeUserCall(e, sym, ctx);
+        return;
+      }
+      if (sym !== void 0 && sym.kind === "fn" && sym.builtin && sym.siblings.some((s) => !s.builtin)) {
+        analyzeHybridCall(e, sym, ctx);
         return;
       }
       if (matches(name, builtinSignatures(ctx.version)).length > 0 || extensionFunctions.some((s) => s.name === name)) {
@@ -16656,6 +17280,38 @@
     e.resolvedType = best.ret;
     e.constValue = foldBuiltin(name, best.ret, e.args);
   }
+  function stagedBuiltinSigs(name, ctx) {
+    const all = [...matches(name, builtinSignatures(ctx.version))];
+    for (const s of extensionFunctions) {
+      if (s.name !== name) continue;
+      const dup = all.some(
+        (c) => c.params.length === s.params.length && c.params.every((p, i) => typeEquals(p, s.params[i])) && typeEquals(c.ret, s.ret) && c.stage === s.stage
+      );
+      if (!dup) all.push(s);
+    }
+    const coreIn300 = (s) => ctx.version === 300 && s.extension === "GL_OES_standard_derivatives";
+    const enabled = all.filter((s) => s.extension === void 0 || coreIn300(s) || ctx.enabledExtensions.has(s.extension));
+    return enabled.filter((s) => s.stage === void 0 || s.stage === ctx.stage);
+  }
+  function analyzeHybridCall(e, sym, ctx) {
+    var _a2;
+    const name = sym.name;
+    const userCands = sym.siblings.filter((s) => !s.builtin).map((s) => ({ params: s.params.map((p) => p.type), ret: s.retType, user: true }));
+    const builtinCands = stagedBuiltinSigs(name, ctx).map((s) => ({ params: s.params, ret: s.ret, user: false }));
+    const best = pickBest([...userCands, ...builtinCands], e.args, ctx, name, e.loc.line);
+    if (best === null) {
+      if (ctx.errors.length === 0 || !ctx.errors[ctx.errors.length - 1].message.includes("ambiguous")) {
+        ctx.error(e.loc.line, `'${name}' : no matching function`);
+      }
+      return;
+    }
+    e.resolvedType = best.ret;
+    if (best.user) {
+      (_a2 = ctx.currentFunction) == null ? void 0 : _a2.calls.add(name);
+    } else {
+      e.constValue = foldBuiltin(name, best.ret, e.args);
+    }
+  }
   function analyzeConstructor(e, name, scope, ctx) {
     const bt = builtinType(name, ctx.version);
     const t = bt !== void 0 ? bt : structTypeOf(name, scope);
@@ -16674,12 +17330,14 @@
         }
         const at = e.args[0].resolvedType;
         if (at === void 0) return;
-        if (at.kind !== "scalar") {
+        if (at.kind !== "scalar" && at.kind !== "vector" && at.kind !== "matrix") {
           ctx.error(e.args[0].loc.line, `'${name}' : cannot construct from '${typeName(at)}'`);
           return;
         }
         e.resolvedType = t;
-        if (e.args[0].constValue !== void 0) e.constValue = convertConst(e.args[0].constValue, at.base, t.base);
+        if (at.kind === "scalar" && e.args[0].constValue !== void 0) {
+          e.constValue = convertConst(e.args[0].constValue, at.base, t.base);
+        }
         return;
       }
       case "vector":
@@ -16711,9 +17369,22 @@
         return;
     }
   }
+  function ctorArgComponents(at) {
+    switch (at.kind) {
+      case "scalar":
+        return 1;
+      case "vector":
+        return at.size;
+      case "matrix":
+        return at.cols * at.rows;
+      default:
+        return 0;
+    }
+  }
   function analyzeVectorConstructor(e, t, ctx) {
     const args = e.args;
     const targetName = typeName(t);
+    const n = t.size;
     if (args.length === 1) {
       const at = args[0].resolvedType;
       if (at === void 0) return;
@@ -16725,37 +17396,36 @@
         e.resolvedType = t;
         return;
       }
-      if (at.kind === "vector" && at.size === t.size) {
-        if (!ctorBaseConvertible(at.base, t.base, ctx.version)) {
-          ctx.error(args[0].loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
-          return;
-        }
-        e.resolvedType = t;
-        return;
-      }
-      ctx.error(args[0].loc.line, `'${targetName}' : cannot construct from '${typeName(at)}'`);
-      return;
     }
     let total = 0;
+    const comps = [];
     for (const a of args) {
       const at = a.resolvedType;
       if (at === void 0) return;
-      if (at.kind === "scalar") total += 1;
-      else if (at.kind === "vector") total += at.size;
-      else {
+      if (at.kind !== "scalar" && at.kind !== "vector" && at.kind !== "matrix") {
         ctx.error(a.loc.line, `'${targetName}' : invalid constructor argument of type '${typeName(at)}'`);
         return;
       }
+      const c = ctorArgComponents(at);
+      comps.push(c);
+      total += c;
     }
-    if (total !== t.size) {
-      ctx.error(e.loc.line, `'${targetName}' : constructor requires ${t.size} components`);
+    if (total < n) {
+      ctx.error(e.loc.line, `'${targetName}' : constructor requires ${n} components`);
+      return;
+    }
+    if (total - comps[comps.length - 1] >= n) {
+      ctx.error(e.loc.line, `'${targetName}' : too many arguments for constructor`);
       return;
     }
     for (const a of args) {
       const at = a.resolvedType;
       if (at === void 0) return;
-      if (at.kind !== "scalar" && at.kind !== "vector") return;
-      if (!ctorBaseConvertible(at.base, t.base, ctx.version)) {
+      let abase;
+      if (at.kind === "scalar" || at.kind === "vector") abase = at.base;
+      else if (at.kind === "matrix") abase = "float";
+      else return;
+      if (!ctorBaseConvertible(abase, t.base, ctx.version)) {
         ctx.error(a.loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
         return;
       }
@@ -16765,51 +17435,54 @@
   function analyzeMatrixConstructor(e, t, ctx) {
     const args = e.args;
     const targetName = typeName(t);
+    const size = t.cols * t.rows;
     if (args.length === 1) {
       const at = args[0].resolvedType;
       if (at === void 0) return;
-      if (at.kind === "scalar" && at.base !== "bool") {
+      if (at.kind === "scalar") {
+        if (!ctorBaseConvertible(at.base, "float", ctx.version)) {
+          ctx.error(args[0].loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
+          return;
+        }
         e.resolvedType = t;
         return;
       }
-      if (at.kind === "matrix" && at.cols === t.cols && at.rows === t.rows) {
+      if (at.kind === "matrix") {
         e.resolvedType = t;
         return;
       }
-      ctx.error(args[0].loc.line, `'${targetName}' : cannot construct from '${typeName(at)}'`);
+    }
+    let total = 0;
+    const comps = [];
+    for (const a of args) {
+      const at = a.resolvedType;
+      if (at === void 0) return;
+      if (at.kind === "matrix") {
+        ctx.error(a.loc.line, `'${targetName}' : constructing a matrix from a matrix can only take one argument`);
+        return;
+      }
+      if (at.kind !== "scalar" && at.kind !== "vector") {
+        ctx.error(a.loc.line, `'${targetName}' : invalid constructor argument of type '${typeName(at)}'`);
+        return;
+      }
+      const c = ctorArgComponents(at);
+      comps.push(c);
+      total += c;
+    }
+    if (total < size || total - comps[comps.length - 1] >= size) {
+      ctx.error(e.loc.line, `'${targetName}' : wrong number of arguments for matrix constructor`);
       return;
     }
-    if (args.length === t.cols) {
-      let allVecs = true;
-      for (const a of args) {
-        const at = a.resolvedType;
-        if (at === void 0) return;
-        if (!(at.kind === "vector" && at.size === t.rows && at.base !== "bool")) {
-          allVecs = false;
-          break;
-        }
-      }
-      if (allVecs) {
-        e.resolvedType = t;
+    for (const a of args) {
+      const at = a.resolvedType;
+      if (at === void 0) return;
+      if (at.kind !== "scalar" && at.kind !== "vector") return;
+      if (!ctorBaseConvertible(at.base, "float", ctx.version)) {
+        ctx.error(a.loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
         return;
       }
     }
-    if (args.length === t.cols * t.rows) {
-      let allScalars = true;
-      for (const a of args) {
-        const at = a.resolvedType;
-        if (at === void 0) return;
-        if (!(at.kind === "scalar" && at.base !== "bool")) {
-          allScalars = false;
-          break;
-        }
-      }
-      if (allScalars) {
-        e.resolvedType = t;
-        return;
-      }
-    }
-    ctx.error(e.loc.line, `'${targetName}' : wrong number of arguments for matrix constructor`);
+    e.resolvedType = t;
   }
   function analyzeArrayConstructor(e, callee, scope, ctx) {
     if (ctx.version === 100) {
@@ -16858,7 +17531,12 @@
         return;
       case "decl-stmt": {
         const baseType = resolveTypeSpec(s.type, scope, ctx);
-        if (baseType !== null) declareVariables(baseType, s.type, s.declarators, scope, ctx, false);
+        if (baseType !== null) {
+          if (s.type.base.kind === "struct-definition" && baseType.kind === "struct") {
+            scope.declare({ kind: "struct", name: baseType.name, type: baseType }, ctx, s.loc.line);
+          }
+          declareVariables(baseType, s.type, s.declarators, scope, ctx, false);
+        }
         return;
       }
       case "expr-stmt":
@@ -17553,9 +18231,19 @@
      * Declare `sym`. GLSL ES forbids shadowing: if the name exists in this
      * scope or any enclosing scope → error `'name' : redefinition` and the
      * symbol is NOT registered. Returns true on success.
+     *
+     * Exception (GLSL ES single namespace): a builtin FUNCTION name that no
+     * user code has claimed yet (the pre-pass placeholder FnSymbol with no user
+     * overloads attached) does not reserve the name — user variables/structs
+     * may reuse it. The placeholder is replaced in this scope's map (a later
+     * function decl with the same name then hits the variable and errors
+     * 'redefinition', which is the correct GLSL behavior). Once a user
+     * function overload claims the name, or the existing symbol is a builtin
+     * VARIABLE (gl_*) or gl_Max* constant, the name is NOT free.
      */
     declare(sym, ctx, line) {
-      if (this.lookup(sym.name) !== void 0) {
+      const existing = this.lookup(sym.name);
+      if (existing !== void 0 && !isFreeBuiltinFnName(existing)) {
         ctx.error(line, `'${sym.name}' : redefinition`);
         return false;
       }
@@ -17575,6 +18263,9 @@
       return this.parent;
     }
   };
+  function isFreeBuiltinFnName(sym) {
+    return sym.kind === "fn" && sym.builtin && sym.siblings.every((s) => s.builtin);
+  }
   var SAMPLER_100 = /* @__PURE__ */ new Set(["sampler2D", "samplerCube"]);
   var SAMPLER_300 = /* @__PURE__ */ new Set([
     "sampler2D",
@@ -17723,20 +18414,20 @@
           ctx.error(d.init.loc.line, `cannot convert from '${typeName(it)}' to '${typeName(type)}'`);
         }
       }
+      let constData;
       if (spec.qualifiers.storage === "const") {
         if (d.init === null) {
           ctx.error(d.loc.line, `'${d.name}' : const variable must be initialized`);
-        } else if (type.kind === "array" || type.kind === "struct") {
-          if (d.init.kind !== "call") {
-            ctx.error(d.init.loc.line, `'${d.name}' : initializer of const variable must be a constant expression`);
-          }
-        } else if (d.init.constValue === void 0) {
-          ctx.error(d.init.loc.line, `'${d.name}' : initializer of const variable must be a constant expression`);
         } else {
-          constValue = d.init.constValue;
+          constData = evalConstExpr(d.init, scope, ctx);
+          if (constData === void 0) {
+            ctx.error(d.init.loc.line, `'${d.name}' : initializer of const variable must be a constant expression`);
+          } else if (type.kind === "scalar") {
+            constValue = constData[0];
+          }
         }
       }
-      scope.declare({ kind: "var", name: d.name, type, storage: spec.qualifiers.storage, constValue }, ctx, d.loc.line);
+      scope.declare({ kind: "var", name: d.name, type, storage: spec.qualifiers.storage, constValue, constData }, ctx, d.loc.line);
     }
   }
   function registerBuiltins(scope, ctx) {
@@ -17830,6 +18521,20 @@
     }
     return false;
   }
+  function enabledBuiltinSigs(name, ctx) {
+    const out = matches(name, builtinSignatures(ctx.version));
+    for (const s of extensionFunctions) {
+      if (s.name === name && s.extension !== void 0 && ctx.enabledExtensions.has(s.extension)) out.push(s);
+    }
+    return out;
+  }
+  function builtinSigExact(s, params) {
+    if (s.params.length !== params.length) return false;
+    for (let i = 0; i < s.params.length; i++) {
+      if (!sameParamType(s.params[i], params[i].type)) return false;
+    }
+    return true;
+  }
   function registerPrototype(d, scope, ctx) {
     const retType = resolveTypeSpec(d.returnType, scope, ctx);
     if (retType === null) return;
@@ -17847,10 +18552,13 @@
       return;
     }
     if (existing.builtin) {
-      ctx.error(d.loc.line, `'${d.name}' : redefinition of built-in function`);
-      return;
+      if (enabledBuiltinSigs(d.name, ctx).some((s) => builtinSigExact(s, params))) {
+        ctx.error(d.loc.line, `'${d.name}' : redefinition of built-in function`);
+        return;
+      }
     }
     for (const sig2 of existing.siblings) {
+      if (sig2.builtin) continue;
       if (sameSignature(sig2, retType, params)) return;
     }
     const sym = makeFnSymbol(d.name, retType, params, false, d.loc.line);
@@ -17875,10 +18583,13 @@
       return null;
     }
     if (existing.builtin) {
-      ctx.error(d.loc.line, `'${proto.name}' : redefinition of built-in function`);
-      return null;
+      if (enabledBuiltinSigs(proto.name, ctx).some((s) => builtinSigExact(s, params))) {
+        ctx.error(d.loc.line, `'${proto.name}' : redefinition of built-in function`);
+        return null;
+      }
     }
     for (const sig2 of existing.siblings) {
+      if (sig2.builtin) continue;
       if (sameSignature(sig2, retType, params)) {
         if (sig2.defined) {
           ctx.error(d.loc.line, `'${proto.name}' : redefinition of function`);
@@ -18220,7 +18931,10 @@
     const comp2 = dyn ? `(${dyn.temp}) * ${dyn.stride} + ${c}` : String(c);
     return env.varyingRead(index, comp2);
   }
-  function attribRead(type, location, dyn, c) {
+  function attribDeclComps(type) {
+    return type.kind === "vector" ? type.size : type.kind === "matrix" ? type.rows : 1;
+  }
+  function attribRead(type, location, declComps, dyn, c) {
     let L = String(location);
     let comp2 = c;
     if (dyn) L = `${L} + (${dyn.temp}) * ${dyn.stride}`;
@@ -18228,8 +18942,7 @@
       L = `${L} + ${Math.floor(c / type.rows)}`;
       comp2 = c % type.rows;
     }
-    const comps = type.kind === "matrix" ? type.rows : type.kind === "vector" ? type.size : 1;
-    const s = `(typeof ctx.attribs[${L}] === 'number' ? (${comp2} === 0 ? ctx.attribs[${L}] : ${comp2} === 3 ? 1 : 0) : ctx.attribs[${L}][ctx.attribIndices[${L}] * ${comps} + ${comp2}])`;
+    const s = `(typeof ctx.attribs[${L}] === 'number' ? (${comp2} === 0 ? ctx.attribs[${L}] : ${comp2} === 3 ? 1 : 0) : ctx.attribs[${L}][ctx.attribIndices[${L}] * ${declComps} + ${comp2}])`;
     return isUintType(type) ? wrapUint(s) : s;
   }
   function outputAccess(type, location, dyn, c) {
@@ -18346,7 +19059,7 @@
       if (type.kind === "array") {
         const elem = type.element;
         const n = flatComponents(elem) * ((_a2 = type.size) != null ? _a2 : 1);
-        const int = isIntegralFamily(elem);
+        const int = isIntegralFamily(elem) && !hasFloatLeaves(elem);
         const base = int ? this.allocIntScratch(n) : this.allocScratch(n);
         return {
           name,
@@ -18403,7 +19116,7 @@
       if (isArr || (opts == null ? void 0 : opts.array)) {
         const elem = isArr ? type.element : type;
         const n = flatComponents(elem) * (isArr ? (_a2 = type.size) != null ? _a2 : 1 : 1);
-        const int = isIntegralFamily(elem);
+        const int = isIntegralFamily(elem) && !hasFloatLeaves(elem);
         const base = int ? this.allocIntScratch(n) : this.allocScratch(n);
         const lv = {
           name,
@@ -18769,7 +19482,8 @@
       case "block":
         return blockIdentifierRef(env, info, type);
       case "attrib": {
-        const read = (c) => attribRead(type, info.location, null, c);
+        const declComps = attribDeclComps(type);
+        const read = (c) => attribRead(type, info.location, declComps, null, c);
         return mkPath(type, false, read, () => {
           throw new Error("codegen: attributes are read-only");
         });
@@ -20109,7 +20823,7 @@
       case "greaterThanEqual":
       case "equal":
       case "notEqual": {
-        const op = {
+        const numOp = {
           lessThan: "<",
           lessThanEqual: "<=",
           greaterThan: ">",
@@ -20117,7 +20831,13 @@
           equal: "===",
           notEqual: "!=="
         };
-        return perComp(n, argVals, argTypes, ([a, b]) => `(${a} ${op[name]} (${b}))`);
+        const isBool = scalarBaseOf(argTypes[0]) === "bool" && scalarBaseOf(argTypes[1]) === "bool";
+        return perComp(
+          n,
+          argVals,
+          argTypes,
+          ([a, b]) => isBool ? `(!!(${a})) ${numOp[name]} (!!(${b}))` : `(${a}) ${numOp[name]} (${b})`
+        );
       }
       case "any": {
         const parts = argVals[0].map((v2) => use2(v2));
@@ -20617,7 +21337,7 @@
       if (lv.kind === "flat") {
         return lv.compNames[p.flatOff + cc];
       }
-      const store = lv.int ? "ctx.intScratch" : "ctx.scratch";
+      const store = lv.int && isIntegralFamily(p.type) ? "ctx.intScratch" : "ctx.scratch";
       const dyn = p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.elemSlots}` : "";
       const s = `${store}[${lv.scratchBase} + ${p.flatOff}${dyn} + ${cc}]`;
       return isUintType(p.type) ? wrapUint(s) : s;
@@ -20633,7 +21353,7 @@
         case "varying":
           return varyingPathRead(env, st.key, p.type, p.dyn, flatC);
         case "attrib":
-          return attribRead(p.type, st.location, p.dyn, flatC);
+          return attribRead(p.type, st.location, st.declComps, p.dyn, flatC);
         case "output":
           return outputAccess(p.type, st.location, p.dyn, flatC);
       }
@@ -20669,7 +21389,7 @@
     throw new Error("codegen: empty path");
   }
   function leafDual(p, env, c) {
-    var _a2;
+    var _a2, _b, _c;
     if (!env.dual) return null;
     const cc = p.swz ? p.swz[c] : c;
     if (p.local) {
@@ -20678,7 +21398,7 @@
       if (lv.kind === "flat") {
         const dx = (_a2 = lv.dxNames) == null ? void 0 : _a2[idx];
         if (!dx) return null;
-        return [dx, `${lv.compNames[idx]}_dy`];
+        return [dx, (_c = (_b = lv.dyNames) == null ? void 0 : _b[idx]) != null ? _c : `${lv.compNames[idx]}_dy`];
       }
       if (lv.int) return null;
       const n = flatComponents(lv.type);
@@ -20730,7 +21450,7 @@
     if (p.local) {
       const lv = p.local;
       if (lv.kind === "flat") return lv.compNames[p.flatOff + cc];
-      const store = lv.int ? "ctx.intScratch" : "ctx.scratch";
+      const store = lv.int && isIntegralFamily(p.type) ? "ctx.intScratch" : "ctx.scratch";
       const dyn = p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.elemSlots}` : "";
       return `${store}[${lv.scratchBase} + ${p.flatOff}${dyn} + ${cc}]`;
     }
@@ -20772,7 +21492,7 @@
     throw new Error("codegen: empty path");
   }
   function leafDualWrite(p, env, c) {
-    var _a2;
+    var _a2, _b, _c;
     if (!env.dual) return null;
     const cc = p.swz ? p.swz[c] : c;
     if (p.local) {
@@ -20781,7 +21501,7 @@
       if (lv.kind === "flat") {
         const dx = (_a2 = lv.dxNames) == null ? void 0 : _a2[idx];
         if (!dx) return null;
-        return [dx, `${lv.compNames[idx]}_dy`];
+        return [dx, (_c = (_b = lv.dyNames) == null ? void 0 : _b[idx]) != null ? _c : `${lv.compNames[idx]}_dy`];
       }
       if (lv.int) return null;
       const n = flatComponents(lv.type);
@@ -20972,7 +21692,7 @@
             };
             return p;
           case "attrib":
-            p.storage = { kind: "attrib", location: info.location };
+            p.storage = { kind: "attrib", location: info.location, declComps: attribDeclComps(t) };
             return p;
           case "varying":
             p.storage = { kind: "varying", key: info.key };
@@ -20998,7 +21718,7 @@
         break;
       }
       case "member": {
-        const p = walk(e.object, env);
+        const p = walkObject(e.object, env);
         const ot = e.object.resolvedType;
         if (ot.kind === "struct") {
           const m = ot.members.find((x) => x.name === e.name);
@@ -21016,7 +21736,7 @@
         throw new Error(`codegen: member access on '${typeName(ot)}'`);
       }
       case "index": {
-        const p = walk(e.object, env);
+        const p = walkObject(e.object, env);
         const ot = p.type;
         const cv = e.index.constValue;
         const isConst = typeof cv === "number" && Number.isInteger(cv);
@@ -21029,6 +21749,7 @@
           const t = env.allocTemp();
           p.pre.push(`${t} = ${idxV.pre && idxV.pre.length ? foldPre(idxV.pre, idxV.v) : idxV.v}`);
           if (p.local) {
+            if (p.local.synth) spillSynthLocal(p, env, flatComponents(et));
             p.dyn = { temp: t, stride: 0, elemSlots: flatComponents(et) };
           } else if (p.storage) {
             switch (p.storage.kind) {
@@ -21088,10 +21809,14 @@
           const t = env.allocTemp();
           p.pre.push(`${t} = ${idxV.pre && idxV.pre.length ? foldPre(idxV.pre, idxV.v) : idxV.v}`);
           if (p.local) {
-            const ds = env.ensureDynScratch(p.local.name);
-            p.pre.unshift(...ds.copyIn);
-            p.post.push(...ds.copyOut);
-            p.local = { ...p.local, kind: "scratch", scratchBase: ds.base, elemSlots: 1, int: ds.int };
+            if (p.local.synth) {
+              spillSynthLocal(p, env, 1);
+            } else {
+              const ds = env.ensureDynScratch(p.local.name);
+              p.pre.unshift(...ds.copyIn);
+              p.post.push(...ds.copyOut);
+              p.local = { ...p.local, kind: "scratch", scratchBase: ds.base, elemSlots: 1, int: ds.int };
+            }
             p.dyn = { temp: t, stride: 0, elemSlots: 1 };
           } else if (p.storage) {
             p.dyn = { temp: t, stride: storageElemStride(p, 1), elemSlots: 0 };
@@ -21130,10 +21855,14 @@
           const t = env.allocTemp();
           p.pre.push(`${t} = ${idxV.pre && idxV.pre.length ? foldPre(idxV.pre, idxV.v) : idxV.v}`);
           if (p.local) {
-            const ds = env.ensureDynScratch(p.local.name);
-            p.pre.unshift(...ds.copyIn);
-            p.post.push(...ds.copyOut);
-            p.local = { ...p.local, kind: "scratch", scratchBase: ds.base, elemSlots: rows, int: ds.int };
+            if (p.local.synth) {
+              spillSynthLocal(p, env, rows);
+            } else {
+              const ds = env.ensureDynScratch(p.local.name);
+              p.pre.unshift(...ds.copyIn);
+              p.post.push(...ds.copyOut);
+              p.local = { ...p.local, kind: "scratch", scratchBase: ds.base, elemSlots: rows, int: ds.int };
+            }
             p.dyn = { temp: t, stride: 0, elemSlots: rows };
           } else if (p.storage) {
             p.dyn = { temp: t, stride: storageElemStride(p, rows), elemSlots: 0 };
@@ -21146,6 +21875,67 @@
         throw new Error("codegen: not a path expression");
     }
     throw new Error("codegen: unreachable");
+  }
+  function isPathExpr(e) {
+    return e.kind === "identifier" || e.kind === "member" || e.kind === "index";
+  }
+  function walkObject(e, env) {
+    var _a2, _b;
+    if (isPathExpr(e)) return walk(e, env);
+    const t = e.resolvedType;
+    const vals = emitExpr(e, env);
+    const n = flatComponents(t);
+    const floatness = flatFloatness(t);
+    const compNames = [];
+    const dxNames = [];
+    const dyNames = [];
+    const pre = [];
+    for (let c = 0; c < n; c++) {
+      const v2 = vals[c];
+      const tn = env.allocTemp();
+      compNames.push(tn);
+      const vv = v2.pre && v2.pre.length ? foldPre(v2.pre, v2.v) : v2.v;
+      if (env.dual && floatness[c]) {
+        const tx = env.allocTemp();
+        const ty = env.allocTemp();
+        dxNames.push(tx);
+        dyNames.push(ty);
+        pre.push(`${tn} = ${vv}`, `${tx} = ${(_a2 = v2.dx) != null ? _a2 : "0"}`, `${ty} = ${(_b = v2.dy) != null ? _b : "0"}`);
+      } else {
+        dxNames.push(null);
+        dyNames.push(null);
+        pre.push(`${tn} = ${vv}`);
+      }
+    }
+    const p = freshP(t);
+    p.local = {
+      name: "_tmp",
+      type: t,
+      kind: "flat",
+      compNames,
+      dxNames,
+      dyNames,
+      synth: true,
+      members: t.kind === "struct" ? structMemberOffsets(t) : void 0
+    };
+    p.pre = pre;
+    return p;
+  }
+  function spillSynthLocal(p, env, elemSlots) {
+    var _a2;
+    const lv = p.local;
+    const n = flatComponents(lv.type);
+    const int = isIntegralFamily(lv.type) && !hasFloatLeaves(lv.type);
+    const base = int ? env.allocIntScratch(n) : env.allocScratch(n);
+    const store = int ? "ctx.intScratch" : "ctx.scratch";
+    for (let k = 0; k < n; k++) {
+      p.pre.push(`${store}[${base} + ${p.flatOff} + ${k}] = ${lv.compNames[k]}`);
+      if (env.dual && ((_a2 = lv.dxNames) == null ? void 0 : _a2[k])) {
+        p.pre.push(`${store}[${base} + ${n} + ${p.flatOff} + ${k}] = ${lv.dxNames[k]}`);
+        p.pre.push(`${store}[${base} + ${2 * n} + ${p.flatOff} + ${k}] = ${lv.dyNames[k]}`);
+      }
+    }
+    p.local = { ...lv, kind: "scratch", scratchBase: base, blockSize: n, elemSlots, int };
   }
   function storageElemStride(p, comps) {
     switch (p.storage.kind) {
@@ -21326,7 +22116,7 @@
         const b = emitExpr(e.right, env)[0];
         const av = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
         const bv = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-        return [{ v: `(${av} !== (${bv}))` }];
+        return [{ v: `((!!(${av})) !== (!!(${bv})))` }];
       }
       case "==":
       case "!=": {
@@ -21353,7 +22143,11 @@
           const bp = bv[c].pre;
           const a = ap && ap.length ? foldPre(ap, av[c].v) : av[c].v;
           const b = bp && bp.length ? foldPre(bp, bv[c].v) : bv[c].v;
-          parts.push(op === "==" ? `(${a} === (${b}))` : `(${a} !== (${b}))`);
+          if (cb === "bool") {
+            parts.push(op === "==" ? `(!!(${a})) === (!!(${b}))` : `(!!(${a})) !== (!!(${b}))`);
+          } else {
+            parts.push(op === "==" ? `(${a} === (${b}))` : `(${a} !== (${b}))`);
+          }
         }
         return [{ v: `(${parts.join(op === "==" ? " && " : " || ")})` }];
       }
@@ -23361,7 +24155,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         const slot = cursor * 4;
         const int = isIntStoreType(t);
         st.slots.set(path, { store: int ? "int" : "float", slot, stride: 0 });
-        const comps = t.kind === "matrix" ? t.cols * t.rows : t.kind === "vector" ? t.size : 1;
+        const comps = t.kind === "matrix" ? t.cols * 4 : t.kind === "vector" ? t.size : 1;
         if (int) st.intMax = Math.max(st.intMax, slot + comps);
         else st.floatMax = Math.max(st.floatMax, slot + comps);
         return { advance: slotCount(t) };
@@ -24203,6 +24997,10 @@ ${inner.map((l) => "  " + l).join("\n")}
   var linkGen = /* @__PURE__ */ new WeakMap();
   var locGen = /* @__PURE__ */ new WeakMap();
   var uniformLocInfo = /* @__PURE__ */ new WeakMap();
+  function getUniformLocationInfo(loc) {
+    var _a2;
+    return (_a2 = uniformLocInfo.get(loc)) != null ? _a2 : { elem: 0, whole: true };
+  }
   var validateStatus = /* @__PURE__ */ new WeakMap();
   var uniformBlockBindings = /* @__PURE__ */ new WeakMap();
   var blockReferenced = /* @__PURE__ */ new WeakMap();
@@ -25351,7 +26149,8 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_OPERATION);
       return null;
     }
-    return { program, pm, uniform, slots: elementSlots(uniform) };
+    const info = getUniformLocationInfo(loc);
+    return { program, pm, uniform, slots: elementSlots(uniform), elem: info.elem };
   }
   function writeFloatAt(t, slotOffset, comp2, v2) {
     const dv = t.program._uniformStore;
@@ -25403,13 +26202,14 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
     }
     const isBool = isBoolType2(t.uniform.type);
+    const base = t.elem * t.slots;
     for (let c = 0; c < k; c++) {
       const v2 = vals[c];
       if (family === "f") {
-        if (isBool) writeIntAt(t, 0, c, v2, "boolf");
-        else writeFloatAt(t, 0, c, v2);
-      } else if (family === "i") writeIntAt(t, 0, c, v2, isBool ? "bool" : "int");
-      else writeIntAt(t, 0, c, v2, "uint");
+        if (isBool) writeIntAt(t, base, c, v2, "boolf");
+        else writeFloatAt(t, base, c, v2);
+      } else if (family === "i") writeIntAt(t, base, c, v2, isBool ? "bool" : "int");
+      else writeIntAt(t, base, c, v2, "uint");
     }
   }
   function uniformVector(ctx, location, k, family, values, srcOffset, srcLength) {
@@ -25448,9 +26248,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
     }
     const isBool = isBoolType2(t.uniform.type);
-    const total = Math.min(count, t.uniform.size * k);
+    const total = Math.min(count, (t.uniform.size - t.elem) * k);
     for (let i = 0; i < total; i++) {
-      const element = Math.floor(i / k);
+      const element = Math.floor(i / k) + t.elem;
       const comp2 = i % k;
       const v2 = values[off + i];
       const slotOff = element * t.slots;
@@ -25493,9 +26293,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
-    const total = Math.min(count, t.uniform.size * n);
+    const total = Math.min(count, (t.uniform.size - t.elem) * n);
     for (let i = 0; i < total; i++) {
-      const element = Math.floor(i / n);
+      const element = Math.floor(i / n) + t.elem;
       const col = Math.floor(i % n / rows);
       const row = i % rows;
       writeFloatAt(t, element * t.slots + col * 4, row, values[off + i]);
@@ -26214,7 +27014,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         s.readFramebuffer = fbo;
       } else {
         s.drawFramebuffer = fbo;
-        if (ctx._version === 2 && target === C1.FRAMEBUFFER) s.readFramebuffer = fbo;
+        if (target === C1.FRAMEBUFFER) s.readFramebuffer = fbo;
       }
       if (fbo) fbo._isBound = true;
     };
