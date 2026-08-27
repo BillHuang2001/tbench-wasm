@@ -532,6 +532,22 @@ function dualLowerBuiltin(
         dx: '0',
         dy: '0',
       }));
+    case 'unpackSnorm2x16':
+    case 'unpackUnorm2x16':
+    case 'unpackHalf2x16':
+    case 'unpackUnorm4x8':
+    case 'unpackSnorm4x8': {
+      // Bit unpacking — the RESULT is a pure function of the packed INTEGER
+      // bits, so it has no screen-space dependence: v-only with zero duals
+      // (per C5b; same lowering as the non-dual path, which drops the arg's
+      // duals anyway — the arg is a uint).
+      const n2 = name === 'unpackUnorm4x8' || name === 'unpackSnorm4x8' ? 4 : 2;
+      const b = env.allocScratch(n2);
+      const pre = [`R.${name}(${use(argVals[0][0])}, ctx.scratch, ${b})`];
+      const out: Value[] = [];
+      for (let i = 0; i < n2; i++) out.push({ v: `ctx.scratch[${b} + ${i}]`, dx: '0', dy: '0', pre });
+      return out;
+    }
     case 'modf': {
       // modf(x, ip): result = fract(x) — derivative passes through (trunc is
       // constant a.e.); ip's integer part is piecewise constant → its dual
@@ -1321,6 +1337,32 @@ function emitTextureCall(
   ret: GLSLType,
   env: CodegenEnv,
 ): Value[] {
+  const vals = emitTextureCallInner(name, sig, args, argVals, argTypes, argN, ret, env);
+  // Dual mode: the sampled value's screen-space derivative is not tracked
+  // analytically — for implicit-LOD calls the coordinate duals were consumed
+  // as gradient params (LOD selection) inside; the RESULT itself is a plain
+  // value with zero duals (the standard approximation — dFdx(texture(...))
+  // yields 0). Int/uint results (textureSize, integer texelFetch) carry no
+  // duals and stay untouched.
+  if (env.dual && hasFloatLeaves(ret)) {
+    for (const v of vals) {
+      if (v.dx === undefined) v.dx = '0';
+      if (v.dy === undefined) v.dy = '0';
+    }
+  }
+  return vals;
+}
+
+function emitTextureCallInner(
+  name: string,
+  sig: BuiltinSignature,
+  args: Expr[],
+  argVals: Value[][],
+  argTypes: GLSLType[],
+  argN: number[],
+  ret: GLSLType,
+  env: CodegenEnv,
+): Value[] {
   const samplerT = argTypes[0];
   if (samplerT.kind !== 'sampler') throw new Error(`codegen: '${name}': first argument must be a sampler`);
   const kind = samplerT.sampler;
@@ -1332,6 +1374,8 @@ function emitTextureCall(
   const P = argVals[1];
   const pc = (i: number): string => use(P[i]);
   const coordCount = (f: string): number => (f === 'sampler2D' ? 2 : 3);
+  /** Dual mode (fragment only — vertex stages never set env.dual). */
+  const dual = env.dual;
 
   const is2D = fam === 'sampler2D';
   const is3D = fam === 'sampler3D';
@@ -1427,6 +1471,67 @@ function emitTextureCall(
     }
   };
 
+  /* ---- Dual-mode implicit-LOD routing (C5b): coordinate duals → gradient
+   * params. Only reachable in fragment dual mode (vertex stages never set
+   * env.dual). The coord VALUE strings are the same expressions the non-dual
+   * path emits (folded pres run inline inside the call — the call string IS
+   * the shared pre); the gradient slots receive the coords' dx/dy strings. */
+  const dcoord = (i: number): { v: string; dx: string; dy: string } => ({
+    v: pc(i),
+    dx: P[i].dx ?? '0',
+    dy: P[i].dy ?? '0',
+  });
+  /** Projected coordinate (P_i / P_q) with quotient-rule duals. */
+  const ddivP = (i: number, qi: number): { v: string; dx: string; dy: string } => {
+    const q = pc(qi);
+    return {
+      v: `((${pc(i)}) / (${q}))`,
+      dx: `(((${P[i].dx ?? '0'}) * (${q}) - (${pc(i)}) * (${P[qi].dx ?? '0'})) / ((${q}) * (${q})))`,
+      dy: `(((${P[i].dy ?? '0'}) * (${q}) - (${pc(i)}) * (${P[qi].dy ?? '0'})) / ((${q}) * (${q})))`,
+    };
+  };
+  /**
+   * Implicit-LOD sample in dual mode: same ctx.tex entry points as `implicit`
+   * with the gradient slots filled from the coordinate duals (bias last, as in
+   * the non-dual call shapes). `ref` (shadow compare value) and the 2DArray
+   * layer coordinate are value-only — they are not filtered/wrapped, so no
+   * gradients. Result duals are zeroed by the emitTextureCall wrapper.
+   */
+  const implicitDual = (coords: { v: string; dx: string; dy: string }[], bias: string | null, ref?: string): Value[] => {
+    const b = bias ?? '0';
+    const c = '/* implicit-LOD from screen-space derivatives */ ';
+    switch (fam) {
+      case 'sampler2D':
+        return fromCtxTex(`${c}ctx.tex.sample2D(${unit}, ${coords[0].v}, ${coords[1].v}, ${coords[0].dx}, ${coords[1].dx}, ${coords[0].dy}, ${coords[1].dy}, ${b})`, 4);
+      case 'sampler3D':
+        return fromCtxTex(
+          `${c}ctx.tex.sample3D(${unit}, ${coords[0].v}, ${coords[1].v}, ${coords[2].v}, ${coords[0].dx}, ${coords[1].dx}, ${coords[2].dx}, ${coords[0].dy}, ${coords[1].dy}, ${coords[2].dy}, ${b})`,
+          4,
+        );
+      case 'samplerCube':
+        return fromCtxTex(
+          `${c}ctx.tex.sampleCube(${unit}, ${coords[0].v}, ${coords[1].v}, ${coords[2].v}, ${coords[0].dx}, ${coords[1].dx}, ${coords[2].dx}, ${coords[0].dy}, ${coords[1].dy}, ${coords[2].dy}, ${b})`,
+          4,
+        );
+      case 'sampler2DArray':
+        return fromCtxTex(`${c}ctx.tex.sample2DArray(${unit}, ${coords[0].v}, ${coords[1].v}, ${coords[2].v}, ${coords[0].dx}, ${coords[1].dx}, ${coords[0].dy}, ${coords[1].dy}, ${b})`, 4);
+      case 'sampler2DShadow':
+        return fromCtxTex(`${c}ctx.tex.sample2DShadow(${unit}, ${coords[0].v}, ${coords[1].v}, ${ref ?? '0'}, ${coords[0].dx}, ${coords[1].dx}, ${coords[0].dy}, ${coords[1].dy}, ${b})`, 1);
+      case 'samplerCubeShadow':
+        return fromCtxTex(
+          `${c}ctx.tex.sampleCubeShadow(${unit}, ${coords[0].v}, ${coords[1].v}, ${coords[2].v}, ${ref ?? '0'}, ${coords[0].dx}, ${coords[1].dx}, ${coords[2].dx}, ${coords[0].dy}, ${coords[1].dy}, ${coords[2].dy}, ${b})`,
+          1,
+        );
+      case 'sampler2DArrayShadow':
+        return fromCtxTex(
+          `${c}ctx.tex.sample2DArrayShadow(${unit}, ${coords[0].v}, ${coords[1].v}, ${coords[2].v}, ${ref ?? '0'}, ${coords[0].dx}, ${coords[1].dx}, ${coords[0].dy}, ${coords[1].dy}, ${b})`,
+          1,
+        );
+      default:
+        throw new Error(`codegen: cannot implicitly sample '${kind}'`);
+    }
+  };
+
   /** Explicit-LOD sample: fragment (non-shadow) via ctx.tex, otherwise R. */
   const lodSample = (coords: string[], lod: string, ref?: string): Value[] => {
     if (env.stage === 'FRAGMENT' && !isShadow) {
@@ -1499,11 +1604,14 @@ function emitTextureCall(
     /* ---------------- 1.00 core ---------------- */
     case 'texture2D': {
       const bias = args.length > 2 ? use(argVals[2][0]) : null;
+      if (dual) return implicitDual([dcoord(0), dcoord(1)], bias);
       return implicit([pc(0), pc(1)], bias);
     }
     case 'texture2DProj': {
       const bias = args.length > 2 ? use(argVals[2][0]) : null;
-      const q = argN[1] === 3 ? pc(2) : pc(3);
+      const qi = argN[1] === 3 ? 2 : 3;
+      if (dual) return implicitDual([ddivP(0, qi), ddivP(1, qi)], bias);
+      const q = pc(qi);
       if (env.stage === 'FRAGMENT') return implicit([divP(0, q), divP(1, q)], bias);
       return fromR('tex2DProjLod', `${unit}, ${pc(0)}, ${pc(1)}, ${q}, ${bias ?? '0'}`);
     }
@@ -1515,6 +1623,7 @@ function emitTextureCall(
     }
     case 'textureCube': {
       const bias = args.length > 2 ? use(argVals[2][0]) : null;
+      if (dual) return implicitDual([dcoord(0), dcoord(1), dcoord(2)], bias);
       return implicit([pc(0), pc(1), pc(2)], bias);
     }
     case 'textureCubeLod':
@@ -1530,6 +1639,10 @@ function emitTextureCall(
     case 'textureCubeLodEXT':
       return fromCtxTex(`ctx.tex.sampleCubeLod(${unit}, ${pc(0)}, ${pc(1)}, ${pc(2)}, ${use(argVals[2][0])})`, 4);
     case 'texture2DGradEXT':
+      // EXPLICIT gradients (GL_EXT_shader_texture_lod): in dual mode the
+      // coordinate duals are IGNORED — the explicit dPdx/dPdy win (same rule
+      // as textureGrad per C5b). gradComps() takes the gradient VALUES (the
+      // args' own duals are irrelevant); the wrapper zeroes the result duals.
       return gradSample([pc(0), pc(1)], gradComps(2));
     case 'texture2DProjGradEXT': {
       const q = argN[1] === 3 ? pc(2) : pc(3);
@@ -1538,6 +1651,11 @@ function emitTextureCall(
     case 'textureCubeGradEXT':
       return gradSample([pc(0), pc(1), pc(2)], gradComps(2));
     case 'texture2DShadowLodEXT': {
+      // EXPLICIT LOD (GL_EXT_shader_texture_lod): dual mode needs no
+      // coordinate gradients — the exact LOD wins and the coord duals are
+      // ignored (same rule as textureLod per C5b). The R-based exact-LOD
+      // sample cannot throw in dual mode; the emitTextureCall wrapper zeroes
+      // the RESULT duals (dFdx(texture2DShadowLodEXT(..)) → 0).
       // EXT declares a vec4 result (compare in .x per the shadow2D convention);
       // the compare is single-channel — pad the remaining components.
       const r = fromR('sampleShadowLod', `${unit}, ${pc(0)}, ${pc(1)}, ${pc(2)}, ${use(argVals[2][0])}`, 1);
@@ -1547,6 +1665,12 @@ function emitTextureCall(
     /* ---------------- 3.00 core ---------------- */
     case 'texture': {
       const bias = args.length > 2 ? use(argVals[2][0]) : null;
+      if (dual) {
+        if (fam === 'sampler2DShadow') return implicitDual([dcoord(0), dcoord(1)], bias, pc(2));
+        if (fam === 'samplerCubeShadow') return implicitDual([dcoord(0), dcoord(1), dcoord(2)], bias, pc(3));
+        if (fam === 'sampler2DArrayShadow') return implicitDual([dcoord(0), dcoord(1), dcoord(2)], bias, pc(3));
+        return implicitDual(is2D ? [dcoord(0), dcoord(1)] : [dcoord(0), dcoord(1), dcoord(2)], bias);
+      }
       if (fam === 'sampler2DShadow') return implicit([pc(0), pc(1)], bias, pc(2));
       if (fam === 'samplerCubeShadow') return implicit([pc(0), pc(1), pc(2)], bias, pc(3));
       if (fam === 'sampler2DArrayShadow') return implicit([pc(0), pc(1), pc(2)], bias, pc(3));
@@ -1555,7 +1679,17 @@ function emitTextureCall(
     }
     case 'textureProj': {
       const bias = args.length > 2 ? use(argVals[2][0]) : null;
-      const q = argN[1] === 3 ? pc(2) : pc(3);
+      const qi = argN[1] === 3 ? 2 : 3;
+      if (dual) {
+        if (is2D) return implicitDual([ddivP(0, qi), ddivP(1, qi)], bias);
+        if (is3D) return implicitDual([ddivP(0, qi), ddivP(1, qi), ddivP(2, qi)], bias);
+        if (fam === 'sampler2DShadow') {
+          const ref = argN[1] === 4 ? divP(2, pc(qi)) : pc(2);
+          return implicitDual([ddivP(0, qi), ddivP(1, qi)], bias, ref);
+        }
+        throw new Error(`codegen: textureProj does not support '${kind}'`);
+      }
+      const q = pc(qi);
       if (is2D) {
         if (env.stage === 'FRAGMENT') return implicit([divP(0, q), divP(1, q)], bias);
         return fromR('tex2DProjLod', `${unit}, ${pc(0)}, ${pc(1)}, ${q}, ${bias ?? '0'}`);
