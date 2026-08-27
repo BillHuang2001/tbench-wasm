@@ -110,4 +110,4 @@ linkProgram:    matching → attrib/uniform/block layout (std140) → limits →
 - `../gl/` → consumer of Program/Shader (sibling — read-only)
 
 ## Status
-Phase 1 complete: public API, type system, AST and exec-context contracts in place (compiler.ts/program.ts bodies throw 'not implemented'). Phase 2 pending: implement pipeline modules per Routing Table, then verify against the CTS gates above.
+Implemented: the full front-end (preprocessor, lexer, parser, semantics) and the link pipeline — uniform merge + vec4-slot layout, UBO std140 layout (E5b1), varying matching/packing incl. varying interface blocks (E5b2: vertex `out` / fragment `in` blocks, matched by (blockName, memberName), dual-key layout emission for differing instance names), transform feedback validation, sampler explicit-binding conflict checks, attribute/output location assignment, limits, and the JS codegen (single + dual-number mode). Linker-known limitations (clear 'linker: ... not supported' rejections): struct-ARRAY varyings, ARRAYED varying interface blocks, vertex `in` / fragment `out` blocks. Verify against the CTS gates in the Test Strategy section.
