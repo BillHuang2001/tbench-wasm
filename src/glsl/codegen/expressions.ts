@@ -1447,17 +1447,14 @@ function emitCall(e: Extract<Expr, { kind: 'call' }>, env: CodegenEnv): Value[] 
     const t = e.resolvedType!;
     const elem = t.kind === 'array' ? t.element : undefined;
     if (!elem) throw new Error('codegen: indexed callee is not an array constructor');
-    // Dual mode: array ctors need the dual-aware value flow (C5a2) — a
-    // v-only flattening would silently zero the element derivatives.
-    if (env.dual && hasFloatLeaves(elem)) {
-      throw new Error('codegen: dual-mode array constructors require C5a2 (constructors)');
-    }
     return emitArrayCtor(e.args, elem, t, env);
   }
   throw new Error('codegen: unsupported call callee');
 }
 
-/** Emit float[N](...) / vec3[N](...) array constructors (element-wise). */
+/** Emit float[N](...) / vec3[N](...) array constructors (element-wise). Dual
+ *  mode: convertValue preserves float→float duals and attaches constant duals
+ *  for int→float elements, so element derivatives flow through. */
 function emitArrayCtor(args: Expr[], elem: GLSLType, t: GLSLType, env: CodegenEnv): Value[] {
   const n = t.kind === 'array' ? (t.size ?? 0) : 0;
   const out: Value[] = [];
