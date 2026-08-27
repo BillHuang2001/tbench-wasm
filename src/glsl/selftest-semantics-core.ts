@@ -310,6 +310,47 @@ expectOk('float f(float a[]) { return a[0]; }', 100, 'VERTEX'); // unsized param
 expectErr('void main() { float x = 1.0; float y = x[0]; }', 100, 'VERTEX', undefined, /index/);
 
 /* ------------------------------------------------------------------ */
+/* 19. Builtin-name reuse (BUG 4) + function-body struct scoping (BUG 6) */
+/* ------------------------------------------------------------------ */
+
+// BUG 4: GLSL ES allows user VARIABLES with builtin function names (the
+// builtin name is only shadowed in the declaring scope).
+expectOk('void main() { float sign = 1.0; sign = -sign; }', 100, 'VERTEX'); // local var named after builtin fn
+expectOk('float sign; void main() { sign = 1.0; }', 100, 'VERTEX'); // global var
+expectOk('void main() { vec2 exp = vec2(1.0); float c = exp.x; }', 100, 'VERTEX');
+expectOk('void f(float sin) { sin = sin + 1.0; } void main() { f(1.0); }', 100, 'VERTEX'); // param
+// BUG 4: user FUNCTION overloads with a builtin name (DIFFERENT signature)
+// are legal; the overload is attached to the builtin placeholder's siblings.
+expectOk('int radians(int f) { return f; } void main() { }', 100, 'FRAGMENT'); // ogles CorrectBuiltInOveride
+expectOk('float pow(float a, float b, float c) { return a; } void main() { }', 100, 'VERTEX');
+expectOk('int radians(int f); int radians(int f) { return f; } void main() { }', 100, 'FRAGMENT'); // proto + def
+expectOk('int radians(int f) { return f; } int radians(int f); void main() { }', 100, 'FRAGMENT'); // def + proto
+expectOk('int radians(int f) { return f; } int radians(int f, int g) { return f + g; } void main() { }', 100, 'VERTEX'); // 2 overloads
+// BUG 4: a same-signature user function with a builtin name is still an error
+// (compared against the builtin TABLES, not the void/[] placeholder).
+expectErr('float radians(float f) { return f; } void main() { }', 100, 'FRAGMENT', undefined, /built-in/i);
+expectErr('int sin(float x) { return 1; } void main() { }', 100, 'VERTEX', undefined, /built-in/i); // same params, diff ret
+// (same-signature 'min' override already covered above, section 14)
+// BUG 4: builtin VARIABLES (gl_*) and gl_Max* constants stay non-shadowable.
+expectErr('float gl_Position; void main() { }', 100, 'VERTEX', undefined, /redefinition/);
+expectErr('float gl_FragColor; void main() { }', 100, 'FRAGMENT', undefined, /redefinition/);
+// BUG 4: single namespace — once a user function claims a builtin name, a
+// later variable with the same name is a redefinition (and vice versa).
+expectErr('int radians(int f) { return f; } float radians; void main() { }', 100, 'FRAGMENT', undefined, /redefinition/);
+expectErr('float radians; int radians(int f) { return f; } void main() { }', 100, 'FRAGMENT', undefined, /redefinition/);
+
+// BUG 6: struct types declared INSIDE a function body are visible to later
+// statements in the same scope (declarations, constructors, nested structs).
+expectOk('void main() { struct S { float x; int y; }; S s; float a = s.x; int b = s.y; }', 100, 'VERTEX');
+expectOk('void main() { struct S { float x; }; S s = S(1.0); float a = s.x; }', 100, 'VERTEX'); // constructor
+expectOk('void main() { struct B { float x; }; struct A { B b; }; A a; float y = a.b.x; }', 100, 'VERTEX'); // nested
+expectOk('void main() { struct B { float x; }; struct A { B b; }; A a = A(B(1.0)); float y = a.b.x; }', 100, 'VERTEX'); // nested ctor
+expectOk('void main() { { struct S { float x; }; S s; float a = s.x; } }', 100, 'VERTEX'); // block-scoped struct
+expectErr('void main() { struct S { float x; }; { struct S { float y; }; } }', 100, 'VERTEX', undefined, /redefinition/); // GLSL: no shadowing
+// BUG 4 + BUG 6 combined: local struct with a builtin function name.
+expectOk('void main() { struct sign { float x; }; sign s; s.x = 1.0; }', 100, 'VERTEX');
+
+/* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
 

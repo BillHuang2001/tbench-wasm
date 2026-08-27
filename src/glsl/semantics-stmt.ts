@@ -37,7 +37,19 @@ export function analyzeStatement(s: Stmt, scope: Scope, ctx: SemContext, fn: { r
       return;
     case 'decl-stmt': {
       const baseType = resolveTypeSpec(s.type, scope, ctx);
-      if (baseType !== null) declareVariables(baseType, s.type, s.declarators, scope, ctx, false);
+      if (baseType !== null) {
+        if (s.type.base.kind === 'struct-definition' && baseType.kind === 'struct') {
+          // `struct S {...};` / `struct S {...} v;` inside a function body:
+          // register the struct TYPE in the CURRENT scope so later statements
+          // in the same scope (declarations, constructors, member-typed
+          // declarations of nested structs) resolve it — mirrors the global
+          // pre-pass registration (analyzeGlobalVarDecl/registerStructDecl).
+          // Registered BEFORE the declarators so `struct S {...} s = S(...)`
+          // initializers can use the constructor.
+          scope.declare({ kind: 'struct', name: baseType.name, type: baseType }, ctx, s.loc.line);
+        }
+        declareVariables(baseType, s.type, s.declarators, scope, ctx, false);
+      }
       return;
     }
     case 'expr-stmt':
