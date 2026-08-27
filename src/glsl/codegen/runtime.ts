@@ -1046,6 +1046,57 @@ export function tex2DShadowGrad(
   out[off] = texOut[0];
 }
 
+/** textureGrad(samplerCubeShadow, P, dPdx, dPdy) — P = (u, v, w, ref). */
+export function texCubeShadowGrad(
+  ctx: TextureResolveCtx, unit: number,
+  u: number, v: number, w: number, ref: number,
+  dudx: number, dvdx: number, dwdx: number,
+  dudy: number, dvdy: number, dwdy: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    out[off] = 0;
+    return;
+  }
+  coordV[0] = u;
+  coordV[1] = v;
+  coordV[2] = w;
+  coordDx[0] = dudx;
+  coordDx[1] = dvdx;
+  coordDx[2] = dwdx;
+  coordDy[0] = dudy;
+  coordDy[1] = dvdy;
+  coordDy[2] = dwdy;
+  sampleTextureShadow(img, samplerState(ctx, unit), gradCoord, ref, 0, texOut);
+  out[off] = texOut[0];
+}
+
+/** textureGrad(sampler2DArrayShadow, P, dPdx, dPdy) — P = (u, v, layer, ref). */
+export function tex2DArrayShadowGrad(
+  ctx: TextureResolveCtx, unit: number,
+  u: number, v: number, layer: number, ref: number,
+  dudx: number, dvdx: number, dudy: number, dvdy: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    out[off] = 0;
+    return;
+  }
+  coordV[0] = u;
+  coordV[1] = v;
+  coordV[2] = layer;
+  coordDx[0] = dudx;
+  coordDx[1] = dvdx;
+  coordDx[2] = 0;
+  coordDy[0] = dudy;
+  coordDy[1] = dvdy;
+  coordDy[2] = 0;
+  sampleTextureShadow(img, samplerState(ctx, unit), gradCoord, ref, 0, texOut);
+  out[off] = texOut[0];
+}
+
 /**
  * textureOffset(sampler2D, P, offset) — approximation: sample at coords
  * shifted by (offset / baseLevel size). Equivalent for NEAREST filtering and
@@ -1150,6 +1201,8 @@ export const R: Readonly<Record<string, Function>> = {
   tex3DGrad,
   texCubeGrad,
   tex2DShadowGrad,
+  texCubeShadowGrad,
+  tex2DArrayShadowGrad,
   tex2DOffsetApprox,
   tex2DArrayOffsetApprox,
   tex3DOffsetApprox,

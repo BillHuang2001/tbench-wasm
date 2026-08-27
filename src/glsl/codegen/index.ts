@@ -82,6 +82,18 @@ export interface CodegenLayout {
   uniformSlots: Map<string, UniformSlot>;
   /** Uniform-block layouts: block index → member path → byte layout. */
   blocks: Map<number, Map<string, BlockMemberLayout>>;
+  /**
+   * Block access name → block index. For INSTANCE-ARRAYED blocks
+   * (`uniform B {..} b[2]`) the key is the instance name ('b'); for
+   * INSTANCE-LESS blocks the keys are the bare MEMBER names ('m') — GLSL
+   * accesses instance-less block members by bare name. Codegen resolves a
+   * member identifier through this map; the member path keys then live in
+   * `blocks.get(index)` (prefixed with the instance name + index for
+   * instance arrays, e.g. 'b[0].m'). Arrayed blocks additionally need a
+   * PREFIX entry 'b[0]' (offset 0, blockStride set) so codegen can resolve
+   * dynamic instance indices.
+   */
+  blockIndices: Map<string, number>;
   /** Interface varyings by base name. */
   varyings: Map<string, VaryingLayout>;
   /** Vertex attributes: base name → first location (matC occupies C consecutive). */
@@ -102,11 +114,24 @@ export interface StageCodegenResult {
   intScratchSize: number;
 }
 
-/** One JS expression: `v` = value; `dx`/`dy` = dual parts (dual mode only). */
+/**
+ * One JS expression: `v` = value; `dx`/`dy` = dual parts (dual mode only).
+ *
+ * `pre` = PURE materialization expressions (texture-sample chains, temp
+ * assignments of multi-use pure math) that MUST run once, in order, before
+ * `v`/`dx`/`dy` are evaluated. Every component of one multi-component result
+ * shares the SAME pre-array instance; statement emitters dedupe pres by array
+ * identity and hoist them before the statement's expression. Pres are always
+ * PURE (no assignments to GLSL state, no out-param writes) — GLSL side
+ * effects (assignments, out params) fold inline into `v` instead, so running
+ * a pre unconditionally is always safe. The dual-mode task (C5) treats pre
+ * the same way (pres run once; dx/dy strings reference the same temps).
+ */
 export interface Value {
   v: string;
   dx?: string;
   dy?: string;
+  pre?: string[];
 }
 
 /** Generate the vertex stage body (writes ctx.out.position/pointSize/varyings). */
