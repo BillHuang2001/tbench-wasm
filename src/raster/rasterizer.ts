@@ -24,10 +24,11 @@
  * addressing are documented on DrawCall in types.ts.
  */
 
-import type { DrawCall, FragmentExecCtx, RasterState, VaryingInterpolant } from './types';
+import type { DrawCall, FragmentExecCtx, RasterState, SamplerState, TextureImage, VaryingInterpolant } from './types';
 import {
   POINTS, LINES, LINE_LOOP, LINE_STRIP, TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN,
   FRONT, BACK, FRONT_AND_BACK, CW, CCW,
+  NEAREST_MIPMAP_LINEAR, LINEAR, REPEAT, NONE, LEQUAL,
 } from './gl-enums';
 import { clipPrimitive, pointIsVisible, applyViewportTransform, MAX_CLIPPED_VERTICES } from './clip';
 import { rasterizeTriangle, signedArea2 } from './triangles';
@@ -47,6 +48,61 @@ type DrawCallExt = DrawCall & {
   uniformBlocks?: Record<string, ArrayBufferView>;
   sampleCountRef?: { value: number };
 };
+
+/* ------------------------------------------------------------------ */
+/* Module-level per-draw resources (draws are sequential; sharing is    */
+/* safe and avoids per-draw GC churn in the three.js/Babylon suites).   */
+/* ------------------------------------------------------------------ */
+
+/** Minimum size of the codegen scratch buffers (grow as programs need more). */
+const MIN_SCRATCH = 64;
+
+/** Codegen float scratch for fragment execution (shared across draws). */
+let scratch = new Float32Array(MIN_SCRATCH);
+/** Codegen int scratch for fragment execution (shared across draws). */
+let intScratch = new Int32Array(MIN_SCRATCH);
+
+/** Growing zero-filled stores for unbound uniform blocks (read-only for codegen). */
+let zeroStore = new Float32Array(0);
+let zeroIntStore = new Int32Array(0);
+
+/** Empty default-block int store fallback (programs without int uniforms). */
+const EMPTY_INT_STORE = new Int32Array(0);
+
+/**
+ * Default effective sampler state for texture units with nothing bound
+ * (GL spec defaults; matches gl/'s effectiveSamplerState({}, null)).
+ */
+const DEFAULT_STATE: SamplerState = {
+  minFilter: NEAREST_MIPMAP_LINEAR, // 0x2702
+  magFilter: LINEAR, // 0x2601
+  wrapS: REPEAT, // 0x2901
+  wrapT: REPEAT, // 0x2901
+  wrapR: REPEAT, // 0x2901
+  minLod: -1000,
+  maxLod: 1000,
+  compareMode: NONE, // 0
+  compareFunc: LEQUAL, // 0x0203
+  maxAnisotropy: 1,
+};
+
+/** Ensures the module-level scratch buffers can hold `n` floats / ints. */
+function ensureScratch(n: number, intN: number): void {
+  if (scratch.length < n) scratch = new Float32Array(Math.max(n, MIN_SCRATCH));
+  if (intScratch.length < intN) intScratch = new Int32Array(Math.max(intN, MIN_SCRATCH));
+}
+
+/** Zero-filled float store of at least `n` elements (growing, shared). */
+function getZeroStore(n: number): Float32Array {
+  if (zeroStore.length < n) zeroStore = new Float32Array(n);
+  return zeroStore;
+}
+
+/** Zero-filled int store of at least `n` elements (growing, shared). */
+function getZeroIntStore(n: number): Int32Array {
+  if (zeroIntStore.length < n) zeroIntStore = new Int32Array(n);
+  return zeroIntStore;
+}
 
 /** Rasterizes one draw call (contract §2 `rasterizer.draw`). */
 export function draw(dc: DrawCall): void {
@@ -128,9 +184,10 @@ export function draw(dc: DrawCall): void {
 }
 
 /**
- * Builds the per-draw execution state: FragmentExecCtx (varyings arrays,
- * texture env + scratch), FragmentOps, and the quad scratch buffers.
- * Allocates once per draw call.
+ * Builds the per-draw execution state: the full FragmentExecCtx (varyings
+ * interpolants, uniform stores + scratch + texture arrays per BaseExecCtx,
+ * texture env), FragmentOps, and the quad scratch buffers. Allocates once per
+ * draw call.
  */
 export function createRasterState(dc: DrawCall): RasterState {
   const dcx = dc as DrawCallExt;
@@ -160,13 +217,68 @@ export function createRasterState(dc: DrawCall): RasterState {
   const colorOuts: Float32Array[] = [];
   for (let i = 0; i <= maxLocation; i++) colorOuts.push(new Float32Array(4));
 
+  // Default-block int store: glsl Program.intStore (FLOAT-index convention —
+  // samplers/ints/bools/uints share it). Empty fallback for programs without
+  // int uniforms (codegen never reads it then).
+  const pm = dc.program;
+  const intUniforms = pm.intStore ?? EMPTY_INT_STORE;
+
+  // Uniform-block stores per BLOCK INDEX (contract §1). The DrawCall carries
+  // them keyed by block NAME; convert using the program's uniformBlocks
+  // metadata (name/index/size). Unbound blocks get a zero-filled store.
+  const blocks = pm.uniformBlocks ?? [];
+  const blockStores: Float32Array[] = new Array(blocks.length);
+  const blockIntStores: Int32Array[] = new Array(blocks.length);
+  const dcBlocks = dcx.uniformBlocks;
+  for (let bi = 0; bi < blocks.length; bi++) {
+    const view = dcBlocks ? dcBlocks[blocks[bi].name] : undefined;
+    if (view) {
+      const n = view.byteLength >>> 2;
+      if (view.byteOffset % 4 === 0) {
+        blockStores[bi] = view as Float32Array;
+        blockIntStores[bi] = new Int32Array(view.buffer, view.byteOffset, n);
+      } else {
+        // Defensive: unaligned view — copy into an aligned buffer so the int
+        // store shares its bytes bit-exactly (gl/ views are 4-byte aligned).
+        const copy = new Float32Array(n);
+        copy.set(new Float32Array(view.buffer, view.byteOffset, n));
+        blockStores[bi] = copy;
+        blockIntStores[bi] = new Int32Array(copy.buffer);
+      }
+    } else {
+      const n = Math.max(Math.ceil(blocks[bi].size / 4), 4);
+      blockStores[bi] = getZeroStore(n);
+      blockIntStores[bi] = getZeroIntStore(n);
+    }
+  }
+
+  // Per-unit texture images + effective sampler state (contract §1: null
+  // image / default state when nothing bound).
+  const texUnits = dc.textures;
+  const textures: (TextureImage | null)[] = new Array(texUnits.length);
+  const samplerStates: SamplerState[] = new Array(texUnits.length);
+  for (let i = 0; i < texUnits.length; i++) {
+    const t = texUnits[i];
+    textures[i] = t ? t.img : null;
+    samplerStates[i] = t ? t.state : DEFAULT_STATE;
+  }
+
+  // Codegen scratch (module-level, grows with the program's needs).
+  ensureScratch(Math.max(pm.scratchSize ?? 0, MIN_SCRATCH), Math.max(pm.intScratchSize ?? 0, MIN_SCRATCH));
+
   const fragCtx: FragmentExecCtx = {
     varyings: fragVaryings,
     fragCoord: new Float32Array(4),
     frontFacing: true, // driver sets it per primitive
     pointCoord: new Float32Array(2),
     uniforms: dcx.uniforms,
-    uniformBlocks: dcx.uniformBlocks,
+    intUniforms,
+    blockStores,
+    blockIntStores,
+    textures,
+    samplerStates,
+    scratch,
+    intScratch,
     tex: createTextureEnv(dc.textures),
     out: { color: colorOuts, fragDepth: 0 },
     discarded: false,

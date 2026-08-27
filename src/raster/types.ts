@@ -103,12 +103,27 @@ export interface FragmentExecCtx {
   frontFacing: boolean;
   /** [s, t] in 0..1 for POINTS primitives; zero otherwise. */
   pointCoord: Float32Array;
-  /** Default-block uniform store (float). Integer/sampler uniforms are stored
-   *  as their raw bit patterns in the float array (codegen reads via
-   *  Int32Array views or `| 0`). */
+  /** Default-block float/matrix uniform store (program.floatStore). */
   uniforms: Float32Array;
-  /** Uniform block stores keyed by block name (WebGL2). */
-  uniformBlocks?: Record<string, ArrayBufferView>;
+  /** Default-block int/uint/bool/sampler uniforms (program.intStore).
+   *  Integer and sampler uniforms live HERE, never in `uniforms`. */
+  intUniforms: Int32Array;
+  /**
+   * Uniform-block data per BLOCK INDEX (UniformBlockInfo.index order — NOT
+   * keyed by block name or binding point). Float members read
+   * `blockStores[i]`; int/uint/bool members read `blockIntStores[i]` (same
+   * bytes, bit-exact). Both are zero-filled when the block is unbound.
+   */
+  blockStores: Float32Array[];
+  blockIntStores: Int32Array[];
+  /** Texture images per texture unit (null = nothing bound). */
+  textures: (TextureImage | null)[];
+  /** Effective per-unit sampling state (DEFAULT_STATE when nothing bound). */
+  samplerStates: SamplerState[];
+  /** Codegen scratch for float locals/arrays (length ≥ program.scratchSize). */
+  scratch: Float32Array;
+  /** Codegen scratch for int locals/arrays (length ≥ program.intScratchSize). */
+  intScratch: Int32Array;
   /** Texture sampling entry points + per-unit bindings (see TextureEnv). */
   tex: TextureEnv;
   out: {
@@ -197,6 +212,17 @@ export interface RasterProgram {
     /** Fragment color outputs: { location, type } pairs. */
     outputs: readonly { location: number; type: GLenum }[];
   };
+  /**
+   * Codegen scratch sizes (in elements) the fragment shader needs — raster
+   * sizes ctx.scratch / ctx.intScratch to at least this. Optional so
+   * hand-built test programs compile; glsl's Program always provides them.
+   */
+  scratchSize?: number;
+  intScratchSize?: number;
+  /** Default-block int/uint/bool/sampler uniform store (glsl Program.intStore). */
+  intStore?: Int32Array;
+  /** Uniform-block metadata (glsl Program.uniformBlocks: name/index/size). */
+  uniformBlocks?: readonly { name: string; index: number; size: number }[];
 }
 
 /* ================================================================== */
