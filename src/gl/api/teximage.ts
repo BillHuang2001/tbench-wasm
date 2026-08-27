@@ -1419,7 +1419,7 @@ const W2_UNSIZED: number[] = [
 
 /** texStorage requires a SIZED internalformat (norm16 gated on the extension). */
 function isW2SizedInternalFormat(ctx: WebGLRenderingContext, fmt: GLenum): boolean {
-  if (isNorm16Format(fmt)) return ctx.getExtension('EXT_texture_norm16') !== null;
+  if (isNorm16Format(fmt)) return ctx._extensions.has('EXT_texture_norm16');
   return fmt in W2_COMBOS && !W2_UNSIZED.includes(fmt);
 }
 
