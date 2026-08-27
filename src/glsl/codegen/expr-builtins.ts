@@ -1246,21 +1246,18 @@ function lowerBuiltin(
     }
 
     /* ---------------- relational ---------------- */
-    case 'lessThan':
-    case 'lessThanEqual':
-    case 'greaterThan':
-    case 'greaterThanEqual':
     case 'equal':
     case 'notEqual': {
-      const op: Record<string, string> = {
-        lessThan: '<',
-        lessThanEqual: '<=',
-        greaterThan: '>',
-        greaterThanEqual: '>=',
-        equal: '===',
-        notEqual: '!==',
-      };
-      return perComp(n, argVals, argTypes, ([a, b]) => `(${a} ${op[name]} (${b}))`);
+      // BUG 6 (audit of the bool strict-equality class): equal/notEqual accept
+      // BOOL vectors — uniform-store operands are numbers (0/1) while literals
+      // are true/false, so strict ===/!== miscompares. Normalize both sides
+      // only for bool operands (numeric comparisons stay strict).
+      const isBool =
+        scalarBaseOf(argTypes[0]) === 'bool' && scalarBaseOf(argTypes[1]) === 'bool';
+      const op = name === 'equal' ? '===' : '!==';
+      return perComp(n, argVals, argTypes, ([a, b]) =>
+        isBool ? `(!!(${a})) ${op} (!!(${b}))` : `(${a}) ${op} (${b})`,
+      );
     }
     case 'any': {
       const parts = argVals[0].map((v) => use(v));

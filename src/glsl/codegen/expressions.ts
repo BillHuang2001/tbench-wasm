@@ -37,6 +37,7 @@ import {
   CodegenEnv,
   LocalVar,
   flatComponents,
+  flatFloatness,
   scalarBaseOf,
   isUintType,
   isIntType,
@@ -49,10 +50,12 @@ import {
   convertValue,
   foldPre,
   structMemberOffset,
+  structMemberOffsets,
   uniformPathRead,
   blockPathRead,
   varyingPathRead,
   attribRead,
+  attribDeclComps,
   outputAccess,
 } from './env.js';
 import type { Value } from './index.js';
@@ -67,7 +70,14 @@ type StorageKind =
   | { kind: 'uniform'; key: string }
   | { kind: 'block'; blockIndex: number; key: string; instance: boolean }
   | { kind: 'varying'; key: string }
-  | { kind: 'attrib'; location: number }
+  | {
+      kind: 'attrib';
+      location: number;
+      /** Declared per-location component count (BUG 5): the per-vertex fetch
+       *  stride. Set at identifier resolution and carried through swizzles
+       *  (which retype p.type but must NOT change the stride). */
+      declComps: number;
+    }
   | { kind: 'output'; location: number };
 
 /** Walked access path: identifier + member/index chains. `dyn` (outermost
@@ -115,7 +125,11 @@ function leafRead(p: P, env: CodegenEnv, c: number): string {
     if (lv.kind === 'flat') {
       return lv.compNames![p.flatOff + cc];
     }
-    const store = lv.int ? 'ctx.intScratch' : 'ctx.scratch';
+    // BUG 2: the store is chosen per MEMBER type. lv.int is set only when ALL
+    // leaves of the block are integral, so an int member of a mixed struct
+    // array (float store) reads from ctx.scratch — float32 storage is exact
+    // for |v| < 2^24, and uint wraps below via isUintType.
+    const store = lv.int && isIntegralFamily(p.type) ? 'ctx.intScratch' : 'ctx.scratch';
     const dyn = p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.elemSlots}` : '';
     const s = `${store}[${lv.scratchBase} + ${p.flatOff}${dyn} + ${cc}]`;
     return isUintType(p.type) ? wrapUint(s) : s;
@@ -131,7 +145,9 @@ function leafRead(p: P, env: CodegenEnv, c: number): string {
       case 'varying':
         return varyingPathRead(env, st.key, p.type, p.dyn, flatC);
       case 'attrib':
-        return attribRead(p.type, st.location, p.dyn, flatC);
+        // BUG 5: fetch stride = DECLARED comps (st.declComps), not p.type's
+        // (swizzles retype p.type to the swizzle width).
+        return attribRead(p.type, st.location, st.declComps, p.dyn, flatC);
       case 'output':
         return outputAccess(p.type, st.location, p.dyn, flatC);
     }
@@ -191,7 +207,11 @@ function leafDual(p: P, env: CodegenEnv, c: number): [string, string] | null {
     if (lv.kind === 'flat') {
       const dx = lv.dxNames?.[idx];
       if (!dx) return null;
-      return [dx, `${lv.compNames![idx]}_dy`];
+      // BUG 1: synthesized paths (member/index of a call result) carry
+      // explicit dyNames (their compNames are allocTemp names — the derived
+      // `compNames[idx]_dy` would never be declared); ordinary locals fall
+      // back to the registered `_dy` convention.
+      return [dx, lv.dyNames?.[idx] ?? `${lv.compNames![idx]}_dy`];
     }
     if (lv.int) return null;
     const n = flatComponents(lv.type);
@@ -246,7 +266,8 @@ function leafWrite(p: P, env: CodegenEnv, c: number): string {
   if (p.local) {
     const lv = p.local;
     if (lv.kind === 'flat') return lv.compNames![p.flatOff + cc];
-    const store = lv.int ? 'ctx.intScratch' : 'ctx.scratch';
+    // BUG 2: per-MEMBER store selection (see leafRead) — the write mirror.
+    const store = lv.int && isIntegralFamily(p.type) ? 'ctx.intScratch' : 'ctx.scratch';
     const dyn = p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.elemSlots}` : '';
     return `${store}[${lv.scratchBase} + ${p.flatOff}${dyn} + ${cc}]`;
   }
@@ -303,7 +324,8 @@ function leafDualWrite(p: P, env: CodegenEnv, c: number): [string, string] | nul
     if (lv.kind === 'flat') {
       const dx = lv.dxNames?.[idx];
       if (!dx) return null;
-      return [dx, `${lv.compNames![idx]}_dy`];
+      // BUG 1: synthesized paths carry explicit dyNames (see leafDual).
+      return [dx, lv.dyNames?.[idx] ?? `${lv.compNames![idx]}_dy`];
     }
     if (lv.int) return null;
     const n = flatComponents(lv.type);
@@ -518,7 +540,10 @@ function walk(e: Expr, env: CodegenEnv): P {
           };
           return p;
         case 'attrib':
-          p.storage = { kind: 'attrib', location: info.location };
+          // BUG 5: carry the DECLARED component count — swizzles retype
+          // p.type, but the per-vertex fetch stride must stay the declared
+          // width (a.xy on a vec4 fetches with stride 4).
+          p.storage = { kind: 'attrib', location: info.location, declComps: attribDeclComps(t) };
           return p;
         case 'varying':
           p.storage = { kind: 'varying', key: info.key };
@@ -544,7 +569,9 @@ function walk(e: Expr, env: CodegenEnv): P {
       break;
     }
     case 'member': {
-      const p = walk(e.object, env);
+      // BUG 1: the object may be a call/binary/... result — materialize it
+      // into temps instead of crashing ("not a path expression").
+      const p = walkObject(e.object, env);
       const ot = e.object.resolvedType!;
       if (ot.kind === 'struct') {
         const m = ot.members.find((x) => x.name === e.name);
@@ -562,7 +589,9 @@ function walk(e: Expr, env: CodegenEnv): P {
       throw new Error(`codegen: member access on '${typeName(ot)}'`);
     }
     case 'index': {
-      const p = walk(e.object, env);
+      // BUG 1: the object may be a call/binary/... result — materialize it
+      // into temps instead of crashing (see walkObject).
+      const p = walkObject(e.object, env);
       const ot = p.type;
       const cv = e.index.constValue;
       const isConst = typeof cv === 'number' && Number.isInteger(cv);
@@ -576,6 +605,10 @@ function walk(e: Expr, env: CodegenEnv): P {
         const t = env.allocTemp();
         p.pre.push(`${t} = ${idxV!.pre && idxV!.pre.length ? foldPre(idxV!.pre, idxV!.v) : idxV!.v}`);
         if (p.local) {
+          // BUG 1: a synthesized flat local (call-result object) is not
+          // addressable by index — spill its temps into a scratch block so the
+          // dyn term can stride (flat-local reads ignore p.dyn).
+          if (p.local.synth) spillSynthLocal(p, env, flatComponents(et));
           p.dyn = { temp: t, stride: 0, elemSlots: flatComponents(et) };
         } else if (p.storage) {
           switch (p.storage.kind) {
@@ -636,10 +669,15 @@ function walk(e: Expr, env: CodegenEnv): P {
         const t = env.allocTemp();
         p.pre.push(`${t} = ${idxV!.pre && idxV!.pre.length ? foldPre(idxV!.pre, idxV!.v) : idxV!.v}`);
         if (p.local) {
-          const ds = env.ensureDynScratch(p.local.name);
-          p.pre.unshift(...ds.copyIn);
-          p.post.push(...ds.copyOut);
-          p.local = { ...p.local, kind: 'scratch', scratchBase: ds.base, elemSlots: 1, int: ds.int };
+          if (p.local.synth) {
+            // BUG 1: call-result object — scratch spill (see the array branch).
+            spillSynthLocal(p, env, 1);
+          } else {
+            const ds = env.ensureDynScratch(p.local.name);
+            p.pre.unshift(...ds.copyIn);
+            p.post.push(...ds.copyOut);
+            p.local = { ...p.local, kind: 'scratch', scratchBase: ds.base, elemSlots: 1, int: ds.int };
+          }
           p.dyn = { temp: t, stride: 0, elemSlots: 1 };
         } else if (p.storage) {
           p.dyn = { temp: t, stride: storageElemStride(p, 1), elemSlots: 0 };
@@ -679,10 +717,15 @@ function walk(e: Expr, env: CodegenEnv): P {
         const t = env.allocTemp();
         p.pre.push(`${t} = ${idxV!.pre && idxV!.pre.length ? foldPre(idxV!.pre, idxV!.v) : idxV!.v}`);
         if (p.local) {
-          const ds = env.ensureDynScratch(p.local.name);
-          p.pre.unshift(...ds.copyIn);
-          p.post.push(...ds.copyOut);
-          p.local = { ...p.local, kind: 'scratch', scratchBase: ds.base, elemSlots: rows, int: ds.int };
+          if (p.local.synth) {
+            // BUG 1: call-result object — scratch spill (see the array branch).
+            spillSynthLocal(p, env, rows);
+          } else {
+            const ds = env.ensureDynScratch(p.local.name);
+            p.pre.unshift(...ds.copyIn);
+            p.post.push(...ds.copyOut);
+            p.local = { ...p.local, kind: 'scratch', scratchBase: ds.base, elemSlots: rows, int: ds.int };
+          }
           p.dyn = { temp: t, stride: 0, elemSlots: rows };
         } else if (p.storage) {
           p.dyn = { temp: t, stride: storageElemStride(p, rows), elemSlots: 0 };
@@ -695,6 +738,95 @@ function walk(e: Expr, env: CodegenEnv): P {
       throw new Error('codegen: not a path expression');
   }
   throw new Error('codegen: unreachable');
+}
+
+/** True when `e` is a plain lvalue path (identifier/member/index chain). */
+function isPathExpr(e: Expr): boolean {
+  return e.kind === 'identifier' || e.kind === 'member' || e.kind === 'index';
+}
+
+/**
+ * BUG 1: resolve the OBJECT of a member/index access. Plain path expressions
+ * walk normally; ANY other expression kind (call — builtin/user/ctor — binary,
+ * unary, ternary, assign, comma) is not addressable, so its VALUE is
+ * materialized into temps and a synthesized temp-backed flat-local path is
+ * built. The member/index descent then reads the temps (struct member offsets,
+ * const/dynamic indices and swizzles all work on the flat compNames). The
+ * assignments are carried on p.pre UNCONDITIONALLY — a call result with no pre
+ * (an IIFE string) must not become the "path" itself, or reads() would emit it
+ * as a bare expression statement and discard the value. p.lvalue stays false →
+ * emitLValue throws "not an lvalue" for write attempts.
+ *
+ * DUAL MODE: float components materialize as (v, dx, dy) temp triples with the
+ * plane names recorded in dxNames/dyNames (allocTemp names violate the
+ * `compNames[c]+'_dy'` convention — leafDual/leafDualWrite consult dyNames).
+ * Int/bool components get no duals.
+ */
+function walkObject(e: Expr, env: CodegenEnv): P {
+  if (isPathExpr(e)) return walk(e, env);
+  const t = e.resolvedType!;
+  const vals = emitExpr(e, env);
+  const n = flatComponents(t);
+  const floatness = flatFloatness(t);
+  const compNames: string[] = [];
+  const dxNames: (string | null)[] = [];
+  const dyNames: (string | null)[] = [];
+  const pre: string[] = [];
+  for (let c = 0; c < n; c++) {
+    const v = vals[c];
+    const tn = env.allocTemp();
+    compNames.push(tn);
+    const vv = v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v;
+    if (env.dual && floatness[c]) {
+      const tx = env.allocTemp();
+      const ty = env.allocTemp();
+      dxNames.push(tx);
+      dyNames.push(ty);
+      pre.push(`${tn} = ${vv}`, `${tx} = ${v.dx ?? '0'}`, `${ty} = ${v.dy ?? '0'}`);
+    } else {
+      dxNames.push(null);
+      dyNames.push(null);
+      pre.push(`${tn} = ${vv}`);
+    }
+  }
+  const p = freshP(t);
+  p.local = {
+    name: '_tmp',
+    type: t,
+    kind: 'flat',
+    compNames,
+    dxNames,
+    dyNames,
+    synth: true,
+    members: t.kind === 'struct' ? structMemberOffsets(t) : undefined,
+  };
+  p.pre = pre;
+  return p;
+}
+
+/**
+ * BUG 1: spill a synthesized temp-backed flat local into a scratch block so a
+ * DYNAMIC index can stride (flat-local reads ignore p.dyn — temp names are not
+ * addressable by index). The copy-in assignments (v + dual planes, offset by
+ * p.flatOff for struct-member descent) join p.pre, so they run before every
+ * read. `elemSlots` = flat components per indexed element. The store follows
+ * the BUG 2 rule: all-integral objects → intScratch, otherwise float scratch
+ * (leafRead/leafWrite then select per member type).
+ */
+function spillSynthLocal(p: P, env: CodegenEnv, elemSlots: number): void {
+  const lv = p.local!;
+  const n = flatComponents(lv.type);
+  const int = isIntegralFamily(lv.type) && !hasFloatLeaves(lv.type);
+  const base = int ? env.allocIntScratch(n) : env.allocScratch(n);
+  const store = int ? 'ctx.intScratch' : 'ctx.scratch';
+  for (let k = 0; k < n; k++) {
+    p.pre.push(`${store}[${base} + ${p.flatOff} + ${k}] = ${lv.compNames![k]}`);
+    if (env.dual && lv.dxNames?.[k]) {
+      p.pre.push(`${store}[${base} + ${n} + ${p.flatOff} + ${k}] = ${lv.dxNames[k]}`);
+      p.pre.push(`${store}[${base} + ${2 * n} + ${p.flatOff} + ${k}] = ${lv.dyNames![k]}`);
+    }
+  }
+  p.local = { ...lv, kind: 'scratch', scratchBase: base, blockSize: n, elemSlots, int };
 }
 
 /** Storage stride for a dynamic VECTOR-component / MATRIX-column index. */
@@ -940,7 +1072,10 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
       const b = emitExpr(e.right, env)[0];
       const av = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
       const bv = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-      return [{ v: `(${av} !== (${bv}))` }];
+      // BUG 3: ^^ operands are always bool — the uniform store holds numbers
+      // (0/1) while literals emit true/false; strict !== would compare 1 !==
+      // true (false for equal operands). Normalize both sides.
+      return [{ v: `((!!(${av})) !== (!!(${bv})))` }];
     }
     case '==':
     case '!=': {
@@ -970,7 +1105,14 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
         const bp = bv[c].pre;
         const a = ap && ap.length ? foldPre(ap, av[c].v) : av[c].v;
         const b = bp && bp.length ? foldPre(bp, bv[c].v) : bv[c].v;
-        parts.push(op === '==' ? `(${a} === (${b}))` : `(${a} !== (${b}))`);
+        // BUG 3: bool operands may mix uniform-store numbers (0/1) and
+        // literals (true/false) — strict === on 1 vs true is false. `!!`
+        // normalizes both sides (vector bools: all components).
+        if (cb === 'bool') {
+          parts.push(op === '==' ? `(!!(${a})) === (!!(${b}))` : `(!!(${a})) !== (!!(${b}))`);
+        } else {
+          parts.push(op === '==' ? `(${a} === (${b}))` : `(${a} !== (${b}))`);
+        }
       }
       return [{ v: `(${parts.join(op === '==' ? ' && ' : ' || ')})` }];
     }

@@ -258,6 +258,19 @@ export interface LocalVar {
   members?: Map<string, number>;
   /** Dual-mode dx JS name per flat component (null = non-float); absent for scratch. */
   dxNames?: (string | null)[];
+  /**
+   * Dual-mode dy JS name per flat component (null = non-float). Present only
+   * when the dy names deviate from the `compNames[c] + '_dy'` convention —
+   * synthesized member/index-of-call-result paths (BUG 1) whose compNames are
+   * allocTemp names (`t0_dy` is never declared). leafDual/leafDualWrite fall
+   * back to the derived name for ordinary locals.
+   */
+  dyNames?: (string | null)[];
+  /** Synthetic flat local backing a member/index of a call result (BUG 1):
+   *  compNames are temps, never registered in locals_/paramFrames_ (so
+   *  ensureDynScratch must be bypassed); dynamic indexing spills it to a
+   *  scratch block (walk in expressions.ts). */
+  synth?: boolean;
   /** Scratch block size in elements (v-plane length; dual planes sit after). */
   blockSize?: number;
   /**
@@ -487,8 +500,22 @@ export function varyingFragmentRead(
   return env.varyingRead(index, comp);
 }
 
-/** Vertex attribute read with the constant-attribute typeof guard. */
-export function attribRead(type: GLSLType, location: number, dyn: DynTerm | null, c: number): string {
+/** Declared per-location component count of an attribute type: vector → size,
+ *  matrix → rows, scalar → 1. The per-vertex fetch stride MUST come from the
+ *  DECLARED type — a swizzled read (a.xy on a vec4) retypes the path but the
+ *  fetch stride stays the declared width (BUG 5). */
+export function attribDeclComps(type: GLSLType): number {
+  return type.kind === 'vector' ? type.size : type.kind === 'matrix' ? type.rows : 1;
+}
+
+/**
+ * Vertex attribute read with the constant-attribute typeof guard.
+ * `declComps` = DECLARED per-location component count (see attribDeclComps) —
+ * it drives the per-vertex fetch stride; `type` drives the swizzle/component
+ * selection and the matrix column-location math (matrices are never swizzled,
+ * so whole-matrix reads keep the matrix type).
+ */
+export function attribRead(type: GLSLType, location: number, declComps: number, dyn: DynTerm | null, c: number): string {
   let L = String(location);
   let comp = c;
   if (dyn) L = `${L} + (${dyn.temp}) * ${dyn.stride}`;
@@ -496,8 +523,7 @@ export function attribRead(type: GLSLType, location: number, dyn: DynTerm | null
     L = `${L} + ${Math.floor(c / type.rows)}`;
     comp = c % type.rows;
   }
-  const comps = type.kind === 'matrix' ? type.rows : type.kind === 'vector' ? type.size : 1;
-  const s = `(typeof ctx.attribs[${L}] === 'number' ? (${comp} === 0 ? ctx.attribs[${L}] : ${comp} === 3 ? 1 : 0) : ctx.attribs[${L}][ctx.attribIndices[${L}] * ${comps} + ${comp}])`;
+  const s = `(typeof ctx.attribs[${L}] === 'number' ? (${comp} === 0 ? ctx.attribs[${L}] : ${comp} === 3 ? 1 : 0) : ctx.attribs[${L}][ctx.attribIndices[${L}] * ${declComps} + ${comp}])`;
   // Uint attributes: gl/ passes Uint32Array; wrap defensively (an Int32Array
   // view would otherwise read back signed bit patterns).
   return isUintType(type) ? wrapUint(s) : s;
@@ -656,7 +682,11 @@ export class CodegenEnv {
     if (type.kind === 'array') {
       const elem = type.element;
       const n = flatComponents(elem) * (type.size ?? 1);
-      const int = isIntegralFamily(elem);
+      // BUG 2: the int store is only for ALL-integral blocks — a struct with
+      // any float leaf allocates in the float scratch so `s[0].color = 0.5`
+      // writes a float, not an int32-truncated 0 (leafRead/leafWrite select
+      // the store per MEMBER type).
+      const int = isIntegralFamily(elem) && !hasFloatLeaves(elem);
       const base = int ? this.allocIntScratch(n) : this.allocScratch(n);
       return {
         name,
@@ -732,7 +762,8 @@ export class CodegenEnv {
     if (isArr || opts?.array) {
       const elem = isArr ? type.element : type;
       const n = flatComponents(elem) * (isArr ? type.size ?? 1 : 1);
-      const int = isIntegralFamily(elem);
+      // BUG 2: int store only when ALL leaves are integral (see makeParamLocal).
+      const int = isIntegralFamily(elem) && !hasFloatLeaves(elem);
       const base = int ? this.allocIntScratch(n) : this.allocScratch(n);
       const lv: LocalVar = {
         name,
@@ -1125,7 +1156,11 @@ export function globalPathRef(env: CodegenEnv, info: GlobalInfo, type: GLSLType)
     case 'block':
       return blockIdentifierRef(env, info, type);
     case 'attrib': {
-      const read = (c: number): string => attribRead(type, info.location, null, c);
+      // Identifier-level reads carry the DECLARED type — declComps derives
+      // from it (swizzles happen in the expressions walker, which carries
+      // declComps on the storage instead).
+      const declComps = attribDeclComps(type);
+      const read = (c: number): string => attribRead(type, info.location, declComps, null, c);
       return mkPath(type, false, read, () => {
         throw new Error('codegen: attributes are read-only');
       });
