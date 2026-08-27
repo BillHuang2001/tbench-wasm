@@ -224,6 +224,12 @@ export class WebGLRenderingContext {
   polygonOffset(factor: GLfloat, units: GLfloat): void { throw new Error('GL stub'); }
   sampleCoverage(value: GLclampf, invert: GLboolean): void { throw new Error('GL stub'); }
   scissor(x: GLint, y: GLint, width: GLsizei, height: GLsizei): void { throw new Error('GL stub'); }
+  stencilFunc(func: GLenum, ref: GLint, mask: GLuint): void { throw new Error('GL stub'); }
+  stencilFuncSeparate(face: GLenum, func: GLenum, ref: GLint, mask: GLuint): void { throw new Error('GL stub'); }
+  stencilMask(mask: GLuint): void { throw new Error('GL stub'); }
+  stencilMaskSeparate(face: GLenum, mask: GLuint): void { throw new Error('GL stub'); }
+  stencilOp(fail: GLenum, zfail: GLenum, zpass: GLenum): void { throw new Error('GL stub'); }
+  stencilOpSeparate(face: GLenum, fail: GLenum, zfail: GLenum, zpass: GLenum): void { throw new Error('GL stub'); }
   viewport(x: GLint, y: GLint, width: GLsizei, height: GLsizei): void { throw new Error('GL stub'); }
 
   // ---- Buffer objects ----

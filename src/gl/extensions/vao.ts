@@ -24,6 +24,15 @@ import { buildExtension, ctorOf, isLost } from './util';
 
 const VAOCtor = ctorOf(WebGLVertexArrayObject);
 
+/**
+ * VAOs that have been bound at least once (glIsVertexArrayOES semantics).
+ * Per GLES 2.0 glIsVertexArrayOES: true iff the object has been bound at least
+ * once and not deleted — CTS oes-vertex-array-object.html (false before first
+ * bind, true after bind+unbind) and context-lost-restored.html (fresh VAOs →
+ * false; after bindVertexArrayOES(vao)+bindVertexArrayOES(null) → true).
+ */
+const everBoundVAOs = new WeakSet<WebGLVertexArrayObject>();
+
 /** The default VAO contents for a context (lazily created / migrated). */
 function defaultVAO(ctx: WebGLRenderingContext): VAOState {
   if (!ctx._defaultVAO) {
@@ -51,7 +60,10 @@ export function createOESVertexArrayObject(ctx: WebGLRenderingContext): object {
     {
       createVertexArrayOES: (): WebGLVertexArrayObject | null => {
         const gl = ctx;
-        if (isLost(gl)) return null;
+        // No [WebGLHandlesContextLoss]: while lost it still creates an object
+        // (CTS context-lost.html nonNullTests, context-lost-restored.html
+        // "with extension lost" — createVertexArrayOES → non-null) with NO
+        // error; isVertexArrayOES on it → false (isLost guard / never bound).
         const vao = createObject(gl, VAOCtor);
         vao._vao = defaultVAOState(gl._state.limits.MAX_VERTEX_ATTRIBS);
         return vao;
@@ -85,7 +97,9 @@ export function createOESVertexArrayObject(ctx: WebGLRenderingContext): object {
           gl._errors.push(C1.INVALID_OPERATION);
           return false;
         }
-        return !vertexArray._deleted;
+        // glIsVertexArray semantics: bound at least once AND not deleted
+        // (CTS context-lost-restored.html lines 244/252/259, oes-vertex-array-object.html).
+        return !vertexArray._deleted && everBoundVAOs.has(vertexArray);
       },
 
       bindVertexArrayOES: (vertexArray: WebGLVertexArrayObject | null): void => {
@@ -112,6 +126,7 @@ export function createOESVertexArrayObject(ctx: WebGLRenderingContext): object {
         }
         gl._state.vaoBinding = vertexArray;
         gl._state.vao = vertexArray._vao;
+        everBoundVAOs.add(vertexArray);
       },
     },
   );

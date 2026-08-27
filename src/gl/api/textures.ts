@@ -44,9 +44,12 @@ const TEXTURE_IMMUTABLE_FORMAT = 0x912f;
 const TEXTURE_IMMUTABLE_LEVELS = 0x82df;
 const RGB9_E5 = 0x8c3d;
 
-/** Context-loss guard: no-op + one CONTEXT_LOST_WEBGL per call. */
+/**
+ * Context-loss guard: no-op while lost WITHOUT generating an error (CTS
+ * context-lost.html asserts NO_ERROR after every void call while lost — the
+ * single CONTEXT_LOST_WEBGL is delivered via getError's lost-epoch, lost.ts).
+ */
 function isLost(ctx: WebGLRenderingContext): boolean {
-  if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
   return ctx._isLost;
 }
 
@@ -237,7 +240,9 @@ function texParameterImpl(ctx: WebGLRenderingContext, target: GLenum, pname: GLe
 export function installTexturesApi(proto: WebGLRenderingContext): void {
   proto.createTexture = function (this: WebGLRenderingContext): WebGLTexture | null {
     const ctx = this;
-    if (isLost(ctx)) return null;
+    // No [WebGLHandlesContextLoss]: while lost it still creates an object
+    // (CTS context-lost.html nonNullTests) with NO error; isTexture on it →
+    // false while lost (isLost guard).
     return createObject(ctx, TextureCtor);
   };
 

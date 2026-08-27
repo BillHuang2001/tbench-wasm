@@ -4,11 +4,14 @@
  * Owns: enable, disable, isEnabled, blendColor, blendEquation(separate),
  * blendFunc(separate), clearColor, clearDepth, clearStencil, colorMask,
  * cullFace, depthFunc, depthMask, depthRange, frontFace, hint, lineWidth,
- * pixelStorei, polygonOffset, sampleCoverage, scissor, viewport.
+ * pixelStorei, polygonOffset, sampleCoverage, scissor, stencilFunc(separate),
+ * stencilMask(separate), stencilOp(separate), viewport.
  *
  * Behavior notes (implemented):
  *  - All setters validate the enum/value FIRST (INVALID_ENUM/INVALID_VALUE) and
- *    are no-ops on context loss (CONTEXT_LOST_WEBGL pushed once per call).
+ *    are silent no-ops on context loss (NO error — the single CONTEXT_LOST_WEBGL
+ *    is delivered by getError's lost-epoch; CTS context-lost.html asserts
+ *    NO_ERROR after every void call while lost).
  *    WebIDL conversion failures (wrong argument types) still throw TypeError.
  *  - pixelStorei: UNPACK/PACK_ALIGNMENT ∈ {1,2,4,8} (INVALID_VALUE otherwise);
  *    UNPACK_FLIP_Y/PREMULTIPLY_ALPHA ∈ {0,1} (INVALID_VALUE otherwise);
@@ -45,7 +48,7 @@
 
 import type { WebGLRenderingContext } from '../webgl1';
 import { C1, C2, CExt } from '../constants';
-import type { State } from '../state';
+import type { State, StencilState } from '../state';
 import { isClipDistanceEnabled, setClipDistanceEnabled } from '../extensions/clip-state';
 import type { GLboolean, GLclampf, GLenum, GLfloat, GLint } from '../types';
 
@@ -142,11 +145,46 @@ const DEPTH_FUNCS: number[] = [
   C1.ALWAYS,
 ];
 
+/** Stencil test funcs are the same eight as depth (GLES 2.0 §6.2). */
+const STENCIL_FUNCS: number[] = DEPTH_FUNCS;
+
+/** Stencil ops (stencilOp/OpSeparate fail/zfail/zpass). */
+const STENCIL_OPS: number[] = [
+  C1.KEEP,
+  C1.ZERO,
+  C1.REPLACE,
+  C1.INCR,
+  C1.DECR,
+  C1.INVERT,
+  C1.INCR_WRAP,
+  C1.DECR_WRAP,
+];
+
+/** Stencil faces for the *Separate methods (INVALID_ENUM otherwise). */
+const STENCIL_FACES: number[] = [C1.FRONT, C1.BACK, C1.FRONT_AND_BACK];
+
+/** Resolve face → the affected StencilState(s); null → INVALID_ENUM. */
+function stencilFaceStates(ctx: WebGLRenderingContext, face: GLenum): StencilState[] | null {
+  switch (face) {
+    case C1.FRONT:
+      return [ctx._state.stencil.front];
+    case C1.BACK:
+      return [ctx._state.stencil.back];
+    case C1.FRONT_AND_BACK:
+      return [ctx._state.stencil.front, ctx._state.stencil.back];
+    default:
+      return null;
+  }
+}
+
 const HINT_MODES: number[] = [C1.FASTEST, C1.NICEST, C1.DONT_CARE];
 
-/** Context-loss guard: no-op + one CONTEXT_LOST_WEBGL per call. */
+/**
+ * Context-loss guard: no-op while lost WITHOUT generating an error (CTS
+ * context-lost.html asserts NO_ERROR after every void call while lost — the
+ * single CONTEXT_LOST_WEBGL is delivered via getError's lost-epoch, lost.ts).
+ */
 function isLost(ctx: WebGLRenderingContext): boolean {
-  if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
   return ctx._isLost;
 }
 
@@ -496,6 +534,99 @@ export function installStateApi(proto: WebGLRenderingContext): void {
       return;
     }
     ctx._state.scissor = { x: xv, y: yv, w: wv, h: hv };
+  };
+
+  proto.stencilFunc = function (this: WebGLRenderingContext, func: GLenum, ref: GLint, mask: GLuint): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    if (!STENCIL_FUNCS.includes(func)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    // WebIDL conversions: ref is a GLint (long), mask a GLuint (unsigned long).
+    const r = ref | 0;
+    const m = mask >>> 0;
+    ctx._state.stencil.front.func = func;
+    ctx._state.stencil.front.ref = r;
+    ctx._state.stencil.front.valueMask = m;
+    ctx._state.stencil.back.func = func;
+    ctx._state.stencil.back.ref = r;
+    ctx._state.stencil.back.valueMask = m;
+  };
+
+  proto.stencilFuncSeparate = function (this: WebGLRenderingContext, face: GLenum, func: GLenum, ref: GLint, mask: GLuint): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const states = stencilFaceStates(ctx, face);
+    if (states === null) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    if (!STENCIL_FUNCS.includes(func)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    const r = ref | 0;
+    const m = mask >>> 0;
+    for (const st of states) {
+      st.func = func;
+      st.ref = r;
+      st.valueMask = m;
+    }
+  };
+
+  proto.stencilMask = function (this: WebGLRenderingContext, mask: GLuint): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const m = mask >>> 0;
+    ctx._state.stencil.front.writeMask = m;
+    ctx._state.stencil.back.writeMask = m;
+  };
+
+  proto.stencilMaskSeparate = function (this: WebGLRenderingContext, face: GLenum, mask: GLuint): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const states = stencilFaceStates(ctx, face);
+    if (states === null) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    const m = mask >>> 0;
+    for (const st of states) st.writeMask = m;
+  };
+
+  proto.stencilOp = function (this: WebGLRenderingContext, fail: GLenum, zfail: GLenum, zpass: GLenum): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    if (!STENCIL_OPS.includes(fail) || !STENCIL_OPS.includes(zfail) || !STENCIL_OPS.includes(zpass)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    ctx._state.stencil.front.fail = fail;
+    ctx._state.stencil.front.depthFail = zfail;
+    ctx._state.stencil.front.depthPass = zpass;
+    ctx._state.stencil.back.fail = fail;
+    ctx._state.stencil.back.depthFail = zfail;
+    ctx._state.stencil.back.depthPass = zpass;
+  };
+
+  proto.stencilOpSeparate = function (this: WebGLRenderingContext, face: GLenum, fail: GLenum, zfail: GLenum, zpass: GLenum): void {
+    const ctx = this;
+    if (isLost(ctx)) return;
+    const states = stencilFaceStates(ctx, face);
+    if (states === null) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    if (!STENCIL_OPS.includes(fail) || !STENCIL_OPS.includes(zfail) || !STENCIL_OPS.includes(zpass)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
+    for (const st of states) {
+      st.fail = fail;
+      st.depthFail = zfail;
+      st.depthPass = zpass;
+    }
   };
 
   proto.viewport = function (this: WebGLRenderingContext, x: GLint, y: GLint, width: GLsizei, height: GLsizei): void {

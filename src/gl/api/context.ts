@@ -12,15 +12,19 @@
  *    drawing buffer is single-sampled (documented decision — see CONTEXT.md
  *    Design Decisions; verify CTS context/context-attributes.html expectations).
  *  - getError drains ErrorQueue (errors.ts); when the context is lost it returns
- *    CONTEXT_LOST_WEBGL the first time, then NO_ERROR (spec [WebGLHandlesContextLoss]).
+ *    CONTEXT_LOST_WEBGL the first time, then drains the queue (errors generated
+ *    while lost — e.g. INVALID_OPERATION from loseContext() on an already-lost
+ *    context — must be observable; CTS context-lost.html asserts exactly that).
  *  - getString: VERSION 'WebGL 1.0 (Software Renderer)' / 'WebGL 2.0 (Software
  *    Renderer)', SHADING_LANGUAGE_VERSION 'WebGL GLSL ES 1.00 (Software)' /
  *    'WebGL GLSL ES 3.00 (Software)', VENDOR/RENDERER fixed strings, EXTENSIONS
  *    → space-separated getSupportedExtensions() names. Returns null while lost.
  *  - isContextLost: true only after loseContext() (lifecycle.ts).
- *  - getExtension/getSupportedExtensions delegate to extensions/index.ts
- *    (version-aware registry; singleton cache on ctx._extensions; factories in
- *    extensions/*.ts build the per-extension objects).
+ *  - getExtension/getSupportedExtensions return null while the context is lost
+ *    (CTS context-lost.html nullTests); after restore they work again. The
+ *    extension singleton cache is NOT touched by the lost path — doRestore
+ *    (lost.ts) re-creates non-WEBGL_lose_context singletons on restore
+ *    (context-lost-restored.html requires NEW objects without prior properties).
  *  - getParameter delegates to getters.ts (the full pname table).
  *  - Internal exceptions NEVER escape: getParameter is wrapped; unexpected
  *    engine failures report INVALID_OPERATION.
@@ -28,16 +32,12 @@
 
 import type { WebGLRenderingContext } from '../webgl1';
 import { getExtensionObject, getSupportedExtensionNames } from '../extensions';
+import { getErrorWhileLost } from '../lost';
 import { getParameter, stringValueForPname } from '../getters';
 
 /** 0x0500 INVALID_ENUM / 0x0502 INVALID_OPERATION (constants.ts values). */
 const INVALID_ENUM = 0x0500;
 const INVALID_OPERATION = 0x0502;
-const NO_ERROR = 0x0000;
-const CONTEXT_LOST_WEBGL = 0x9242;
-
-/** Per-context getError bookkeeping for the "first call returns CONTEXT_LOST_WEBGL" rule. */
-const lostErrorState = new WeakMap<WebGLRenderingContext, { lostEpoch: boolean; consumed: boolean }>();
 
 export function installContextApi(proto: WebGLRenderingContext): void {
   proto.getContextAttributes = function (this: WebGLRenderingContext) {
@@ -53,32 +53,31 @@ export function installContextApi(proto: WebGLRenderingContext): void {
   };
 
   proto.getSupportedExtensions = function (this: WebGLRenderingContext) {
-    // Spec: extension queries keep working while the context is lost.
+    // Spec: extension queries return null while the context is lost (CTS
+    // context-lost.html nullTests); they work again after restore.
+    if (this._isLost) return null;
     return getSupportedExtensionNames(this._version);
   };
 
   proto.getExtension = function (this: WebGLRenderingContext, name: string) {
     // WebIDL DOMString conversion.
     const n = String(name);
+    // Spec: null while the context is lost (CTS context-lost.html nullTests).
+    // Deliberately BEFORE getExtensionObject: the singleton cache is untouched
+    // (doRestore re-creates non-WEBGL_lose_context singletons; the kept
+    // WEBGL_lose_context object must keep its identity — context-lost-restored.html).
+    if (this._isLost) return null;
     return getExtensionObject(this, n);
   } as WebGLRenderingContext['getExtension'];
 
   proto.getError = function (this: WebGLRenderingContext) {
     if (this._isLost) {
-      // Spec: the first getError after context loss returns CONTEXT_LOST_WEBGL,
-      // subsequent calls return NO_ERROR until the context is restored.
-      let st = lostErrorState.get(this);
-      if (!st || !st.lostEpoch) {
-        st = { lostEpoch: true, consumed: false };
-        lostErrorState.set(this, st);
-      }
-      if (!st.consumed) {
-        st.consumed = true;
-        return CONTEXT_LOST_WEBGL;
-      }
-      return NO_ERROR;
+      // Spec: the first getError after context loss returns CONTEXT_LOST_WEBGL;
+      // subsequent calls return errors generated while lost (e.g.
+      // INVALID_OPERATION from loseContext() while already lost — CTS
+      // context-lost.html) or NO_ERROR. Lost-epoch bookkeeping lives in lost.ts.
+      return getErrorWhileLost(this);
     }
-    lostErrorState.delete(this);
     return this._errors.get();
   };
 

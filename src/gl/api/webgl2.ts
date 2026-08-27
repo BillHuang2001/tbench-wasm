@@ -90,9 +90,12 @@ import { defaultVAOState } from '../state';
 import type { VAOState } from '../state';
 import type { GLbitfield, GLboolean, GLenum, GLfloat, GLint, GLuint, GLuint64 } from '../types';
 
-/** Context-loss guard: no-op + one CONTEXT_LOST_WEBGL per call. */
+/**
+ * Context-loss guard: no-op while lost WITHOUT generating an error (CTS
+ * context-lost.html asserts NO_ERROR after every void call while lost — the
+ * single CONTEXT_LOST_WEBGL is delivered via getError's lost-epoch, lost.ts).
+ */
 function isLost(ctx: WebGLRenderingContext): boolean {
-  if (ctx._isLost) ctx._errors.push(C1.CONTEXT_LOST_WEBGL);
   return ctx._isLost;
 }
 
@@ -376,7 +379,8 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
   if ('createQuery' in proto) {
     proto.createQuery = function (this: WebGL2RenderingContext): WebGLQuery | null {
       const ctx = this;
-      if (isLost(ctx)) return null;
+      // No [WebGLHandlesContextLoss]: while lost it still creates an object
+      // (CTS context-lost.html nonNullTests WebGL2 branch) with NO error.
       return createObject(ctx, Query.make);
     };
   }
@@ -575,7 +579,8 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
   if ('createSampler' in proto) {
     proto.createSampler = function (this: WebGL2RenderingContext): WebGLSampler | null {
       const ctx = this;
-      if (isLost(ctx)) return null;
+      // No [WebGLHandlesContextLoss]: while lost it still creates an object
+      // (CTS context-lost.html nonNullTests WebGL2 branch) with NO error.
       return createObject(ctx, Sampler.make); // _params defaults set in the class
     };
   }
@@ -693,7 +698,9 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
   if ('createVertexArray' in proto) {
     proto.createVertexArray = function (this: WebGL2RenderingContext): WebGLVertexArrayObject | null {
       const ctx = this;
-      if (isLost(ctx)) return null;
+      // No [WebGLHandlesContextLoss]: while lost it still creates an object
+      // (CTS context-lost.html nonNullTests WebGL2 branch) with NO error;
+      // isVertexArray on it → false while lost (isLost guard).
       const vao = createObject(ctx, Vao.make);
       vao._vao = defaultVAOState(ctx._state.limits.MAX_VERTEX_ATTRIBS);
       return vao;
@@ -763,7 +770,8 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
   if ('createTransformFeedback' in proto) {
     proto.createTransformFeedback = function (this: WebGL2RenderingContext): WebGLTransformFeedback | null {
       const ctx = this;
-      if (isLost(ctx)) return null;
+      // No [WebGLHandlesContextLoss]: while lost it still creates an object
+      // (CTS context-lost.html nonNullTests WebGL2 branch) with NO error.
       const tf = createObject(ctx, Tf.make);
       const n = ctx._state.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
       tf._buffers = new Array<WebGLBuffer | null>(n).fill(null);

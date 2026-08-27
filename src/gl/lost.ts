@@ -90,9 +90,39 @@ interface LostState {
 /** Per-context loss bookkeeping (kept off the class — engine-owned). */
 const lostState = new WeakMap<object, LostState>();
 
+/** Per-context getError bookkeeping for the "first call returns CONTEXT_LOST_WEBGL" rule. */
+const lostErrorState = new WeakMap<object, { consumed: boolean }>();
+
 /** True while the context is lost (api/context.ts isContextLost reads _isLost). */
 export function isContextLost(ctx: ContextLike): boolean {
   return ctx._isLost;
+}
+
+/**
+ * getError() while the context is lost (api/context.ts delegates here): the
+ * first call after a loss returns CONTEXT_LOST_WEBGL; subsequent calls drain
+ * the error queue normally. Errors generated WHILE lost must be observable —
+ * e.g. loseContext() on an already-lost context pushes INVALID_OPERATION and
+ * CTS context-lost.html asserts it via getError. Void API calls while lost are
+ * silent no-ops (the api/ guards push nothing), so the queue drains to
+ * NO_ERROR for them.
+ */
+export function getErrorWhileLost(ctx: ContextLike): number {
+  let st = lostErrorState.get(ctx);
+  if (!st) {
+    st = { consumed: false };
+    lostErrorState.set(ctx, st);
+  }
+  if (!st.consumed) {
+    st.consumed = true;
+    return C1.CONTEXT_LOST_WEBGL;
+  }
+  return ctx._errors.get();
+}
+
+/** Forget the lost-epoch bookkeeping (fresh epoch per loss; cleared on restore). */
+export function resetLostErrorState(ctx: ContextLike): void {
+  lostErrorState.delete(ctx);
 }
 
 /**
@@ -123,6 +153,7 @@ export function loseContext(ctx: ContextLike): void {
     ctx._errors.push(C1.INVALID_OPERATION); // WEBGL_lose_context: already lost
     return;
   }
+  resetLostErrorState(ctx); // fresh epoch: first getError after THIS loss → CONTEXT_LOST_WEBGL
   ctx._isLost = true;
   // Set the spec's "invalidated flag" on every tracked object BEFORE
   // invalidateAll() (which sets _deleted and clears the tracking set). Query
@@ -182,6 +213,7 @@ function doRestore(ctx: ContextLike): void {
   // Re-create the drawing buffer, default VAO, present adapter, initial viewport.
   initContextResources(ctx);
   ctx._isLost = false;
+  resetLostErrorState(ctx); // a later loss starts a fresh CONTEXT_LOST_WEBGL epoch
   // Extension singletons are re-created on restore — EXCEPT WEBGL_lose_context,
   // which must be the SAME object (CTS context-lost-restored.html: only
   // WEBGL_lose_context keeps its webglTestProperty).
