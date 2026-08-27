@@ -208,50 +208,74 @@ export class BrowserCanvasSurface implements CanvasSurface {
    * Never touches _pixels (gl/ readPixels aliases it zero-copy).
    */
   private buildPresentedCopy(premultipliedAlpha: boolean, alpha: boolean): void {
-    const src = this._pixels;
-    const dst = this._scratch;
-    const w = this._width;
-    const h = this._height;
-    if (w === 0 || h === 0) {
-      return;
-    }
-    const rowBytes = w * 4;
-    if (!premultipliedAlpha && alpha) {
-      // Fast path: pure vertical flip, straight copy.
-      for (let i = 0; i < h; i++) {
-        const s = (h - 1 - i) * rowBytes;
-        const d = i * rowBytes;
-        for (let k = 0; k < rowBytes; k++) {
-          dst[d + k] = src[s + k];
-        }
-      }
-      return;
-    }
+    buildPresentedPixels(
+      this._pixels,
+      this._scratch,
+      this._width,
+      this._height,
+      premultipliedAlpha,
+      alpha
+    );
+  }
+}
+
+/**
+ * Build the presented (TOP-DOWN) copy of the drawing buffer into `dst` from
+ * the raw BOTTOM-UP `src` (both RGBA8, dst = w*h*4): y-flip every row, and per
+ * pixel:
+ * - premultipliedAlpha → unpremultiply (c' = (c*255 + a/2) / a, Chrome-style
+ *   integer math, clamped to 255; a=0 leaves RGB untouched);
+ * - alpha:false → force alpha to 255 AFTER the unpremultiply.
+ * Pure function — never mutates `src` (gl/ readPixels aliases it zero-copy).
+ * Exported for reuse by gl/ (OffscreenCanvas.transferToImageBitmap snapshots).
+ */
+export function buildPresentedPixels(
+  src: Uint8Array,
+  dst: Uint8Array,
+  w: number,
+  h: number,
+  premultipliedAlpha: boolean,
+  alpha: boolean
+): void {
+  if (w === 0 || h === 0) {
+    return;
+  }
+  const rowBytes = w * 4;
+  if (!premultipliedAlpha && alpha) {
+    // Fast path: pure vertical flip, straight copy.
     for (let i = 0; i < h; i++) {
       const s = (h - 1 - i) * rowBytes;
       const d = i * rowBytes;
-      for (let j = 0; j < w; j++) {
-        const si = s + j * 4;
-        const di = d + j * 4;
-        let r = src[si];
-        let g = src[si + 1];
-        let b = src[si + 2];
-        const a = src[si + 3];
-        if (premultipliedAlpha && a > 0) {
-          r = ((r * 255 + (a >> 1)) / a) | 0;
-          g = ((g * 255 + (a >> 1)) / a) | 0;
-          b = ((b * 255 + (a >> 1)) / a) | 0;
-          // Clamp (Chrome-style): guards non-premultiplied data, where c > a
-          // would otherwise overflow past 255.
-          if (r > 255) r = 255;
-          if (g > 255) g = 255;
-          if (b > 255) b = 255;
-        }
-        dst[di] = r;
-        dst[di + 1] = g;
-        dst[di + 2] = b;
-        dst[di + 3] = alpha ? a : 255;
+      for (let k = 0; k < rowBytes; k++) {
+        dst[d + k] = src[s + k];
       }
+    }
+    return;
+  }
+  for (let i = 0; i < h; i++) {
+    const s = (h - 1 - i) * rowBytes;
+    const d = i * rowBytes;
+    for (let j = 0; j < w; j++) {
+      const si = s + j * 4;
+      const di = d + j * 4;
+      let r = src[si];
+      let g = src[si + 1];
+      let b = src[si + 2];
+      const a = src[si + 3];
+      if (premultipliedAlpha && a > 0) {
+        r = ((r * 255 + (a >> 1)) / a) | 0;
+        g = ((g * 255 + (a >> 1)) / a) | 0;
+        b = ((b * 255 + (a >> 1)) / a) | 0;
+        // Clamp (Chrome-style): guards non-premultiplied data, where c > a
+        // would otherwise overflow past 255.
+        if (r > 255) r = 255;
+        if (g > 255) g = 255;
+        if (b > 255) b = 255;
+      }
+      dst[di] = r;
+      dst[di + 1] = g;
+      dst[di + 2] = b;
+      dst[di + 3] = alpha ? a : 255;
     }
   }
 }
