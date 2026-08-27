@@ -84,7 +84,7 @@ linkProgram:    uniform merge → attrib locations → varying match/pack → un
 - **Sampler conflicts**: only EXPLICIT `layout(binding=)` conflicts (different types, same unit) are link errors; default-0 samplers are not (WebGL practice).
 
 ## Test Strategy
-- **In-repo selftests (committed tsx scripts, the PRIMARY gate — run via `npx tsx src/glsl/selftest-<name>.ts`)**: preproc 298, lexer 578, parse 328, semantics-core 186, semantics 141, runtime 129, codegen-expr 118, codegen-stmt 30, codegen-fn 21, codegen-stage 27, link 111, dual 31, dual-builtins 60 — 2,058 checks, all green. They compile shaders via compileShader, link via linkProgram, and RUN generated stages against hand-built exec ctxs (per program.ts).
+- **In-repo selftests (committed tsx scripts, the PRIMARY gate — run via `npx tsx src/glsl/selftest-<name>.ts`)**: preproc 298, lexer 578, parse 328, semantics-core 186, semantics 141, runtime 129, codegen-expr 118, codegen-stmt 30, codegen-fn 21, codegen-stage 27, link 111, dual 31, dual-builtins 60, integration 59 — 2,117 checks, all green. They compile shaders via compileShader, link via linkProgram, and RUN generated stages against hand-built exec ctxs (per program.ts).
 - `tests/unit/` is owned by the tests manager (parallel work) — do NOT rely on it; its glsl.test.ts may use minimal ctxs that don't match the full contract.
 - CTS gates (must pass 100%): `sdk/tests/conformance/glsl/` (313 tests) and `sdk/tests/conformance2/glsl3/` via `tests/conformance/`.
 - Regression: compile the full three.js/Babylon example shader sets without errors.
