@@ -76,6 +76,7 @@ import {
   blitDepthStencilSurface,
   getPackConverter,
   getFormat,
+  floatToHalf,
 } from '../raster';
 import type {
   DrawCall, FramebufferTarget, SamplerState, Surface, TextureImage, TextureUnitBinding,
@@ -1383,6 +1384,15 @@ function makeLocalPack(surf: Surface, format: GLenum, type: GLenum): ((src: Arra
         for (let c = 0; c < comps; c++) df[(d >> 2) + c] = tmp[c];
       };
     }
+    case 0x140b /* HALF_FLOAT */:
+    case 0x8d61 /* HALF_FLOAT_OES */: {
+      const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
+      return (_src, so, dst, d) => {
+        decodeSurfaceTexel(surf, so, tmp);
+        const dh = dst as Uint16Array;
+        for (let c = 0; c < comps; c++) dh[(d >> 1) + c] = floatToHalf(tmp[c]);
+      };
+    }
     case C1.UNSIGNED_INT: // DEPTH_COMPONENT / integer formats
       if (format === C1.DEPTH_COMPONENT) {
         return (_src, so, dst, d) => {
@@ -1424,15 +1434,20 @@ export function executeReadPixels(
     pushError(ctx, C1.INVALID_OPERATION);
     return;
   }
-  // Pack converter: raster's when available, else local.
+  // Pack converter: raster's when available, else local. When the surface is
+  // float-storage (W1 unsized float textures promoted to f32), raster's static
+  // table maps unsized formats to u8 and would mis-decode — use the local pack,
+  // which decodes via surf.info (the real float spec).
   let conv: ((src: ArrayBufferView, srcOff: number, dst: ArrayBufferView, dstOff: number) => void) | null = null;
-  try {
-    const rc = getPackConverter(surf.format, format, type);
-    if (rc) {
-      conv = (src, so, dst, d) => rc.convert(src, so, dst, d);
+  if (!surf.info?.isFloat) {
+    try {
+      const rc = getPackConverter(surf.format, format, type);
+      if (rc) {
+        conv = (src, so, dst, d) => rc.convert(src, so, dst, d);
+      }
+    } catch {
+      conv = null;
     }
-  } catch {
-    conv = null;
   }
   if (!conv) {
     conv = makeLocalPack(surf, format, type);
