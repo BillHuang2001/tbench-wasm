@@ -27,6 +27,7 @@ import { preprocess } from './preprocessor.js';
 import { tokenize } from './lexer.js';
 import { parse } from './parser.js';
 import { analyze } from './semantics.js';
+import { linkProgram as linkProgramImpl } from './linker.js';
 
 /** Shader stage. */
 export type ShaderStage = 'VERTEX' | 'FRAGMENT';
@@ -268,7 +269,9 @@ export function compileShader(source: string, opts: CompileOptions): CompileResu
  * (explicit layout → attribBindings → automatic), uniform store layout
  * (vec4-slot packing, std140 for UBOs), limit checks, transform-feedback
  * validation, JS codegen for both stages, and Program assembly.
+ *
+ * Implemented in linker.ts.
  */
 export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkResult {
-  throw new Error('not implemented');
+  return linkProgramImpl(vs, fs, opts);
 }
