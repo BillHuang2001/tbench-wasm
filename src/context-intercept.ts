@@ -38,10 +38,13 @@ export function buildInterceptScript(): string {
     const msg = `Software renderer not found: ${path}. Build the renderer and place it at ${path}.`;
     return `
 (function() {
+  var _softwareContexts = new WeakMap();
   var _orig = HTMLCanvasElement.prototype.getContext;
   HTMLCanvasElement.prototype.getContext = function(type, attrs) {
     if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
       document.title = 'RENDERER_NOT_FOUND';
+      var gl = null;
+      if (gl) _softwareContexts.set(this, gl);
       throw new Error(${JSON.stringify(msg)});
     }
     return _orig.call(this, type, attrs);
@@ -51,10 +54,34 @@ export function buildInterceptScript(): string {
     OffscreenCanvas.prototype.getContext = function(type, attrs) {
       if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
         document.title = 'RENDERER_NOT_FOUND';
+        var gl = null;
+        if (gl) _softwareContexts.set(this, gl);
         throw new Error(${JSON.stringify(msg)});
       }
       return _origOff.call(this, type, attrs);
     };
+    var _origTransfer = OffscreenCanvas.prototype.transferToImageBitmap;
+    if (typeof _origTransfer === 'function') {
+      OffscreenCanvas.prototype.transferToImageBitmap = function() {
+        var gl = _softwareContexts.get(this);
+        if (!gl || typeof gl._transferToImageBitmap !== 'function') {
+          return _origTransfer.call(this);
+        }
+        try {
+          var snap = gl._transferToImageBitmap();
+          if (!snap) return _origTransfer.call(this);
+          // Real ImageBitmap, SYNCHRONOUSLY: native 2D OffscreenCanvas +
+          // putImageData + native transferToImageBitmap. This is the only sync
+          // path (createImageBitmap is async; ImageBitmap is not constructible).
+          var native = new OffscreenCanvas(snap.width, snap.height);
+          var ctx2d = native.getContext('2d');
+          ctx2d.putImageData(new ImageData(snap.data, snap.width, snap.height), 0, 0);
+          return _origTransfer.call(native);
+        } catch (e) {
+          return _origTransfer.call(this);
+        }
+      };
+    }
   }
 })();
 `;
@@ -64,11 +91,14 @@ export function buildInterceptScript(): string {
   return `
 ${source}
 (function() {
+  var _softwareContexts = new WeakMap();
   var _orig = HTMLCanvasElement.prototype.getContext;
   HTMLCanvasElement.prototype.getContext = function(type, attrs) {
     if ((type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') &&
         typeof window.__createSoftwareWebGLContext === 'function') {
-      return window.__createSoftwareWebGLContext(this, attrs, type);
+      var gl = window.__createSoftwareWebGLContext(this, attrs, type);
+      if (gl) _softwareContexts.set(this, gl);
+      return gl;
     }
     return _orig.call(this, type, attrs);
   };
@@ -77,10 +107,34 @@ ${source}
     OffscreenCanvas.prototype.getContext = function(type, attrs) {
       if ((type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') &&
           typeof window.__createSoftwareWebGLContext === 'function') {
-        return window.__createSoftwareWebGLContext(this, attrs, type);
+        var gl = window.__createSoftwareWebGLContext(this, attrs, type);
+        if (gl) _softwareContexts.set(this, gl);
+        return gl;
       }
       return _origOff.call(this, type, attrs);
     };
+    var _origTransfer = OffscreenCanvas.prototype.transferToImageBitmap;
+    if (typeof _origTransfer === 'function') {
+      OffscreenCanvas.prototype.transferToImageBitmap = function() {
+        var gl = _softwareContexts.get(this);
+        if (!gl || typeof gl._transferToImageBitmap !== 'function') {
+          return _origTransfer.call(this);
+        }
+        try {
+          var snap = gl._transferToImageBitmap();
+          if (!snap) return _origTransfer.call(this);
+          // Real ImageBitmap, SYNCHRONOUSLY: native 2D OffscreenCanvas +
+          // putImageData + native transferToImageBitmap. This is the only sync
+          // path (createImageBitmap is async; ImageBitmap is not constructible).
+          var native = new OffscreenCanvas(snap.width, snap.height);
+          var ctx2d = native.getContext('2d');
+          ctx2d.putImageData(new ImageData(snap.data, snap.width, snap.height), 0, 0);
+          return _origTransfer.call(native);
+        } catch (e) {
+          return _origTransfer.call(this);
+        }
+      };
+    }
   }
 })();
 `;
