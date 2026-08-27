@@ -1427,15 +1427,20 @@ export function executeReadPixels(
     pushError(ctx, C1.INVALID_OPERATION);
     return;
   }
-  // Pack converter: raster's when available, else local.
+  // Pack converter: raster's when available, else local. When the surface is
+  // float-storage (W1 unsized float textures promoted to f32), raster's static
+  // table maps unsized formats to u8 and would mis-decode — use the local pack,
+  // which decodes via surf.info (the real float spec).
   let conv: ((src: ArrayBufferView, srcOff: number, dst: ArrayBufferView, dstOff: number) => void) | null = null;
-  try {
-    const rc = getPackConverter(surf.format, format, type);
-    if (rc) {
-      conv = (src, so, dst, d) => rc.convert(src, so, dst, d);
+  if (!surf.info?.isFloat) {
+    try {
+      const rc = getPackConverter(surf.format, format, type);
+      if (rc) {
+        conv = (src, so, dst, d) => rc.convert(src, so, dst, d);
+      }
+    } catch {
+      conv = null;
     }
-  } catch {
-    conv = null;
   }
   if (!conv) {
     conv = makeLocalPack(surf, format, type);
