@@ -62,6 +62,9 @@ linkProgram:    uniform merge → attrib locations → varying match/pack → un
 ### 7. Error reporting
 - 1-based lines (post-#line remapping), Khronos `ERROR: 0:<line>: <message>` format; infoLog '' on success; link failures return one formatted log string. Compile errors capped at 20.
 
+### 8. Varying matching — fragment-USED rule (native Chromium behavior)
+- Only fragment varyings whose VALUE IS READ (`VaryingDecl.used`, tracked by semantics-decl.ts scanUses: loads of plain/arrayed varyings, swizzles, struct members, and interface-block members mark the entry; pure `=`-write targets do not; compound assignment and `++`/`--` DO read) must match a vertex output — otherwise `linker: varying 'X' not matched` (name, type+arraySize, flat checks unchanged for used ones). Declared-but-unread fragment varyings impose NO constraint, and extra vertex outputs are always allowed and packed (raster interpolates the whole record). Version-independent (GLSL ES 1.00 and 3.00), verified against native Chromium probes (src/glsl/probe-results.json) and CTS shaders-with-varyings.html. Name-based read tracking is exact because GLSL ES forbids shadowing (Scope.declare rejects redefinition in any enclosing scope).
+
 ## Known Issues / Gotchas
 - **Texture approximations** (may fail CTS texture-offset/shadow-Lod tests): `textureOffset` family ≈ base-level texel-size shift (R helpers `tex*OffsetApprox`); shadow-Lod ≈ texelFetch-nearest compare (`sampleShadowLod`). Rationale: raster's committed TextureEnv has no grad/offset/shadow-Lod methods; R approximates. TextureGrad/shadow-Grad variants DO pass explicit gradients through the generic sampler.
 - **No textureGather/textureQueryLod/textureQueryLevels** — verified absent from CTS conformance2/glsl3 tables (excluded from builtins).
