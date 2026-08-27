@@ -101,6 +101,14 @@ export interface CodegenLayout {
   outputLocations: Map<string, number>;
   /** Shader capability flags (ShaderInfo.uses) — `derivatives` drives dual mode. */
   uses: ShaderUses;
+  /**
+   * User struct type names declared by EITHER stage (union, deduped) — the
+   * linker fills this from both ASTs so `Foo(...)` constructor calls resolve
+   * to the struct type (emitStructCtor) instead of failing as unknown calls.
+   * Absent/empty (selftests construct layouts directly) = no user structs;
+   * codegen seeds env.structNames from it (`layout.structNames ?? []`).
+   */
+  structNames?: string[];
 }
 
 /** Result of generating one stage's function body. */
