@@ -28,7 +28,17 @@ export interface TestRunResult {
   messages: string[];
   timeMs: number;
   rendererMissing: boolean;
+  /** True when window.__createSoftwareWebGLContext was observed as a function. */
+  rendererActive: boolean;
 }
+
+/**
+ * Gate message prepended to messages when a page ran WITHOUT the software
+ * renderer (factory missing -> native WebGL fallback). Prepended (not appended)
+ * so it is never lost to the MAX_MESSAGES page-error cap.
+ */
+export const RENDERER_INACTIVE_MSG =
+  "renderer bundle not active (window.__createSoftwareWebGLContext missing) — page ran WITHOUT the software renderer";
 
 export interface RunPageOptions {
   /** Idle timeout: no observed progress for this long -> timeout-fail. */
@@ -87,6 +97,7 @@ interface PollSnapshot {
   finished: boolean;
   title: string;
   description: string;
+  rendererActive: boolean;
 }
 
 /** Must be a real function (not a string) so Playwright serializes and calls it. */
@@ -100,6 +111,8 @@ const pollSnapshot = (): PollSnapshot => {
     finished: s ? s.finished : false,
     title: document.title || "",
     description: d && d.textContent ? d.textContent : "",
+    rendererActive:
+      typeof (window as unknown as { __createSoftwareWebGLContext?: unknown }).__createSoftwareWebGLContext === "function",
   };
 };
 
@@ -155,6 +168,7 @@ export async function runTestPage(
         messages: [...messages, `navigation failed: ${errMsg(err)}`],
         timeMs: Date.now() - started,
         rendererMissing: false,
+        rendererActive: false,
       };
     }
     if (response && response.status() >= 400) {
@@ -166,6 +180,7 @@ export async function runTestPage(
         messages: [...messages, `HTTP ${response.status()} for ${url}`],
         timeMs: Date.now() - started,
         rendererMissing: false,
+        rendererActive: false,
       };
     }
 
@@ -174,14 +189,18 @@ export async function runTestPage(
       const now = Date.now();
 
       if (snap.finished) {
+        // Gate: a page that finished with 0 harness fails must NOT pass if the
+        // software renderer was never active (it ran native WebGL instead).
+        const inactive = !snap.rendererActive;
         return {
-          status: snap.fail > 0 ? "fail" : "pass",
+          status: snap.fail > 0 || inactive ? "fail" : "pass",
           pass: snap.pass,
           fail: snap.fail,
           skip: snap.skip,
-          messages,
+          messages: inactive ? [RENDERER_INACTIVE_MSG, ...messages] : messages,
           timeMs: now - started,
           rendererMissing: false,
+          rendererActive: snap.rendererActive,
         };
       }
 
@@ -189,14 +208,16 @@ export async function runTestPage(
       // "TEST COMPLETE: N PASS, M FAIL" line appended to #description.
       const dom = parseDomComplete(snap.description);
       if (dom) {
+        const inactive = !snap.rendererActive;
         return {
-          status: dom.fail > 0 ? "fail" : "pass",
+          status: dom.fail > 0 || inactive ? "fail" : "pass",
           pass: dom.pass,
           fail: dom.fail,
           skip: snap.skip,
-          messages,
+          messages: inactive ? [RENDERER_INACTIVE_MSG, ...messages] : messages,
           timeMs: now - started,
           rendererMissing: false,
+          rendererActive: snap.rendererActive,
         };
       }
 
@@ -216,6 +237,7 @@ export async function runTestPage(
           ],
           timeMs: now - started,
           rendererMissing: true,
+          rendererActive: false,
         };
       }
 
@@ -225,14 +247,18 @@ export async function runTestPage(
         lastKey = key;
       }
       if (now - lastActivity > opts.timeoutMs) {
+        const inactive = !snap.rendererActive;
         return {
           status: "timeout",
           pass: snap.pass,
           fail: snap.fail,
           skip: snap.skip,
-          messages: [...messages, `timed out after ${opts.timeoutMs}ms idle (no progress)`],
+          messages: inactive
+            ? [RENDERER_INACTIVE_MSG, ...messages, `timed out after ${opts.timeoutMs}ms idle (no progress)`]
+            : [...messages, `timed out after ${opts.timeoutMs}ms idle (no progress)`],
           timeMs: now - started,
           rendererMissing: false,
+          rendererActive: snap.rendererActive,
         };
       }
 
@@ -247,6 +273,7 @@ export async function runTestPage(
       messages: [...messages, `page driver error: ${errMsg(err)}`],
       timeMs: Date.now() - started,
       rendererMissing: false,
+      rendererActive: false,
     };
   } finally {
     await page.close().catch(() => {});

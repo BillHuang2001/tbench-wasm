@@ -98,6 +98,7 @@ function errorResult(message: string, job?: Job): TestResult {
     messages: [message],
     timeMs: 0,
     rendererMissing: false,
+    rendererActive: false,
     url: job ? job.url : "",
     suite: job ? job.suite : "",
   };
@@ -278,6 +279,13 @@ function printSummary(report: RunReport, opts: RunOptions, server: CtsServer): v
   console.log(`  TIMEOUT ${s.timeout}`);
   console.log(`  ERROR   ${s.error}`);
   console.log(`  skipped subtests: ${s.skippedSubtests}`);
+
+  // Renderer-active gate: error paths are navigation/driver failures, not
+  // "ran without the software renderer" — only non-error results count.
+  const inactiveCount = report.tests.filter((t) => !t.rendererActive && t.status !== "error").length;
+  if (inactiveCount > 0) {
+    console.log(`WARNING: ${inactiveCount} pages ran without the software renderer (bundle likely dead)`);
+  }
 
   const bad = report.tests.filter((t) => t.status !== "pass");
   if (bad.length > 0) {
