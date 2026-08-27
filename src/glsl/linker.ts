@@ -126,7 +126,9 @@ function slotCount(t: GLSLType): number {
 }
 
 /** FLOAT elements between consecutive elements of the LAST array dimension
- *  (the `stride` codegen applies for dynamic indices). */
+ *  (the `stride` codegen applies for dynamic indices). Nested arrays align
+ *  each outer element to its vec4-slot footprint (slotCount*4) so the dynamic
+ *  stride agrees with the const-index leaf positions. */
 function elemFloatStride(e: GLSLType): number {
   switch (e.kind) {
     case 'scalar':
@@ -139,7 +141,7 @@ function elemFloatStride(e: GLSLType): number {
     case 'struct':
       return slotCount(e) * 4;
     case 'array':
-      return elemFloatStride(e.element) * (e.size ?? 1);
+      return slotCount(e) * 4;
     case 'void':
       return 0;
   }
@@ -178,29 +180,44 @@ function emitType(path: string, t: GLSLType, cursor: number, st: AllocState): { 
       const n = t.size ?? 0;
       const e = t.element;
       if (n === 0) return { advance: 0 };
-      if (e.kind === 'struct' || e.kind === 'array') {
-        // Struct / nested-array uniform support lands with the flattening
-        // extension (commit 2 of E5a).
-        return { error: `linker: array of '${typeName(e)}' uniforms not supported` };
-      }
       const dense = e.kind === 'scalar' || e.kind === 'sampler';
       const stride = elemFloatStride(e);
       const int = isIntStoreType(e);
-      const comps = e.kind === 'matrix' ? e.cols * e.rows : e.kind === 'vector' ? e.size : 1;
       const base = cursor * 4;
       // '[0]' prefix: dynamic-index resolution (codegen reads its stride).
       st.slots.set(`${path}[0]`, { store: int ? 'int' : 'float', slot: base, stride });
-      for (let k = 0; k < n; k++) {
-        const slot = base + k * stride;
-        st.slots.set(`${path}[${k}]`, { store: int ? 'int' : 'float', slot, stride: 0 });
-        if (int) st.intMax = Math.max(st.intMax, slot + comps);
-        else st.floatMax = Math.max(st.floatMax, slot + comps);
+      if (dense) {
+        // Scalar/sampler arrays pack densely: element k at base + k floats.
+        for (let k = 0; k < n; k++) {
+          const slot = base + k;
+          st.slots.set(`${path}[${k}]`, { store: int ? 'int' : 'float', slot, stride: 0 });
+          if (int) st.intMax = Math.max(st.intMax, slot + 1);
+          else st.floatMax = Math.max(st.floatMax, slot + 1);
+        }
+        return { advance: Math.ceil(n / 4) };
       }
-      return { advance: dense ? Math.ceil(n / 4) : slotCount(e) * n };
+      // Non-scalar elements (vector/matrix/struct/nested array): one whole
+      // (aligned) element block per index; recursion places the inner leaves.
+      let adv = 0;
+      for (let k = 0; k < n; k++) {
+        const r = emitType(`${path}[${k}]`, e, (base + k * stride) / 4, st);
+        if ('error' in r) return r;
+        adv += r.advance;
+      }
+      return { advance: adv };
     }
-    case 'struct':
-      // Struct uniform support lands with the flattening extension (commit 2).
-      return { error: `linker: struct uniform '${path}' not supported` };
+    case 'struct': {
+      // Members are laid out sequentially (each at its own slot advance);
+      // the struct itself gets an ancestor-prefix entry ('u', 'u[0]').
+      let c = cursor;
+      for (const m of t.members) {
+        const r = emitType(`${path}.${m.name}`, m.type, c, st);
+        if ('error' in r) return r;
+        c += r.advance;
+      }
+      st.slots.set(path, { store: isIntStoreType(t) ? 'int' : 'float', slot: cursor * 4, stride: elemFloatStride(t) });
+      return { advance: c - cursor };
+    }
     case 'void':
       return { advance: 0 };
   }
@@ -243,61 +260,133 @@ function mergeUniforms(vs: Shader, fs: Shader): MergedUniform[] | { error: strin
   return order.map((n) => byName.get(n)!);
 }
 
+/** Visit every flattened LEAF path of a type in allocation order (struct
+ *  members recurse; array elements expand per index — matching emitType's
+ *  uniformSlots keys). */
+function walkLeaves(path: string, t: GLSLType, cb: (path: string, leaf: GLSLType) => void): void {
+  switch (t.kind) {
+    case 'scalar':
+    case 'vector':
+    case 'sampler':
+    case 'matrix':
+      cb(path, t);
+      return;
+    case 'struct':
+      for (const m of t.members) walkLeaves(`${path}.${m.name}`, m.type, cb);
+      return;
+    case 'array': {
+      const n = t.size ?? 0;
+      for (let k = 0; k < n; k++) walkLeaves(`${path}[${k}]`, t.element, cb);
+      return;
+    }
+    case 'void':
+      return;
+  }
+}
+
 interface UniformLayoutResult {
   slots: Map<string, UniformSlot>;
   uniforms: UniformInfo[];
+  uniformMap: Map<string, UniformInfo>;
   floatMax: number;
   intMax: number;
 }
 
 /** Allocate the default-block stores for the merged uniform set (vs order
- *  first, then fs-only), building uniformSlots + the Program.uniforms list. */
-function layoutUniforms(merged: MergedUniform[]): UniformLayoutResult | { error: string } {
+ *  first, then fs-only), building uniformSlots + Program.uniforms +
+ *  Program.uniformMap, and checking the per-stage uniform-vector limits. */
+function layoutUniforms(merged: MergedUniform[], limits: LinkLimits): UniformLayoutResult | { error: string } {
   const st: AllocState = { slots: new Map(), floatMax: 0, intMax: 0 };
   const uniforms: UniformInfo[] = [];
+  const uniformMap = new Map<string, UniformInfo>();
   let cursor = 0;
+  let vertexSlots = 0;
+  let fragmentSlots = 0;
   for (const u of merged) {
     const t = u.decl.type;
+    const slots = slotCount(t);
+    if (u.inVs) vertexSlots += slots;
+    if (u.inFs) fragmentSlots += slots;
     const r = emitType(u.decl.name, t, cursor, st);
     if ('error' in r) return { error: r.error };
-    // Ancestor prefix for the root name (arrays; the leaf case already keyed it).
+    // Ancestor prefix for the root name (arrays/structs; leaves already keyed it).
     if (!st.slots.has(u.decl.name)) {
       st.slots.set(u.decl.name, { store: isIntStoreType(t) ? 'int' : 'float', slot: cursor * 4, stride: 0 });
     }
-    // getActiveUniform entries: plain arrays are ONE entry 'u[0]' (size N);
-    // plain non-arrays one entry 'u'. Structs flatten per leaf (extension).
-    if (t.kind === 'array') {
-      const e = t.element;
-      uniforms.push({
-        name: `${u.decl.name}[0]`,
-        location: st.slots.get(`${u.decl.name}[0]`)!.slot,
-        type: toGLenum(e),
-        size: t.size ?? 1,
-        components: typeComponents(e),
-        integral: isIntegral(e),
-        blockIndex: -1,
-        sampler: isSampler(e),
-      });
+    const leaves: { path: string; type: GLSLType }[] = [];
+    walkLeaves(u.decl.name, t, (p, lt) => leaves.push({ path: p, type: lt }));
+    const leafInfo = (path: string, type: GLSLType, size: number): UniformInfo => ({
+      name: path,
+      location: st.slots.get(path)!.slot,
+      type: toGLenum(type),
+      size,
+      components: typeComponents(type),
+      integral: isIntegral(type),
+      blockIndex: -1,
+      sampler: isSampler(type),
+    });
+    const isStructRoot = t.kind === 'struct' || (t.kind === 'array' && t.element.kind === 'struct');
+    if (!isStructRoot) {
+      // Plain (non-struct) uniform: ONE getActiveUniform entry — non-arrays
+      // 'u', arrays 'u[0]' with size = array length. uniformMap holds
+      // per-element infos + the bare name → first element.
+      const e = t.kind === 'array' ? t.element : t;
+      uniforms.push(
+        leafInfo(t.kind === 'array' ? `${u.decl.name}[0]` : u.decl.name, e, t.kind === 'array' ? t.size ?? 1 : 1),
+      );
+      for (const l of leaves) uniformMap.set(l.path, leafInfo(l.path, l.type, 1));
+      uniformMap.set(u.decl.name, uniformMap.get(leaves[0].path)!);
     } else {
-      uniforms.push({
-        name: u.decl.name,
-        location: st.slots.get(u.decl.name)!.slot,
-        type: toGLenum(t),
-        size: 1,
-        components: typeComponents(t),
-        integral: isIntegral(t),
-        blockIndex: -1,
-        sampler: isSampler(t),
-      });
+      // Struct / struct-array: getActiveUniform entries per flattened leaf
+      // ('u.m', 'u[0].m', 'u[2].m'; size 1 each). uniformMap: leaf paths +
+      // bare name → first leaf; struct arrays also key 'u[0]' → first leaf.
+      for (const l of leaves) {
+        const info = leafInfo(l.path, l.type, 1);
+        uniforms.push(info);
+        uniformMap.set(l.path, info);
+      }
+      const first = uniformMap.get(leaves[0].path)!;
+      uniformMap.set(u.decl.name, first);
+      if (t.kind === 'array') uniformMap.set(`${u.decl.name}[0]`, first);
     }
     cursor += r.advance;
   }
-  return { slots: st.slots, uniforms, floatMax: st.floatMax, intMax: st.intMax };
+  if (vertexSlots > limits.maxVertexUniformVectors) {
+    return {
+      error: `linker: too many vertex uniform vectors (${vertexSlots}, max ${limits.maxVertexUniformVectors})`,
+    };
+  }
+  if (fragmentSlots > limits.maxFragmentUniformVectors) {
+    return {
+      error: `linker: too many fragment uniform vectors (${fragmentSlots}, max ${limits.maxFragmentUniformVectors})`,
+    };
+  }
+  return { slots: st.slots, uniforms, uniformMap, floatMax: st.floatMax, intMax: st.intMax };
 }
 
 /* ------------------------------------------------------------------ */
 /* Varying matching + packing                                          */
 /* ------------------------------------------------------------------ */
+
+/** One packed varying leaf (plain varyings are one leaf; struct varyings
+ *  flatten to one leaf per member). `type` is the element type (arrays carry
+ *  their size in `arraySize` for plain varyings and inside `type` for struct
+ *  members). */
+interface VaryingLeaf {
+  key: string;
+  type: GLSLType;
+  arraySize: number;
+}
+
+/** Flatten a struct varying into per-member leaves ('v.m'; nested structs
+ *  recurse; member arrays keep their array structure inside the type). */
+function flattenVaryingStruct(prefix: string, t: GLSLType, out: VaryingLeaf[]): void {
+  if (t.kind !== 'struct') {
+    out.push({ key: prefix, type: t, arraySize: 1 });
+    return;
+  }
+  for (const m of t.members) flattenVaryingStruct(`${prefix}.${m.name}`, m.type, out);
+}
 
 interface VaryingLayoutResult {
   map: Map<string, VaryingLayout>;
@@ -307,7 +396,8 @@ interface VaryingLayoutResult {
 /** Match every fragment input against a vertex output (name / element type /
  *  array size / flat) and pack in VERTEX declaration order (dense flat
  *  components, cumulative offsets). Extra vertex outputs are packed too —
- *  they are active varyings (raster interpolates the whole record). */
+ *  they are active varyings (raster interpolates the whole record). Struct
+ *  varyings flatten to per-member leaves, each with its own (index, offset). */
 function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayoutResult | { error: string } {
   const vsByName = new Map<string, typeof vs.info.varyings[number]>();
   for (const v of vs.info.varyings) vsByName.set(v.name, v);
@@ -326,16 +416,27 @@ function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayo
   let offset = 0;
   let vectors = 0;
   for (const v of vs.info.varyings) {
+    let leaves: VaryingLeaf[];
     if (v.type.kind === 'struct') {
-      // Struct-varying flattening lands with the extension (commit 2).
-      return { error: `linker: struct varying '${v.name}' not supported` };
+      if (v.arraySize > 1) {
+        // Struct-array varyings need a codegen-side element-offset channel
+        // (subP resets the const-index flatOff on member descent) — deferred
+        // with the varying-interface-block work.
+        return { error: `linker: struct-array varying '${v.name}' not supported` };
+      }
+      leaves = [];
+      flattenVaryingStruct(v.name, v.type, leaves);
+    } else {
+      leaves = [{ key: v.name, type: v.type, arraySize: v.arraySize }];
     }
-    const elemComps = flatComponents(v.type);
-    const comps = elemComps * v.arraySize;
-    map.set(v.name, { index: infos.length, offset, components: comps, elemComponents: elemComps, flat: v.flat });
-    infos.push({ name: v.name, type: toGLenum(v.type), components: comps, flat: v.flat });
-    offset += comps;
-    vectors += Math.ceil(comps / 4);
+    for (const leaf of leaves) {
+      const elemComps = leaf.type.kind === 'array' ? flatComponents(leaf.type.element) : flatComponents(leaf.type);
+      const comps = flatComponents(leaf.type) * leaf.arraySize;
+      map.set(leaf.key, { index: infos.length, offset, components: comps, elemComponents: elemComps, flat: v.flat });
+      infos.push({ name: leaf.key, type: toGLenum(leaf.type), components: comps, flat: v.flat });
+      offset += comps;
+      vectors += Math.ceil(comps / 4);
+    }
   }
   if (vectors > limits.maxVaryingVectors) {
     return { error: `linker: too many varying vectors (${vectors}, max ${limits.maxVaryingVectors})` };
@@ -519,7 +620,7 @@ export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkRes
 
   const merged = mergeUniforms(vs, fs);
   if ('error' in merged) return { ok: false, log: merged.error };
-  const ul = layoutUniforms(merged);
+  const ul = layoutUniforms(merged, limits);
   if ('error' in ul) return { ok: false, log: ul.error };
 
   const vl = layoutVaryings(vs, fs, limits);
@@ -578,7 +679,7 @@ export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkRes
       usesGLPointCoord: uses.pointCoord,
       usesFragCoord: uses.fragCoord,
       usesFrontFacing: uses.frontFacing,
-      uniformMap: new Map(),
+      uniformMap: ul.uniformMap,
       floatStore: new Float32Array(ul.floatMax),
       intStore: new Int32Array(ul.intMax),
       scratchSize: Math.max(vsRes.scratchSize, fsRes.scratchSize),
