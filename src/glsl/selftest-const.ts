@@ -15,7 +15,11 @@
  *  - RUNTIME: link + run (makeVertexCtx/makeFragmentCtx shapes from
  *    tests/unit/glsl.test.ts) — global-const reads (whole, member, matrix
  *    index) emit annotated ctor calls and produce the expected colors; one
- *    dual-mode run (dFdx on a const — constant duals must not crash).
+ *    dual-mode run (dFdx on a const — constant duals must not crash);
+ *  - STRUCT EQUALITY: whole-struct == / != on const operands folds to a single
+ *    bool (GLSL ES 1.00 §5.9 / ES 3.00) — link+run value checks; non-const
+ *    struct operands ACCEPTED at compile level; wrong struct types and array
+ *    operands still rejected; both 100 and 300.
  *
  * Run: npx tsx src/glsl/selftest-const.ts   (prints "OK", exit 0)
  */
@@ -279,6 +283,56 @@ const VERT_SIMPLE = 'attribute vec4 a_position;\nvoid main() { gl_Position = a_p
     ['GL_OES_standard_derivatives'],
   );
   check(close4(c5, [0, 0, 0.75, 1]), `runtime: dual mode dFdx(const) → [0,0,0.75,1] (got ${JSON.stringify(c5 ? Array.from(c5) : null)})`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 5. Struct equality (== / !=): const fold + acceptance               */
+/* ------------------------------------------------------------------ */
+
+{
+  // Whole-struct == / != on CONST operands folds to a single bool; the
+  // link+run proves the fold happened (a non-folded struct == would throw in
+  // codegen's emitBinary). Values: a==b true, a!=c true, a!=b false, a==c false.
+  // GLOBAL const structs: with the fold, the mutated operand nodes are never
+  // emitted, so the link avoids the (pre-existing) struct-ctor codegen gap.
+  const r1 = runFragment(
+    VERT_SIMPLE,
+    'precision mediump float;\nstruct S { float x; vec2 y; };\nconst S a = S(1.0, vec2(2.0, 3.0));\nconst S b = S(1.0, vec2(2.0, 3.0));\nconst S c = S(1.0, vec2(2.0, 4.0));\nvoid main() { const bool eq = (a == b); gl_FragColor = vec4(float(eq), float(a != c), float(a != b), float(a == c)); }',
+  );
+  check(close4(r1, [1, 1, 0, 0]), `runtime: const struct ==/!= fold → [1,1,0,0] (got ${JSON.stringify(r1 ? Array.from(r1) : null)})`);
+
+  // Nested structs: member == (Inner) and whole == / != (the ogles
+  // CorrectConstFolding2 shapes: st551/st552/st553 with st6 members).
+  const r2 = runFragment(
+    VERT_SIMPLE,
+    'precision mediump float;\nstruct Inner { vec3 v; };\nstruct Outer { int i; float f; Inner inr; };\nconst Outer a = Outer(2, 4.0, Inner(vec3(7.0)));\nconst Outer b = Outer(2, 4.0, Inner(vec3(7.0)));\nconst Outer c = Outer(2, 4.0, Inner(vec3(8.0)));\nvoid main() { gl_FragColor = vec4(float(a.inr == b.inr), float(a == b), float(a.inr != c.inr), float(a != c)); }',
+  );
+  check(close4(r2, [1, 1, 1, 1]), `runtime: nested const struct ==/!= (member + whole) → [1,1,1,1] (got ${JSON.stringify(r2 ? Array.from(r2) : null)})`);
+
+  // Local const struct == / != with a const bool result: ACCEPTED at compile
+  // level (the const bool folds; linking a LOCAL const struct DECL still hits
+  // the pre-existing struct-ctor codegen gap, so no link here).
+  const l1 = okShader('precision mediump float;\nstruct S { float x; vec2 y; };\nvoid main() { const S a = S(1.0, vec2(2.0, 3.0)); const S b = S(1.0, vec2(2.0, 3.0)); const bool eq = (a == b); gl_FragColor = vec4(float(eq)); }', 100, 'FRAGMENT');
+  check(l1 !== null, 'LOCAL const struct == accepted (fold path, compile-level)');
+
+  // Non-const struct operands: ACCEPTED (compile-level only — runtime emit of
+  // a non-folded struct comparison is a codegen concern).
+  const n1 = okShader('struct S { float x; };\nuniform S us;\nvoid main() { bool b = (us == us); gl_Position = vec4(float(b)); }', 100, 'VERTEX');
+  check(n1 !== null, 'non-const struct == accepted (uniform operands)');
+  const n2 = okShader('struct S { float x; };\nvoid main() { S a = S(1.0); S b = S(1.0); bool c = (a != b); gl_Position = vec4(float(c)); }', 100, 'VERTEX');
+  check(n2 !== null, 'non-const struct != accepted (local operands)');
+  const n3 = okShader('struct S { float x; };\nvoid main() { const S a = S(1.0); S b = S(1.0); bool c = (a == b); gl_Position = vec4(float(c)); }', 100, 'VERTEX');
+  check(n3 !== null, 'mixed const/non-const struct == accepted (no fold)');
+
+  // ES 3.00: struct == on const operands (compile-level).
+  const v3 = okShader('#version 300 es\nprecision mediump float;\nstruct S { float x; };\nout vec4 o;\nvoid main() { const S a = S(1.0); const S b = S(1.0); const bool eq = (a == b); o = vec4(float(eq)); }', 300, 'FRAGMENT');
+  check(v3 !== null, 'ES 3.00 const struct == accepted');
+
+  // Wrong struct types → error; arrays are never comparable → error.
+  const e1 = errs('struct A { float x; };\nstruct B { float x; };\nvoid main() { bool b = (A(1.0) == B(1.0)); gl_Position = vec4(float(b)); }', 100, 'VERTEX');
+  check(hasErr(e1, 3, "'==' : operands of type 'A' and 'B' cannot be compared"), 'struct == of different struct types → error');
+  const e2 = errs('#version 300 es\nvoid main() { float a[2] = float[2](1.0, 2.0); float b[2] = float[2](1.0, 2.0); bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+  check(hasErr(e2, 2, "'==' : operands of type 'float[2]' and 'float[2]' cannot be compared"), 'array == → error (arrays not comparable)');
 }
 
 /* ------------------------------------------------------------------ */

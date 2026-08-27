@@ -622,6 +622,9 @@ function analyzeBinary(e: BinaryExpr, scope: Scope, ctx: SemContext): void {
       else if (lt.kind === 'vector' && rt.kind === 'vector' && lt.size === rt.size) {
         ok = sameBase(lt.base, rt.base, ctx.version) !== null;
       } else if (lt.kind === 'matrix' && rt.kind === 'matrix' && lt.cols === rt.cols && lt.rows === rt.rows) ok = true;
+      // GLSL ES 1.00 §5.9 / ES 3.00 §5.9: equality is defined for STRUCTS of
+      // the same type (result: one bool); ARRAYS are never comparable.
+      else if (lt.kind === 'struct' && rt.kind === 'struct') ok = typeEquals(lt, rt);
       if (!ok) {
         ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(lt)}' and '${typeName(rt)}' cannot be compared`);
         return;
@@ -629,6 +632,18 @@ function analyzeBinary(e: BinaryExpr, scope: Scope, ctx: SemContext): void {
       e.resolvedType = { kind: 'scalar', base: 'bool' };
       if (e.left.constValue !== undefined && e.right.constValue !== undefined) {
         e.constValue = foldBinary(e.op, lt, rt, e.left.constValue, e.right.constValue, ctx.version);
+      } else if (lt.kind === 'struct') {
+        // Struct operands are aggregates (no scalar constValue): fold the
+        // whole comparison via the const-expression evaluator, which compares
+        // the two flattened component lists component-wise. The single bool
+        // result annotates the node — codegen folds ANY scalar-constValue node
+        // (expressions.ts emitExpr), so const-folded struct equality needs no
+        // codegen support. Non-const struct comparisons stay unfolded here
+        // (runtime emit is codegen's concern; see the codegen contract).
+        const data = evalConstExpr(e, scope, ctx);
+        if (data !== undefined && data.length === 1 && typeof data[0] === 'boolean') {
+          e.constValue = data[0];
+        }
       }
       return;
     }

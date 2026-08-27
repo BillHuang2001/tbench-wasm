@@ -291,6 +291,10 @@ function evalConstBinary(
   }
 
   // Equality: scalars delegate; aggregates compare component-wise → bool.
+  // STRUCT operands land here too (semantics accepts struct == / != per
+  // GLSL ES 1.00 §5.9 / ES 3.00 §5.9): their flattened component lists have
+  // equal length, and foldBinary per component handles both numeric (exact
+  // for int/uint — float64 represents int32/uint32 exactly) and bool members.
   if (op === '==' || op === '!=') {
     if (lv.length === 1 && rv.length === 1) {
       const r = foldBinary(op, lt, rt, lv[0], rv[0], ctx.version);
