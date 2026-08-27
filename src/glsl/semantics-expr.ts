@@ -10,8 +10,11 @@
  *
  * Covers: literals, identifier resolution (locals → globals → builtin
  * variables → gl_Max* constants, with stage filtering and writability),
- * unary/binary operators (with ES 1.00 int→float / ES 3.00 int→uint→float
- * implicit conversions), assignment (incl. compound), ternary, indexing,
+ * unary/binary operators (STRICT operand typing — no implicit conversions:
+ * binary ops, assignments, initializers, function calls, ternary and struct
+ * constructors require exact type matches in both ES 1.00 and ES 3.00;
+ * explicit conversions happen only in type constructors), assignment (incl.
+ * compound), ternary, indexing,
  * struct member access + vector swizzles, and calls (constructors, builtin
  * overload resolution with per-argument scoring, user functions with
  * recursion edges recorded on `ctx.currentFunction.calls`).
@@ -38,6 +41,9 @@ import { builtinType } from './semantics.js';
  * The common base of two scalar bases after implicit conversion, or null.
  * ES 1.00: int→float only. ES 3.00: int→uint, int→float, uint→float.
  * bool NEVER converts implicitly.
+ *
+ * Used ONLY by foldBinary (constant folding of already-validated same-base
+ * operand pairs) — binary operators themselves never promote (see sameBase).
  */
 function commonBase(a: BaseScalar, b: BaseScalar, version: 100 | 300): BaseScalar | null {
   if (a === b) return a;
@@ -51,16 +57,31 @@ function commonBase(a: BaseScalar, b: BaseScalar, version: 100 | 300): BaseScala
 }
 
 /**
- * True when `from` can be implicitly converted to `to` in `version`
- * (exact match, or scalar/vector of same size with a legal base promotion).
+ * Strict same-base check for binary operators: both operands must have the
+ * SAME base — NO implicit promotion. GLSL ES 1.00 §5.9 operator rules require
+ * operands of identical type (e.g. `1.0 + 1` is an error), and ES 3.00/3.20
+ * §4 state "There are no implicit conversions between types" (so `1u + 2` is
+ * also an error). Version-independent.
+ */
+function sameBase(a: BaseScalar, b: BaseScalar, version: 100 | 300): BaseScalar | null {
+  void version;
+  return a === b ? a : null;
+}
+
+/**
+ * True when `from` can be implicitly converted to `to` in `version`.
+ * STRICT in both versions: only an exact type match. GLSL ES 1.00 §5.8
+ * (assignment/initializers), §6.1 ("No promotion or demotion of the input
+ * argument types is done") and ES 3.00 §4 ("There are no implicit conversions
+ * between types") forbid implicit scalar/vector promotions — the 65 CTS
+ * `conformance/glsl/implicit/*` pages all expect compile FAIL for int→float
+ * in binary ops, assignments, initializers, function calls, ternary and
+ * struct constructors. Explicit conversions happen only in constructors
+ * (ctorBaseConvertible).
  */
 export function convertible(from: GLSLType, to: GLSLType, version: 100 | 300): boolean {
-  if (typeEquals(from, to)) return true;
-  if (from.kind === 'scalar' && to.kind === 'scalar') return commonBase(from.base, to.base, version) === to.base;
-  if (from.kind === 'vector' && to.kind === 'vector' && from.size === to.size) {
-    return commonBase(from.base, to.base, version) === to.base;
-  }
-  return false;
+  void version;
+  return typeEquals(from, to);
 }
 
 /** Convert a folded scalar constant from one base to another (constructor + implicit conversions). */
@@ -114,25 +135,27 @@ function scalarBase(t: GLSLType): BaseScalar {
   return t.kind === 'scalar' || t.kind === 'vector' ? t.base : 'float';
 }
 
-/** Common type of two numeric scalars/vectors (shape must match), or null. */
+/** Common type of two numeric scalars/vectors (shape must match), or null.
+ * Bases must be IDENTICAL (no implicit promotion — ES 1.00/3.00 §5.9);
+ * float-scalar × float-vector and int-scalar × int-vector stay legal. */
 function sameShapeType(lt: GLSLType, rt: GLSLType, version: 100 | 300): GLSLType | null {
   if (!isNumericScalarOrVector(lt) || !isNumericScalarOrVector(rt)) return null;
   if (lt.kind === 'scalar' && rt.kind === 'scalar') {
-    const b = commonBase(lt.base, rt.base, version);
+    const b = sameBase(lt.base, rt.base, version);
     return b === null ? null : { kind: 'scalar', base: b };
   }
   if (lt.kind === 'vector' && rt.kind === 'vector') {
     if (lt.size !== rt.size) return null;
-    const b = commonBase(lt.base, rt.base, version);
+    const b = sameBase(lt.base, rt.base, version);
     return b === null ? null : { kind: 'vector', base: b, size: lt.size };
   }
   // scalar + vector (component-wise application)
   if (lt.kind === 'vector' && rt.kind === 'scalar') {
-    const b = commonBase(lt.base, rt.base, version);
+    const b = sameBase(lt.base, rt.base, version);
     return b === null ? null : { kind: 'vector', base: b, size: lt.size };
   }
   if (lt.kind === 'scalar' && rt.kind === 'vector') {
-    const b = commonBase(rt.base, lt.base, version);
+    const b = sameBase(rt.base, lt.base, version);
     return b === null ? null : { kind: 'vector', base: b, size: rt.size };
   }
   return null;
@@ -151,8 +174,8 @@ function arithmeticType(op: BinaryOp, lt: GLSLType, rt: GLSLType, version: 100 |
   if (ss !== null) return ss;
   if (lt.kind === 'matrix' || rt.kind === 'matrix') {
     if (op === '*') {
-      if (lt.kind === 'scalar' && rt.kind === 'matrix') return rt;
-      if (lt.kind === 'matrix' && rt.kind === 'scalar') return lt;
+      if (lt.kind === 'scalar' && rt.kind === 'matrix') return lt.base === 'float' ? rt : null;
+      if (lt.kind === 'matrix' && rt.kind === 'scalar') return rt.base === 'float' ? lt : null;
       if (lt.kind === 'matrix' && rt.kind === 'matrix') {
         if (lt.rows !== rt.cols) return null;
         return { kind: 'matrix', cols: rt.cols, rows: lt.rows };
@@ -172,8 +195,8 @@ function arithmeticType(op: BinaryOp, lt: GLSLType, rt: GLSLType, version: 100 |
       if (lt.cols !== rt.cols || lt.rows !== rt.rows) return null;
       return lt;
     }
-    if (lt.kind === 'matrix' && rt.kind === 'scalar') return rt.base === 'bool' ? null : lt;
-    if (lt.kind === 'scalar' && rt.kind === 'matrix') return lt.base === 'bool' ? null : rt;
+    if (lt.kind === 'matrix' && rt.kind === 'scalar') return rt.base === 'float' ? lt : null;
+    if (lt.kind === 'scalar' && rt.kind === 'matrix') return lt.base === 'float' ? rt : null;
     return null;
   }
   return null;
@@ -565,8 +588,7 @@ function analyzeBinary(e: BinaryExpr, scope: Scope, ctx: SemContext): void {
         ctx.error(e.loc.line, `'${e.op}' : relational operators require scalar numeric operands`);
         return;
       }
-      const b = commonBase(lt.base, rt.base, ctx.version);
-      if (b === null) {
+      if (lt.base !== rt.base) {
         ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(lt)}' and '${typeName(rt)}' are incompatible`);
         return;
       }
@@ -579,9 +601,10 @@ function analyzeBinary(e: BinaryExpr, scope: Scope, ctx: SemContext): void {
     case '==':
     case '!=': {
       let ok = false;
-      if (lt.kind === 'scalar' && rt.kind === 'scalar') ok = commonBase(lt.base, rt.base, ctx.version) !== null;
+      // Same base required (bool==bool legal; int==float and int==uint are not).
+      if (lt.kind === 'scalar' && rt.kind === 'scalar') ok = sameBase(lt.base, rt.base, ctx.version) !== null;
       else if (lt.kind === 'vector' && rt.kind === 'vector' && lt.size === rt.size) {
-        ok = commonBase(lt.base, rt.base, ctx.version) !== null;
+        ok = sameBase(lt.base, rt.base, ctx.version) !== null;
       } else if (lt.kind === 'matrix' && rt.kind === 'matrix' && lt.cols === rt.cols && lt.rows === rt.rows) ok = true;
       if (!ok) {
         ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(lt)}' and '${typeName(rt)}' cannot be compared`);
@@ -693,14 +716,14 @@ function analyzeTernary(e: TernaryExpr, scope: Scope, ctx: SemContext): void {
     ctx.error(e.loc.line, `'?:' : cannot use a void expression as a ternary operand`);
     return;
   }
-  // GLSL ES: arms must be scalars or vectors of a common type
+  // GLSL ES: ternary arms must be of the SAME type (ES 1.00 §5.8 / ES 3.00
+  // §5.9 — no implicit conversion between the arms; the 65 CTS implicit
+  // pages include ternary_int_float/ternary_ivec*_vec* expecting FAIL).
   let t: GLSLType | null = null;
   if (tt.kind === 'scalar' && ft.kind === 'scalar') {
-    const b = commonBase(tt.base, ft.base, ctx.version);
-    if (b !== null) t = { kind: 'scalar', base: b };
+    if (typeEquals(tt, ft)) t = tt;
   } else if (tt.kind === 'vector' && ft.kind === 'vector' && tt.size === ft.size) {
-    const b = commonBase(tt.base, ft.base, ctx.version);
-    if (b !== null) t = { kind: 'vector', base: b, size: tt.size };
+    if (typeEquals(tt, ft)) t = tt;
   }
   if (t === null) {
     ctx.error(e.loc.line, `'?:' : operands of type '${typeName(tt)}' and '${typeName(ft)}' are incompatible`);

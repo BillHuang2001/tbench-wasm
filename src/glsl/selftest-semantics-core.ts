@@ -122,13 +122,33 @@ expectOk('void main() {}', 100, 'VERTEX');
 expectOk('#version 300 es\nvoid main() {}', 300, 'FRAGMENT');
 
 /* ------------------------------------------------------------------ */
-/* 3. Implicit conversions                                             */
+/* 3. Implicit conversions — STRICT (no implicit conversions anywhere)  */
 /* ------------------------------------------------------------------ */
 
-expectOk('void main() { float x = 1 + 2.0; }', 100, 'VERTEX'); // int+float → float
-expectOk('#version 300 es\nvoid main() { uint x = 1u + 2; float y = 1u + 2.0; }', 300, 'VERTEX'); // int→uint, uint→float
-expectErr('void main() { int x = 1.0 + 2; }', 100, 'VERTEX'); // float→int NOT implicit
+// Binary ops: NO int→float / int→uint / uint→float promotion in 100 or 300
+// (ES 1.00 §5.9, ES 3.00/3.20 §4 + §5.9; CTS conformance/glsl/implicit/*).
+expectErr('void main() { float x = 1 + 2.0; }', 100, 'VERTEX'); // int+float → error
+expectErr('#version 300 es\nvoid main() { uint x = 1u + 2; float y = 1u + 2.0; }', 300, 'VERTEX'); // int+uint, uint+float → error
+expectErr('void main() { int x = 1.0 + 2; }', 100, 'VERTEX'); // float+int → error
+expectErr('#version 300 es\nvoid main() { float x = 1 + 2.0; }', 300, 'VERTEX'); // int+float → error in 300 too
+expectErr('#version 300 es\nvoid main() { bool b = 1 < 2.0; }', 300, 'VERTEX'); // relational mixed bases
+expectErr('void main() { bool b = 1 < 2.0; }', 100, 'VERTEX'); // relational mixed bases
+expectErr('void main() { vec3 v = ivec3(1) + vec3(1.0); }', 100, 'VERTEX'); // ivec+vec → error
+expectErr('void main() { mat2 m = mat2(1.0) * 1; }', 100, 'VERTEX'); // mat * int → error (CTS multiply_int_mat2)
 expectErr('void main() { uint x = 1; }', 100, 'VERTEX'); // uint is not a 1.00 type
+// Same-base scalar×vector and vector×vector stay legal (ES §5.9 shape rules).
+expectOk('void main() { vec3 v = 2.0 * vec3(1.0); }', 100, 'VERTEX'); // float-scalar × float-vector
+expectOk('void main() { ivec3 v = 2 * ivec3(1); }', 100, 'VERTEX'); // int-scalar × int-vector
+expectOk('#version 300 es\nvoid main() { uint x = 1u + 2u; }', 300, 'VERTEX'); // uint+uint OK
+// Assignment / initializers: exact type required (ES 1.00 §5.8; CTS
+// assign_int_to_float = `float f = -123;` expects FAIL).
+expectErr('void main() { float f = 1; }', 100, 'VERTEX'); // int-literal float initializer → error
+expectErr('void main() { float f = -123; }', 100, 'VERTEX'); // exact CTS assign_int_to_float page body
+expectErr('#version 300 es\nvoid main() { float f = 1u; }', 300, 'VERTEX'); // uint→float initializer → error
+// Function-call arguments: no promotion (ES 1.00 §6.1; CTS function_int_float).
+expectErr('float foo(float f) { return f; } void main() { float x = foo(1); }', 100, 'VERTEX');
+// Struct constructors: exact member types (CTS construct_struct).
+expectErr('struct Foo { float bar; }; void main() { Foo foo = Foo(1); }', 100, 'VERTEX');
 
 /* ------------------------------------------------------------------ */
 /* 4. Operator type errors                                             */
@@ -150,8 +170,8 @@ expectErr(
   100,
   'VERTEX',
   undefined,
-  /ambiguous/i,
-);
+  /no matching/i,
+); // strict args: (int,int) matches neither overload — no implicit conversion
 expectErr('float f(float x) { return x; } void main() { float y = f(1.0, 2.0); }', 100, 'VERTEX', undefined, /no matching/i);
 
 /* ------------------------------------------------------------------ */
@@ -160,7 +180,7 @@ expectErr('float f(float x) { return x; } void main() { float y = f(1.0, 2.0); }
 
 expectOk('void main() { vec4 v = vec4(vec2(1.0), vec2(2.0)); }', 100, 'VERTEX');
 expectOk('void main() { mat3 m = mat3(1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,9.0); }', 100, 'VERTEX');
-expectErr('void main() { mat2 m = mat2(mat3(1.0)); }', 100, 'VERTEX'); // dims mismatch
+expectOk('void main() { mat2 m = mat2(mat3(1.0)); }', 100, 'VERTEX'); // mat2(mat3) dims mismatch OK (copy matching comps)
 expectOk('void main() { int i = int(3.7); }', 100, 'VERTEX'); // scalar conversion ctor
 expectErr('void main() { vec3 v = vec3(1.0, 2.0); }', 100, 'VERTEX'); // component count
 expectOk('#version 300 es\nvoid main() { float a[3] = float[3](1.0, 2.0, 3.0); }', 300, 'VERTEX');
@@ -227,7 +247,7 @@ expectErr('#version 300 es\nvoid main() { case 1: }', 300, 'VERTEX', undefined, 
 /* 12. Return statements                                               */
 /* ------------------------------------------------------------------ */
 
-expectOk('float f() { return 1; }', 100, 'VERTEX'); // int→float implicit
+expectErr('float f() { return 1; }', 100, 'VERTEX'); // int→float return NOT implicit
 expectErr('int f() { return 1.0; }', 100, 'VERTEX'); // float→int NOT implicit
 expectErr('void f() { return 1.0; }', 100, 'VERTEX', undefined, /void/);
 expectErr('float f() { return; }', 100, 'VERTEX', undefined, /return/);
@@ -279,7 +299,8 @@ expectOk('void main() { float a[gl_MaxVertexAttribs]; }', 100, 'VERTEX'); // gl_
 expectOk('#version 300 es\nvoid f(inout float x) { x = 1.0; }', 300, 'VERTEX');
 expectOk('void main() { float x = (1.0, 2.0); }', 100, 'VERTEX'); // comma type = last
 expectErr('void main() { x = 1.0; }', 100, 'VERTEX', undefined, /undeclared/);
-expectOk('void main() { bool b = 1 == 1.0; bool c = vec2(1.0) == vec2(1.0); }', 100, 'VERTEX');
+expectErr('void main() { bool b = 1 == 1.0; }', 100, 'VERTEX'); // int == float → error
+expectOk('void main() { bool c = vec2(1.0) == vec2(1.0); }', 100, 'VERTEX'); // same-base vector equality OK
 expectErr('void main() { bool b = 1 == true; }', 100, 'VERTEX'); // int vs bool
 expectErr('#version 300 es\nvoid main() { float z = ~1.0; }', 300, 'VERTEX'); // ~ on float
 expectOk('#version 300 es\nvoid main() { int x = 5 % 2; uint u = 5u % 2u; int s = 1 << 2; }', 300, 'VERTEX');
@@ -295,7 +316,7 @@ expectOk('void f() { } void main() { f(); }', 100, 'VERTEX'); // void call as st
 /* 17. Ternary                                                         */
 /* ------------------------------------------------------------------ */
 
-expectOk('void main() { float x = true ? 1 : 2.0; }', 100, 'VERTEX');
+expectErr('void main() { float x = true ? 1 : 2.0; }', 100, 'VERTEX'); // mixed-base arms → error (CTS ternary_int_float)
 expectOk('void main() { vec3 v = true ? vec3(1.0) : vec3(2.0); }', 100, 'VERTEX');
 expectErr('void main() { mat2 m = true ? mat2(1.0) : mat2(2.0); }', 100, 'VERTEX', undefined, /incompatible/);
 
