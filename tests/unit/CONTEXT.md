@@ -18,18 +18,18 @@ Fast, dependency-free unit tests for the pure `src/` modules — glsl compiler/l
 - **Status discipline**: the suite is the executable spec for src/ and is fully green (95/95). Do NOT delete or skip tests to make the suite green; fix a test only if the src contract changed (update this file's API Surface in the same pass). A failing test is a regression signal — investigate src/ first, and report genuine src bugs rather than papering over them in the test.
 - **File size**: each test file ≤ ~1000 lines; split by module.
 
-## Current status (verified at alignment, 2026-08)
-| File | Compile (`tsc`) | Runtime | Turns green when |
-|---|---|---|---|
-| `intercept.test.ts` | ✅ | ✅ 6/6 PASS | already green |
-| `state.test.ts` | ✅ | ✅ 17/17 PASS (`createDefaultState` fully implemented) | already green |
-| `formats.test.ts` | ✅ | ⚠️ 4/20 PASS (halfToFloat/floatToHalf/sRGB/packDepth24Stencil — implemented); 16 fail (`FORMATS` registry empty until `defineFormat()` runs for `ALL_INTERNAL_FORMATS`; converters are stubs) | src/raster/formats Phase 2 lands |
-| `raster.test.ts` | ✅ | ⚠️ 3/18 PASS (record-layout constants, `computeVertexStride`, `writeVertexHeader` — implemented); 15 fail (`clipPrimitive`/`signedArea2`/`applyViewportTransform`/`pointIsVisible`/`depthSlope` stubs) | src/raster clip+triangles land |
-| `glsl.test.ts` | ✅ | ❌ 0/14 (`compileShader`/`linkProgram` stubs) | src/glsl compiler+linker land |
-| `math.test.ts` | ✅ | ❌ 0/11 (all stubs) | src/util/math lands |
-| `present.test.ts` | ✅ | ❌ 0/5 (`NodeCanvasSurface.resize`/`getPixels`, `createCanvasSurface` stubs; `present()` itself is a no-op but tests need `resize()` first) | src/present/canvas lands |
+## Current status (verified 2026-08: all src/ modules landed, suite fully green)
+| File | Compile (`tsc`) | Runtime |
+|---|---|---|
+| `intercept.test.ts` | ✅ | ✅ 6/6 PASS |
+| `state.test.ts` | ✅ | ✅ 17/17 PASS |
+| `formats.test.ts` | ✅ | ✅ 20/20 PASS |
+| `raster.test.ts` | ✅ | ✅ 18/18 PASS |
+| `glsl.test.ts` | ✅ | ✅ 18/18 PASS |
+| `math.test.ts` | ✅ | ✅ 11/11 PASS |
+| `present.test.ts` | ✅ | ✅ 5/5 PASS |
 
-`npm run test:unit` exits non-zero (61/91 fail on stubs) until the src/ implementation lands — that is the intended state. Suite total: 91 tests (30 pass, 61 fail).
+`npm run test:unit` and `npm run typecheck` are both fully green. Suite total: 95 tests, all pass.
 
 ## API Surface (coordination contract with src/ — VERIFIED against the real modules)
 Import paths and export names below are the ACTUAL src APIs the tests compile against (rewritten 2026-08 from the earlier assumed contracts). If src/ changes a shape, update the call sites in the listed file AND this table in the same pass.
