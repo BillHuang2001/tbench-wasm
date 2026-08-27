@@ -29,10 +29,11 @@ import type {
   TexImageSource,
   Uint32List,
 } from './types';
-import { C2, installConstants } from './constants';
+import { C1, C2, installConstants } from './constants';
 import { createDefaultState } from './state';
 import { WebGLRenderingContext, CONTEXT_TOKEN } from './webgl1';
 import { installAll } from './api';
+import { chainToNative } from './native-chain';
 import { DEFAULT_CONTEXT_ATTRIBUTES } from './types';
 import type {
   WebGLActiveInfo,
@@ -211,8 +212,31 @@ export interface WebGL2RenderingContext {
   getExtension(name: 'WEBGL_render_shared_exponent'): WEBGL_render_shared_exponent | null;
 }
 
-// Install WebGL2 constants on the WebGL2 prototype (gl2.X via prototype chain).
+// WebGL2 contexts see the FULL constant surface (C1 + C2) as OWN properties:
+// once the prototype is re-chained under the native WebGL2 prototype (below),
+// the class-extends link to WebGLRenderingContext.prototype is severed, so
+// inherited WebGL1 constants would be unreachable. Native WebGL2 prototypes
+// carry their own copies of every constant — mirror that.
+installConstants(WebGL2RenderingContext.prototype, C1);
 installConstants(WebGL2RenderingContext.prototype, C2);
 // Wire the api/ prototype mixins for WebGL2 (idempotent — entry.ts also calls
 // installAll; WebGL1 methods arrive via the prototype chain from webgl1.ts).
 installAll(WebGL2RenderingContext.prototype);
+
+// The class-body getters (canvas, drawingBufferWidth/Height) live ONLY on
+// WebGLRenderingContext.prototype (installAll installs methods, not these
+// getters) — copy them so they survive the re-chaining below.
+for (const name of ['canvas', 'drawingBufferWidth', 'drawingBufferHeight'] as const) {
+  const desc = Object.getOwnPropertyDescriptor(WebGLRenderingContext.prototype, name);
+  if (desc) Object.defineProperty(WebGL2RenderingContext.prototype, name, desc);
+}
+
+// Browser instanceof compatibility (see webgl1.ts): re-chain this prototype
+// under the NATIVE WebGL2RenderingContext prototype. This intentionally
+// REPLACES the class-extends prototype link (our2 → our1) with (our2 → native2)
+// — the `class ... extends WebGLRenderingContext` declaration stays unchanged
+// (constructor super() + typing depend on it). Safe because installAll above
+// made every WebGL1+2 method an OWN property of this prototype and nothing in
+// the engine does `instanceof WebGLRenderingContext` on context instances.
+// Mirrors native Chromium, where WebGL2 is NOT instanceof WebGLRenderingContext.
+chainToNative(WebGL2RenderingContext.prototype, 'WebGL2RenderingContext');
