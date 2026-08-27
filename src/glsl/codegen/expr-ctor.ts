@@ -263,8 +263,17 @@ function emitStructCtor(
   for (let i = 0; i < args.length; i++) {
     const m = retType.members[i];
     // convertValue preserves float→float duals; int→float attaches constant
-    // duals; int members carry no duals.
-    out.push(...convertValue(emitExpr(args[i], env), args[i].resolvedType!, m.type));
+    // duals; int members carry no duals. convertValue DROPS Value.pre when it
+    // converts scalar bases — re-attach so member pres survive.
+    const srcVals = emitExpr(args[i], env);
+    const conv = convertValue(srcVals, args[i].resolvedType!, m.type);
+    for (let c = 0; c < srcVals.length; c++) {
+      const src = srcVals[c];
+      if (conv[c] !== src && src.pre && src.pre.length > 0) {
+        conv[c] = { ...conv[c], pre: src.pre };
+      }
+    }
+    out.push(...conv);
   }
   return out;
 }
