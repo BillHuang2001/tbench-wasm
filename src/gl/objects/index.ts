@@ -8,6 +8,7 @@
  */
 
 import type { WebGLRenderingContext } from '../webgl1';
+import { chainToNative } from '../native-chain';
 import { WebGLObject } from './webgl-object';
 import { WebGLBuffer } from './webgl-buffer';
 import { WebGLTexture } from './webgl-texture';
@@ -86,3 +87,32 @@ export function createObject<T extends WebGLObject>(
 ): T {
   return ctx._resources.track(new ctor(ctx));
 }
+
+// ---- Native instanceof chaining (browser only; no-op in Node) ----
+// Re-chain every concrete object class prototype under the native browser class
+// of the same name so e.g. `gl.createBuffer() instanceof WebGLBuffer` (the
+// native global) holds — the CTS harness checks object identity via instanceof
+// in places. PROTOTYPE-ONLY: never touch the constructor [[Prototype]] (native
+// WebGL constructors are illegal to call — that would break super() in our
+// constructors). Instances are still `new OurClass(...)`, so internal
+// `instanceof OurClass` checks keep working (our prototype remains the
+// instance's immediate prototype).
+//
+// The abstract WebGLObject base is deliberately NOT chained: it holds only
+// instance fields (_context/_deleted) set in constructors, no prototype
+// methods, and no engine code does `instanceof WebGLObject` at runtime.
+chainToNative(WebGLBuffer.prototype, 'WebGLBuffer');
+chainToNative(WebGLTexture.prototype, 'WebGLTexture');
+chainToNative(WebGLProgram.prototype, 'WebGLProgram');
+chainToNative(WebGLShader.prototype, 'WebGLShader');
+chainToNative(WebGLFramebuffer.prototype, 'WebGLFramebuffer');
+chainToNative(WebGLRenderbuffer.prototype, 'WebGLRenderbuffer');
+chainToNative(WebGLVertexArrayObject.prototype, 'WebGLVertexArrayObject');
+chainToNative(WebGLSampler.prototype, 'WebGLSampler');
+chainToNative(WebGLQuery.prototype, 'WebGLQuery');
+chainToNative(WebGLSync.prototype, 'WebGLSync');
+chainToNative(WebGLTransformFeedback.prototype, 'WebGLTransformFeedback');
+// aux classes (opaque handles / plain records — NOT WebGLObjects)
+chainToNative(WebGLUniformLocation.prototype, 'WebGLUniformLocation');
+chainToNative(WebGLActiveInfo.prototype, 'WebGLActiveInfo');
+chainToNative(WebGLShaderPrecisionFormat.prototype, 'WebGLShaderPrecisionFormat');

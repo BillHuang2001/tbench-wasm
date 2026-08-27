@@ -39,6 +39,7 @@ import { C1, installConstants } from './constants';
 import { ErrorQueue } from './errors';
 import { createDefaultState, type State } from './state';
 import { installAll } from './api';
+import { chainToNative } from './native-chain';
 import { Resources } from './objects';
 import type {
   WebGLActiveInfo,
@@ -384,3 +385,10 @@ export interface WebGLRenderingContext {
 installConstants(WebGLRenderingContext.prototype, C1);
 // Wire the api/ prototype mixins (idempotent — entry.ts also calls installAll).
 installAll(WebGLRenderingContext.prototype);
+
+// Browser instanceof compatibility: re-chain this prototype under the NATIVE
+// WebGLRenderingContext prototype so `gl instanceof WebGLRenderingContext` (the
+// native global) is true — the CTS harness checks it (webgl-test-utils.js
+// isWebGLContext). Prototype-only: the constructor chain (super resolution) is
+// untouched; no-op in Node where the native class is absent.
+chainToNative(WebGLRenderingContext.prototype, 'WebGLRenderingContext');

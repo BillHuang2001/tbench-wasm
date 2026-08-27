@@ -318,7 +318,7 @@ function texImageDstAllowed(srcFormat: GLenum, srcType: GLenum): ReadonlySet<num
       }
     case RGB:
       switch (srcType) {
-        case UNSIGNED_BYTE: return new Set([RGB8, RGB8UI, SRGB8, RGB]);
+        case UNSIGNED_BYTE: return new Set([RGB8, RGB8UI, SRGB8, RGB, RGBA8, RGBA4, RGB5_A1, RGB565, SRGB8_ALPHA8, RGBA]);
         case BYTE: return new Set([RGB8_SNORM, RGB8I]);
         case UNSIGNED_SHORT_5_6_5: return new Set([RGB565, RGB]);
         case UNSIGNED_INT_2_10_10_10_REV: return new Set([RGB10_A2, RGB10_A2UI]);
@@ -334,7 +334,7 @@ function texImageDstAllowed(srcFormat: GLenum, srcType: GLenum): ReadonlySet<num
       }
     case RGBA:
       switch (srcType) {
-        case UNSIGNED_BYTE: return new Set([RGBA8, RGBA8UI, SRGB8_ALPHA8, RGBA]);
+        case UNSIGNED_BYTE: return new Set([RGBA8, RGBA8UI, SRGB8_ALPHA8, RGBA, LUMINANCE, LUMINANCE_ALPHA, ALPHA, RGB565, RGB, RGB5_A1, RGBA4]);
         case BYTE: return new Set([RGBA8_SNORM, RGBA8I]);
         case UNSIGNED_SHORT_4_4_4_4: return new Set([RGBA4, RGBA]);
         case UNSIGNED_SHORT_5_5_5_1: return new Set([RGB5_A1, RGBA]);
