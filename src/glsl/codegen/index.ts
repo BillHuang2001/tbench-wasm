@@ -43,6 +43,14 @@ export interface BlockMemberLayout {
   arrayStride: number;   // bytes between array elements (0 when not an array)
   matrixStride: number;  // bytes between matrix columns (0 when not a matrix)
   rowMajor: boolean;     // always false (std140 column-major is mandatory)
+  /**
+   * std140 byte size of ONE block instance (bytes between consecutive
+   * instances of an ARRAYED block, e.g. `uniform Blocks {..} b[2]`).
+   * Absent on every member entry = single-instance block (a dynamic
+   * instance index is then a linker error). Present on ALL member entries
+   * of an arrayed block (the linker stamps the same value on each).
+   */
+  blockStride?: number;
 }
 
 /** One interface varying's packed position (both stages agree). */
@@ -65,6 +73,11 @@ export interface VaryingLayout {
  * computes layout.
  */
 export interface CodegenLayout {
+  /** Shader language version (100 | 300) — from the Shader's declared #version.
+   *  Needed by codegen for builtin re-resolution (builtinSignatures(version))
+   *  and for version-dependent call lowering (texture2D vs texture). The
+   *  linker fills this from the Shader. */
+  version: 100 | 300;
   /** Flattened default-block uniform paths: 'u', 'u.m', 'u[0]', 'u[0].m', 'u[2].m'. */
   uniformSlots: Map<string, UniformSlot>;
   /** Uniform-block layouts: block index → member path → byte layout. */

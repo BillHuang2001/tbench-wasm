@@ -44,7 +44,8 @@
  * - Matrix inverse of a singular matrix is UNDEFINED per GLSL — helpers write
  *   zeros and return (documented; callers must not rely on it).
  */
-import type { TextureImage } from '../../raster/types.js';
+import type { SamplerState, SampleCoord, TextureImage } from '../../raster/types.js';
+import { sampleTexture, sampleTextureLod, sampleTextureShadow, texelFetch } from '../../raster/sampler.js';
 
 /** A writable numeric array — generated code passes ctx.scratch / ctx.intScratch. */
 export interface NumOut {
@@ -63,6 +64,13 @@ export interface TextureResolveCtx {
   tex?: {
     units?: ArrayLike<{ img?: TextureImage | null } | null | undefined> | null;
   } | null;
+  /**
+   * Effective per-unit sampler state (gl/ merges texture params with any
+   * bound WebGLSampler). Absent → a default NEAREST/REPEAT state (the
+   * explicit-LOD/grad helpers only use it for filtering decisions; the
+   * shadow helper reads compareFunc from it).
+   */
+  samplerStates?: ArrayLike<SamplerState | null | undefined> | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -663,6 +671,437 @@ export function resolveImage(ctx: TextureResolveCtx, unit: number): TextureImage
 }
 
 /* ------------------------------------------------------------------ */
+/* Texture helpers — explicit-LOD / gradient / offset / size paths     */
+/* (GLSL ES 3.00 §8.8–8.9; the 1.00 Lod/Grad forms map to the same     */
+/* helpers). Fragment-stage explicit-LOD / texelFetch calls go through */
+/* ctx.tex.* (see raster/types.ts TextureEnv); these resolveImage-     */
+/* based helpers cover VERTEX-stage sampling, textureSize in both      */
+/* stages, and every Grad/Offset/Shadow form (TextureEnv has no        */
+/* gradient/offset entry points).                                      */
+/* ------------------------------------------------------------------ */
+
+/** Texel result scratch shared by the helpers (also read via I32/U32 views). */
+const texOut = new Float32Array(4);
+const texOutI32 = new Int32Array(texOut.buffer);
+const texOutU32 = new Uint32Array(texOut.buffer);
+
+/** Coord scratch for the generic sampler entry points (no allocation). */
+const coordV = new Float32Array(4);
+const coordDx = new Float32Array(4);
+const coordDy = new Float32Array(4);
+const sampleCoord: SampleCoord = { v: coordV };
+const gradCoord: SampleCoord = { v: coordV, dx: coordDx, dy: coordDy };
+
+/** Default effective sampler state when ctx.samplerStates is absent. */
+const DEFAULT_SAMPLER_STATE: SamplerState = {
+  minFilter: 0x2600, // GL_NEAREST
+  magFilter: 0x2600, // GL_NEAREST
+  wrapS: 0x2901, // GL_REPEAT
+  wrapT: 0x2901,
+  wrapR: 0x2901,
+  minLod: -1000,
+  maxLod: 1000,
+  compareMode: 0, // GL_NONE
+  compareFunc: 0x0203, // GL_LEQUAL
+  maxAnisotropy: 1,
+};
+
+/** Effective sampler state for a unit (defensive fallback). */
+function samplerState(ctx: TextureResolveCtx, unit: number): SamplerState {
+  const s = ctx.samplerStates && ctx.samplerStates[unit];
+  return s || DEFAULT_SAMPLER_STATE;
+}
+
+/**
+ * Copies the 4-component result from texOut into the caller's array, honoring
+ * the image format: integer formats carry raw bit patterns in texOut (the
+ * sampler writes bits into the Float32Array) — they are reinterpreted to
+ * signed/unsigned JS numbers here so the caller (ctx.intScratch etc.) stores
+ * the numerically correct value.
+ */
+function writeTexel(img: TextureImage, out: NumOut, off: number): void {
+  const info = img.info;
+  if (info && info.isInteger) {
+    if (info.isSigned) {
+      out[off] = texOutI32[0];
+      out[off + 1] = texOutI32[1];
+      out[off + 2] = texOutI32[2];
+      out[off + 3] = texOutI32[3];
+    } else {
+      out[off] = texOutU32[0];
+      out[off + 1] = texOutU32[1];
+      out[off + 2] = texOutU32[2];
+      out[off + 3] = texOutU32[3];
+    }
+  } else {
+    out[off] = texOut[0];
+    out[off + 1] = texOut[1];
+    out[off + 2] = texOut[2];
+    out[off + 3] = texOut[3];
+  }
+}
+
+/** Null-image sample result: (0, 0, 0, 1) per the sampler contract. */
+function zeroSample(out: NumOut, off: number): void {
+  out[off] = 0;
+  out[off + 1] = 0;
+  out[off + 2] = 0;
+  out[off + 3] = 1;
+}
+
+/** Null-image texelFetch result: (0, 0, 0, 0). */
+function zeroFetch(out: NumOut, off: number): void {
+  out[off] = 0;
+  out[off + 1] = 0;
+  out[off + 2] = 0;
+  out[off + 3] = 0;
+}
+
+/**
+ * textureSize(sampler, lod) → level dimensions. Writes width to out[off],
+ * height to out[off + 1] and (3D / 2D_ARRAY only) the slice count to
+ * out[off + 2]; codegen reads only the components its ivec ret type has.
+ * The queried level index = img.baseLevel + lod (GLSL LOD numbers are
+ * relative to the base level — the same convention textureLod uses for
+ * level selection). Incomplete/missing level → all zeros (spec: undefined).
+ */
+export function textureSize(
+  ctx: TextureResolveCtx, unit: number, lod: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    out[off] = 0;
+    out[off + 1] = 0;
+    out[off + 2] = 0;
+    return;
+  }
+  const lvl = img.levels && img.levels[(img.baseLevel || 0) + lod];
+  if (!lvl) {
+    out[off] = 0;
+    out[off + 1] = 0;
+    out[off + 2] = 0;
+    return;
+  }
+  out[off] = lvl.width;
+  out[off + 1] = lvl.height;
+  out[off + 2] = lvl.depth;
+}
+
+/** textureLod(sampler2D, P, lod) — any stage (vertex via R, fragment via ctx.tex). */
+export function tex2DLod(
+  ctx: TextureResolveCtx, unit: number, u: number, v: number, lod: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    zeroSample(out, off);
+    return;
+  }
+  coordV[0] = u;
+  coordV[1] = v;
+  sampleTextureLod(img, samplerState(ctx, unit), sampleCoord, lod, texOut);
+  writeTexel(img, out, off);
+}
+
+/** textureLod(sampler2DArray, P, lod) — P = (u, v, layer). */
+export function tex2DArrayLod(
+  ctx: TextureResolveCtx, unit: number, u: number, v: number, layer: number, lod: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    zeroSample(out, off);
+    return;
+  }
+  coordV[0] = u;
+  coordV[1] = v;
+  coordV[2] = layer;
+  sampleTextureLod(img, samplerState(ctx, unit), sampleCoord, lod, texOut);
+  writeTexel(img, out, off);
+}
+
+/** textureLod(sampler3D, P, lod) — P = (u, v, w). */
+export function tex3DLod(
+  ctx: TextureResolveCtx, unit: number, u: number, v: number, w: number, lod: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    zeroSample(out, off);
+    return;
+  }
+  coordV[0] = u;
+  coordV[1] = v;
+  coordV[2] = w;
+  sampleTextureLod(img, samplerState(ctx, unit), sampleCoord, lod, texOut);
+  writeTexel(img, out, off);
+}
+
+/** textureLod(samplerCube, P, lod) — P = (u, v, w). */
+export function texCubeLod(
+  ctx: TextureResolveCtx, unit: number, u: number, v: number, w: number, lod: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    zeroSample(out, off);
+    return;
+  }
+  coordV[0] = u;
+  coordV[1] = v;
+  coordV[2] = w;
+  sampleTextureLod(img, samplerState(ctx, unit), sampleCoord, lod, texOut);
+  writeTexel(img, out, off);
+}
+
+/** texture2DProjLod(sampler2D, P, lod): divide u/v by q, then 2D sample. */
+export function tex2DProjLod(
+  ctx: TextureResolveCtx, unit: number, u: number, v: number, q: number, lod: number,
+  out: NumOut, off: number,
+): void {
+  if (q === 0) {
+    // Division by zero is undefined; sample (0,0) to keep the call safe.
+    tex2DLod(ctx, unit, 0, 0, lod, out, off);
+    return;
+  }
+  tex2DLod(ctx, unit, u / q, v / q, lod, out, off);
+}
+
+/** texelFetch(sampler2D|3D|2DArray, P, level) — z = 0 for 2D. */
+export function texelFetchRaw(
+  ctx: TextureResolveCtx, unit: number, x: number, y: number, z: number, level: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    zeroFetch(out, off);
+    return;
+  }
+  texelFetch(img, x, y, z, level, texOut);
+  writeTexel(img, out, off);
+}
+
+/**
+ * Shadow comparison: result = (ref op depth-texel) ? 1 : 0 (GL convention,
+ * e.g. LEQUAL → ref <= texel). `func` is the GL compare enum.
+ */
+function compareDepth(func: number, ref: number, depth: number): boolean {
+  switch (func) {
+    case 0x0200: return false; // GL_NEVER
+    case 0x0201: return ref < depth; // GL_LESS
+    case 0x0202: return ref === depth; // GL_EQUAL
+    case 0x0204: return ref > depth; // GL_GREATER
+    case 0x0205: return ref !== depth; // GL_NOTEQUAL
+    case 0x0206: return ref >= depth; // GL_GEQUAL
+    case 0x0207: return true; // GL_ALWAYS
+    default: return ref <= depth; // GL_LEQUAL
+  }
+}
+
+/**
+ * textureLod(sampler2DShadow, P, lod): NEAREST approximation — fetches the
+ * depth texel at floor(P.xy * levelSize), level = baseLevel + lod, and
+ * compares against the reference with the state's compareFunc. Documented
+ * approximation: no 2×2 depth filtering; correct for NEAREST shadow maps.
+ */
+export function sampleShadowLod(
+  ctx: TextureResolveCtx, unit: number, u: number, v: number, ref: number, lod: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    out[off] = 0;
+    return;
+  }
+  const level = (img.baseLevel || 0) + lod;
+  const lvl = img.levels && img.levels[level];
+  if (!lvl) {
+    out[off] = 0;
+    return;
+  }
+  const x = Math.min(Math.max(Math.floor(u * lvl.width), 0), lvl.width - 1);
+  const y = Math.min(Math.max(Math.floor(v * lvl.height), 0), lvl.height - 1);
+  texelFetch(img, x, y, 0, level, texOut);
+  out[off] = compareDepth(samplerState(ctx, unit).compareFunc, ref, texOut[0]) ? 1 : 0;
+}
+
+/** textureGrad(sampler2D, P, dPdx, dPdy) — implicit LOD from explicit gradients. */
+export function tex2DGrad(
+  ctx: TextureResolveCtx, unit: number,
+  u: number, v: number, dudx: number, dvdx: number, dudy: number, dvdy: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    zeroSample(out, off);
+    return;
+  }
+  coordV[0] = u;
+  coordV[1] = v;
+  coordDx[0] = dudx;
+  coordDx[1] = dvdx;
+  coordDy[0] = dudy;
+  coordDy[1] = dvdy;
+  sampleTexture(img, samplerState(ctx, unit), gradCoord, 0, texOut);
+  writeTexel(img, out, off);
+}
+
+/** textureGrad(sampler2DArray, P, dPdx, dPdy) — layer derivative = 0. */
+export function tex2DArrayGrad(
+  ctx: TextureResolveCtx, unit: number,
+  u: number, v: number, layer: number,
+  dudx: number, dvdx: number, dudy: number, dvdy: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    zeroSample(out, off);
+    return;
+  }
+  coordV[0] = u;
+  coordV[1] = v;
+  coordV[2] = layer;
+  coordDx[0] = dudx;
+  coordDx[1] = dvdx;
+  coordDx[2] = 0;
+  coordDy[0] = dudy;
+  coordDy[1] = dvdy;
+  coordDy[2] = 0;
+  sampleTexture(img, samplerState(ctx, unit), gradCoord, 0, texOut);
+  writeTexel(img, out, off);
+}
+
+/** textureGrad(sampler3D, P, dPdx, dPdy). */
+export function tex3DGrad(
+  ctx: TextureResolveCtx, unit: number,
+  u: number, v: number, w: number,
+  dudx: number, dvdx: number, dwdx: number,
+  dudy: number, dvdy: number, dwdy: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    zeroSample(out, off);
+    return;
+  }
+  coordV[0] = u;
+  coordV[1] = v;
+  coordV[2] = w;
+  coordDx[0] = dudx;
+  coordDx[1] = dvdx;
+  coordDx[2] = dwdx;
+  coordDy[0] = dudy;
+  coordDy[1] = dvdy;
+  coordDy[2] = dwdy;
+  sampleTexture(img, samplerState(ctx, unit), gradCoord, 0, texOut);
+  writeTexel(img, out, off);
+}
+
+/** textureGrad(samplerCube, P, dPdx, dPdy). */
+export function texCubeGrad(
+  ctx: TextureResolveCtx, unit: number,
+  u: number, v: number, w: number,
+  dudx: number, dvdx: number, dwdx: number,
+  dudy: number, dvdy: number, dwdy: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    zeroSample(out, off);
+    return;
+  }
+  coordV[0] = u;
+  coordV[1] = v;
+  coordV[2] = w;
+  coordDx[0] = dudx;
+  coordDx[1] = dvdx;
+  coordDx[2] = dwdx;
+  coordDy[0] = dudy;
+  coordDy[1] = dvdy;
+  coordDy[2] = dwdy;
+  sampleTexture(img, samplerState(ctx, unit), gradCoord, 0, texOut);
+  writeTexel(img, out, off);
+}
+
+/** textureGrad(sampler2DShadow, P, dPdx, dPdy). */
+export function tex2DShadowGrad(
+  ctx: TextureResolveCtx, unit: number,
+  u: number, v: number, ref: number,
+  dudx: number, dvdx: number, dudy: number, dvdy: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    out[off] = 0;
+    return;
+  }
+  coordV[0] = u;
+  coordV[1] = v;
+  coordDx[0] = dudx;
+  coordDx[1] = dvdx;
+  coordDy[0] = dudy;
+  coordDy[1] = dvdy;
+  sampleTextureShadow(img, samplerState(ctx, unit), gradCoord, ref, 0, texOut);
+  out[off] = texOut[0];
+}
+
+/**
+ * textureOffset(sampler2D, P, offset) — approximation: sample at coords
+ * shifted by (offset / baseLevel size). Equivalent for NEAREST filtering and
+ * for REPEAT wrap (wrapping commutes with the integer shift); LINEAR
+ * filtering near wrap edges may differ by one texel from the true offset
+ * lookup. Documented approximation.
+ */
+export function tex2DOffsetApprox(
+  ctx: TextureResolveCtx, unit: number,
+  u: number, v: number, ox: number, oy: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    zeroSample(out, off);
+    return;
+  }
+  const w = img.width || 1;
+  const h = img.height || 1;
+  tex2DLod(ctx, unit, u + ox / w, v + oy / h, 0, out, off);
+}
+
+/** textureOffset(sampler2DArray, P, offset) — approximation (see tex2DOffsetApprox). */
+export function tex2DArrayOffsetApprox(
+  ctx: TextureResolveCtx, unit: number,
+  u: number, v: number, layer: number, ox: number, oy: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    zeroSample(out, off);
+    return;
+  }
+  const w = img.width || 1;
+  const h = img.height || 1;
+  tex2DArrayLod(ctx, unit, u + ox / w, v + oy / h, layer, 0, out, off);
+}
+
+/** textureOffset(sampler3D, P, offset) — approximation (see tex2DOffsetApprox). */
+export function tex3DOffsetApprox(
+  ctx: TextureResolveCtx, unit: number,
+  u: number, v: number, w: number, ox: number, oy: number, oz: number,
+  out: NumOut, off: number,
+): void {
+  const img = resolveImage(ctx, unit);
+  if (!img) {
+    zeroSample(out, off);
+    return;
+  }
+  const w0 = img.width || 1;
+  const h = img.height || 1;
+  const d = img.depth || 1;
+  tex3DLod(ctx, unit, u + ox / w0, v + oy / h, w + oz / d, 0, out, off);
+}
+
+/* ------------------------------------------------------------------ */
 /* The runtime object handed to generated code                         */
 /* ------------------------------------------------------------------ */
 
@@ -698,4 +1137,20 @@ export const R: Readonly<Record<string, Function>> = {
   umulExtended,
   imulExtended,
   resolveImage,
+  textureSize,
+  tex2DLod,
+  tex2DArrayLod,
+  tex3DLod,
+  texCubeLod,
+  tex2DProjLod,
+  texelFetchRaw,
+  sampleShadowLod,
+  tex2DGrad,
+  tex2DArrayGrad,
+  tex3DGrad,
+  texCubeGrad,
+  tex2DShadowGrad,
+  tex2DOffsetApprox,
+  tex2DArrayOffsetApprox,
+  tex3DOffsetApprox,
 };
