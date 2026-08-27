@@ -48,6 +48,7 @@
  */
 import type { ShaderStage } from '../compiler.js';
 import type { GLSLType } from '../types.js';
+import type { Expr } from '../ast.js';
 import {
   builtinConstants,
   builtinVariables,
@@ -186,6 +187,14 @@ export interface LocalVar {
    * static accesses continue to read/write the flat vars directly.
    */
   dynScratch?: { base: number; int: boolean; copyIn: string[]; copyOut: string[] };
+}
+
+/** One inlined call's scope (C3b): the call's param LocalVars (per-call-site
+ *  unique JS names) + the function's local names (pre-scanned from its body,
+ *  so an inner local shadows an outer same-named param in resolveLocal). */
+export interface ParamFrame {
+  params: Map<string, LocalVar>;
+  localNames: Set<string>;
 }
 
 /** Struct member → relative flat offset (within the struct). */
@@ -529,10 +538,87 @@ export class CodegenEnv {
   /** User struct type names (C3/C4 populate from the AST; used for ctor dispatch). */
   structNames = new Set<string>();
   /**
-   * User-function call hook (C3's inliner sets it). C2 leaves it null —
+   * User-function call hook (C3b's inliner sets it). C2 leaves it null —
    * a user call then throws "user function call outside the function inliner".
+   * `rawArgs` (4th param, optional) carries the RAW argument AST exprs —
+   * the inliner needs them to emitLValue out/inout arguments (the emitted
+   * `args` are already-lowered Values and cannot be re-lvalued).
    */
-  emitUserCall: ((name: string, args: Value[][], argTypes: GLSLType[]) => Value[] | null) | null = null;
+  emitUserCall:
+    | ((name: string, args: Value[][], argTypes: GLSLType[], rawArgs?: Expr[]) => Value[] | null)
+    | null = null;
+
+  /** Active inlined-call scopes (C3b): innermost last. Each frame holds the
+   *  call's param LocalVars + the function's local names; resolveLocal
+   *  consults them top-down so same-named params/locals of nested calls
+   *  never collide (locals_ alone cannot hold two entries per GLSL name). */
+  private paramFrames_: ParamFrame[] = [];
+
+  /** Push a frame for one inlined call (the inliner pops it after the body). */
+  pushParamFrame(): ParamFrame {
+    const frame: ParamFrame = { params: new Map(), localNames: new Set() };
+    this.paramFrames_.push(frame);
+    return frame;
+  }
+
+  popParamFrame(): void {
+    this.paramFrames_.pop();
+  }
+
+  /**
+   * Create a param LocalVar for ONE inlined call site. Flat kinds get
+   * per-call-site unique JS names (`<name>$c<N>` — `$` is not a GLSL
+   * identifier character, so collisions with GLSL-derived names and temps
+   * are impossible); array params get a fresh scratch region. Does NOT
+   * register the var — the inliner stores it in the active frame.
+   */
+  makeParamLocal(name: string, type: GLSLType, suffix: string): LocalVar {
+    if (type.kind === 'array') {
+      const elem = type.element;
+      const n = flatComponents(elem) * (type.size ?? 1);
+      const int = isIntegralFamily(elem);
+      const base = int ? this.allocIntScratch(n) : this.allocScratch(n);
+      return {
+        name,
+        type,
+        kind: 'scratch',
+        scratchBase: base,
+        elemSlots: flatComponents(elem),
+        int,
+        members: elem.kind === 'struct' ? structMemberOffsets(elem) : undefined,
+      };
+    }
+    const compNames = flatNames(name + suffix, type);
+    for (const js of compNames) {
+      if (this.usedJsNames_.has(js)) {
+        throw new Error(`codegen: JS name '${js}' already in use (param suffix '${suffix}')`);
+      }
+      this.usedJsNames_.add(js);
+    }
+    return {
+      name,
+      type,
+      kind: 'flat',
+      compNames,
+      members: type.kind === 'struct' ? structMemberOffsets(type) : undefined,
+    };
+  }
+
+  /**
+   * Resolve an identifier for READS: active param frames first (innermost
+   * frame's params, then its locals — an inner local shadows an outer
+   * param), then declared locals. Declarations use lookupLocal (locals_
+   * only — statements.ts's sibling re-declaration path must not see frames).
+   */
+  resolveLocal(name: string): LocalVar | null {
+    for (let i = this.paramFrames_.length - 1; i >= 0; i--) {
+      const f = this.paramFrames_[i];
+      const p = f.params.get(name);
+      if (p) return p;
+      if (f.localNames.has(name)) return this.locals_.get(name) ?? null;
+    }
+    return this.locals_.get(name) ?? null;
+  }
 
   private locals_ = new Map<string, LocalVar>();
   private usedJsNames_ = new Set<string>();
@@ -610,7 +696,17 @@ export class CodegenEnv {
    * (Int32Array reads come back signed).
    */
   ensureDynScratch(name: string): { base: number; int: boolean; copyIn: string[]; copyOut: string[] } {
-    const lv = this.locals_.get(name);
+    let lv = this.locals_.get(name);
+    if (!lv) {
+      // Frame params (inlined calls) live outside locals_ — resolve them too.
+      for (let i = this.paramFrames_.length - 1; i >= 0; i--) {
+        const p = this.paramFrames_[i].params.get(name);
+        if (p) {
+          lv = p;
+          break;
+        }
+      }
+    }
     if (!lv) throw new Error(`codegen: unknown local '${name}'`);
     if (lv.kind === 'scratch') {
       throw new Error(`codegen: '${name}' is already scratch-backed (cannot dyn-spill)`);

@@ -325,7 +325,7 @@ function walk(e: Expr, env: CodegenEnv): P {
   switch (e.kind) {
     case 'identifier': {
       const t = e.resolvedType!;
-      const lv = env.lookupLocal(e.name);
+      const lv = env.resolveLocal(e.name);
       if (lv) {
         const p = freshP(t);
         p.local = lv;
@@ -1048,7 +1048,7 @@ function emitCall(e: Extract<Expr, { kind: 'call' }>, env: CodegenEnv): Value[] 
     const name = callee.name;
     const argTypes = e.args.map((a) => a.resolvedType!);
     if (env.emitUserCall) {
-      const r = env.emitUserCall(name, e.args.map((a) => emitExpr(a, env)), argTypes);
+      const r = env.emitUserCall(name, e.args.map((a) => emitExpr(a, env)), argTypes, e.args);
       if (r) return r;
     }
     if (isConstructorName(name, env)) return emitConstructorCall(name, e.args, e.resolvedType!, env);
