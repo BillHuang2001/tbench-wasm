@@ -124,6 +124,14 @@ function isValidUsage(ctx: WebGLRenderingContext, usage: GLenum): boolean {
 }
 
 /**
+ * True when `v` is a SharedArrayBuffer (a BufferDataSource per WebIDL when the
+ * global exists). Guarded so environments without SharedArrayBuffer stay safe.
+ */
+function isSharedArrayBuffer(v: unknown): v is SharedArrayBuffer {
+  return typeof SharedArrayBuffer !== 'undefined' && v instanceof SharedArrayBuffer;
+}
+
+/**
  * Indexed TRANSFORM_FEEDBACK_BUFFER binding at `index` (last bind wins).
  * The source of truth is the buffer objects' _tfRangeBindings entries, which
  * persist regardless of which (if any) transform feedback object is bound.
@@ -466,25 +474,23 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
-    if (typeof size === 'number') {
-      if (size < 0) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      const n = Math.trunc(size); // WebIDL long long conversion
-      let data: ArrayBuffer;
-      try {
-        data = new ArrayBuffer(n); // zero-filled
-      } catch {
-        ctx._errors.push(C1.OUT_OF_MEMORY);
-        return;
-      }
-      buf._data = data;
-      buf._size = n;
-    } else {
-      const data = requireBufferData(size, 'size'); // throws TypeError for wrong types
-      const bytes =
-        data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    // WebIDL overload resolution (CTS buffer-data-and-buffer-sub-data.html):
+    // null/undefined resolve to the nullable ArrayBuffer member → INVALID_VALUE
+    // per the WebGL spec (no throw, no state change); ArrayBuffer/ArrayBufferView
+    // take the data path; everything else (strings, objects, arrays, floats)
+    // converts via ToNumber to the GLsizeiptr overload (long long semantics:
+    // NaN/±Infinity → 0, truncation toward zero).
+    if (size === null || size === undefined) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (size instanceof ArrayBuffer || ArrayBuffer.isView(size) || isSharedArrayBuffer(size)) {
+      const data = requireBufferData(size, 'size');
+      const bytes = isSharedArrayBuffer(data)
+        ? new Uint8Array(data)
+        : data instanceof ArrayBuffer
+          ? new Uint8Array(data)
+          : new Uint8Array((data as ArrayBufferView).buffer, (data as ArrayBufferView).byteOffset, (data as ArrayBufferView).byteLength);
       let copy: ArrayBuffer;
       try {
         copy = new ArrayBuffer(bytes.byteLength);
@@ -495,6 +501,22 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       new Uint8Array(copy).set(bytes);
       buf._data = copy;
       buf._size = bytes.byteLength;
+    } else {
+      const raw = Number(size); // WebIDL ToNumber (Symbol → TypeError, like WebIDL)
+      const n = Number.isFinite(raw) ? Math.trunc(raw) : 0; // NaN/±Infinity → 0 (long long)
+      if (n < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      let data: ArrayBuffer;
+      try {
+        data = new ArrayBuffer(n); // zero-filled
+      } catch {
+        ctx._errors.push(C1.OUT_OF_MEMORY);
+        return;
+      }
+      buf._data = data;
+      buf._size = n;
     }
     buf._usage = usage;
   };

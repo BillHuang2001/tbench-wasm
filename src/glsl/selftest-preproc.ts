@@ -221,11 +221,20 @@ expect('// comment\n/* block */\n#version 100\nfoo', ['foo']);
 const EXT = new Set(['GL_OES_standard_derivatives']);
 expect('#extension GL_OES_standard_derivatives : enable\nGL_OES_standard_derivatives', ['1'], { extensions: EXT });
 expect('#extension GL_OES_standard_derivatives : require\nok', ['ok'], { extensions: EXT });
-expectErr('#extension GL_UNKNOWN : enable', "extension 'GL_UNKNOWN' is not supported", { extensions: EXT });
+// Unsupported extension names: only `require` is an error; enable/disable/warn
+// are warnings per GLSL ES §3.4 (accepted silently — no warning channel).
+expect('#extension GL_UNKNOWN : enable\nok', ['ok'], { extensions: EXT });
 expectErr('#extension GL_UNKNOWN : require', "extension 'GL_UNKNOWN' is not supported", { extensions: EXT });
 expect('#extension GL_UNKNOWN : warn\nok', ['ok'], { extensions: EXT });
 expect('#extension GL_UNKNOWN : disable\nok', ['ok'], { extensions: EXT });
 expect('#extension GL_UNKNOWN : warn\nok', ['ok']); // no extensions set at all
+// `enable` of an unsupported extension defines no macro (the extension is not
+// enabled); the `#ifdef` branch is skipped.
+expect('#extension GL_UNKNOWN : enable\n#ifdef GL_UNKNOWN\nBAD\n#else\nok\n#endif', ['ok'], { extensions: EXT });
+// Same for `disable` of an unknown extension (macro stays undefined).
+expect('#extension GL_UNKNOWN : disable\n#ifdef GL_UNKNOWN\nBAD\n#else\nok\n#endif', ['ok'], { extensions: EXT });
+// `enable` of a SUPPORTED extension still defines the macro.
+expect('#extension GL_OES_standard_derivatives : enable\n#ifdef GL_OES_standard_derivatives\nok\n#else\nBAD\n#endif', ['ok'], { extensions: EXT });
 // Last directive wins.
 expect('#extension GL_OES_standard_derivatives : enable\n#extension GL_OES_standard_derivatives : disable\nGL_OES_standard_derivatives',
   ['GL_OES_standard_derivatives'], { extensions: EXT });
@@ -250,6 +259,16 @@ expect('#extension GL_OES_standard_derivatives : enable\n#extension all : disabl
     check(r.extensionDirectives[0].name === 'GL_OES_standard_derivatives' && r.extensionDirectives[0].behavior === 'enable' && r.extensionDirectives[0].line === 1,
       'first directive metadata');
     check(r.extensionDirectives[1].behavior === 'warn' && r.extensionDirectives[1].line === 2, 'second directive metadata');
+  }
+}
+{
+  // `enable` of an UNSUPPORTED extension is not an error and does NOT add the
+  // name to the enabled-extensions result (the extension is ignored).
+  const r = run('#extension GL_UNKNOWN : enable\nok', { extensions: EXT });
+  check(r.ok, 'unknown enable run ok');
+  if (r.ok) {
+    check(JSON.stringify(r.extensions) === JSON.stringify([]), `unknown enable extensions: got ${JSON.stringify(r.extensions)}`);
+    check(r.extensionDirectives.length === 1 && r.extensionDirectives[0].behavior === 'enable', 'unknown enable directive recorded');
   }
 }
 

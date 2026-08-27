@@ -405,8 +405,13 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
 
   const e2 = errs('precision mediump float;\nvoid main() { float d = dFdx(1.0); gl_FragColor = vec4(d); }', 100, 'FRAGMENT', ['GL_OES_standard_derivatives']);
   check(hasErr(e2, 2, "'dFdx' : requires extension 'GL_OES_standard_derivatives' which is not enabled"), 'opts.extensions alone (no #extension in source) → still error');
+  // An unknown-extension `#extension ... : enable` in the source is NOT a
+  // preprocessor error (GLSL ES §3.4 — the directive is accepted, the
+  // extension stays disabled). Only a USE of its functions errors, via the
+  // semantics disabled-extension gate.
   const e3 = errs('#extension GL_OES_standard_derivatives : enable\nprecision mediump float;\nvoid main() { float d = dFdx(1.0); gl_FragColor = vec4(d); }', 100, 'FRAGMENT');
-  check(e3.length > 0 && e3[0].message.includes("not supported"), '#extension without opts.extensions → preprocess error');
+  check(hasErr(e3, 3, "'dFdx' : requires extension 'GL_OES_standard_derivatives' which is not enabled"), '#extension without opts.extensions: directive OK, dFdx use errors at the use line');
+  okInfo('#extension GL_OES_standard_derivatives : enable\nprecision mediump float;\nvoid main() { gl_FragColor = vec4(1.0); }', 100, 'FRAGMENT'); // #extension alone compiles
 
   const e4 = errs('precision mediump float;\nuniform sampler2D s;\nvoid main() { gl_FragColor = texture2DLodEXT(s, vec2(0.0), 0.0); }', 100, 'FRAGMENT');
   check(hasErr(e4, 3, "'texture2DLodEXT' : requires extension 'GL_EXT_shader_texture_lod' which is not enabled"), 'texture2DLodEXT without EXT → error');
@@ -530,6 +535,64 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
       }
     }
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 13. Constructor rules (GLSL ES 1.00 §5.4.2) + builtin-name overloads */
+/* ------------------------------------------------------------------ */
+
+{
+  // --- vecN(matM): first N components of the matrix, column-major order ---
+  okInfo('void main() { mat2 m = mat2(1.0); vec4 v = vec4(m); gl_Position = v; }', 100, 'VERTEX'); // vec4(mat2)
+  okInfo('void main() { mat4 m = mat4(1.0); vec2 v = vec2(m); gl_Position = vec4(v, 0.0, 1.0); }', 100, 'VERTEX'); // vec2(mat4) shorten
+  okInfo('void main() { mat3 m = mat3(1.0); vec3 v = vec3(m); gl_Position = vec4(v, 1.0); }', 100, 'VERTEX'); // vec3(mat3)
+  okInfo('void main() { mat3 m = mat3(1.0); vec4 v = vec4(m); gl_Position = v; }', 100, 'VERTEX'); // vec4(mat3) shorten (9 comps)
+  okInfo('void main() { mat4 m = mat4(1.0); ivec4 v = ivec4(m); gl_Position = vec4(v); }', 100, 'VERTEX'); // ivec4(mat4)
+  okInfo('void main() { mat4 m = mat4(1.0); bvec4 v = bvec4(m); gl_Position = vec4(1.0); }', 100, 'VERTEX'); // bvec4(mat4)
+  // Matrix followed by a further argument that contributes nothing → error
+  // (matches ANGLE/CTS: vec4(mat2, scalar) is "too many arguments").
+  const m1 = errs('void main() { mat2 m = mat2(1.0); vec4 v = vec4(m, 2.0); gl_Position = v; }', 100, 'VERTEX');
+  check(m1.length > 0, 'vec4(mat2, scalar) → error (matrix contributes all components)');
+  // ... but a matrix LATER in the argument list is fine when earlier args
+  // leave room: vec4(2.0, mat2) fills 1 + 3 components.
+  okInfo('void main() { mat2 m = mat2(1.0); vec4 v = vec4(2.0, m); gl_Position = v; }', 100, 'VERTEX');
+
+  // --- mixed scalar+vector constructor args (scalars combine with vectors) ---
+  okInfo('void main() { vec3 v = vec3(5.0, 4.0, ivec2(2.0, 1.0)); gl_Position = vec4(v, 1.0); }', 100, 'VERTEX'); // ogles CorrectConstruct
+  okInfo('void main() { vec3 v = vec3(2, 2.0, 1); gl_Position = vec4(v, 1.0); }', 100, 'VERTEX'); // mixed int/float scalars
+  okInfo('void main() { vec3 v3 = vec3(1.0); vec3 v = vec3(1.2, v3); gl_Position = vec4(v, 1.0); }', 100, 'VERTEX'); // shorten: 4 comps into 3
+  okInfo('void main() { bvec4 b = bvec4(true); vec3 v = vec3(b); gl_Position = vec4(v, 1.0); }', 100, 'VERTEX'); // bool → float, shorten
+  okInfo('void main() { vec4 v4 = vec4(1.0); vec2 v = vec2(v4); gl_Position = vec4(v, 0.0, 1.0); }', 100, 'VERTEX'); // shorten vec4 → vec2
+  okInfo('void main() { vec2 v2 = vec2(1.0); vec4 v = vec4(3.0, v2, 4.0); gl_Position = v; }', 100, 'VERTEX'); // 1+2+1 = 4
+  const m2 = errs('void main() { vec4 v4 = vec4(1.0); vec4 w = vec4(v4, v4, v4); gl_Position = w; }', 100, 'VERTEX');
+  check(m2.length > 0, 'vec4(v, v, v) → error (unused trailing argument)');
+  const m3 = errs('void main() { vec4 v = vec4(1.0, 2.0, 3.0); gl_Position = v; }', 100, 'VERTEX');
+  check(m3.length > 0, 'vec4(1,2,3) → error (not enough components)');
+  const m4 = errs('void main() { vec2 v2 = vec2(1.0); vec4 v = vec4(v2); gl_Position = v; }', 100, 'VERTEX');
+  check(m4.length > 0, 'vec4(vec2) → error (not enough components)');
+  okInfo('void main() { float f = float(vec2(1.0, 2.0)); gl_Position = vec4(f); }', 100, 'VERTEX'); // scalar ctor takes first element
+
+  // --- matrix constructors from vectors / mixed args ---
+  okInfo('void main() { vec3 v = vec3(1.0); mat3 m = mat3(v, v, v); gl_Position = vec4(1.0); }', 100, 'VERTEX'); // 3 columns
+  okInfo('void main() { vec3 v = vec3(1.0); mat2 m = mat2(v, 2.0); gl_Position = vec4(1.0); }', 100, 'VERTEX'); // vec3 + scalar
+  okInfo('void main() { vec4 v = vec4(1.0); mat2 m = mat2(v); gl_Position = vec4(1.0); }', 100, 'VERTEX'); // single vec4 arg
+  okInfo('void main() { vec3 a = vec3(1.0); vec4 b = vec4(1.0); mat4 m = mat4(a, b, b, a, 2.0, 3.0); gl_Position = vec4(1.0); }', 100, 'VERTEX'); // ogles CorrectConstFolding1 pattern
+  okInfo('void main() { bool b = true; mat4 m = mat4(b); gl_Position = vec4(1.0); }', 100, 'VERTEX'); // bool scalar diagonal
+  okInfo('void main() { mat3 m = mat3(1.0); mat2 n = mat2(m); gl_Position = vec4(1.0); }', 100, 'VERTEX'); // mat2(mat3) single matrix arg
+  const m5 = errs('void main() { mat2 a = mat2(1.0); mat3 m = mat3(a, 2.0); gl_Position = vec4(1.0); }', 100, 'VERTEX');
+  check(m5.length > 0, 'mat3(mat2, scalar) → error (matrix in multi-arg matrix constructor)');
+
+  // --- user functions may overload builtin names (GLSL ES 1.00 §6.1) ---
+  // `radians(3)` must resolve to the USER int radians(int), not the builtin
+  // radians(float) (which would return float and fail the int assignment).
+  okInfo('int radians(int x) { return x; }\nvoid main() { int f = 45; f = radians(f); }', 100, 'VERTEX');
+  okInfo('int radians(int x) { return x; }\nvoid main() { int f = radians(3); gl_Position = vec4(float(f)); }', 100, 'VERTEX');
+  // A call only the builtin can take still routes to the builtin table.
+  okInfo('int radians(int x) { return x; }\nvoid main() { float f = radians(1.0); gl_Position = vec4(f); }', 100, 'VERTEX');
+  const m6 = errs('int radians(int x) { return x; }\nvoid main() { float f = radians(true); gl_Position = vec4(f); }', 100, 'VERTEX');
+  check(m6.length > 0, 'radians(bool): neither user overload nor builtin matches → error');
+  // Fragment variant of the ogles CorrectBuiltInOveride pattern.
+  okInfo('precision mediump float;\nint radians(int x) { return x; }\nvoid main() { int f = 45; f = radians(f); gl_FragColor = vec4(1.0); }', 100, 'FRAGMENT');
 }
 
 /* ------------------------------------------------------------------ */

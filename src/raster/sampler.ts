@@ -55,6 +55,7 @@ import {
   TEXTURE_2D, TEXTURE_3D, TEXTURE_CUBE_MAP, TEXTURE_2D_ARRAY,
   NEVER, LESS, EQUAL, LEQUAL, GREATER, NOTEQUAL, GEQUAL, ALWAYS,
   DEPTH_COMPONENT16, DEPTH_COMPONENT24, DEPTH24_STENCIL8,
+  ALPHA, LUMINANCE, LUMINANCE_ALPHA,
 } from './gl-enums';
 import { halfToFloat, sRGBToLinear } from './formats';
 import type { PixelFormatInfo, StorageKind } from './formats';
@@ -300,22 +301,32 @@ function readFromEntry(info: PixelFormatInfo, entry: ArrayBufferView, byteOffset
     return;
   }
   if (isUniformStorage(info)) {
-    const n = info.components;
-    const cs = compSize(info.storage);
-    if (info.normalized) {
-      // Fixed-point normalized: decode to 0..1 (snorm −1..1, clamped at −1).
-      const div = normDivisor(info.storage);
-      const isSigned = info.isSigned;
-      for (let c = 0; c < n; c++) {
-        const raw = readComp(entry, info.storage, byteOffset + c * cs);
-        const x = raw / div;
-        out[c] = isSigned ? (x < -1 ? -1 : x) : x;
-      }
+    // WebGL1 unsized luminance/alpha formats have non-identity channel maps
+    // (ALPHA → (0,0,0,a); LUMINANCE → (l,l,l,1); LUMINANCE_ALPHA → (l,l,l,a)).
+    // The uniform-storage fast path below only handles identity RGBA layouts
+    // (missing components 0/1), which would mis-sample these; route them
+    // through the format's decode instead (same /div normalization, writes
+    // the full 4-channel expansion — no allocation).
+    if (info.format === ALPHA || info.format === LUMINANCE || info.format === LUMINANCE_ALPHA) {
+      info.decode(entry, byteOffset, out);
     } else {
-      // Float storage (or raw fixed-point defensive path): passthrough.
-      for (let c = 0; c < n; c++) out[c] = readComp(entry, info.storage, byteOffset + c * cs);
+      const n = info.components;
+      const cs = compSize(info.storage);
+      if (info.normalized) {
+        // Fixed-point normalized: decode to 0..1 (snorm −1..1, clamped at −1).
+        const div = normDivisor(info.storage);
+        const isSigned = info.isSigned;
+        for (let c = 0; c < n; c++) {
+          const raw = readComp(entry, info.storage, byteOffset + c * cs);
+          const x = raw / div;
+          out[c] = isSigned ? (x < -1 ? -1 : x) : x;
+        }
+      } else {
+        // Float storage (or raw fixed-point defensive path): passthrough.
+        for (let c = 0; c < n; c++) out[c] = readComp(entry, info.storage, byteOffset + c * cs);
+      }
+      for (let c = n; c < 4; c++) out[c] = c === 3 ? 1 : 0;
     }
-    for (let c = n; c < 4; c++) out[c] = c === 3 ? 1 : 0;
   } else {
     info.decode(entry, byteOffset, out);
   }

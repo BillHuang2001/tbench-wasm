@@ -30,12 +30,13 @@ import type {
 import type { GLSLType, Precision, SamplerKind, StorageClass, StructMember } from './types.js';
 import { isFloat, typeEquals, typeName } from './types.js';
 import { analyzeExpr, convertible } from './semantics-expr.js';
+import { evalConstExpr } from './semantics-const.js';
 import { analyzeStatement } from './semantics-stmt.js';
 import {
   builtinConstants, builtinSignatures, builtinVariables,
-  extensionConstants, extensionFunctions, extensionVariables,
+  extensionConstants, extensionFunctions, extensionVariables, matches,
 } from './builtins/index.js';
-import type { BuiltinVariable } from './builtins/index.js';
+import type { BuiltinSignature, BuiltinVariable } from './builtins/index.js';
 
 export { analyzeExpr, analyzeStatement, convertible };
 
@@ -145,6 +146,13 @@ export interface VarSymbol extends BaseSymbol {
   storage?: StorageClass;
   /** const globals/locals with constant initializers: the folded value. */
   constValue?: number | boolean;
+  /**
+   * const variables ONLY (never const-qualified params): the FULLY folded
+   * initializer as flat components (column-major matrices, struct members
+   * flattened in declaration order, arrays element-major, scalar = [v]).
+   * Non-scalar consts have no scalar constValue — this array is their value.
+   */
+  constData?: (number | boolean)[];
 }
 
 /** One function parameter (name may be '' for unnamed params). */
@@ -246,9 +254,19 @@ export class Scope {
    * Declare `sym`. GLSL ES forbids shadowing: if the name exists in this
    * scope or any enclosing scope → error `'name' : redefinition` and the
    * symbol is NOT registered. Returns true on success.
+   *
+   * Exception (GLSL ES single namespace): a builtin FUNCTION name that no
+   * user code has claimed yet (the pre-pass placeholder FnSymbol with no user
+   * overloads attached) does not reserve the name — user variables/structs
+   * may reuse it. The placeholder is replaced in this scope's map (a later
+   * function decl with the same name then hits the variable and errors
+   * 'redefinition', which is the correct GLSL behavior). Once a user
+   * function overload claims the name, or the existing symbol is a builtin
+   * VARIABLE (gl_*) or gl_Max* constant, the name is NOT free.
    */
   declare(sym: Symbol, ctx: SemContext, line: number): boolean {
-    if (this.lookup(sym.name) !== undefined) {
+    const existing = this.lookup(sym.name);
+    if (existing !== undefined && !isFreeBuiltinFnName(existing)) {
       ctx.error(line, `'${sym.name}' : redefinition`);
       return false;
     }
@@ -270,6 +288,17 @@ export class Scope {
   pop(): Scope | null {
     return this.parent;
   }
+}
+
+/**
+ * True when `sym` is the builtin FUNCTION placeholder with NO user overloads
+ * attached (its siblings are all builtin placeholders — i.e. just itself): a
+ * user variable/struct may still claim the name (GLSL ES single namespace).
+ * Once a user function overload exists, the name is claimed by user code →
+ * a later var/struct decl with the same name is a redefinition.
+ */
+function isFreeBuiltinFnName(sym: Symbol): boolean {
+  return sym.kind === 'fn' && sym.builtin && sym.siblings.every((s) => s.builtin);
 }
 
 /* ------------------------------------------------------------------ */
@@ -460,9 +489,12 @@ function checkFloatPrecision(ctx: SemContext, line: number, t: GLSLType, name: s
  * Analyze an initializer + register each declarator as a VarSymbol.
  * Shared by global declarations and local decl-statements. Initializers are
  * analyzed as expressions and must convert (implicitly) to the declared
- * type; `const` variables require a constant initializer (scalar/vector/
- * matrix: a folded constValue; array/struct: a constructor call). Array dims
- * are validated via wrapArrayDims.
+ * type; `const` variables require a CONSTANT initializer — `evalConstExpr`
+ * (semantics-const.ts) folds the whole expression (scalar/vector/matrix
+ * constructors, struct/array constant initializers, comma/ternary, binary
+ * ops, member/index reads of consts); the folded flat components are stored
+ * on the symbol as `constData` (scalars additionally mirror `constValue`).
+ * Array dims are validated via wrapArrayDims.
  */
 export function declareVariables(
   baseType: GLSLType | null,
@@ -489,22 +521,25 @@ export function declareVariables(
         ctx.error(d.init.loc.line, `cannot convert from '${typeName(it)}' to '${typeName(type)}'`);
       }
     }
+    let constData: (number | boolean)[] | undefined;
     if (spec.qualifiers.storage === 'const') {
       if (d.init === null) {
         ctx.error(d.loc.line, `'${d.name}' : const variable must be initialized`);
-      } else if (type.kind === 'array' || type.kind === 'struct') {
-        // const arrays/structs: accept constructor-call initializers (the
-        // scalar constValue model cannot represent aggregates).
-        if (d.init.kind !== 'call') {
-          ctx.error(d.init.loc.line, `'${d.name}' : initializer of const variable must be a constant expression`);
-        }
-      } else if (d.init.constValue === undefined) {
-        ctx.error(d.init.loc.line, `'${d.name}' : initializer of const variable must be a constant expression`);
       } else {
-        constValue = d.init.constValue;
+        // evalConstExpr covers every constant-expression form: literals,
+        // const reads, all constructor families (incl. the CTS boilerplate
+        // `const vec4 green = vec4(0.0, 1.0, 0.0, 1.0);`), comma/ternary,
+        // binary/unary ops and member/index reads of consts. Undefined =
+        // a non-const leaf → not a constant expression.
+        constData = evalConstExpr(d.init, scope, ctx);
+        if (constData === undefined) {
+          ctx.error(d.init.loc.line, `'${d.name}' : initializer of const variable must be a constant expression`);
+        } else if (type.kind === 'scalar') {
+          constValue = constData[0];
+        }
       }
     }
-    scope.declare({ kind: 'var', name: d.name, type, storage: spec.qualifiers.storage, constValue }, ctx, d.loc.line);
+    scope.declare({ kind: 'var', name: d.name, type, storage: spec.qualifiers.storage, constValue, constData }, ctx, d.loc.line);
   }
 }
 
@@ -621,6 +656,33 @@ function sameParamType(a: GLSLType, b: GLSLType): boolean {
   return false;
 }
 
+/**
+ * The builtin signatures visible for `name` in this shader: the version's
+ * core table plus extension-gated signatures whose extension is enabled —
+ * the SAME sources the builtin pre-pass uses to reserve names.
+ */
+function enabledBuiltinSigs(name: string, ctx: SemContext): BuiltinSignature[] {
+  const out = matches(name, builtinSignatures(ctx.version));
+  for (const s of extensionFunctions) {
+    if (s.name === name && s.extension !== undefined && ctx.enabledExtensions.has(s.extension)) out.push(s);
+  }
+  return out;
+}
+
+/**
+ * Does the user function signature (name is already known to match) collide
+ * with one builtin signature row? GLSL identifies a function by its name and
+ * PARAMETER types — the return type cannot be overloaded, so a param-list
+ * match is a same-signature redefinition regardless of the return type.
+ */
+function builtinSigExact(s: BuiltinSignature, params: ParamInfo[]): boolean {
+  if (s.params.length !== params.length) return false;
+  for (let i = 0; i < s.params.length; i++) {
+    if (!sameParamType(s.params[i], params[i].type)) return false;
+  }
+  return true;
+}
+
 /** Register a function prototype (no body). Duplicate prototypes are OK; new
  * signatures become overloads; colliding builtin names error. */
 function registerPrototype(d: FunctionPrototype, scope: Scope, ctx: SemContext): void {
@@ -640,10 +702,17 @@ function registerPrototype(d: FunctionPrototype, scope: Scope, ctx: SemContext):
     return;
   }
   if (existing.builtin) {
-    ctx.error(d.loc.line, `'${d.name}' : redefinition of built-in function`);
-    return;
+    // GLSL ES: a user function may reuse a builtin name when its signature
+    // differs from EVERY visible builtin signature; a same-signature match is
+    // a redefinition error. Compare against the builtin TABLES — never the
+    // placeholder itself (void return, no params).
+    if (enabledBuiltinSigs(d.name, ctx).some((s) => builtinSigExact(s, params))) {
+      ctx.error(d.loc.line, `'${d.name}' : redefinition of built-in function`);
+      return;
+    }
   }
   for (const sig of existing.siblings) {
+    if (sig.builtin) continue; // the placeholder carries no real signature
     if (sameSignature(sig, retType, params)) return; // repeated prototype: OK
   }
   const sym = makeFnSymbol(d.name, retType, params, false, d.loc.line);
@@ -674,10 +743,16 @@ function registerDefinition(d: FunctionDefinition, scope: Scope, ctx: SemContext
     return null;
   }
   if (existing.builtin) {
-    ctx.error(d.loc.line, `'${proto.name}' : redefinition of built-in function`);
-    return null;
+    // User function with a builtin name: allowed only with a signature that
+    // differs from every visible builtin signature (compare against the
+    // builtin TABLES, never the void/[] placeholder itself).
+    if (enabledBuiltinSigs(proto.name, ctx).some((s) => builtinSigExact(s, params))) {
+      ctx.error(d.loc.line, `'${proto.name}' : redefinition of built-in function`);
+      return null;
+    }
   }
   for (const sig of existing.siblings) {
+    if (sig.builtin) continue; // the placeholder carries no real signature
     if (sameSignature(sig, retType, params)) {
       if (sig.defined) {
         ctx.error(d.loc.line, `'${proto.name}' : redefinition of function`);

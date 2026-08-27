@@ -337,9 +337,9 @@ void main() {
   );
 }
 {
-  // Multiple declarators in one statement + int→float implicit init.
+  // Multiple declarators in one statement + explicit int→float ctor init.
   const r = runVertex(
-    `void main() { int i = 2, j = 3; float x = i; gl_Position.x = x + float(j); }`,
+    `void main() { int i = 2, j = 3; float x = float(i); gl_Position.x = x + float(j); }`,
   );
   check(r.ctx.out.position[0] === 5, `multi-declarator decl + int→float init: x === 5 (got ${r.ctx.out.position[0]})`);
 }

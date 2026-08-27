@@ -18,6 +18,9 @@
  * - Error cases with EXACT 1-based line numbers (missing `;`, unterminated
  *   block, reserved words in 1.00, bitwise in 1.00, anonymous/nested structs,
  *   invalid precision base, bad case label, interface block in 1.00).
+ * - in/out/inout function parameter qualifiers: legal in 1.00 (§6.1) and 3.00
+ *   (recorded as type.qualifiers.storage); still reserved words elsewhere in
+ *   1.00 (storage-class position, declarator/function names, expressions).
  *
  * Prints "parser selftest: N checks, M failure(s)" then "OK" and exits 0 on
  * success, or exits 1 when any check fails.
@@ -567,11 +570,12 @@ void main() { gl_Position = vec4(0.0); }
 }
 
 {
-  // `inout` is reserved in GLSL ES 1.00 (parameter position).
-  const errs = parseFail('float f(inout float x);\n', 100);
-  check(errs.length === 1, `inout-100 count: ${errs.length}`);
-  check(errs[0].line === 1, `inout-100 line: ${errs[0].line}`);
-  check(errs[0].message === "'inout' is reserved in GLSL ES 1.00", `inout-100 msg: ${errs[0].message}`);
+  // `in`/`out`/`inout` ARE legal in GLSL ES 1.00 function parameter lists
+  // (§6.1) — the `inout` rejection below was the OLD buggy behavior.
+  const ast = parseOk('float f(inout float x);\n', 100);
+  const f = fproto(ast.declarations[0]);
+  check(f.params.length === 1 && f.params[0].type.qualifiers.storage === 'inout', '1.00 inout param accepted, storage inout');
+  check(f.params[0].name === 'x', '1.00 inout param name');
 }
 
 {
@@ -715,6 +719,36 @@ void main() { gl_Position = vec4(0.0); }
   const f = fproto(ast.declarations[0]);
   check(f.params[0].type.qualifiers.storage === 'inout', 'inout recorded as inout');
   check(f.params[0].name === 'x', 'inout param name');
+}
+
+{
+  // GLSL ES 1.00 §6.1: in/out/inout are legal function parameter qualifiers
+  // (reserved words everywhere ELSE in 1.00). Stored exactly like 3.00.
+  const ast = parseOk('float f(in float a, out float b, inout float c);\n', 100);
+  const f = fproto(ast.declarations[0]);
+  check(f.params.length === 3, '1.00 three qualified params');
+  check(f.params[0].type.qualifiers.storage === 'in', '1.00 in param storage');
+  check(f.params[1].type.qualifiers.storage === 'out', '1.00 out param storage');
+  check(f.params[2].type.qualifiers.storage === 'inout', '1.00 inout param storage');
+  // `const in` combination also parses in 1.00.
+  const ast2 = parseOk('float g(const in float x);\n', 100);
+  const g = fproto(ast2.declarations[0]);
+  check(g.params[0].type.qualifiers.storage === 'in', '1.00 const in param storage');
+  // Same qualifiers work in 1.00 function DEFINITIONS, not just prototypes.
+  const ast3 = parseOk('float h(out float x) { x = 1.0; return x; }\n', 100);
+  const h = fdef(ast3.declarations[0]);
+  check(h.prototype.params[0].type.qualifiers.storage === 'out', '1.00 out param in definition');
+  // Reserved-word use OUTSIDE parameter lists still fails in 1.00: as a
+  // function name / declarator identifier, and in storage-class position.
+  const errs1 = parseFail('float in(float x);\n', 100);
+  check(errs1.length === 1, `fn-name-in-100 count: ${errs1.length}`);
+  check(errs1[0].message.includes("expected identifier, found 'in'"), `fn-name-in-100 msg: ${errs1[0].message}`);
+  const errs2 = parseFail('void main() { out vec4 pos; }\n', 100);
+  check(errs2.length === 1, `stmt-storage-out-100 count: ${errs2.length}`);
+  check(errs2[0].message === "'out' is reserved in GLSL ES 1.00", `stmt-storage-out-100 msg: ${errs2[0].message}`);
+  // 3.00 regression: in/out params still parse there.
+  const ast4 = parseOk('#version 300 es\nfloat i(out float x);\n', 300);
+  check(fproto(ast4.declarations[0]).params[0].type.qualifiers.storage === 'out', '3.00 out param storage');
 }
 
 /* ------------------------------------------------------------------ */

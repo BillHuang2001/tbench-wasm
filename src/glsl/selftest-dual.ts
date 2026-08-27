@@ -654,20 +654,20 @@ function runDual(
   );
 }
 
-/* 24. Int/float mix: the int literal carries no duals — dFdx(v + 1) == v.ddx */
+/* 24. Float literal carries no duals — dFdx(v + 1.0) == v.ddx */
 {
   const layout = baseLayout(100, { varyings: new Map([['v', vg(0, 0, 1, 1)]]) });
   const r = runDual(
     `#extension GL_OES_standard_derivatives : enable
      precision mediump float;
      varying float v;
-     void main() { float t = v + 1; gl_FragColor.x = dFdx(t); }`,
+     void main() { float t = v + 1.0; gl_FragColor.x = dFdx(t); }`,
     layout,
     { varyings: [{ v: new Float32Array([0.5]), ddx: new Float32Array([2.0]), ddy: new Float32Array([3.0]) }] },
   );
   check(
     r.ctx.out.color[0][0] === 2,
-    `int/float mix: dFdx(v + 1) == v.ddx == 2 (got ${r.ctx.out.color[0][0]})`,
+    `float-literal mix: dFdx(v + 1.0) == v.ddx == 2 (got ${r.ctx.out.color[0][0]})`,
   );
 }
 

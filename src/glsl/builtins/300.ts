@@ -8,7 +8,8 @@
  * texture2DProjLod/textureCube/textureCubeLod) are REMOVED in 3.00 and
  * replaced by the texture()/textureProj()/textureLod()/... family — see
  * REPLACED_100_NAMES below. Variables differ too (no gl_FragColor/
- * gl_FragData; gl_VertexID/gl_InstanceID/gl_FragDepth added).
+ * gl_FragData; gl_VertexID/gl_InstanceID/gl_FragDepth added; gl_DepthRange
+ * is shared with 1.00 — see builtinVariables300).
  *
  * ES 3.00 specifics encoded here:
  * - Shadow texture functions return FLOAT (not vec4) — a 3.00 change.
@@ -32,7 +33,7 @@
  *   not part of the core table — add it if that extension is implemented).
  *
  * Counts (verified by selftest-builtins.ts): 625 function signatures,
- * 8 variables, 20 constants.
+ * 9 variables, 20 constants.
  */
 import { builtinFunctions100 } from './100.js';
 import {
@@ -360,6 +361,20 @@ export const builtinFunctions300: BuiltinSignature[] = [
   ...texture300,
 ];
 
+/**
+ * GLSL ES 3.00 §7.7 built-in uniform state type (identical to ES 1.00 §7.6):
+ * `uniform gl_DepthRangeParameters { float near; float far; float diff; }`.
+ */
+const depthRangeParams: GLSLType = {
+  kind: 'struct',
+  name: 'gl_DepthRangeParameters',
+  members: [
+    { name: 'near', type: F },
+    { name: 'far', type: F },
+    { name: 'diff', type: F },
+  ],
+};
+
 export const builtinVariables300: BuiltinVariable[] = [
   { name: 'gl_Position', type: V4, stage: 'VERTEX', writable: true },
   { name: 'gl_PointSize', type: F, stage: 'VERTEX', writable: true },
@@ -369,6 +384,13 @@ export const builtinVariables300: BuiltinVariable[] = [
   { name: 'gl_VertexID', type: I, stage: 'VERTEX', writable: false },
   { name: 'gl_InstanceID', type: I, stage: 'VERTEX', writable: false },
   { name: 'gl_FragDepth', type: F, stage: 'FRAGMENT', writable: true },
+  // GLSL ES 3.00 §7.7 built-in uniform state (usable in BOTH stages):
+  // `uniform gl_DepthRangeParameters { float near; float far; float diff; }
+  //  gl_DepthRange;`. Member reads (gl_DepthRange.near) resolve via the struct
+  // type (semantics analyzeMember). NOTE: codegen has no gl_DepthRange
+  // lowering yet (codegen/env.ts builtinRef + the member walker) — LINK of a
+  // shader reading it is not supported; compile is.
+  { name: 'gl_DepthRange', type: depthRangeParams, stage: 'BOTH', writable: false },
 ];
 
 /** gl_Max* values = the EXACT WebGL 2.0 minimums (must match gl/ getParameter). */

@@ -190,15 +190,15 @@ export function clipPrimitive(
 }
 
 /**
- * Point visibility: true when the point satisfies -w ≤ x,y,z ≤ w
- * (points are not polygon-clipped).
+ * Point visibility: true when w > 0 and the point satisfies -w ≤ z ≤ w.
+ * GLES 2.0 §2.13: points are clipped ONLY against the near/far planes — an
+ * x/y-outside center passes and the point square is clipped to the viewport
+ * by the rasterizer's bbox clamp (points are not polygon-clipped).
  */
 export function pointIsVisible(buf: Float32Array, base: number, stride: number): boolean {
-  const x = buf[base + X];
-  const y = buf[base + Y];
   const z = buf[base + Z];
   const w = buf[base + W];
-  return -w <= x && x <= w && -w <= y && y <= w && -w <= z && z <= w;
+  return w > 0 && z >= -w && z <= w;
 }
 
 /**

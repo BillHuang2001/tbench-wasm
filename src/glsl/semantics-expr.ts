@@ -10,8 +10,11 @@
  *
  * Covers: literals, identifier resolution (locals → globals → builtin
  * variables → gl_Max* constants, with stage filtering and writability),
- * unary/binary operators (with ES 1.00 int→float / ES 3.00 int→uint→float
- * implicit conversions), assignment (incl. compound), ternary, indexing,
+ * unary/binary operators (STRICT operand typing — no implicit conversions:
+ * binary ops, assignments, initializers, function calls, ternary and struct
+ * constructors require exact type matches in both ES 1.00 and ES 3.00;
+ * explicit conversions happen only in type constructors), assignment (incl.
+ * compound), ternary, indexing,
  * struct member access + vector swizzles, and calls (constructors, builtin
  * overload resolution with per-argument scoring, user functions with
  * recursion edges recorded on `ctx.currentFunction.calls`).
@@ -21,14 +24,15 @@
  */
 import type {
   AssignExpr, BinaryExpr, BinaryOp, CallExpr, CommaExpr, Expr, IdentifierExpr,
-  IndexExpr, MemberExpr, TernaryExpr, UnaryExpr,
+  IndexExpr, LiteralExpr, Loc, MemberExpr, TernaryExpr, UnaryExpr,
 } from './ast.js';
 import type { BaseScalar, GLSLType } from './types.js';
 import { typeEquals, typeName } from './types.js';
 import type { BuiltinSignature } from './builtins/index.js';
 import { builtinSignatures, extensionFunctions, matches } from './builtins/index.js';
-import type { FnSymbol, Scope, SemContext, StructSymbol } from './semantics.js';
+import type { FnSymbol, Scope, SemContext, StructSymbol, VarSymbol } from './semantics.js';
 import { builtinType } from './semantics.js';
+import { evalConstExpr, flatSize } from './semantics-const.js';
 
 /* ------------------------------------------------------------------ */
 /* Implicit conversions (shared with declaration/statement analysis)   */
@@ -38,6 +42,9 @@ import { builtinType } from './semantics.js';
  * The common base of two scalar bases after implicit conversion, or null.
  * ES 1.00: int→float only. ES 3.00: int→uint, int→float, uint→float.
  * bool NEVER converts implicitly.
+ *
+ * Used ONLY by foldBinary (constant folding of already-validated same-base
+ * operand pairs) — binary operators themselves never promote (see sameBase).
  */
 function commonBase(a: BaseScalar, b: BaseScalar, version: 100 | 300): BaseScalar | null {
   if (a === b) return a;
@@ -51,20 +58,36 @@ function commonBase(a: BaseScalar, b: BaseScalar, version: 100 | 300): BaseScala
 }
 
 /**
- * True when `from` can be implicitly converted to `to` in `version`
- * (exact match, or scalar/vector of same size with a legal base promotion).
+ * Strict same-base check for binary operators: both operands must have the
+ * SAME base — NO implicit promotion. GLSL ES 1.00 §5.9 operator rules require
+ * operands of identical type (e.g. `1.0 + 1` is an error), and ES 3.00/3.20
+ * §4 state "There are no implicit conversions between types" (so `1u + 2` is
+ * also an error). Version-independent.
  */
-export function convertible(from: GLSLType, to: GLSLType, version: 100 | 300): boolean {
-  if (typeEquals(from, to)) return true;
-  if (from.kind === 'scalar' && to.kind === 'scalar') return commonBase(from.base, to.base, version) === to.base;
-  if (from.kind === 'vector' && to.kind === 'vector' && from.size === to.size) {
-    return commonBase(from.base, to.base, version) === to.base;
-  }
-  return false;
+function sameBase(a: BaseScalar, b: BaseScalar, version: 100 | 300): BaseScalar | null {
+  void version;
+  return a === b ? a : null;
 }
 
-/** Convert a folded scalar constant from one base to another (constructor + implicit conversions). */
-function convertConst(v: number | boolean, from: BaseScalar, to: BaseScalar): number | boolean {
+/**
+ * True when `from` can be implicitly converted to `to` in `version`.
+ * STRICT in both versions: only an exact type match. GLSL ES 1.00 §5.8
+ * (assignment/initializers), §6.1 ("No promotion or demotion of the input
+ * argument types is done") and ES 3.00 §4 ("There are no implicit conversions
+ * between types") forbid implicit scalar/vector promotions — the 65 CTS
+ * `conformance/glsl/implicit/*` pages all expect compile FAIL for int→float
+ * in binary ops, assignments, initializers, function calls, ternary and
+ * struct constructors. Explicit conversions happen only in constructors
+ * (ctorBaseConvertible).
+ */
+export function convertible(from: GLSLType, to: GLSLType, version: 100 | 300): boolean {
+  void version;
+  return typeEquals(from, to);
+}
+
+/** Convert a folded scalar constant from one base to another (constructor + implicit conversions).
+ *  Exported for the const-expression evaluator (semantics-const.ts). */
+export function convertConst(v: number | boolean, from: BaseScalar, to: BaseScalar): number | boolean {
   if (typeof v === 'boolean') {
     return to === 'bool' ? v : v ? 1 : 0;
   }
@@ -114,25 +137,27 @@ function scalarBase(t: GLSLType): BaseScalar {
   return t.kind === 'scalar' || t.kind === 'vector' ? t.base : 'float';
 }
 
-/** Common type of two numeric scalars/vectors (shape must match), or null. */
+/** Common type of two numeric scalars/vectors (shape must match), or null.
+ * Bases must be IDENTICAL (no implicit promotion — ES 1.00/3.00 §5.9);
+ * float-scalar × float-vector and int-scalar × int-vector stay legal. */
 function sameShapeType(lt: GLSLType, rt: GLSLType, version: 100 | 300): GLSLType | null {
   if (!isNumericScalarOrVector(lt) || !isNumericScalarOrVector(rt)) return null;
   if (lt.kind === 'scalar' && rt.kind === 'scalar') {
-    const b = commonBase(lt.base, rt.base, version);
+    const b = sameBase(lt.base, rt.base, version);
     return b === null ? null : { kind: 'scalar', base: b };
   }
   if (lt.kind === 'vector' && rt.kind === 'vector') {
     if (lt.size !== rt.size) return null;
-    const b = commonBase(lt.base, rt.base, version);
+    const b = sameBase(lt.base, rt.base, version);
     return b === null ? null : { kind: 'vector', base: b, size: lt.size };
   }
   // scalar + vector (component-wise application)
   if (lt.kind === 'vector' && rt.kind === 'scalar') {
-    const b = commonBase(lt.base, rt.base, version);
+    const b = sameBase(lt.base, rt.base, version);
     return b === null ? null : { kind: 'vector', base: b, size: lt.size };
   }
   if (lt.kind === 'scalar' && rt.kind === 'vector') {
-    const b = commonBase(rt.base, lt.base, version);
+    const b = sameBase(rt.base, lt.base, version);
     return b === null ? null : { kind: 'vector', base: b, size: rt.size };
   }
   return null;
@@ -151,8 +176,8 @@ function arithmeticType(op: BinaryOp, lt: GLSLType, rt: GLSLType, version: 100 |
   if (ss !== null) return ss;
   if (lt.kind === 'matrix' || rt.kind === 'matrix') {
     if (op === '*') {
-      if (lt.kind === 'scalar' && rt.kind === 'matrix') return rt;
-      if (lt.kind === 'matrix' && rt.kind === 'scalar') return lt;
+      if (lt.kind === 'scalar' && rt.kind === 'matrix') return lt.base === 'float' ? rt : null;
+      if (lt.kind === 'matrix' && rt.kind === 'scalar') return rt.base === 'float' ? lt : null;
       if (lt.kind === 'matrix' && rt.kind === 'matrix') {
         if (lt.rows !== rt.cols) return null;
         return { kind: 'matrix', cols: rt.cols, rows: lt.rows };
@@ -172,8 +197,8 @@ function arithmeticType(op: BinaryOp, lt: GLSLType, rt: GLSLType, version: 100 |
       if (lt.cols !== rt.cols || lt.rows !== rt.rows) return null;
       return lt;
     }
-    if (lt.kind === 'matrix' && rt.kind === 'scalar') return rt.base === 'bool' ? null : lt;
-    if (lt.kind === 'scalar' && rt.kind === 'matrix') return lt.base === 'bool' ? null : rt;
+    if (lt.kind === 'matrix' && rt.kind === 'scalar') return rt.base === 'float' ? lt : null;
+    if (lt.kind === 'scalar' && rt.kind === 'matrix') return lt.base === 'float' ? rt : null;
     return null;
   }
   return null;
@@ -197,8 +222,9 @@ function smoothstep(e0: number, e1: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
-/** Fold a binary operator with constant scalar operands; undefined when not foldable. */
-function foldBinary(
+/** Fold a binary operator with constant scalar operands; undefined when not foldable.
+ *  Exported for the const-expression evaluator (semantics-const.ts). */
+export function foldBinary(
   op: BinaryOp,
   lt: GLSLType,
   rt: GLSLType,
@@ -433,6 +459,19 @@ function analyzeIdentifier(e: IdentifierExpr, scope: Scope, ctx: SemContext): vo
       e.resolvedType = sym.type;
       e.lvalue = sym.storage !== 'const';
       if (sym.constValue !== undefined) e.constValue = sym.constValue;
+      // GLOBAL const AGGREGATES have no codegen storage — every read must
+      // fold at semantics. Mutate the identifier node in place into an
+      // annotated constructor-call node (callee = type name; args = constant
+      // literal/ctor nodes) so codegen emits the constructor computation.
+      // Scalar consts fold via constValue (above); LOCAL consts are ordinary
+      // JS locals in codegen and are never rewritten.
+      if (
+        sym.constData !== undefined &&
+        sym.type.kind !== 'scalar' &&
+        isGlobalSymbol(sym, scope)
+      ) {
+        mutateConstUse(e, sym.type, sym.constData);
+      }
       return;
     case 'builtin-var':
       if (sym.stage !== 'BOTH' && sym.stage !== ctx.stage) {
@@ -565,8 +604,7 @@ function analyzeBinary(e: BinaryExpr, scope: Scope, ctx: SemContext): void {
         ctx.error(e.loc.line, `'${e.op}' : relational operators require scalar numeric operands`);
         return;
       }
-      const b = commonBase(lt.base, rt.base, ctx.version);
-      if (b === null) {
+      if (lt.base !== rt.base) {
         ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(lt)}' and '${typeName(rt)}' are incompatible`);
         return;
       }
@@ -579,10 +617,14 @@ function analyzeBinary(e: BinaryExpr, scope: Scope, ctx: SemContext): void {
     case '==':
     case '!=': {
       let ok = false;
-      if (lt.kind === 'scalar' && rt.kind === 'scalar') ok = commonBase(lt.base, rt.base, ctx.version) !== null;
+      // Same base required (bool==bool legal; int==float and int==uint are not).
+      if (lt.kind === 'scalar' && rt.kind === 'scalar') ok = sameBase(lt.base, rt.base, ctx.version) !== null;
       else if (lt.kind === 'vector' && rt.kind === 'vector' && lt.size === rt.size) {
-        ok = commonBase(lt.base, rt.base, ctx.version) !== null;
+        ok = sameBase(lt.base, rt.base, ctx.version) !== null;
       } else if (lt.kind === 'matrix' && rt.kind === 'matrix' && lt.cols === rt.cols && lt.rows === rt.rows) ok = true;
+      // GLSL ES 1.00 §5.9 / ES 3.00 §5.9: equality is defined for STRUCTS of
+      // the same type (result: one bool); ARRAYS are never comparable.
+      else if (lt.kind === 'struct' && rt.kind === 'struct') ok = typeEquals(lt, rt);
       if (!ok) {
         ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(lt)}' and '${typeName(rt)}' cannot be compared`);
         return;
@@ -590,6 +632,18 @@ function analyzeBinary(e: BinaryExpr, scope: Scope, ctx: SemContext): void {
       e.resolvedType = { kind: 'scalar', base: 'bool' };
       if (e.left.constValue !== undefined && e.right.constValue !== undefined) {
         e.constValue = foldBinary(e.op, lt, rt, e.left.constValue, e.right.constValue, ctx.version);
+      } else if (lt.kind === 'struct') {
+        // Struct operands are aggregates (no scalar constValue): fold the
+        // whole comparison via the const-expression evaluator, which compares
+        // the two flattened component lists component-wise. The single bool
+        // result annotates the node — codegen folds ANY scalar-constValue node
+        // (expressions.ts emitExpr), so const-folded struct equality needs no
+        // codegen support. Non-const struct comparisons stay unfolded here
+        // (runtime emit is codegen's concern; see the codegen contract).
+        const data = evalConstExpr(e, scope, ctx);
+        if (data !== undefined && data.length === 1 && typeof data[0] === 'boolean') {
+          e.constValue = data[0];
+        }
       }
       return;
     }
@@ -693,14 +747,14 @@ function analyzeTernary(e: TernaryExpr, scope: Scope, ctx: SemContext): void {
     ctx.error(e.loc.line, `'?:' : cannot use a void expression as a ternary operand`);
     return;
   }
-  // GLSL ES: arms must be scalars or vectors of a common type
+  // GLSL ES: ternary arms must be of the SAME type (ES 1.00 §5.8 / ES 3.00
+  // §5.9 — no implicit conversion between the arms; the 65 CTS implicit
+  // pages include ternary_int_float/ternary_ivec*_vec* expecting FAIL).
   let t: GLSLType | null = null;
   if (tt.kind === 'scalar' && ft.kind === 'scalar') {
-    const b = commonBase(tt.base, ft.base, ctx.version);
-    if (b !== null) t = { kind: 'scalar', base: b };
+    if (typeEquals(tt, ft)) t = tt;
   } else if (tt.kind === 'vector' && ft.kind === 'vector' && tt.size === ft.size) {
-    const b = commonBase(tt.base, ft.base, ctx.version);
-    if (b !== null) t = { kind: 'vector', base: b, size: tt.size };
+    if (typeEquals(tt, ft)) t = tt;
   }
   if (t === null) {
     ctx.error(e.loc.line, `'?:' : operands of type '${typeName(tt)}' and '${typeName(ft)}' are incompatible`);
@@ -734,7 +788,7 @@ function analyzeIndex(e: IndexExpr, scope: Scope, ctx: SemContext): void {
       }
       e.resolvedType = ot.element;
       e.lvalue = e.object.lvalue === true;
-      return;
+      break;
     }
     case 'vector': {
       if (constIdx !== null && (constIdx < 0 || constIdx >= ot.size)) {
@@ -743,7 +797,7 @@ function analyzeIndex(e: IndexExpr, scope: Scope, ctx: SemContext): void {
       }
       e.resolvedType = { kind: 'scalar', base: ot.base };
       e.lvalue = e.object.lvalue === true;
-      return;
+      break;
     }
     case 'matrix': {
       if (constIdx !== null && (constIdx < 0 || constIdx >= ot.cols)) {
@@ -752,14 +806,20 @@ function analyzeIndex(e: IndexExpr, scope: Scope, ctx: SemContext): void {
       }
       e.resolvedType = { kind: 'vector', base: 'float', size: ot.rows };
       e.lvalue = e.object.lvalue === true;
-      return;
+      break;
     }
     default:
       ctx.error(e.loc.line, `'[' : cannot index a value of type '${typeName(ot)}'`);
+      return;
   }
+  // Post-analysis const folding: a constant-index read of a const object
+  // (global or local — never an lvalue) folds to a scalar constValue or
+  // mutates into a ctor call.
+  foldConstRead(e, scope, ctx);
 }
 
-const SWIZZLE_SETS: readonly string[] = ['xyzw', 'rgba', 'stpq'];
+/** Swizzle component sets (exported for the const-expression evaluator). */
+export const SWIZZLE_SETS: readonly string[] = ['xyzw', 'rgba', 'stpq'];
 
 /** Swizzle result for a vector: { type, noDupes } or { error }. */
 function swizzleInfo(base: BaseScalar, size: number, name: string):
@@ -806,9 +866,7 @@ function analyzeMember(e: MemberExpr, scope: Scope, ctx: SemContext): void {
     }
     e.resolvedType = m.type;
     e.lvalue = e.object.lvalue === true;
-    return;
-  }
-  if (ot.kind === 'vector') {
+  } else if (ot.kind === 'vector') {
     const r = swizzleInfo(ot.base, ot.size, e.name);
     if ('error' in r) {
       ctx.error(e.loc.line, r.error);
@@ -816,9 +874,167 @@ function analyzeMember(e: MemberExpr, scope: Scope, ctx: SemContext): void {
     }
     e.resolvedType = r.type;
     e.lvalue = r.noDupes && e.object.lvalue === true;
+  } else {
+    ctx.error(e.loc.line, `'.' : cannot access a member of type '${typeName(ot)}'`);
     return;
   }
-  ctx.error(e.loc.line, `'.' : cannot access a member of type '${typeName(ot)}'`);
+  // Post-analysis const folding: a member read of a const (global or local —
+  // never an lvalue) folds to a scalar constValue or mutates into a ctor call.
+  foldConstRead(e, scope, ctx);
+}
+
+/* ------------------------------------------------------------------ */
+/* Const-expression use-site folding (BUGS 2+5)                        */
+/* ------------------------------------------------------------------ */
+
+/** True when `sym` is declared in the GLOBAL scope (locals are ordinary JS
+ *  codegen locals and are never rewritten; global consts have no storage). */
+function isGlobalSymbol(sym: VarSymbol, scope: Scope): boolean {
+  let s: Scope | null = scope;
+  while (s !== null && s.parent !== null) s = s.parent;
+  return s !== null && s.lookupLocal(sym.name) === sym;
+}
+
+/**
+ * Post-analysis const folding for member/index reads. Runs AFTER the normal
+ * analysis of the node: evaluates the full expression chain; a SCALAR result
+ * sets `constValue` on the outer node (codegen folds ANY node kind with a
+ * scalar constValue — expressions.ts emitExpr), an aggregate result mutates
+ * the outer node into an annotated constructor-call node built from the
+ * sliced components. Chained reads (s11.ss.i) fold at the outer node; inner
+ * mutated nodes are never emitted (the outer node folds before descent).
+ * Non-const chains (uniform/attribute reads, dynamic indices, lvalues) are
+ * untouched — evalConstExpr returns undefined on any non-const leaf.
+ */
+function foldConstRead(e: MemberExpr | IndexExpr, scope: Scope, ctx: SemContext): void {
+  if (e.resolvedType === undefined) return; // analysis failed
+  const data = evalConstExpr(e, scope, ctx);
+  if (data === undefined) return;
+  const t = e.resolvedType;
+  if (t.kind === 'scalar') {
+    e.constValue = data[0];
+  } else if (t.kind === 'vector' || t.kind === 'matrix' || t.kind === 'struct' || t.kind === 'array') {
+    mutateConstUse(e, t, data);
+  }
+}
+
+/**
+ * Mutate a fully-analyzed const expression node (identifier/member/index —
+ * consts are never lvalues, so emitLValue is unreachable on them) IN PLACE
+ * into an annotated constructor-call node: callee = the type name (array
+ * types use the `T[N](...)` IndexExpr callee form), args = constant
+ * literal/ctor nodes, all with resolvedType/constValue set. Codegen lowers
+ * the call via emitConstructorCall/emitArrayCtor (codegen/expr-ctor.ts) —
+ * constant args emit as literals with constant duals, so dual mode is
+ * correct with zero codegen changes.
+ */
+function mutateConstUse(e: Expr, type: GLSLType, data: (number | boolean)[]): void {
+  const loc = e.loc;
+  const callee: Expr =
+    type.kind === 'array'
+      ? {
+          kind: 'index',
+          loc,
+          object: { kind: 'identifier', name: typeName(type.element), loc },
+          index: { kind: 'literal', value: type.size ?? 0, literalType: 'int', loc },
+        }
+      : { kind: 'identifier', name: typeName(type), loc };
+  const call: CallExpr = {
+    kind: 'call',
+    loc,
+    callee,
+    args: buildConstCtorArgs(type, data, loc),
+    resolvedType: type,
+    lvalue: false,
+  };
+  Object.assign(e, call);
+}
+
+/** Constructor arguments for `type` from flat components: one literal per
+ *  scalar/vector/matrix component, one node per struct member / array
+ *  element (recursively built). */
+function buildConstCtorArgs(type: GLSLType, data: (number | boolean)[], loc: Loc): Expr[] {
+  switch (type.kind) {
+    case 'scalar':
+      return [constLiteral(data[0], type.base, loc)];
+    case 'vector': {
+      const args: Expr[] = [];
+      for (let i = 0; i < type.size; i++) args.push(constLiteral(data[i], type.base, loc));
+      return args;
+    }
+    case 'matrix': {
+      const args: Expr[] = [];
+      for (let i = 0; i < type.cols * type.rows; i++) args.push(constLiteral(data[i], 'float', loc));
+      return args;
+    }
+    case 'struct': {
+      const args: Expr[] = [];
+      let off = 0;
+      for (const m of type.members) {
+        const sz = flatSize(m.type);
+        args.push(buildConstValueNode(m.type, data.slice(off, off + sz), loc));
+        off += sz;
+      }
+      return args;
+    }
+    case 'array': {
+      const args: Expr[] = [];
+      const sz = flatSize(type.element);
+      for (let i = 0; i < (type.size ?? 0); i++) {
+        args.push(buildConstValueNode(type.element, data.slice(i * sz, (i + 1) * sz), loc));
+      }
+      return args;
+    }
+    default:
+      return []; // void / sampler: unreachable (no const value)
+  }
+}
+
+/** A constant expression node for `type` from flat components: a literal for
+ *  scalars, a fully annotated ctor-call node for aggregates. */
+function buildConstValueNode(type: GLSLType, data: (number | boolean)[], loc: Loc): Expr {
+  switch (type.kind) {
+    case 'scalar':
+      return constLiteral(data[0], type.base, loc);
+    case 'vector':
+    case 'matrix':
+    case 'struct':
+    case 'array': {
+      const callee: Expr =
+        type.kind === 'array'
+          ? {
+              kind: 'index',
+              loc,
+              object: { kind: 'identifier', name: typeName(type.element), loc },
+              index: { kind: 'literal', value: type.size ?? 0, literalType: 'int', loc },
+            }
+          : { kind: 'identifier', name: typeName(type), loc };
+      const call: CallExpr = {
+        kind: 'call',
+        loc,
+        callee,
+        args: buildConstCtorArgs(type, data, loc),
+        resolvedType: type,
+        lvalue: false,
+      };
+      return call;
+    }
+    default:
+      return constLiteral(0, 'int', loc); // unreachable
+  }
+}
+
+/** A fully annotated constant literal node. */
+function constLiteral(v: number | boolean, base: BaseScalar, loc: Loc): LiteralExpr {
+  return {
+    kind: 'literal',
+    value: v,
+    literalType: base,
+    loc,
+    resolvedType: { kind: 'scalar', base },
+    constValue: v,
+    lvalue: false,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -868,6 +1084,13 @@ function analyzeCall(e: CallExpr, scope: Scope, ctx: SemContext): void {
       analyzeUserCall(e, sym, ctx);
       return;
     }
+    if (sym !== undefined && sym.kind === 'fn' && sym.builtin && sym.siblings.some((s) => !s.builtin)) {
+      // Builtin function name with USER overloads (GLSL ES 1.00 §6.1: user
+      // functions may overload builtins with different signatures): resolve
+      // across BOTH the user signatures and the builtin signature tables.
+      analyzeHybridCall(e, sym, ctx);
+      return;
+    }
     if (matches(name, builtinSignatures(ctx.version)).length > 0 || extensionFunctions.some((s) => s.name === name)) {
       analyzeBuiltinCall(e, name, ctx);
       return;
@@ -900,14 +1123,14 @@ function scoreSignature(params: GLSLType[], args: Expr[], ctx: SemContext): numb
 }
 
 /** Select the best-scoring signature among `candidates`; reports ambiguity. */
-function pickBest(
-  candidates: { params: GLSLType[]; ret: GLSLType }[],
+function pickBest<T extends { params: GLSLType[]; ret: GLSLType }>(
+  candidates: T[],
   args: Expr[],
   ctx: SemContext,
   name: string,
   line: number,
-): { params: GLSLType[]; ret: GLSLType } | null {
-  let best: { params: GLSLType[]; ret: GLSLType } | null = null;
+): T | null {
+  let best: T | null = null;
   let bestScore = Infinity;
   for (const c of candidates) {
     const sc = scoreSignature(c.params, args, ctx);
@@ -985,6 +1208,64 @@ function analyzeBuiltinCall(e: CallExpr, name: string, ctx: SemContext): void {
   e.constValue = foldBuiltin(name, best.ret, e.args);
 }
 
+/**
+ * The builtin signatures of `name` usable in this shader: core table plus
+ * extension entries (deduped against core), filtered to enabled extensions
+ * and the current stage — the same visibility rules analyzeBuiltinCall
+ * applies, as a plain candidate list for hybrid resolution.
+ */
+function stagedBuiltinSigs(name: string, ctx: SemContext): BuiltinSignature[] {
+  const all: BuiltinSignature[] = [...matches(name, builtinSignatures(ctx.version))];
+  for (const s of extensionFunctions) {
+    if (s.name !== name) continue;
+    // Skip extension entries duplicating a core signature exactly (e.g. dFdx
+    // is core in 3.00 AND listed for GL_OES_standard_derivatives).
+    const dup = all.some(
+      (c) =>
+        c.params.length === s.params.length &&
+        c.params.every((p, i) => typeEquals(p, s.params[i])) &&
+        typeEquals(c.ret, s.ret) &&
+        c.stage === s.stage,
+    );
+    if (!dup) all.push(s);
+  }
+  // GL_OES_standard_derivatives functions (dFdx/dFdy/fwidth) are CORE in
+  // GLSL ES 3.00 — their extension gate applies to 1.00 shaders only.
+  const coreIn300 = (s: BuiltinSignature): boolean =>
+    ctx.version === 300 && s.extension === 'GL_OES_standard_derivatives';
+  const enabled = all.filter((s) => s.extension === undefined || coreIn300(s) || ctx.enabledExtensions.has(s.extension));
+  return enabled.filter((s) => s.stage === undefined || s.stage === ctx.stage);
+}
+
+/**
+ * Call to a builtin function name that user code has overloaded: GLSL ES
+ * 1.00 allows user-defined functions to overload builtins (any signature
+ * differing from every visible builtin signature). Resolution picks the best
+ * match across the user signatures AND the builtin tables — the user
+ * overload wins on an exact/int-better match, the builtin still serves
+ * calls that only it can take (e.g. radians(float) for a float argument).
+ */
+function analyzeHybridCall(e: CallExpr, sym: FnSymbol, ctx: SemContext): void {
+  const name = sym.name;
+  const userCands = sym.siblings
+    .filter((s) => !s.builtin)
+    .map((s) => ({ params: s.params.map((p) => p.type), ret: s.retType, user: true }));
+  const builtinCands = stagedBuiltinSigs(name, ctx).map((s) => ({ params: s.params, ret: s.ret, user: false }));
+  const best = pickBest([...userCands, ...builtinCands], e.args, ctx, name, e.loc.line);
+  if (best === null) {
+    if (ctx.errors.length === 0 || !ctx.errors[ctx.errors.length - 1].message.includes('ambiguous')) {
+      ctx.error(e.loc.line, `'${name}' : no matching function`);
+    }
+    return;
+  }
+  e.resolvedType = best.ret;
+  if (best.user) {
+    ctx.currentFunction?.calls.add(name); // recursion-detection edge
+  } else {
+    e.constValue = foldBuiltin(name, best.ret, e.args);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Constructors                                                        */
 /* ------------------------------------------------------------------ */
@@ -1007,12 +1288,16 @@ function analyzeConstructor(e: CallExpr, name: string, scope: Scope, ctx: SemCon
       }
       const at = e.args[0].resolvedType;
       if (at === undefined) return;
-      if (at.kind !== 'scalar') {
+      // Scalar constructors take the FIRST element of a non-scalar
+      // (GLSL ES 1.00 §5.4.1: float(vec3) selects the first component).
+      if (at.kind !== 'scalar' && at.kind !== 'vector' && at.kind !== 'matrix') {
         ctx.error(e.args[0].loc.line, `'${name}' : cannot construct from '${typeName(at)}'`);
         return;
       }
       e.resolvedType = t;
-      if (e.args[0].constValue !== undefined) e.constValue = convertConst(e.args[0].constValue, at.base, t.base);
+      if (at.kind === 'scalar' && e.args[0].constValue !== undefined) {
+        e.constValue = convertConst(e.args[0].constValue, at.base, t.base);
+      }
       return;
     }
     case 'vector':
@@ -1045,6 +1330,21 @@ function analyzeConstructor(e: CallExpr, name: string, scope: Scope, ctx: SemCon
   }
 }
 
+/** Component count an argument contributes to a constructor: scalar → 1,
+ * vector → size, matrix → cols*rows (components read in column-major order). */
+function ctorArgComponents(at: GLSLType): number {
+  switch (at.kind) {
+    case 'scalar':
+      return 1;
+    case 'vector':
+      return at.size;
+    case 'matrix':
+      return at.cols * at.rows;
+    default:
+      return 0;
+  }
+}
+
 function analyzeVectorConstructor(
   e: CallExpr,
   t: Extract<GLSLType, { kind: 'vector' }>,
@@ -1052,6 +1352,7 @@ function analyzeVectorConstructor(
 ): void {
   const args = e.args;
   const targetName = typeName(t);
+  const n = t.size;
   if (args.length === 1) {
     const at = args[0].resolvedType;
     if (at === undefined) return;
@@ -1063,38 +1364,43 @@ function analyzeVectorConstructor(
       e.resolvedType = t; // splat
       return;
     }
-    if (at.kind === 'vector' && at.size === t.size) {
-      if (!ctorBaseConvertible(at.base, t.base, ctx.version)) {
-        ctx.error(args[0].loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
-        return;
-      }
-      e.resolvedType = t;
-      return;
-    }
-    ctx.error(args[0].loc.line, `'${targetName}' : cannot construct from '${typeName(at)}'`);
-    return;
   }
-  // N args: scalars and/or smaller vectors; total components must equal size
+  // General form: scalars, vectors and matrices (matrix components are read
+  // in column-major order — GLSL ES 1.00 §5.4.2: vecN(matM) = the first N
+  // components of the matrix). Constructors can SHORTEN: extra trailing
+  // components are dropped, but an argument that contributes no component at
+  // all is an error (matches ANGLE and the CTS constructor generator:
+  // vec3(5.0, 4.0, ivec2(...)) OK, vec4(v, v, v) rejected).
   let total = 0;
+  const comps: number[] = [];
   for (const a of args) {
     const at = a.resolvedType;
     if (at === undefined) return;
-    if (at.kind === 'scalar') total += 1;
-    else if (at.kind === 'vector') total += at.size;
-    else {
+    if (at.kind !== 'scalar' && at.kind !== 'vector' && at.kind !== 'matrix') {
       ctx.error(a.loc.line, `'${targetName}' : invalid constructor argument of type '${typeName(at)}'`);
       return;
     }
+    const c = ctorArgComponents(at);
+    comps.push(c);
+    total += c;
   }
-  if (total !== t.size) {
-    ctx.error(e.loc.line, `'${targetName}' : constructor requires ${t.size} components`);
+  if (total < n) {
+    ctx.error(e.loc.line, `'${targetName}' : constructor requires ${n} components`);
+    return;
+  }
+  if (total - comps[comps.length - 1] >= n) {
+    ctx.error(e.loc.line, `'${targetName}' : too many arguments for constructor`);
     return;
   }
   for (const a of args) {
     const at = a.resolvedType;
     if (at === undefined) return;
-    if (at.kind !== 'scalar' && at.kind !== 'vector') return;
-    if (!ctorBaseConvertible(at.base, t.base, ctx.version)) {
+    // Matrix components are float — convertibility is checked against float.
+    let abase: BaseScalar;
+    if (at.kind === 'scalar' || at.kind === 'vector') abase = at.base;
+    else if (at.kind === 'matrix') abase = 'float';
+    else return;
+    if (!ctorBaseConvertible(abase, t.base, ctx.version)) {
       ctx.error(a.loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
       return;
     }
@@ -1109,53 +1415,61 @@ function analyzeMatrixConstructor(
 ): void {
   const args = e.args;
   const targetName = typeName(t);
+  const size = t.cols * t.rows;
   if (args.length === 1) {
     const at = args[0].resolvedType;
     if (at === undefined) return;
-    if (at.kind === 'scalar' && at.base !== 'bool') {
+    if (at.kind === 'scalar') {
+      if (!ctorBaseConvertible(at.base, 'float', ctx.version)) {
+        ctx.error(args[0].loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
+        return;
+      }
       e.resolvedType = t; // diagonal
       return;
     }
-    if (at.kind === 'matrix' && at.cols === t.cols && at.rows === t.rows) {
-      e.resolvedType = t; // same-dims conversion
+    if (at.kind === 'matrix') {
+      // matN(matM) of any dimensions: components at corresponding col/row
+      // indices are copied, the rest is filled from the identity matrix.
+      e.resolvedType = t;
       return;
     }
-    ctx.error(args[0].loc.line, `'${targetName}' : cannot construct from '${typeName(at)}'`);
+  }
+  // Mixed scalars/vectors. A matrix argument inside a MULTI-argument matrix
+  // constructor is an error (GLSL/ANGLE: "constructing matrix from matrix can
+  // only take one argument" — CTS generator rejects any such argument list).
+  let total = 0;
+  const comps: number[] = [];
+  for (const a of args) {
+    const at = a.resolvedType;
+    if (at === undefined) return;
+    if (at.kind === 'matrix') {
+      ctx.error(a.loc.line, `'${targetName}' : constructing a matrix from a matrix can only take one argument`);
+      return;
+    }
+    if (at.kind !== 'scalar' && at.kind !== 'vector') {
+      ctx.error(a.loc.line, `'${targetName}' : invalid constructor argument of type '${typeName(at)}'`);
+      return;
+    }
+    const c = ctorArgComponents(at);
+    comps.push(c);
+    total += c;
+  }
+  // Same component-count rules as vectors: enough components AND the last
+  // argument must contribute at least one (extra trailing components drop).
+  if (total < size || total - comps[comps.length - 1] >= size) {
+    ctx.error(e.loc.line, `'${targetName}' : wrong number of arguments for matrix constructor`);
     return;
   }
-  if (args.length === t.cols) {
-    // C vectors of size R (columns)
-    let allVecs = true;
-    for (const a of args) {
-      const at = a.resolvedType;
-      if (at === undefined) return;
-      if (!(at.kind === 'vector' && at.size === t.rows && at.base !== 'bool')) {
-        allVecs = false;
-        break;
-      }
-    }
-    if (allVecs) {
-      e.resolvedType = t;
+  for (const a of args) {
+    const at = a.resolvedType;
+    if (at === undefined) return;
+    if (at.kind !== 'scalar' && at.kind !== 'vector') return;
+    if (!ctorBaseConvertible(at.base, 'float', ctx.version)) {
+      ctx.error(a.loc.line, `cannot convert from '${typeName(at)}' to '${targetName}'`);
       return;
     }
   }
-  if (args.length === t.cols * t.rows) {
-    // C*R scalars, column-major
-    let allScalars = true;
-    for (const a of args) {
-      const at = a.resolvedType;
-      if (at === undefined) return;
-      if (!(at.kind === 'scalar' && at.base !== 'bool')) {
-        allScalars = false;
-        break;
-      }
-    }
-    if (allScalars) {
-      e.resolvedType = t;
-      return;
-    }
-  }
-  ctx.error(e.loc.line, `'${targetName}' : wrong number of arguments for matrix constructor`);
+  e.resolvedType = t;
 }
 
 /** `T[size](...)` array constructor (ES 3.00 only). `callee` is the IndexExpr. */

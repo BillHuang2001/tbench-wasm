@@ -23,6 +23,7 @@ import {
 } from './index.js';
 import type { BuiltinConstant, BuiltinSignature, BuiltinVariable } from './types.js';
 import type { GLSLType, SamplerKind } from '../types.js';
+import { compileShader } from '../compiler.js';
 
 let failures = 0;
 function check(cond: boolean, msg: string): void {
@@ -52,8 +53,14 @@ function canon(t: GLSLType): string {
   }
 }
 
-/** A type is structurally valid; `allowVoid` permits void (return types only). */
-function typeValid(t: GLSLType, allowVoid: boolean, where: string): boolean {
+/**
+ * A type is structurally valid; `allowVoid` permits void (return types only).
+ * `allowStruct` permits struct types — legal for builtin VARIABLES
+ * (gl_DepthRange is a struct per GLSL ES 1.00 §7.6 / 3.00 §7.7) but never for
+ * function signature params/returns, so the signature path keeps
+ * allowStruct=false.
+ */
+function typeValid(t: GLSLType, allowVoid: boolean, where: string, allowStruct: boolean = false): boolean {
   switch (t.kind) {
     case 'void':
       return allowVoid;
@@ -67,6 +74,21 @@ function typeValid(t: GLSLType, allowVoid: boolean, where: string): boolean {
     case 'sampler':
       return SAMPLER_KINDS.has(t.sampler);
     case 'struct':
+      if (allowStruct) {
+        if (t.members.length === 0) {
+          check(false, `${where}: struct ${t.name} has no members`);
+          return false;
+        }
+        let ok = true;
+        for (const m of t.members) {
+          if (m.name.length === 0) {
+            check(false, `${where}: struct ${t.name} has an unnamed member`);
+            ok = false;
+          }
+          if (!typeValid(m.type, false, `${where}: member ${t.name}.${m.name}`, true)) ok = false;
+        }
+        return ok;
+      }
       check(false, `${where}: builtin types must never be structs`);
       return false;
     case 'array':
@@ -74,7 +96,7 @@ function typeValid(t: GLSLType, allowVoid: boolean, where: string): boolean {
         check(false, `${where}: unsized/empty array`);
         return false;
       }
-      return typeValid(t.element, false, where);
+      return typeValid(t.element, false, where, allowStruct);
   }
 }
 
@@ -98,7 +120,7 @@ function validateVariables(table: BuiltinVariable[], label: string): void {
   const names = new Set<string>();
   for (const v of table) {
     check(v.name.startsWith('gl_'), `${label}: ${v.name} not a gl_ builtin`);
-    typeValid(v.type, false, `${label}: type of ${v.name}`);
+    typeValid(v.type, false, `${label}: type of ${v.name}`, true);
     check(v.stage === 'VERTEX' || v.stage === 'FRAGMENT' || v.stage === 'BOTH', `${label}: ${v.name} bad stage`);
     check(typeof v.writable === 'boolean', `${label}: ${v.name} missing writable`);
     check(!names.has(v.name), `${label}: duplicate variable ${v.name}`);
@@ -114,6 +136,28 @@ function validateConstants(table: BuiltinConstant[], label: string): void {
     check(!names.has(c.name), `${label}: duplicate constant ${c.name}`);
     names.add(c.name);
   }
+}
+
+/**
+ * gl_DepthRange must be the built-in uniform-state struct (GLSL ES 1.00 §7.6 /
+ * 3.00 §7.7): `uniform gl_DepthRangeParameters { float near; float far;
+ * float diff; } gl_DepthRange;`, usable in both stages, read-only.
+ */
+function checkDepthRangeVariable(table: BuiltinVariable[], label: string): void {
+  const v = table.find((vv) => vv.name === 'gl_DepthRange');
+  check(v !== undefined, `${label}: missing variable gl_DepthRange`);
+  if (v === undefined) return;
+  check(v.type.kind === 'struct', `${label}: gl_DepthRange must be a struct`);
+  if (v.type.kind !== 'struct') return;
+  check(v.type.name === 'gl_DepthRangeParameters', `${label}: gl_DepthRange struct must be gl_DepthRangeParameters`);
+  const memberNames = v.type.members.map((m) => m.name);
+  check(
+    memberNames.length === 3 && memberNames[0] === 'near' && memberNames[1] === 'far' && memberNames[2] === 'diff',
+    `${label}: gl_DepthRangeParameters must have exactly 3 members near/far/diff`,
+  );
+  check(v.type.members.every((m) => canon(m.type) === 'float'), `${label}: gl_DepthRangeParameters members must be float`);
+  check(v.stage === 'BOTH', `${label}: gl_DepthRange must be BOTH-stage`);
+  check(v.writable === false, `${label}: gl_DepthRange must be read-only`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -178,6 +222,7 @@ check(fd100 !== undefined && fd100.type.kind === 'array' && fd100.type.size === 
 check(fdext !== undefined && fdext.type.kind === 'array' && fdext.type.size === 4, 'gl_FragData must be vec4[4] with GL_EXT_draw_buffers');
 check(builtinConstants100.find((c) => c.name === 'gl_MaxDrawBuffers')?.value === 1, 'core gl_MaxDrawBuffers must be 1');
 check(extensionConstants.find((c) => c.name === 'gl_MaxDrawBuffers')?.value === 4, 'extension gl_MaxDrawBuffers must be 4');
+checkDepthRangeVariable(builtinVariables100, '100');
 
 /* ------------------------------------------------------------------ */
 /* 4. Extension-gated function checks                                  */
@@ -270,6 +315,7 @@ check(!builtinVariables300.some((v) => v.name === 'gl_FragColor'), '300: gl_Frag
 check(!builtinVariables300.some((v) => v.name === 'gl_FragData'), '300: gl_FragData must not exist');
 check(builtinVariables300.find((v) => v.name === 'gl_FragDepth')?.writable === true, 'gl_FragDepth must be writable');
 check(builtinVariables300.find((v) => v.name === 'gl_VertexID')?.writable === false, 'gl_VertexID must be read-only');
+checkDepthRangeVariable(builtinVariables300, '300');
 
 // 3.00 constants: exact WebGL minimums.
 const EXPECTED_300: Record<string, number> = {
@@ -298,6 +344,28 @@ for (const [name, value] of Object.entries(EXPECTED_100)) {
   const c = builtinConstants100.find((cc) => cc.name === name);
   check(c !== undefined && c.value === value, `100: ${name} must be ${value}`);
 }
+
+/* ------------------------------------------------------------------ */
+/* 6. gl_DepthRange member reads compile in both versions              */
+/* ------------------------------------------------------------------ */
+
+const DEPTH_RANGE_SRC_BODY = [
+  'precision highp float;',
+  'void main() {',
+  '  float n = gl_DepthRange.near;',
+  '  float f = gl_DepthRange.far;',
+  '  float d = gl_DepthRange.diff;',
+  '  gl_Position = vec4(n + f + d, 0.0, 0.0, 1.0);',
+  '}',
+].join('\n');
+
+const dr100 = compileShader(DEPTH_RANGE_SRC_BODY, { type: 'VERTEX', version: 100 });
+check(dr100.ok, '100: shader reading gl_DepthRange.near/far/diff must compile');
+if (!dr100.ok) console.error('  100 errors: ' + JSON.stringify(dr100.errors));
+
+const dr300 = compileShader('#version 300 es\n' + DEPTH_RANGE_SRC_BODY, { type: 'VERTEX', version: 300 });
+check(dr300.ok, '300: shader reading gl_DepthRange.near/far/diff must compile');
+if (!dr300.ok) console.error('  300 errors: ' + JSON.stringify(dr300.errors));
 
 /* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
