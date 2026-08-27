@@ -68,6 +68,15 @@ describe("buildInterceptScript with a missing renderer", () => {
     // The stub must NOT pretend a renderer exists.
     expect(script).not.toContain("__createSoftwareWebGLContext");
   });
+
+  it("patches OffscreenCanvas.getContext when the global exists", () => {
+    process.env.WEBGL_SOFTWARE_RENDERER = MISSING;
+    const script = buildInterceptScript();
+
+    expect(script).toContain("OffscreenCanvas.prototype.getContext");
+    // The patch is guarded so pages without OffscreenCanvas stay intact.
+    expect(script).toContain("typeof OffscreenCanvas !== 'undefined'");
+  });
 });
 
 describe("buildInterceptScript with a renderer present", () => {
@@ -84,6 +93,17 @@ describe("buildInterceptScript with a renderer present", () => {
       // Non-webgl types still fall through to the native implementation
       // (the renderer itself uses '2d' for presentation blits).
       expect(script).toContain("_orig.call(this, type, attrs)");
+    });
+  });
+
+  it("patches OffscreenCanvas.getContext when the global exists", () => {
+    withTempRenderer((path) => {
+      process.env.WEBGL_SOFTWARE_RENDERER = path;
+      const script = buildInterceptScript();
+
+      expect(script).toContain("OffscreenCanvas.prototype.getContext");
+      // The patch is guarded so pages without OffscreenCanvas stay intact.
+      expect(script).toContain("typeof OffscreenCanvas !== 'undefined'");
     });
   });
 });
