@@ -198,6 +198,9 @@ const RP_PAIRS_2 = new Set<number>();
   P(C2.RGBA_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
   P(C1.RGB, C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_6_5,
     C2.HALF_FLOAT, C1.FLOAT, C2.UNSIGNED_INT_2_10_10_10_REV);
+  // RGB9_E5 (shared exponent) — GLES3 ReadPixels table (ES 3.0 §4.3.2):
+  // RGB/UNSIGNED_INT_5_9_9_9_REV is the native pair (WEBGL_render_shared_exponent).
+  P(C1.RGB, C2.UNSIGNED_INT_5_9_9_9_REV);
   P(C2.RGB_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
   P(C2.RG, C1.UNSIGNED_BYTE, C2.HALF_FLOAT, C1.FLOAT);
   P(C2.RG_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
@@ -227,6 +230,7 @@ function expectedViewForType(type: GLenum): (new (n: number) => ArrayBufferView)
       return Uint16Array;
     case C1.SHORT: return Int16Array;
     case C1.UNSIGNED_INT: case C2.UNSIGNED_INT_2_10_10_10_REV: case C2.UNSIGNED_INT_24_8:
+    case C2.UNSIGNED_INT_5_9_9_9_REV:
       return Uint32Array;
     case C1.INT: return Int32Array;
     case C1.FLOAT: case C2.FLOAT_32_UNSIGNED_INT_24_8_REV: return Float32Array;
@@ -355,6 +359,14 @@ function readComboOK(
       // GLES3 adds RGB/FLOAT; the CTS (format-r11f-g11f-b10f, ext-color-buffer-
       // float) additionally reads RGBA/FLOAT from R11F_G11F_B10F attachments.
       return (format === C1.RGB || format === C1.RGBA) && floatReadOK(ctx, type, true);
+    case C2.RGB9_E5:
+      // Shared-exponent (WEBGL_render_shared_exponent): native
+      // RGB/UNSIGNED_INT_5_9_9_9_REV + RGB/RGBA with FLOAT (GLES3 ReadPixels
+      // table). The CTS page reads RGBA/FLOAT via checkCanvasRect and the exact
+      // pair RGB/UNSIGNED_INT_5_9_9_9_REV (driven by IMPLEMENTATION_COLOR_READ_*).
+      return (format === C1.RGB && type === C2.UNSIGNED_INT_5_9_9_9_REV) ||
+        (format === C1.RGB && type === C1.FLOAT) ||
+        (format === C1.RGBA && type === C1.FLOAT);
     // Signed / unsigned integer (native width-matched pair + universal
     // RGBA_INTEGER/INT | RGBA_INTEGER/UNSIGNED_INT expansion).
     case C2.R8I: return (format === C2.RED_INTEGER && type === C1.BYTE) || universalSInt;
@@ -410,6 +422,7 @@ function packBytesPerPixel(format: GLenum, type: GLenum): number {
     case C1.UNSIGNED_SHORT: case C1.SHORT: case C2.HALF_FLOAT: case 0x8d61 /* HALF_FLOAT_OES */:
       return comps * 2;
     case C2.UNSIGNED_INT_2_10_10_10_REV: return 4;
+    case C2.UNSIGNED_INT_5_9_9_9_REV: return 4; // packed 9/9/9/5 (RGB only)
     case C2.FLOAT_32_UNSIGNED_INT_24_8_REV: return 8;
     default: return comps * 4; // UNSIGNED_INT, INT, FLOAT, UNSIGNED_INT_24_8
   }

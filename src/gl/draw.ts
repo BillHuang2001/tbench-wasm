@@ -1611,6 +1611,15 @@ function tfCaptureCursor(tf: WebGLTransformFeedback): number {
 /* executeDraw                                                         */
 /* ================================================================== */
 
+/** True when the draw framebuffer's attachment at `index` (COLOR_ATTACHMENT0+index) has internal format `fmt`. */
+function drawBufferAttachmentIs(ctx: WebGLRenderingContext, index: number, fmt: GLenum): boolean {
+  const fbo = ctx._state.drawFramebuffer;
+  if (!fbo) return false;
+  const att = fbo._attachments.get(C1.COLOR_ATTACHMENT0 + index);
+  if (!att) return false;
+  return (att.type === 'renderbuffer' ? att.renderbuffer._internalformat : att.texture._image?.internalFormat) === fmt;
+}
+
 /**
  * Execute an assembled draw request: attribute fetch → vertex evaluation →
  * record packing → TF capture → rasterizer.draw (steps above).
@@ -1747,6 +1756,25 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
       if (declared.has(i)) continue;
       const m = s.colorMaskPerDrawBuffer.get(i) ?? s.colorMask;
       if (m[0] || m[1] || m[2] || m[3]) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+    }
+  }
+  // WEBGL_render_shared_exponent: a draw is INVALID_OPERATION when any ENABLED
+  // draw buffer with an RGB9_E5 attachment has an effective color mask (per-
+  // drawbuffer colorMaskiOES entry, else the common mask) that is neither
+  // all-true nor all-false — the shared exponent couples all three channels, so
+  // individual-channel writes are impossible (CTS webgl-render-shared-exponent
+  // colorMaskTest). Placement mirrors the undefined-output check (pre-vertex).
+  if (s.version === 2) {
+    for (let i = 0; i < s.drawBuffers.length; i++) {
+      const db = s.drawBuffers[i];
+      if (db === C1.NONE) continue;
+      const dbIdx = db - C1.COLOR_ATTACHMENT0;
+      if (!drawBufferAttachmentIs(ctx, dbIdx, C2.RGB9_E5)) continue;
+      const m = s.colorMaskPerDrawBuffer.get(dbIdx) ?? s.colorMask;
+      if ((m[0] || m[1] || m[2] || m[3]) && !(m[0] && m[1] && m[2] && m[3])) {
         pushError(ctx, C1.INVALID_OPERATION);
         return;
       }
@@ -1973,6 +2001,14 @@ export function executeClear(ctx: WebGLRenderingContext, mask: GLuint): void {
       const surf = fb.color[idx];
       if (!surf) continue;
       const cm = s.colorMaskPerDrawBuffer.get(d) ?? s.colorMask;
+      // WEBGL_render_shared_exponent: Clear is INVALID_OPERATION when an
+      // enabled RGB9_E5 draw buffer's effective mask is neither all-true nor
+      // all-false (shared exponent couples all channels; CTS colorMaskTest).
+      if (drawBufferAttachmentIs(ctx, idx, C2.RGB9_E5) &&
+          (cm[0] || cm[1] || cm[2] || cm[3]) && !(cm[0] && cm[1] && cm[2] && cm[3])) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
       if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) continue;
       const [r, g, b, a] = s.clearColor;
       try {
@@ -2024,9 +2060,26 @@ function packBytesPerPixel(format: GLenum, type: GLenum): number {
     case C1.UNSIGNED_SHORT: case C1.SHORT: case C2.HALF_FLOAT:
       return comps * 2;
     case C2.UNSIGNED_INT_2_10_10_10_REV: return 4;
+    case C2.UNSIGNED_INT_5_9_9_9_REV: return 4; // packed 9/9/9/5 (RGB only)
     case C2.FLOAT_32_UNSIGNED_INT_24_8_REV: return 8;
     default: return comps * 4; // UNSIGNED_INT, INT, FLOAT, UNSIGNED_INT_24_8
   }
+}
+
+/**
+ * Float triple → UNSIGNED_INT_5_9_9_9_REV bits with the GL readback layout:
+ * R in bits 0-8, G 9-17, B 18-26, shared exponent E in 27-31 (GLES 3.0
+ * §3.8.21 — CTS webgl-render-shared-exponent.html decodes R from bits 0-8).
+ * Quantization matches raster's pack9E5 (E = max(0, floor(log2(maxC)) + 16),
+ * mantissa = round(c / 2^(E−24)) clamped to [0, 511]).
+ */
+function pack9E5Read(r: number, g: number, b: number): number {
+  const maxC = Math.max(r, g, b);
+  if (maxC <= 2 ** -25) return 0; // ≤ 2^-25 → all-zero (value 0)
+  const exp = Math.max(0, Math.floor(Math.log2(maxC)) + 16);
+  const scale = 2 ** (exp - 24);
+  const m = (v: number): number => Math.min(511, Math.max(0, Math.round(v / scale)));
+  return ((exp << 27) | m(r) | (m(g) << 9) | (m(b) << 18)) >>> 0;
 }
 
 /** Local pack conversion (replace with raster getPackConverter when it lands). */
@@ -2080,6 +2133,19 @@ function makeLocalPack(surf: Surface, format: GLenum, type: GLenum): ((src: Arra
           (Math.min(3, Math.max(0, Math.round(tmp[3] * 3))) << 30)
         ) >>> 0;
         (dst as Uint32Array)[d >> 2] = v;
+      };
+    case C2.UNSIGNED_INT_5_9_9_9_REV:
+      // Shared-exponent pack (RGB9_E5 storage; WEBGL_render_shared_exponent).
+      // The surface stores f32 (isFloat → the raster getPackConverter is
+      // skipped), so encode the decoded triple with the GL 9_9_9_5 layout:
+      // R in bits 0-8, G 9-17, B 18-26, shared exponent 27-31 (GLES 3.0
+      // §3.8.21; CTS webgl-render-shared-exponent.html decodes R from bits
+      // 0-8). NOTE: raster's pack9E5 uses the REVERSED layout (R at 18-26) —
+      // consistent with its own f32 storage convention but NOT the GL
+      // readback layout, so it cannot be reused here.
+      return (_src, so, dst, d) => {
+        decodeSurfaceTexel(surf, so, tmp);
+        (dst as Uint32Array)[d >> 2] = pack9E5Read(tmp[0], tmp[1], tmp[2]);
       };
     case C1.FLOAT: {
       const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
@@ -2410,6 +2476,14 @@ export function executeClearBuffer(
     const surf = fb.color[idx];
     if (!surf) return;
     const cm = s.colorMaskPerDrawBuffer.get(drawbuffer) ?? s.colorMask;
+    // WEBGL_render_shared_exponent: ClearBuffer* is INVALID_OPERATION when the
+    // target draw buffer holds an RGB9_E5 attachment and its effective mask is
+    // neither all-true nor all-false (CTS colorMaskTest clearBufferfv checks).
+    if (drawBufferAttachmentIs(ctx, idx, C2.RGB9_E5) &&
+        (cm[0] || cm[1] || cm[2] || cm[3]) && !(cm[0] && cm[1] && cm[2] && cm[3])) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return;
+    }
     if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) return;
     if (values instanceof Int32Array || values instanceof Uint32Array) {
       clearColorIntLocal(surf, values, cm, scissor);
