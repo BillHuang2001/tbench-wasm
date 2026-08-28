@@ -420,7 +420,16 @@ export function installTexturesApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
-    const base = tex._params[C2.TEXTURE_BASE_LEVEL] ?? 0;
+    // GLES 3.0 §3.8.10: the effective base level is
+    // clamp(TEXTURE_BASE_LEVEL, 0, clamp(TEXTURE_MAX_LEVEL, 0, q)) where q is
+    // the texture's highest defined level (levels-1 for immutable textures).
+    // A huge BASE_LEVEL therefore clamps into range and generateMipmap must
+    // NOT error — it just has (almost) nothing to generate (CTS
+    // generate-mipmap-with-large-base-level.html, crbug.com/913301 regression).
+    const baseRaw = Math.max(0, (tex._params[C2.TEXTURE_BASE_LEVEL] ?? 0) | 0);
+    const maxRaw = Math.max(0, (tex._params[C2.TEXTURE_MAX_LEVEL] ?? 1000) | 0);
+    const q = img.levels.length - 1;
+    const base = Math.min(baseRaw, Math.min(maxRaw, q));
     const lv = img.levels[base];
     if (!lv || lv.width < 1 || lv.height < 1) {
       ctx._errors.push(C1.INVALID_OPERATION);
