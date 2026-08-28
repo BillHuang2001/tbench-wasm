@@ -108,7 +108,7 @@ linkProgram:    uniform merge → attrib locations → varying match/pack → un
 - `program.ts` → Program model, info types, exec contexts (interfaces only — the linker builds the objects)
 - `types.ts` → GLSL type system + declared helpers; `ast.ts` → AST definitions; `index.ts` → re-exports
 - `preprocessor.ts` → # directives, macros, token pasting/stringize, __LINE__/__FILE__/__VERSION__, extension macros
-- `lexer.ts` → tokens, version-dependent keywords/literals (float literals rounded to single precision via Math.fround)
+- `lexer.ts` → tokens, version-dependent keywords/literals (float literals rounded to single precision via Math.fround) (float literals rounded to single precision via Math.fround)
 - `parser.ts` → declarations & statements; `parser-expr.ts` → expressions; `parser-stmt.ts` → statement forms
 - `semantics.ts` → scopes, type checking, overload resolution, const folding; `semantics-expr.ts` → expressions; `semantics-stmt.ts` → statements; `semantics-decl.ts` → declarations, precision/extension rules, interface blocks, ShaderInfo
 - `builtins/` → builtin signature/variable/constant tables: `100.ts`, `300.ts`, `extensions.ts`, `index.ts`
