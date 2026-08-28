@@ -1204,7 +1204,13 @@ function samplerFeedbackAtLevel(tex: WebGLTexture, img: TextureImage, dstLevel: 
   if (levelBase > levelMax) return false;
   // Deepest level a full mip chain reaches: floor(log2(maxSize)) + level_base
   // (maxSize excludes 2D_ARRAY layers and cube faces — GLES 3.0 p150).
-  const maxSize = Math.max(img.width, img.height, img.target === C2.TEXTURE_3D ? img.depth : 1);
+  // image.width is the level-0-EQUIVALENT size (baseDims·2^base), so use the
+  // actual base level's dimensions for the spec q formula.
+  const baseLv = img.levels[levelBase];
+  const maxSize = Math.max(
+    baseLv ? baseLv.width : img.width,
+    baseLv ? baseLv.height : img.height,
+    img.target === C2.TEXTURE_3D ? (baseLv ? baseLv.depth : img.depth) : 1);
   const q = Math.min(Math.floor(Math.log2(maxSize)) + levelBase, levelMax);
   const minFilter = st.minFilter;
   const useMips = minFilter !== C1.NEAREST && minFilter !== C1.LINEAR;

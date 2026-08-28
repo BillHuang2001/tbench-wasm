@@ -925,6 +925,18 @@ export function updateCompleteness(
     img.complete = false;
     return;
   }
+  // A texture's LOD footprint is measured in level-0 texel units: the raster
+  // sampler computes λ = log2(|∂coord/∂x|·size) with an ABSOLUTE (level-0
+  // based) λ and clamps floor(λ) into [baseLevel, maxLevel]. The texture's
+  // effective level-0-equivalent size is therefore baseLevelDims << base —
+  // identical to the actual level-0 dims when level 0 is uploaded (the
+  // halving chain makes W0 = Wbase·2^base), and correct when it is not (CTS
+  // tex-mipmap-levels.html partial-level draws must sample level base+λ).
+  img.width = baseLevel.width * 2 ** base;
+  img.height = baseLevel.height * 2 ** base;
+  if (img.target === C.TEXTURE_CUBE_MAP) img.depth = 6;
+  else if (img.target === C.TEXTURE_3D) img.depth = baseLevel.depth * 2 ** base;
+  else if (img.target === C.TEXTURE_2D_ARRAY) img.depth = baseLevel.depth; // layers don't halve
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
   const isArray = img.target === C.TEXTURE_2D_ARRAY;
   const is3D = img.target === C.TEXTURE_3D;
@@ -1815,8 +1827,13 @@ export function compressedTexImage(
 export function generateMipmap(ctx: WebGLRenderingContext, texture: WebGLTexture, target: GLenum): void {
   const img = texture._image;
   if (!img) return;
-  const base = img.levels[0];
-  if (!base) return;
+  // Effective base level: clamp(TEXTURE_BASE_LEVEL, 0, clamp(TEXTURE_MAX_LEVEL, 0, q))
+  // (GLES 3.0 §3.8.10 — the API validation already accepted the clamped base).
+  const baseRaw = Math.max(0, (texture._params[C.TEXTURE_BASE_LEVEL] ?? 0) | 0);
+  const maxRaw = Math.max(0, (texture._params[C.TEXTURE_MAX_LEVEL] ?? 1000) | 0);
+  const baseIdx = Math.min(baseRaw, Math.min(maxRaw, img.levels.length - 1));
+  const base = img.levels[baseIdx];
+  if (!base || base.width < 1 || base.height < 1) return;
   const spec = specForImage(img);
   if (!spec) return;
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
@@ -1826,13 +1843,17 @@ export function generateMipmap(ctx: WebGLRenderingContext, texture: WebGLTexture
   // levels hold ENCODED values (the sampler decodes at sampling time). Alpha
   // is not sRGB-encoded and is never transformed.
   const useSRGB = spec.isSRGB;
-  const maxDim = Math.max(img.width, img.height, !isCube && !isArray ? img.depth : 1);
-  const levels = Math.floor(Math.log2(maxDim)) + 1;
+  const maxDim = Math.max(base.width, base.height, !isCube && !isArray ? base.depth : 1);
+  // Regenerate levels baseIdx+1 .. baseIdx + log2(maxDim) — levels above the
+  // base are always overwritten (mutable) or refilled (immutable). Immutable
+  // textures have a fixed level array (texStorage) and must never grow it.
+  let top = baseIdx + Math.floor(Math.log2(maxDim));
+  if (img.immutable) top = Math.min(top, img.levels.length - 1);
   const out = new Float32Array(4);
-  let w = img.width;
-  let h = img.height;
-  let d = isCube ? 6 : img.depth;
-  for (let l = 1; l < levels; l++) {
+  let w = base.width;
+  let h = base.height;
+  let d = isCube ? 6 : base.depth;
+  for (let l = baseIdx + 1; l <= top; l++) {
     const nw = Math.max(1, w >> 1);
     const nh = Math.max(1, h >> 1);
     const nd = isArray ? d : Math.max(1, d >> 1);

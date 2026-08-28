@@ -622,7 +622,14 @@ function checkAttachment(
     if (!tex._immutable) {
       const baseLevel = tex._params[0x813c] ?? 0;
       const maxLevel = tex._params[0x813d] ?? 1000;
-      const maxSize = Math.max(image.width, image.height, image.target === C2.TEXTURE_3D ? image.depth : 1);
+      // maxSize per GLES 3.0 §3.8.10: the max dimension of the level BASE
+      // array (image.width is the level-0-EQUIVALENT size — baseDims·2^base —
+      // which would over-inflate q for TEXTURE_BASE_LEVEL > 0).
+      const baseLvl0 = image.levels[baseLevel];
+      const maxSize = Math.max(
+        baseLvl0 ? baseLvl0.width : image.width,
+        baseLvl0 ? baseLvl0.height : image.height,
+        image.target === C2.TEXTURE_3D ? (baseLvl0 ? baseLvl0.depth : image.depth) : 1);
       const q = Math.min(Math.floor(Math.log2(maxSize)) + baseLevel, maxLevel);
       if (entry.level < baseLevel || entry.level > q) {
         return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
