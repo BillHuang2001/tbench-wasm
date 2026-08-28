@@ -20,7 +20,14 @@ export class WebGLTransformFeedback extends WebGLObject {
   _program: WebGLProgram | null = null;
   /** Indexed TRANSFORM_FEEDBACK_BUFFER bindings (0..MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS-1). */
   _buffers: (WebGLBuffer | null)[] = [];
-  _bufferRanges: { offset: number; size: number }[] = [];
+  /**
+   * Per-index binding ranges. `base: true` = whole-buffer bindBufferBase binding
+   * (capture capacity tracks the CURRENT data store — bufferData growth between
+   * bind and draw extends it); `base: false` = explicit bindBufferRange of FIXED
+   * `size` (capacity = min(size, store - offset); a range whose size is smaller
+   * than the capture makes the draw INVALID_OPERATION — CTS too-small-buffers).
+   */
+  _bufferRanges: { offset: number; size: number; base: boolean }[] = [];
   /** TRANSFORM_FEEDBACK_ACTIVE. */
   _active = false;
   /** TRANSFORM_FEEDBACK_PAUSED. */

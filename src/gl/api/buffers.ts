@@ -335,10 +335,24 @@ function clearTfBinding(ctx: WebGLRenderingContext, index: number): void {
   }
 }
 
-/** Bind buffer at TF index with the given range (whole-buffer for bindBufferBase). */
-function setTfBinding(ctx: WebGLRenderingContext, index: number, buffer: WebGLBuffer, offset: number, size: number): void {
+/**
+ * Bind buffer at TF index with the given range (whole-buffer for bindBufferBase).
+ * `base` records whether the binding came from bindBufferBase (whole-buffer;
+ * capture capacity follows bufferData reallocations) or bindBufferRange (FIXED
+ * size; a size-0 range extends to the end of the buffer → base-like per GLES
+ * 3.0 §2.10.1). The marker must survive the mirror → per-object sync in
+ * api/webgl2.ts (syncTfBuffers/tfBindingAtIndex copy it through).
+ */
+function setTfBinding(
+  ctx: WebGLRenderingContext,
+  index: number,
+  buffer: WebGLBuffer,
+  offset: number,
+  size: number,
+  base: boolean,
+): void {
   clearTfBinding(ctx, index);
-  buffer._tfRangeBindings.push({ index, offset, size });
+  buffer._tfRangeBindings.push({ index, offset, size, base });
 }
 
 /** The buffer bound to a (valid) target — null when nothing is bound. */
@@ -488,7 +502,7 @@ function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: G
         // §6.24; the default object's bindings — the global mirror — are
         // untouched).
         boundTf._buffers[index] = null;
-        boundTf._bufferRanges[index] = { offset: 0, size: 0 };
+        boundTf._bufferRanges[index] = { offset: 0, size: 0, base: false };
       } else {
         clearTfBinding(ctx, index); // default-TF binding (global mirror)
       }
@@ -540,10 +554,13 @@ function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: G
     // the webgl2 agent copies into the default object at beginTransformFeedback.
     const boundTf = s.transformFeedback;
     if (boundTf) {
+      // Whole-buffer binding: marker base:true → capture capacity tracks the
+      // CURRENT store (bufferData growth between bind and draw extends it —
+      // CTS too-small-buffers.html "Multiple draws success case").
       boundTf._buffers[index] = buf;
-      boundTf._bufferRanges[index] = { offset: 0, size: buf._size };
+      boundTf._bufferRanges[index] = { offset: 0, size: buf._size, base: true };
     } else {
-      setTfBinding(ctx, index, buf, 0, buf._size); // whole buffer (default TF)
+      setTfBinding(ctx, index, buf, 0, buf._size, true); // whole buffer (default TF)
     }
     // GLES 3.0 §2.10.1: bindBufferBase at ANY index also updates the generic
     // TRANSFORM_FEEDBACK_BUFFER binding point (native behavior; CTS
@@ -623,7 +640,7 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       for (let i = 0; i < boundTf._buffers.length; i++) {
         if (boundTf._buffers[i] === buffer) {
           boundTf._buffers[i] = null;
-          boundTf._bufferRanges[i] = { offset: 0, size: 0 };
+          boundTf._bufferRanges[i] = { offset: 0, size: 0, base: false };
         }
       }
       buffer._tfRangeBindings.length = 0; // bind/begin sync must not repopulate
@@ -969,7 +986,7 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
             // indexed binding only (per-object state; the default object's
             // bindings — the global mirror — are untouched).
             boundTf._buffers[index] = null;
-            boundTf._bufferRanges[index] = { offset: 0, size: 0 };
+            boundTf._bufferRanges[index] = { offset: 0, size: 0, base: false };
           } else {
             clearTfBinding(ctx, index); // default-TF binding (global mirror)
           }
@@ -1038,10 +1055,13 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
         // binding belongs to the DEFAULT TF object (global mirror).
         const boundTf = s.transformFeedback;
         if (boundTf) {
+          // Explicit range: FIXED size (capture capacity = min(size, store -
+          // offset)); a size-0 range extends to the end of the buffer (GLES 3.0
+          // §2.10.1) → base-like/live (CTS too-small-buffers.html brange cases).
           boundTf._buffers[index] = buf;
-          boundTf._bufferRanges[index] = { offset, size: rangeSize };
+          boundTf._bufferRanges[index] = { offset, size: rangeSize, base: size === 0 };
         } else {
-          setTfBinding(ctx, index, buf, offset, rangeSize);
+          setTfBinding(ctx, index, buf, offset, rangeSize, size === 0);
         }
         // GLES 3.0 §2.10.1: any-index bindBufferRange also updates the
         // generic TRANSFORM_FEEDBACK_BUFFER binding point.

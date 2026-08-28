@@ -21,6 +21,12 @@ export class WebGLBuffer extends WebGLObject {
   _usage: GLenum = 0x88e4; // STATIC_DRAW
   /** True when deleteBuffer() was called while still bound — real delete deferred. */
   _deletePending = false;
-  /** Indexed binding ranges (bindBufferRange) for TRANSFORM_FEEDBACK_BUFFER. */
-  _tfRangeBindings: { index: GLuint; offset: number; size: number }[] = [];
+  /**
+   * Indexed binding ranges for TRANSFORM_FEEDBACK_BUFFER — the GLOBAL mirror of
+   * the default TF object's (name 0) bindings, recorded by bindBufferBase/
+   * bindBufferRange while NO TF object is bound. `base` distinguishes a
+   * whole-buffer bindBufferBase binding (capacity follows later bufferData
+   * reallocations) from a FIXED bindBufferRange (capacity = min(size, store)).
+   */
+  _tfRangeBindings: { index: GLuint; offset: number; size: number; base: boolean }[] = [];
 }

@@ -343,20 +343,22 @@ function getDefaultTF(ctx: WebGLRenderingContext): WebGLTransformFeedback {
  * (last bind wins). The mirror is the DEFAULT TF object's (name 0) indexed
  * bindings — the bindings made via bindBufferBase/Range while NO TF object was
  * bound (api/buffers.ts records them in the buffers' _tfRangeBindings). Used
- * to initialize the default object and never-bound named objects.
+ * to initialize the default object and never-bound named objects. `base`
+ * (whole-buffer bindBufferBase vs FIXED bindBufferRange) is carried through so
+ * per-object capture-capacity semantics survive the sync.
  */
 function tfBindingAtIndex(
   ctx: WebGLRenderingContext,
   index: number,
-): { buffer: WebGLBuffer | null; offset: number; size: number } {
+): { buffer: WebGLBuffer | null; offset: number; size: number; base: boolean } {
   for (const obj of ctx._resources.all) {
     if (obj instanceof WebGLBuffer) {
       for (const e of obj._tfRangeBindings) {
-        if (e.index === index) return { buffer: obj, offset: e.offset, size: e.size };
+        if (e.index === index) return { buffer: obj, offset: e.offset, size: e.size, base: e.base };
       }
     }
   }
-  return { buffer: null, offset: 0, size: 0 };
+  return { buffer: null, offset: 0, size: 0, base: false };
 }
 
 /**
@@ -375,14 +377,14 @@ function syncTfBuffers(ctx: WebGLRenderingContext, tf: WebGLTransformFeedback): 
   const n = ctx._state.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
   if (tf._buffers.length !== n) {
     tf._buffers = new Array<WebGLBuffer | null>(n).fill(null);
-    tf._bufferRanges = Array.from({ length: n }, () => ({ offset: 0, size: 0 }));
+    tf._bufferRanges = Array.from({ length: n }, () => ({ offset: 0, size: 0, base: false }));
   }
   const isDefault = tf === defaultTFs.get(ctx);
   if (isDefault) {
     for (let i = 0; i < n; i++) {
       const b = tfBindingAtIndex(ctx, i);
       tf._buffers[i] = b.buffer;
-      tf._bufferRanges[i] = { offset: b.offset, size: b.size };
+      tf._bufferRanges[i] = { offset: b.offset, size: b.size, base: b.base };
     }
   } else if (!tfInitialized.has(tf)) {
     tfInitialized.add(tf);
@@ -390,7 +392,7 @@ function syncTfBuffers(ctx: WebGLRenderingContext, tf: WebGLTransformFeedback): 
       const b = tfBindingAtIndex(ctx, i);
       if (b.buffer !== null) {
         tf._buffers[i] = b.buffer;
-        tf._bufferRanges[i] = { offset: b.offset, size: b.size };
+        tf._bufferRanges[i] = { offset: b.offset, size: b.size, base: b.base };
       }
     }
   }
@@ -942,7 +944,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       const tf = createObject(ctx, Tf.make);
       const n = ctx._state.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
       tf._buffers = new Array<WebGLBuffer | null>(n).fill(null);
-      tf._bufferRanges = Array.from({ length: n }, () => ({ offset: 0, size: 0 }));
+      tf._bufferRanges = Array.from({ length: n }, () => ({ offset: 0, size: 0, base: false }));
       return tf;
     };
   }
@@ -1059,6 +1061,36 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       // the transform feedback object being begun — per-object state, not the
       // global mirror; the default object's bindings ARE the mirror).
       syncTfBuffers(ctx, tf);
+      // GLES 3.0 §2.15.2 begin-time binding validation (CTS
+      // same-buffer-two-binding-points.html asserts the error IMMEDIATELY after
+      // beginTransformFeedback): the same buffer bound to two or more of THIS
+      // object's indexed binding points generates INVALID_OPERATION in EVERY
+      // mode (bindBufferBase case, bindBufferRange overlapping AND
+      // non-overlapping ranges); a bound point with no corresponding captured
+      // varying is an error in SEPARATE_ATTRIBS (varying i ↔ binding point i).
+      // INTERLEAVED_ATTRIBS ignores binding points ≥ 1 — leftover bindings are
+      // legal (CTS too-small-buffers.html leaves index 1 bound from its
+      // separate sections across interleaved sections and expects NO_ERROR).
+      // Mirrors the draw-side tfBindingConflict check in draw.ts.
+      const n = s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
+      for (let i = 0; i < n; i++) {
+        const b = tf._buffers[i];
+        if (!b) continue;
+        for (let j = i + 1; j < n; j++) {
+          if (tf._buffers[j] === b) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+        }
+      }
+      if (program._tfBufferMode === C2.SEPARATE_ATTRIBS) {
+        for (let i = varyings.length; i < n; i++) {
+          if (tf._buffers[i]) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+        }
+      }
       const needed = program._tfBufferMode === C2.SEPARATE_ATTRIBS ? varyings.length : 1;
       let boundCount = 0;
       for (let i = 0; i < s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS; i++) {

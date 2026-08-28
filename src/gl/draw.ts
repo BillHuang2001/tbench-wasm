@@ -1383,49 +1383,36 @@ function resolveTfVaryings(pm: ProgramModel): ResolvedTfState | null {
 
 /**
  * Effective capture capacity (bytes) of a bound TF buffer range.
- * The available bytes are measured against the CURRENT data store
- * (`buf._data.byteLength - range.offset`), NOT the `range.size` snapshot taken
- * at bind time: CTS switching-objects.html does `bindBuffer(TF, buf)` →
- * `bufferData(TF, ...)` (grow) → draw, and the bind-time size would be stale.
+ * The state model (api/buffers.ts + api/webgl2.ts sync) records a `base`
+ * marker per indexed binding: bindBufferBase (whole-buffer, base:true) — the
+ * capacity follows the CURRENT data store, so bufferData growth between bind
+ * and draw extends it (CTS too-small-buffers.html "Multiple draws success
+ * case" re-binds base then grows 31→64 bytes and expects success); an explicit
+ * bindBufferRange (base:false) is FIXED at bind time — capacity =
+ * min(range.size, store - offset), so "bindBufferRange too small" sections
+ * (range 28 < 32 needed, or 12 < 16) generate INVALID_OPERATION and capture
+ * NOTHING even though the store is big enough. A size-0 range extends to the
+ * end of the buffer (GLES 3.0 §2.10.1) and is recorded base-like (live).
  * GLES 3.0 §2.15.2: a buffer with NO data store (never bufferData'd — e.g.
  * bindBufferBase'd while the generic binding pointed elsewhere) gives
  * UNDEFINED capture results, NO error (CTS too-small-buffers.html separate
  * sections bind buffer 1 while the generic point still holds buffer 0); an
  * unbound binding point captures nothing (varying skipped) — both yield
  * Infinity so the draw proceeds. An explicit bindBufferRange on an
- * unallocated store is a range that cannot exist → too small (the CTS
- * brange-small cases expect INVALID_OPERATION).
- *
- * The state model records both bindBufferBase and bindBufferRange as
- * `{ offset, size }` on the TF object with NO base-vs-range marker:
- * bindBufferBase records `size = buf._size` AT BIND TIME (nonzero for any
- * previously-allocated store — only a never-allocated buffer records 0), and
- * bindBufferRange records the explicit size (or `buf._size - offset` when
- * size 0 = whole-buffer range per GLES 3.0 §2.10.1). A whole-buffer binding
- * (bindBufferBase) must track the CURRENT store — CTS too-small-buffers.html
- * grows a base-bound store between bind and draw and expects the larger
- * capacity — while an explicit bindBufferRange is FIXED at bind time.
- * Distinguishing the two from `{offset, size}` alone is impossible (a base
- * bind followed by bufferData growth and a too-small explicit range are
- * observably identical at draw time: recorded size < current store), so the
- * capacity uses the CURRENT store for every allocated-store binding; the
- * explicit-range-too-small sections of too-small-buffers.html (range smaller
- * than the store) need a bind-time base/range marker recorded in
- * api/buffers.ts (BLOCKED — out of draw.ts's allowed set). A range extending
- * PAST the current store is still caught (capacity = store size < capture).
+ * unallocated store is a range that cannot exist → too small (the brange
+ * cases expect INVALID_OPERATION).
  */
 function tfRangeCapacity(tf: WebGLTransformFeedback, bufIdx: number): number {
   const buf = tf._buffers[bufIdx];
   if (!buf) return Infinity; // unbound → varying not captured, no overflow
+  const range = tf._bufferRanges[bufIdx] ?? { offset: 0, size: Infinity, base: true };
   if (!buf._data) {
-    const range = tf._bufferRanges[bufIdx] ?? { offset: 0, size: 0 };
-    // bindBufferBase records size 0 for an unallocated buffer (whole-buffer
-    // binding → undefined results, no error); bindBufferRange records the
-    // explicit size (a range over a nonexistent store → too small).
-    return range.size > 0 ? 0 : Infinity;
+    // Whole-buffer (base) binding over a nonexistent store → undefined results,
+    // no error; an explicit range over a nonexistent store → too small.
+    return range.base ? Infinity : 0;
   }
-  const range = tf._bufferRanges[bufIdx] ?? { offset: 0, size: buf._size };
-  return Math.max(0, buf._data.byteLength - range.offset);
+  if (range.base) return Math.max(0, buf._data.byteLength - range.offset);
+  return Math.min(range.size, Math.max(0, buf._data.byteLength - range.offset));
 }
 
 /**
