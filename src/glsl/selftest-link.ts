@@ -495,11 +495,8 @@ const INT = 0x1404; // 5124
     const vctx = vertexCtx(p, { attribs: [new Float32Array([0, 0, 0, 1])], attribIndices: new Int32Array([0]) });
     p.vertex.run(vctx);
     const vg = vctx.out.varyings;
-    // INT varyings bit-pack (T1-A580): the record cells hold the int32 BIT
-    // PATTERNS (float32-reinterpreted), not float32 values.
-    const f2i = (x: number) => new Int32Array(new Float32Array([x]).buffer)[0];
-    check(f2i(vg[0]) === 1 && f2i(vg[1]) === -2 && f2i(vg[2]) === 3 && f2i(vg[3]) === -4,
-      `ivec4 cells carry BIT PATTERNS [1,-2,3,-4] (got f2i=[${[f2i(vg[0]), f2i(vg[1]), f2i(vg[2]), f2i(vg[3])].join(', ')}])`);
+    check(vg[0] === 1 && vg[1] === -2 && vg[2] === 3 && vg[3] === -4,
+      `ivec4 packed [1,-2,3,-4] (got [${Array.from(vg.slice(0, 4)).join(', ')}])`);
     const fctx = fragmentCtx(p, [vg]);
     p.fragment.run(fctx);
     const c = fctx.out.color[0];
