@@ -413,8 +413,8 @@ function emitExprStmt(e: Expr, env: CodegenEnv, out: string[]): void {
         base === 'float'
           ? `${tgt} = ${tgt} + ${delta};`
           : base === 'int'
-            ? `${tgt} = (${tgt} + ${delta}) | 0;`
-            : `${tgt} = (${tgt} + ${delta}) >>> 0;`,
+            ? `${tgt} = ((${tgt} + ${delta}) | 0);`
+            : `${tgt} = ((${tgt} + ${delta}) >>> 0);`,
       );
     }
     if (lv.copyBack) out.push(lv.copyBack);
@@ -490,7 +490,8 @@ function convertPreserving(vals: Value[], from: GLSLType, to: GLSLType): Value[]
  * One component of a compound-assignment op — mirrors expressions.ts's
  * compoundOp (same formulas; that function is module-private and takes the
  * bare op). Returns a self-contained assignment expression (parens included),
- * valid both as a statement and inside a comma expression.
+ * valid both as a statement and inside a comma expression. The int/uint wrap
+ * sits inside the outer parens so the whole assignment is an atom.
  */
 function compoundOpExpr(op: string, target: string, rhs: string, base: string): string {
   const isU = base === 'uint';
@@ -498,54 +499,54 @@ function compoundOpExpr(op: string, target: string, rhs: string, base: string): 
   switch (op) {
     case '+':
       return isU
-        ? `(${target} = ((${target}) + (${rhs})) >>> 0)`
+        ? `(${target} = (((${target}) + (${rhs})) >>> 0))`
         : isI
-          ? `(${target} = ((${target}) + (${rhs})) | 0)`
+          ? `(${target} = (((${target}) + (${rhs})) | 0))`
           : `(${target} = ${target} + ${rhs})`;
     case '-':
       return isU
-        ? `(${target} = ((${target}) - (${rhs})) >>> 0)`
+        ? `(${target} = (((${target}) - (${rhs})) >>> 0))`
         : isI
-          ? `(${target} = ((${target}) - (${rhs})) | 0)`
+          ? `(${target} = (((${target}) - (${rhs})) | 0))`
           : `(${target} = ${target} - ${rhs})`;
     case '*':
       return isU
-        ? `(${target} = (Math.imul(${target}, ${rhs})) >>> 0)`
+        ? `(${target} = ((Math.imul(${target}, ${rhs})) >>> 0))`
         : isI
-          ? `(${target} = ((${target}) * (${rhs})) | 0)`
+          ? `(${target} = (((${target}) * (${rhs})) | 0))`
           : `(${target} = ${target} * ${rhs})`;
     case '/':
       return isU
-        ? `(${target} = ((${target}) / (${rhs})) >>> 0)`
+        ? `(${target} = (((${target}) / (${rhs})) >>> 0))`
         : isI
-          ? `(${target} = ((${target}) / (${rhs})) | 0)`
+          ? `(${target} = (((${target}) / (${rhs})) | 0))`
           : `(${target} = ${target} / ${rhs})`;
     case '%':
       return isU
-        ? `(${target} = ((${target}) % (${rhs})) >>> 0)`
+        ? `(${target} = (((${target}) % (${rhs})) >>> 0))`
         : isI
-          ? `(${target} = ((${target}) % (${rhs})) | 0)`
+          ? `(${target} = (((${target}) % (${rhs})) | 0))`
           : `(${target} = ${target} % ${rhs})`;
     case '<<':
       return isU
-        ? `(${target} = ((${target}) << ((${rhs}) >>> 0)) >>> 0)`
-        : `(${target} = ((${target}) << ((${rhs}) >>> 0)) | 0)`;
+        ? `(${target} = (((${target}) << ((${rhs}) >>> 0)) >>> 0))`
+        : `(${target} = (((${target}) << ((${rhs}) >>> 0)) | 0))`;
     case '>>':
       return isU
-        ? `(${target} = ((${target}) >>> ((${rhs}) >>> 0)) >>> 0)`
-        : `(${target} = ((${target}) >> ((${rhs}) >>> 0)) | 0)`;
+        ? `(${target} = (((${target}) >>> ((${rhs}) >>> 0)) >>> 0))`
+        : `(${target} = (((${target}) >> ((${rhs}) >>> 0)) | 0))`;
     case '&':
       return isU
-        ? `(${target} = ((${target}) & (${rhs})) >>> 0)`
-        : `(${target} = ((${target}) & (${rhs})) | 0)`;
+        ? `(${target} = (((${target}) & (${rhs})) >>> 0))`
+        : `(${target} = (((${target}) & (${rhs})) | 0))`;
     case '^':
       return isU
-        ? `(${target} = ((${target}) ^ (${rhs})) >>> 0)`
-        : `(${target} = ((${target}) ^ (${rhs})) | 0)`;
+        ? `(${target} = (((${target}) ^ (${rhs})) >>> 0))`
+        : `(${target} = (((${target}) ^ (${rhs})) | 0))`;
     case '|':
       return isU
-        ? `(${target} = ((${target}) | (${rhs})) >>> 0)`
-        : `(${target} = ((${target}) | (${rhs})) | 0)`;
+        ? `(${target} = (((${target}) | (${rhs})) >>> 0))`
+        : `(${target} = (((${target}) | (${rhs})) | 0))`;
     default:
       throw new Error(`codegen: bad compound op '${op}'`);
   }
@@ -600,8 +601,8 @@ function updateString(e: Expr, env: CodegenEnv): string {
         base === 'float'
           ? `${tgt} = ${tgt} + ${delta}`
           : base === 'int'
-            ? `${tgt} = (${tgt} + ${delta}) | 0`
-            : `${tgt} = (${tgt} + ${delta}) >>> 0`,
+            ? `${tgt} = ((${tgt} + ${delta}) | 0)`
+            : `${tgt} = ((${tgt} + ${delta}) >>> 0)`,
       );
     }
   }

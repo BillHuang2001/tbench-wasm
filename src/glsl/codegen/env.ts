@@ -869,7 +869,13 @@ export class CodegenEnv {
     const copyOut: string[] = [];
     for (let k = 0; k < n; k++) {
       copyIn.push(`${store}[${base} + ${k}] = ${lv.compNames![k]}`);
-      copyOut.push(`${lv.compNames![k]} = (${store}[${base} + ${k}])${wrap}`);
+      // Self-parenthesized read-back: the `>>> 0` wrap must sit inside the
+      // parens so the RHS is an atom (`x = (e) >>> 0` mis-parses if this
+      // statement is ever embedded in a larger expression). Non-uint reads
+      // keep the plain `(e)` form (already an atom).
+      copyOut.push(
+        wrap ? `${lv.compNames![k]} = ((${store}[${base} + ${k}])${wrap})` : `${lv.compNames![k]} = (${store}[${base} + ${k}])`,
+      );
       if (dual) {
         // Dual planes: dx at base+n, dy at base+2n (allocScratch charged 3n).
         const dx = `${lv.compNames![k]}_dx`;

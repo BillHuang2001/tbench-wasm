@@ -1014,8 +1014,8 @@ function emitUnary(e: Extract<Expr, { kind: 'unary' }>, env: CodegenEnv): Value[
       const target = lv.targets[c];
       let s: string;
       if (base === 'float') s = `(${target} = ${target} + ${delta})`;
-      else if (base === 'int') s = `(${target} = (${target} + ${delta}) | 0)`;
-      else if (base === 'uint') s = `(${target} = (${target} + ${delta}) >>> 0)`;
+      else if (base === 'int') s = `(${target} = ((${target} + ${delta}) | 0))`;
+      else if (base === 'uint') s = `(${target} = ((${target} + ${delta}) >>> 0))`;
       else throw new Error('codegen: cannot increment a bool');
       // Prelude (dyn-index temps / spill copy-in) runs BEFORE the write, the
       // spill copy-back AFTER it — and the expression's VALUE must be the
@@ -1230,10 +1230,12 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
       const shift = `((${bv}) >>> 0)`;
       return emitExpr(e.left, env).map((a) => {
         const x = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
+        // Wrap INSIDE the parens — `| 0` / `>>> 0` bind looser than `+`, so a
+        // bare `(X) | 0` embedded in a larger expression would mis-parse.
         if (op === '<<') {
-          return { v: lb === 'uint' ? `((${x}) << ${shift}) >>> 0` : `((${x}) << ${shift}) | 0` };
+          return { v: lb === 'uint' ? `(((${x}) << ${shift}) >>> 0)` : `(((${x}) << ${shift}) | 0)` };
         }
-        return { v: lb === 'uint' ? `((${x}) >>> ${shift}) >>> 0` : `((${x}) >> ${shift}) | 0` };
+        return { v: lb === 'uint' ? `(((${x}) >>> ${shift}) >>> 0)` : `(((${x}) >> ${shift}) | 0)` };
       });
     }
     case '&':
@@ -1262,7 +1264,8 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
       return av.map((a, c) => {
         const x = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
         const y = bv[c].pre && bv[c].pre.length ? foldPre(bv[c].pre, bv[c].v) : bv[c].v;
-        return { v: isU ? `((${x}) ${op} (${y})) >>> 0` : `((${x}) ${op} (${y})) | 0` };
+        // Self-parenthesized wrap (see the shift case above).
+        return { v: isU ? `(((${x}) ${op} (${y})) >>> 0)` : `(((${x}) ${op} (${y})) | 0)` };
       });
     }
     default:
@@ -1472,21 +1475,24 @@ function emitArith(
     const x = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
     const y = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
     let s: string;
+    // Int/uint results wrap INSIDE the parens (`| 0` / `>>> 0` bind looser
+    // than `+` — a bare `(X) | 0` would mis-parse when embedded in a larger
+    // expression, e.g. float(int sum) + float(uint sum)).
     switch (op) {
       case '+':
-        s = isU ? `((${x}) + (${y})) >>> 0` : isI ? `((${x}) + (${y})) | 0` : `(${x} + ${y})`;
+        s = isU ? `(((${x}) + (${y})) >>> 0)` : isI ? `(((${x}) + (${y})) | 0)` : `(${x} + ${y})`;
         break;
       case '-':
-        s = isU ? `((${x}) - (${y})) >>> 0` : isI ? `((${x}) - (${y})) | 0` : `(${x} - ${y})`;
+        s = isU ? `(((${x}) - (${y})) >>> 0)` : isI ? `(((${x}) - (${y})) | 0)` : `(${x} - ${y})`;
         break;
       case '*':
-        s = isU ? `(Math.imul(${x}, ${y})) >>> 0` : isI ? `((${x}) * (${y})) | 0` : `(${x} * ${y})`;
+        s = isU ? `((Math.imul(${x}, ${y})) >>> 0)` : isI ? `(((${x}) * (${y})) | 0)` : `(${x} * ${y})`;
         break;
       case '/':
-        s = isU ? `((${x}) / (${y})) >>> 0` : isI ? `((${x}) / (${y})) | 0` : `(${x} / ${y})`;
+        s = isU ? `(((${x}) / (${y})) >>> 0)` : isI ? `(((${x}) / (${y})) | 0)` : `(${x} / ${y})`;
         break;
       case '%':
-        s = isU ? `((${x}) % (${y})) >>> 0` : isI ? `((${x}) % (${y})) | 0` : `(${x} % ${y})`;
+        s = isU ? `(((${x}) % (${y})) >>> 0)` : isI ? `(((${x}) % (${y})) | 0)` : `(${x} % ${y})`;
         break;
       default:
         throw new Error(`codegen: bad arithmetic op '${op}'`);
@@ -1496,31 +1502,33 @@ function emitArith(
   return out;
 }
 
-/** One component of a compound-assignment op (lhs already converted). */
+/** One component of a compound-assignment op (lhs already converted).
+ *  The wrap sits inside the outer parens so the whole assignment is an atom
+ *  (`| 0` / `>>> 0` bind looser than `+`). */
 function compoundOp(op: string, target: string, rhs: string, base: string): string {
   const isU = base === 'uint';
   const isI = base === 'int';
   switch (op) {
     case '+':
-      return isU ? `(${target} = ((${target}) + (${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) + (${rhs})) | 0)` : `(${target} = ${target} + ${rhs})`;
+      return isU ? `(${target} = (((${target}) + (${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) + (${rhs})) | 0))` : `(${target} = ${target} + ${rhs})`;
     case '-':
-      return isU ? `(${target} = ((${target}) - (${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) - (${rhs})) | 0)` : `(${target} = ${target} - ${rhs})`;
+      return isU ? `(${target} = (((${target}) - (${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) - (${rhs})) | 0))` : `(${target} = ${target} - ${rhs})`;
     case '*':
-      return isU ? `(${target} = (Math.imul(${target}, ${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) * (${rhs})) | 0)` : `(${target} = ${target} * ${rhs})`;
+      return isU ? `(${target} = ((Math.imul(${target}, ${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) * (${rhs})) | 0))` : `(${target} = ${target} * ${rhs})`;
     case '/':
-      return isU ? `(${target} = ((${target}) / (${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) / (${rhs})) | 0)` : `(${target} = ${target} / ${rhs})`;
+      return isU ? `(${target} = (((${target}) / (${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) / (${rhs})) | 0))` : `(${target} = ${target} / ${rhs})`;
     case '%':
-      return isU ? `(${target} = ((${target}) % (${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) % (${rhs})) | 0)` : `(${target} = ${target} % ${rhs})`;
+      return isU ? `(${target} = (((${target}) % (${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) % (${rhs})) | 0))` : `(${target} = ${target} % ${rhs})`;
     case '<<':
-      return isU ? `(${target} = ((${target}) << ((${rhs}) >>> 0)) >>> 0)` : `(${target} = ((${target}) << ((${rhs}) >>> 0)) | 0)`;
+      return isU ? `(${target} = (((${target}) << ((${rhs}) >>> 0)) >>> 0))` : `(${target} = (((${target}) << ((${rhs}) >>> 0)) | 0))`;
     case '>>':
-      return isU ? `(${target} = ((${target}) >>> ((${rhs}) >>> 0)) >>> 0)` : `(${target} = ((${target}) >> ((${rhs}) >>> 0)) | 0)`;
+      return isU ? `(${target} = (((${target}) >>> ((${rhs}) >>> 0)) >>> 0))` : `(${target} = (((${target}) >> ((${rhs}) >>> 0)) | 0))`;
     case '&':
-      return isU ? `(${target} = ((${target}) & (${rhs})) >>> 0)` : `(${target} = ((${target}) & (${rhs})) | 0)`;
+      return isU ? `(${target} = (((${target}) & (${rhs})) >>> 0))` : `(${target} = (((${target}) & (${rhs})) | 0))`;
     case '^':
-      return isU ? `(${target} = ((${target}) ^ (${rhs})) >>> 0)` : `(${target} = ((${target}) ^ (${rhs})) | 0)`;
+      return isU ? `(${target} = (((${target}) ^ (${rhs})) >>> 0))` : `(${target} = (((${target}) ^ (${rhs})) | 0))`;
     case '|':
-      return isU ? `(${target} = ((${target}) | (${rhs})) >>> 0)` : `(${target} = ((${target}) | (${rhs})) | 0)`;
+      return isU ? `(${target} = (((${target}) | (${rhs})) >>> 0))` : `(${target} = (((${target}) | (${rhs})) | 0))`;
     default:
       throw new Error(`codegen: bad compound op '${op}'`);
   }
