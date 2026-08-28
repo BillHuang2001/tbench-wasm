@@ -383,20 +383,24 @@ void main() {
 // (4e) struct with an array member — flat expansion over the array leaves.
 // Struct locals containing arrays are unsupported by codegen (flat-local
 // limitation), so the operands are STRUCT UNIFORMS with per-leaf slots.
+// ES 3.00 only: struct-with-array ==/!= is legal in 3.00 (CTS
+// compare-structs-containing-arrays), rejected in 1.00 (struct-equals).
 {
   const r = runMainCatch(
-    `precision mediump float;
+    `#version 300 es
+precision mediump float;
 struct S { float f[2]; float g; };
 uniform S u;
 uniform S v;
 uniform S w;
+out vec4 color;
 void main() {
   bool eq = (u == v);
   bool ne = (u != w);
-  gl_FragColor = vec4(eq ? 1.0 : 0.0, ne ? 1.0 : 0.0, 0.0, 1.0);
+  color = vec4(eq ? 1.0 : 0.0, ne ? 1.0 : 0.0, 0.0, 1.0);
 }`,
     'FRAGMENT',
-    100,
+    300,
     {
       uniformSlots: {
         'u.f[0]': { store: 'float', slot: 0, stride: 0 },
