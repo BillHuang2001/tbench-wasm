@@ -33,6 +33,14 @@ export interface TextureLevel {
   data: ArrayBufferView[];
   /** Split stencil plane for DEPTH*_STENCIL* textures (else undefined). */
   stencilData?: Uint8Array;
+  /**
+   * Storage-format key the level was allocated with (teximage.ts allocLevel:
+   * sized storage GLenum for sized uploads, the unsized GLenum for WebGL1
+   * unsized/float-promoted levels). Used by the FBO mipmap-completeness rule
+   * (GLES 3.0 §3.8.13: every level in [baseLevel, q] must share the effective
+   * internal format) — see framebuffer-util.ts checkAttachment.
+   */
+  format?: GLenum;
 }
 
 /** TextureImage with gl's split-stencil-plane addition (assignable to raster's). */

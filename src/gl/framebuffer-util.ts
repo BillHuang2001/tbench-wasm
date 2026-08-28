@@ -301,6 +301,23 @@ function isDepthStencilRenderable(ctx: WebGLRenderingContext, format: GLenum): b
 /* Attachment resolution                                               */
 /* ------------------------------------------------------------------ */
 
+/** Unsized internal format → its sized storage key (mirrors teximage.ts
+ *  unsizedStorage; used to compare effective internal formats across mip
+ *  levels — RGBA ≡ RGBA8, RGB ≡ RGB8, SRGB_EXT ≡ SRGB8, etc.). */
+function storageFormatKey(format: GLenum): GLenum {
+  switch (format) {
+    case 0x1908 /* RGBA */: return 0x8058 /* RGBA8 */;
+    case 0x1907 /* RGB */: return 0x8051 /* RGB8 */;
+    case 0x1903 /* RED */: return 0x8229 /* R8 */;
+    case 0x8227 /* RG */: return 0x822b /* RG8 */;
+    case 0x1902 /* DEPTH_COMPONENT */: return 0x81a5 /* DEPTH_COMPONENT16 */;
+    case 0x84f9 /* DEPTH_STENCIL */: return 0x88f0 /* DEPTH24_STENCIL8 */;
+    case 0x8c40 /* SRGB_EXT */: return 0x8c41 /* SRGB8 */;
+    case 0x8c42 /* SRGB_ALPHA_EXT */: return 0x8c43 /* SRGB8_ALPHA8 */;
+    default: return format;
+  }
+}
+
 /**
  * WebGL2-spec enum → raster-registry key for Surface.format. The WebGL2 spec
  * defines RGBA8I/RGB8I as the DESKTOP-GL values 0x8d8e/0x8d8f (CTS
@@ -333,12 +350,27 @@ function resolveAttachmentSurface(entry: FramebufferAttachment): Surface | null 
   const idx = isCubeFace(entry.face) ? cubeFaceIndex(entry.face) : entry.layer;
   const data = lvl.data[idx];
   if (!data) return null;
-  const info: PixelFormatInfo | null = image.info ?? getFormat(image.internalFormat);
+  // The level's OWN format wins over the texture-global `image.info` /
+  // `image.internalFormat` (last upload/copy wins per texture): a same-texture
+  // copyTexImage2D overwrites them BEFORE another level's surface is resolved
+  // (copy-texture-image-same-texture.html reads from level 1 of a texture
+  // whose level 2 was just redefined) — the per-level key recorded at
+  // allocation (teximage.ts allocLevel) describes THIS level. Keep
+  // `image.info` when it exactly matches the level key (it is richer for
+  // float-promoted WebGL1 unsized levels, where the raster registry only has
+  // the u8 descriptors); otherwise resolve from the per-level key.
+  const lvlFmt = lvl.format ?? image.internalFormat;
+  let info: PixelFormatInfo | null = null;
+  if (image.info && image.info.format === lvlFmt) {
+    info = image.info;
+  } else {
+    info = getFormat(lvlFmt) ?? image.info ?? null;
+  }
   if (!info) return null;
   return {
     width: lvl.width,
     height: lvl.height,
-    format: surfaceFormatKey(image.internalFormat),
+    format: surfaceFormatKey(lvlFmt),
     info,
     data,
     stencilData: lvl.stencilData,
@@ -597,11 +629,35 @@ function checkAttachment(
       }
       if (entry.level !== baseLevel) {
         // Mipmap complete over [baseLevel, q] (spec q): every level's image
-        // must exist.
+        // must exist, have the expected halved dimensions (GLES 3.0 §3.8.13:
+        // max(1, baseW >> (l - level_base)), same for height/depth) and the
+        // SAME effective internal format as the base level. A level redefined
+        // at the wrong size or format (e.g. copyTexImage2D into a higher level
+        // with different dims/format) breaks the chain — CTS
+        // copy-texture-image-same-texture.html hard-asserts INCOMPLETE.
         const isCube = isCubeFace(entry.face);
+        const is3D = image.target === C2.TEXTURE_3D;
+        const isArray = image.target === C2.TEXTURE_2D_ARRAY;
+        const baseLvl = image.levels[baseLevel];
+        const baseW = baseLvl ? baseLvl.width : image.width;
+        const baseH = baseLvl ? baseLvl.height : image.height;
+        const baseD = baseLvl ? baseLvl.depth : image.depth;
+        // Level allocation records its storage-format key (teximage.ts
+        // allocLevel); normalize unsized formats so RGBA ≡ RGBA8 etc.
+        const baseFmt = storageFormatKey(baseLvl ? baseLvl.format ?? image.internalFormat : image.internalFormat);
         for (let l = baseLevel; l <= q; l++) {
           const lvl = image.levels[l];
           if (!lvl) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+          const shift = l - baseLevel;
+          const expW = Math.max(1, baseW >> shift);
+          const expH = Math.max(1, baseH >> shift);
+          const expD = isArray ? baseD : is3D ? Math.max(1, baseD >> shift) : 1;
+          if (lvl.width !== expW || lvl.height !== expH || lvl.depth !== expD) {
+            return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+          }
+          if (storageFormatKey(lvl.format ?? image.internalFormat) !== baseFmt) {
+            return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+          }
           if (isCube) {
             if (lvl.data.length !== 6) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
             for (const face of lvl.data) {

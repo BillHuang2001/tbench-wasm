@@ -534,7 +534,10 @@ function allocLevel(spec: FormatSpec, w: number, h: number, d: number, isCube: b
   const views: ArrayBufferView[] = [];
   const n = isCube ? 6 : d;
   for (let i = 0; i < n; i++) views.push(new spec.ctor(count));
-  const level: TextureLevel = { width: w, height: h, depth: d, data: views };
+  // Record the storage-format key: the FBO mipmap-completeness rule (GLES 3.0
+  // §3.8.13) requires every level in [baseLevel, q] to share the effective
+  // internal format — framebuffer-util.ts compares `level.format`.
+  const level: TextureLevel = { width: w, height: h, depth: d, data: views, format: spec.format };
   if (spec.isStencil) level.stencilData = new Uint8Array(perFace * (isCube ? 1 : d));
   return level;
 }
@@ -580,6 +583,8 @@ function srcComponents(format: GLenum): number {
   switch (format) {
     case C.RGBA: case C.RGBA_INTEGER: case 0x80e1: return 4; // BGRA (EXT_texture_format_BGRA8888, null status)
     case C.RGB: case C.RGB_INTEGER: return 3;
+    case CExt.SRGB_EXT: return 3; // EXT_sRGB source format (texture-srgb-upload.html)
+    case CExt.SRGB_ALPHA_EXT: return 4;
     case C.LUMINANCE_ALPHA: case C.RG: case C.RG_INTEGER: return 2;
     case C.DEPTH_STENCIL: return 2; // depth + stencil (packed 32-bit texels)
     default: return 1; // LUMINANCE, ALPHA, RED, RED_INTEGER, DEPTH_COMPONENT
@@ -684,6 +689,7 @@ function readSourceTexel(dv: DataView, byteOff: number, format: GLenum, type: GL
   // Component fill for formats with fewer than 4 components.
   switch (format) {
     case C.RGB: case C.RGB_INTEGER: out[3] = 1; break;
+    case CExt.SRGB_EXT: out[3] = 1; break; // 3-component sRGB source (EXT_srgb)
     case C.RG: case C.RG_INTEGER: out[2] = 0; out[3] = 1; break;
     case C.LUMINANCE: out[1] = out[0]; out[2] = out[0]; out[3] = 1; break;
     // LUMINANCE_ALPHA stores [L, A]; encoders read L from out[0] and A from
@@ -876,11 +882,29 @@ export function refreshUnitSamplerBindings(state: State, unit: number): void {
 }
 
 /**
+ * W1 float-filterability extension state: whether OES_texture_float_linear /
+ * OES_texture_half_float_linear are ENABLED (singleton cache populated by
+ * getExtensionObject — reading the cache never self-enables).
+ */
+export function floatLinearExtensionState(ctx: WebGLRenderingContext): { float: boolean; halfFloat: boolean } {
+  return {
+    float: ctx._extensions.has('OES_texture_float_linear'),
+    halfFloat: ctx._extensions.has('OES_texture_half_float_linear'),
+  };
+}
+
+/**
  * Recompute _image completeness + base/max level after any mutation. Also
  * called at DRAW time (draw.ts buildTextureEnv) so completeness always reflects
  * the CURRENT texParameteri state, not the state at upload time.
+ * `floatLinear` (W1 float textures) is the enabled state of the _linear
+ * extensions; omitted → treated as disabled (draw-time refresh supersedes).
  */
-export function updateCompleteness(texture: WebGLTexture, version: 1 | 2): void {
+export function updateCompleteness(
+  texture: WebGLTexture,
+  version: 1 | 2,
+  floatLinear?: { float: boolean; halfFloat: boolean },
+): void {
   const img = texture._image;
   if (!img) return;
   const base = Math.max(0, texture._params[0x813c] | 0);
@@ -939,6 +963,27 @@ export function updateCompleteness(texture: WebGLTexture, version: 1 | 2): void 
     const wrapT = smp ? smp._params[0x2803] : texture._params[0x2803];
     if (needsMips || wrapS !== C.CLAMP_TO_EDGE || wrapT !== C.CLAMP_TO_EDGE) {
       ok = false;
+    }
+  }
+  if (ok && version === 1 && img.info?.isFloat) {
+    // WebGL1 float textures (OES_texture_float / OES_texture_half_float): the
+    // texture is INCOMPLETE when the effective filter is LINEAR or any
+    // mipmap-LINEAR variant and the matching _linear extension is not enabled
+    // (sampling returns (0,0,0,1) — CTS oes-texture-float-linear.html). WebGL
+    // convention: NEAREST_MIPMAP_LINEAR=0x2702 / LINEAR_MIPMAP_NEAREST=0x2701
+    // (swapped vs GLES) — only NEAREST and NEAREST_MIPMAP_NEAREST are
+    // filterable without the extension. W1-scoped: WebGL2 float filterability
+    // is a separate GLES3 rule and is NOT applied here.
+    const magFilter = smp ? smp._params[0x2800] : texture._params[0x2800];
+    const needsLinear = magFilter === C.LINEAR ||
+      (minFilter !== C.NEAREST && minFilter !== C.NEAREST_MIPMAP_NEAREST);
+    if (needsLinear) {
+      // W1 float levels are always unsized uploads with type FLOAT or
+      // HALF_FLOAT_OES (floatSpecFor) — the recorded origin picks the
+      // matching extension.
+      const origin = getLevelOrigin(texture, img.baseLevel);
+      const isHalf = origin?.type === CExt.HALF_FLOAT_OES;
+      if (!(isHalf ? floatLinear?.halfFloat : floatLinear?.float)) ok = false;
     }
   }
   img.complete = ok;
@@ -1270,7 +1315,7 @@ function copyPixelsIntoLevel(
           if (view === undefined) break; // defensive: zoffset+depth beyond the level
           copyRows(p, view, levelData.width, xoffset, yoffset, width, height, srcRow0, 0);
         }
-        updateCompleteness(texture, ctx._version);
+        updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
         return;
       }
       // Decode failed. A tainted/cross-origin source MUST throw a SecurityError
@@ -1413,7 +1458,7 @@ export function uploadTexImage(
   }
   recordLevelOrigin(texture, level, format, type);
   copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, 0, 0, 0, explicitDims);
-  updateCompleteness(texture, ctx._version);
+  updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
 }
 
 /** texSubImage2D/3D partial update. */
@@ -1443,7 +1488,7 @@ export function uploadTexSubImage(
   const spec = specForImage(img);
   if (!spec) return;
   copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset, explicitDims);
-  updateCompleteness(texture, ctx._version);
+  updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
 }
 
 /** texStorage2D/3D: allocate immutable mip chain. */
@@ -1483,10 +1528,14 @@ export function allocateImmutableStorage(
   img.width = width;
   img.height = height;
   img.depth = isCube ? 6 : depth;
-  updateCompleteness(texture, ctx._version);
+  updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
 }
 
-/** Copy the read framebuffer rect (x, y, w, h) into a level (GL coords, y-up). */
+/** Copy the read framebuffer rect (x, y, w, h) into a level (GL coords, y-up).
+ *  Source texels outside the framebuffer rect are SKIPPED — destination texels
+ *  they would cover stay untouched (copyTexSubImage2D semantics: only the
+ *  intersection of source-rect ∩ framebuffer is copied). dstX/dstY offset the
+ *  write position within the level (0 for fresh copyTexImage2D levels). */
 function copyFromReadSurface(
   ctx: WebGLRenderingContext,
   levelData: TextureLevel,
@@ -1496,6 +1545,8 @@ function copyFromReadSurface(
   y: number,
   width: number,
   height: number,
+  dstX = 0,
+  dstY = 0,
 ): void {
   let surface: Surface | null = null;
   try {
@@ -1524,7 +1575,20 @@ function copyFromReadSurface(
         } else {
           surface.info.decode(srcData, (sy * sW + sx) * surface.info.bytesPerPixel, out);
         }
-        spec.pack(view, (dy * levelData.width + dx) * dstBpp, out[0], out[1], out[2], out[3]);
+        // Format-fill the DESTINATION channel layout (mirrors readSourceTexel's
+        // upload fill): the surface decode yields [r,g,b,a], but unsized
+        // LUMINANCE_ALPHA stores [L, A] = [r, a] (not [r, g] — alpha must come
+        // from the source alpha, CTS copy-texture-image-same-texture.html /
+        // copy-texture-image-luma-format.html), ALPHA stores A, LUMINANCE
+        // stores L. Both pack conventions (local comps-based pack and the
+        // raster-registry encode) agree on these slots.
+        switch (spec.format) {
+          case C.LUMINANCE_ALPHA: out[1] = out[3]; out[2] = out[0]; break; // [L, A, L, A]
+          case C.ALPHA: out[0] = out[3]; out[1] = 0; out[2] = 0; break; // [A, 0, 0, A]
+          case C.LUMINANCE: out[1] = out[0]; out[2] = out[0]; out[3] = 1; break; // [L, L, L, 1]
+          default: break;
+        }
+        spec.pack(view, ((dstY + dy) * levelData.width + dstX + dx) * dstBpp, out[0], out[1], out[2], out[3]);
       }
     }
   } catch {
@@ -1553,12 +1617,17 @@ export function copyTexImage(
   const existing = img.levels[level];
   const levelData = allocLevel(spec, width, height, 1, isCube);
   if (isCube) {
-    // Keep faces from earlier copyTexImage2D calls (see uploadTexImage).
+    // Keep faces from earlier copyTexImage2D calls (see uploadTexImage); the
+    // TARGET face keeps the freshly allocated view (replacing it with
+    // undefined would lose the storage and make the level look undefined —
+    // copy-texture-cube-map-AMD-bug.html CopyTexSubImage2D INVALID_OPERATION).
     const face = cubeFaceIndex(target);
     for (let f = 0; f < 6; f++) {
-      levelData.data[f] = f !== face && existing && existing.data[f] !== undefined
-        ? existing.data[f]
-        : (undefined as unknown as ArrayBufferView);
+      if (f !== face) {
+        levelData.data[f] = existing && existing.data[f] !== undefined
+          ? existing.data[f]
+          : (undefined as unknown as ArrayBufferView);
+      }
     }
   }
   img.levels[level] = levelData;
@@ -1573,7 +1642,7 @@ export function copyTexImage(
     img.depth = isCube ? 6 : 1;
   }
   copyFromReadSurface(ctx, img.levels[level], cubeFaceIndex(target), spec, x, y, width, height);
-  updateCompleteness(texture, ctx._version);
+  updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
 }
 
 export function copyTexSubImage(
@@ -1590,34 +1659,20 @@ export function copyTexSubImage(
   if (!levelData) return;
   const spec = specForImage(img);
   if (!spec) return;
-  // Copy into the (xoffset, yoffset) region of a temporary of the sub size,
-  // then blit — simpler: read directly with a dst offset via a temp level.
-  const tmp: TextureLevel = { width, height, depth: 1, data: [new (spec.ctor as new (n: number) => ArrayBufferView)((width * height * spec.bytesPerPixel) / spec.bytesPerElement)] };
-  if (spec.isStencil) tmp.stencilData = new Uint8Array(width * height);
-  copyFromReadSurface(ctx, tmp, -1, spec, x, y, width, height);
+  // Write DIRECTLY into the destination level at (xoffset, yoffset):
+  // copyFromReadSurface skips source texels outside the framebuffer rect, so
+  // destination texels outside the source-rect ∩ framebuffer intersection stay
+  // UNCHANGED (spec; copy-tex-image-and-sub-image-2d.html pre-fills the level
+  // with 0x88 and expects it preserved). A temp level would blit zeros over
+  // those texels. The wrapper level aliases the destination view with the
+  // level's row stride so pack offsets land at (yoffset+dy, xoffset+dx).
   const face = cubeFaceIndex(target);
   // Per-layer views (allocLevel): cube face → data[face], 3D/2D_ARRAY →
   // data[zoffset], 2D → data[0]. Each view is one w×h plane.
   const view = levelData.data[face >= 0 ? face : zoffset];
-  const srcView = tmp.data[0];
-  const elemsPerTexel = spec.bytesPerPixel / spec.bytesPerElement;
-  for (let dy = 0; dy < height; dy++) {
-    for (let dx = 0; dx < width; dx++) {
-      const srcElem = ((dy * width + dx) * spec.bytesPerPixel) / spec.bytesPerElement;
-      const dstElem = ((yoffset + dy) * levelData.width + xoffset + dx) * spec.bytesPerPixel / spec.bytesPerElement;
-      for (let e = 0; e < elemsPerTexel; e++) {
-        (view as unknown as { [i: number]: number })[dstElem + e] = (srcView as unknown as { [i: number]: number })[srcElem + e];
-      }
-    }
-  }
-  if (spec.isStencil && levelData.stencilData && tmp.stencilData) {
-    for (let dy = 0; dy < height; dy++) {
-      for (let dx = 0; dx < width; dx++) {
-        levelData.stencilData[(zoffset * levelData.height + yoffset + dy) * levelData.width + xoffset + dx] = tmp.stencilData[dy * width + dx];
-      }
-    }
-  }
-  updateCompleteness(texture, ctx._version);
+  const dstLevel: TextureLevel = { width: levelData.width, height: levelData.height, depth: 1, data: [view] };
+  copyFromReadSurface(ctx, dstLevel, -1, spec, x, y, width, height, xoffset, yoffset);
+  updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
 }
 
 /**
@@ -1742,7 +1797,7 @@ export function compressedTexImage(
       }
     }
   }
-  updateCompleteness(texture, ctx._version);
+  updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
 }
 
 /** generateMipmap: build the full mip chain from the base level (2×2 box filter). */
@@ -1799,5 +1854,5 @@ export function generateMipmap(ctx: WebGLRenderingContext, texture: WebGLTexture
     d = nd;
   }
   void ctx;
-  updateCompleteness(texture, ctx._version);
+  updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
 }

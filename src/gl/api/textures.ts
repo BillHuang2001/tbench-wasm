@@ -37,7 +37,7 @@ import type { WebGLRenderingContext } from '../webgl1';
 import { C1, C2 } from '../constants';
 import { WebGLFramebuffer, WebGLTexture, createObject } from '../objects';
 import { validateObject } from '../validation';
-import { generateMipmap, updateCompleteness, refreshUnitSamplerBindings } from '../teximage';
+import { generateMipmap, updateCompleteness, refreshUnitSamplerBindings, floatLinearExtensionState } from '../teximage';
 import type { GLboolean, GLenum, GLfloat, GLint } from '../types';
 
 // GL values not present in C1 (see constants.ts provenance / state.ts precedent).
@@ -252,7 +252,7 @@ function texParameterImpl(ctx: WebGLRenderingContext, target: GLenum, pname: GLe
   // NEAREST_MIPMAP_LINEAR and later switched to LINEAR becomes complete.
   if (pname === 0x2801 /* MIN_FILTER */ || pname === 0x2800 /* MAG_FILTER */ ||
       pname === 0x813c /* BASE_LEVEL */ || pname === 0x813d /* MAX_LEVEL */) {
-    updateCompleteness(tex, ctx._version);
+    updateCompleteness(tex, ctx._version, floatLinearExtensionState(ctx));
   }
 }
 

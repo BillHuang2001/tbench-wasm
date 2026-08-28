@@ -65,7 +65,7 @@ import { C1, C2 } from './constants';
 import { resolveFramebufferTarget, resolveReadSurface, getAttachmentSurface } from './framebuffer-util';
 import { handleCanvasResize } from './lost';
 import { getClipControl } from './extensions/clip-state';
-import { updateCompleteness } from './teximage';
+import { updateCompleteness, floatLinearExtensionState } from './teximage';
 import {
   computeVertexStride,
   RECORD_HEADER_FLOATS,
@@ -1016,7 +1016,7 @@ function buildTextureEnv(
         // MIN_FILTER was the default NEAREST_MIPMAP_LINEAR then switched to
         // LINEAR would otherwise sample as incomplete forever). Cheap
         // recompute per draw.
-        updateCompleteness(tex, ctx._version);
+        updateCompleteness(tex, ctx._version, floatLinearExtensionState(ctx));
         const img = tex._image as TextureImage;
         const st = effectiveSamplerState(tex, unitState.sampler);
         images[unit] = img;
@@ -1076,7 +1076,7 @@ function textureFeedbackLoop(ctx: WebGLRenderingContext, pm: ProgramModel): bool
         // WebGL1: any attached level of a complete texture is a loop (no
         // level-window concept — CTS feedback-loop.html). Completeness at
         // draw time (MIN_FILTER/level chain — cheap per draw).
-        updateCompleteness(tex, 1);
+        updateCompleteness(tex, 1, floatLinearExtensionState(ctx));
         if (!tex._image.complete) continue;
       }
       for (let i = 0; i < textureAtts.length; i++) {
