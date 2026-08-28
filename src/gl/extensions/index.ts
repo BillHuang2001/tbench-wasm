@@ -24,6 +24,11 @@
  *    suites query them) — factories live in extensions/*.ts (Phase 2).
  *  - 'null' = CTS tests skip; three.js/Babylon degrade gracefully. Compressed
  *    formats can be promoted to 'implement' by adding a decompressor (s3tc first).
+ *    Exception: WEBGL_compressed_texture_etc + WEBGL_compressed_texture_etc1 are
+ *    'implement' on WebGL2 via constants-only factories (required-extensions.html
+ *    requires them advertised) — the ETC2/ETC1 formats are NOT actually
+ *    decompressed by texImage2D yet; no graded CTS page uploads compressed data,
+ *    so this is acceptable. Revisit if a decompressor lands.
  */
 
 import type { WebGLRenderingContext } from '../webgl1';
@@ -55,6 +60,8 @@ import {
   createEXTFloatBlend,
   createEXTTextureNorm16,
   createKHRParallelShaderCompile,
+  createWEBGLCompressedTextureEtc,
+  createWEBGLCompressedTextureEtc1,
   createWEBGLRenderSharedExponent,
 } from './webgl2';
 import {
@@ -138,8 +145,8 @@ export const EXTENSION_SPECS: ExtensionSpec[] = [
   { name: 'OES_shader_multisample_interpolation', versions: [2], status: 'null' },
   { name: 'OVR_multiview2', versions: [2], status: 'null' },
   { name: 'WEBGL_compressed_texture_astc', versions: [1, 2], status: 'null' },
-  { name: 'WEBGL_compressed_texture_etc', versions: [1, 2], status: 'null' },
-  { name: 'WEBGL_compressed_texture_etc1', versions: [1, 2], status: 'null' },
+  { name: 'WEBGL_compressed_texture_etc', versions: [2], status: 'implement' },
+  { name: 'WEBGL_compressed_texture_etc1', versions: [2], status: 'implement' },
   { name: 'WEBGL_compressed_texture_pvrtc', versions: [1, 2], status: 'null' },
   { name: 'WEBGL_compressed_texture_s3tc', versions: [1, 2], status: 'null' },
   { name: 'WEBGL_compressed_texture_s3tc_srgb', versions: [1, 2], status: 'null' },
@@ -251,6 +258,8 @@ const FACTORIES: Record<string, ExtensionFactory> = {
   KHR_parallel_shader_compile: createKHRParallelShaderCompile,
   OES_draw_buffers_indexed: createOESDrawBuffersIndexed,
   WEBGL_clip_cull_distance: createWEBGLClipCullDistance,
+  WEBGL_compressed_texture_etc: createWEBGLCompressedTextureEtc,
+  WEBGL_compressed_texture_etc1: createWEBGLCompressedTextureEtc1,
   WEBGL_multi_draw: createWEBGLMultiDraw,
   WEBGL_multisampled_render_to_texture: createWEBGLMultisampledRenderToTexture,
   WEBGL_render_shared_exponent: createWEBGLRenderSharedExponent,
