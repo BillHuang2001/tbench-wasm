@@ -4,6 +4,7 @@ import { createServer as createHttpServer, type ServerResponse } from "node:http
 import { join, resolve, normalize, extname, sep } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { buildInterceptScript } from "../../src/context-intercept";
+import { buildDiagScript } from "./diag-inject"; // TEMP DIAG (remove after diagnosis)
 import { hasGolden, goldenPath, pageHtmlPath } from "./list";
 import {
   readImage,
@@ -672,6 +673,8 @@ export async function runSuite(pages: string[], opts: RunOptions): Promise<Repor
       });
       await context.addInitScript(buildInterceptScript());
       await context.addInitScript(buildDeterministicScript());
+      // TEMP DIAG: surface swallowed renderer draw exceptions (remove after diagnosis)
+      await context.addInitScript(buildDiagScript());
       try {
         for (;;) {
           const idx = next++;
