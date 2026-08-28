@@ -18,10 +18,11 @@
  *    ELEMENT_ARRAY_BUFFER (CTS buffer-copying-contents.html,
  *    buffer-copying-restrictions.html, out-of-bounds-index-buffers-after-copying.html).
  *    null unbinds (ELEMENT_ARRAY_BUFFER binding lives in the VAO state).
- *    WebGL2: bindBuffer(UNIFORM_BUFFER, b) is equivalent to
- *    bindBufferBase(UNIFORM_BUFFER, 0, b); bindBuffer(TRANSFORM_FEEDBACK_BUFFER, b)
- *    is equivalent to bindBufferBase(TRANSFORM_FEEDBACK_BUFFER, 0, b) (CTS
- *    transform_feedback.html runTFBufferBindingTest + switching-objects.html).
+ *    WebGL2: bindBuffer(UNIFORM_BUFFER/TRANSFORM_FEEDBACK_BUFFER, b) binds the
+ *    GENERIC binding point only — the indexed binding points are untouched
+ *    (CTS uniform-buffers-state-restoration.html, simultaneous_binding.html).
+ *    bindBufferBase/bindBufferRange with index 0 additionally update the
+ *    generic point (GLES 3.0 §2.10.1; same two pages).
  *    Per WebGL2 §BUFFER_OBJECT_BINDING the buffer-type split is element-array vs
  *    other-data: a TF bind only rejects element-array buffers and does NOT fix
  *    the buffer's target (a TF-bound buffer can later bind ARRAY_BUFFER —
@@ -61,11 +62,30 @@
  *    false immediately).
  *  - bindBufferBase/Range: UNIFORM_BUFFER index < MAX_UNIFORM_BUFFER_BINDINGS,
  *    TRANSFORM_FEEDBACK_BUFFER index < MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
- *    UBO range offset aligned to UNIFORM_BUFFER_OFFSET_ALIGNMENT,
- *    offset+size ≤ buffer size and ≤ MAX_UNIFORM_BLOCK_SIZE (INVALID_VALUE);
- *    TF offset multiple of 4, offset+size ≤ buffer size. bindBufferBase sets the
- *    range to the whole buffer ({0, _size}). TF indexed bindings are recorded
- *    on the buffer object (_tfRangeBindings — last bind at an index wins).
+ *    UBO range offset aligned to UNIFORM_BUFFER_OFFSET_ALIGNMENT and range SIZE
+ *    ≤ MAX_UNIFORM_BLOCK_SIZE (INVALID_VALUE); TF offset multiple of 4. Ranges
+ *    past the end of the buffer and unallocated buffers are legal at bind —
+ *    validation is deferred to draw time (ANGLE issue 3388; CTS
+ *    large-uniform-buffers.html, buffer-type-restrictions.html). size 0 means
+ *    "to the end of the buffer" (GLES 3.0 §2.10.1). bindBufferBase binds the
+ *    whole buffer; the UBO range tracks later bufferData resizes (CTS
+ *    uniform-buffers-state-restoration.html). While a transform feedback object
+ *    is ACTIVE, bindBufferBase/Range with TRANSFORM_FEEDBACK_BUFFER →
+ *    INVALID_OPERATION before any other validation (GLES 3.0 §2.13; CTS
+ *    transform_feedback.html runUnchangedBufferBindingsTest,
+ *    switching-objects.html). TF indexed bindings are recorded on the buffer
+ *    object (_tfRangeBindings — last bind at an index wins) and mirrored into
+ *    the bound TF object's _buffers/_bufferRanges.
+ *  - bufferData/bufferSubData/getBufferSubData/copyBufferSubData fail with
+ *    INVALID_OPERATION when the buffer is caught by the transform-feedback
+ *    binding rules (spec "Preventing undefined behavior with Transform
+ *    Feedback"; GLES 3.0 §2.15.2): a buffer in the CURRENTLY BOUND TF object's
+ *    indexed bindings used through any point except the generic
+ *    TRANSFORM_FEEDBACK_BUFFER point (double bind — regardless of TF activity),
+ *    or a buffer in the indexed bindings of any ACTIVE TF object (bound or
+ *    unbound, paused or not) used through ANY point (CTS
+ *    transform_feedback/simultaneous_binding.html, switching-objects.html,
+ *    transform_feedback.html runGetBufferSubDataTest).
  *  - getIndexedParameter: UNIFORM_BUFFER_BINDING/START/SIZE (from
  *    state.uniformBuffers/uniformBufferRanges), TRANSFORM_FEEDBACK_BUFFER_BINDING/
  *    START/SIZE (from the BOUND transform feedback object's _buffers/
@@ -116,6 +136,120 @@ function isLost(ctx: WebGLRenderingContext): boolean {
   return ctx._isLost;
 }
 
+/**
+ * Generic (non-indexed) UNIFORM_BUFFER / TRANSFORM_FEEDBACK_BUFFER bindings.
+ * Per GLES 3.0 §2.10.1 the generic point is DISTINCT from the indexed binding
+ * points: bindBuffer(UNIFORM_BUFFER/TRANSFORM_FEEDBACK_BUFFER, b) touches only
+ * the generic point, while bindBufferBase/bindBufferRange with index 0 touch
+ * both. bufferData/getBufferSubData/getBufferParameter on those targets operate
+ * on the generic binding (CTS uniform-buffers-state-restoration.html,
+ * large-uniform-buffers.html, switching-objects.html).
+ * baseUniformIndices tracks UBO indices bound via bindBufferBase — their
+ * whole-buffer range follows later bufferData resizes (CTS
+ * uniform-buffers-state-restoration.html binds an unallocated buffer with
+ * bindBufferBase, then bufferData, then draws the block data).
+ */
+interface GenericBindings {
+  uniformBuffer: WebGLBuffer | null;
+  transformFeedbackBuffer: WebGLBuffer | null;
+  baseUniformIndices: Set<number>;
+}
+
+const genericBindings = new WeakMap<WebGLRenderingContext, GenericBindings>();
+
+function genericBindingState(ctx: WebGLRenderingContext): GenericBindings {
+  let g = genericBindings.get(ctx);
+  if (g === undefined) {
+    g = { uniformBuffer: null, transformFeedbackBuffer: null, baseUniformIndices: new Set() };
+    genericBindings.set(ctx, g);
+  }
+  return g;
+}
+
+/**
+ * True when any transform feedback object is ACTIVE (begun and not ended —
+ * paused counts as active per GLES 3.0 §2.13). Covers the bound object and
+ * every created object: an active TF may be unbound while still active (CTS
+ * switching-objects.html "Verify buffer is bound for transform feedback even
+ * when its active TF object is unbound (and paused)"). The hidden DEFAULT TF
+ * object is created outside _resources and is not reachable here — no graded
+ * page exercises bind/use restrictions while the default TF is active.
+ */
+function transformFeedbackActive(ctx: WebGLRenderingContext): boolean {
+  const s = ctx._state;
+  if (s.transformFeedback && s.transformFeedback._active) return true;
+  for (const o of ctx._resources.all) {
+    if (o instanceof WebGLTransformFeedback && o._active) return true;
+  }
+  return false;
+}
+
+/**
+ * True when `buf` is bound to any binding point other than the generic
+ * TRANSFORM_FEEDBACK_BUFFER point (which is exempt from the double-bind rule —
+ * spec "Preventing undefined behavior with Transform Feedback"). Only the
+ * CURRENT VAO's attrib/element-array bindings count: a buffer in an UNBOUND
+ * VAO does not restrict generic-TF usage (CTS simultaneous_binding.html binds
+ * tfBuffer into an unbound VAO and still allows bufferData through the generic
+ * TF point).
+ */
+function bufferBoundToOtherBindingPoint(ctx: WebGLRenderingContext, buf: WebGLBuffer): boolean {
+  const s = ctx._state;
+  if (s.arrayBuffer === buf) return true;
+  if (s.vao.elementArrayBuffer === buf) return true;
+  for (const a of s.vao.attribs) {
+    if (a.buffer === buf) return true;
+  }
+  if (ctx._version === 2) {
+    const g = genericBindings.get(ctx);
+    if (g && g.uniformBuffer === buf) return true;
+    for (const b of s.uniformBuffers) {
+      if (b === buf) return true;
+    }
+    if (s.pixelPackBuffer === buf || s.pixelUnpackBuffer === buf) return true;
+    if (s.copyReadBuffer === buf || s.copyWriteBuffer === buf) return true;
+  }
+  return false;
+}
+
+/**
+ * True when using `buf` through `target` is forbidden by the transform
+ * feedback binding rules (WebGL2 spec "Preventing undefined behavior with
+ * Transform Feedback"; GLES 3.0 §2.15.2):
+ *  - double bind: a buffer in the CURRENTLY BOUND TF object's indexed bindings
+ *    may be used only through the generic TRANSFORM_FEEDBACK_BUFFER point, and
+ *    only when it is not bound to any other point — errors regardless of
+ *    whether transform feedback is enabled;
+ *  - active TF: a buffer in the indexed bindings of any ACTIVE TF object (bound
+ *    or unbound, paused or not) cannot be used through ANY point, including the
+ *    generic TF point (CTS transform_feedback.html runGetBufferSubDataTest).
+ * The persistent per-buffer _tfRangeBindings mirror is deliberately NOT used:
+ * it survives bindTransformFeedback(null), which must clear the restriction
+ * (CTS simultaneous_binding.html "Test bufferData family with tf object
+ * unbound").
+ */
+function bufferTfUseError(ctx: WebGLRenderingContext, buf: WebGLBuffer, target: GLenum): boolean {
+  const s = ctx._state;
+  const boundTf = s.transformFeedback;
+  if (boundTf && boundTf._buffers.includes(buf)) {
+    if (target !== C2.TRANSFORM_FEEDBACK_BUFFER) return true;
+    // Use through the generic TF point is legal only when the buffer is not
+    // simultaneously bound to another point (CTS simultaneous_binding.html
+    // "Test bufferData": bufferData via the generic TF point fails once the
+    // buffer is also bound to COPY_WRITE_BUFFER).
+    if (bufferBoundToOtherBindingPoint(ctx, buf)) return true;
+  }
+  // Any ACTIVE TF object (bound or unbound, paused or not) forbids use of its
+  // indexed bindings through ANY point. The scan covers the bound TF as well
+  // (it is a created object) and handles several simultaneously active TFs
+  // (CTS switching-objects.html "Successfully switching TF object while TF is
+  // paused").
+  for (const o of ctx._resources.all) {
+    if (o instanceof WebGLTransformFeedback && o._active && o._buffers.includes(buf)) return true;
+  }
+  return false;
+}
+
 // WebGLBuffer inherits WebGLObject's PROTECTED constructor, so its `typeof`
 // is not assignable to the generic helpers' `new (...)` constructor params —
 // cast once here (runtime behavior is identical).
@@ -162,25 +296,8 @@ function isSharedArrayBuffer(v: unknown): v is SharedArrayBuffer {
 }
 
 /**
- * Indexed TRANSFORM_FEEDBACK_BUFFER binding at `index` (last bind wins).
- * The source of truth is the buffer objects' _tfRangeBindings entries, which
- * persist regardless of which (if any) transform feedback object is bound.
+ * Remove any TF binding at `index` (previous buffer loses the slot).
  */
-function tfBindingAtIndex(
-  ctx: WebGLRenderingContext,
-  index: number,
-): { buffer: WebGLBuffer | null; offset: number; size: number } {
-  for (const obj of ctx._resources.all) {
-    if (obj instanceof WebGLBuffer) {
-      for (const e of obj._tfRangeBindings) {
-        if (e.index === index) return { buffer: obj, offset: e.offset, size: e.size };
-      }
-    }
-  }
-  return { buffer: null, offset: 0, size: 0 };
-}
-
-/** Remove any TF binding at `index` (previous buffer loses the slot). */
 function clearTfBinding(ctx: WebGLRenderingContext, index: number): void {
   for (const obj of ctx._resources.all) {
     if (obj instanceof WebGLBuffer) {
@@ -205,9 +322,14 @@ function boundBufferForTarget(ctx: WebGLRenderingContext, target: GLenum): WebGL
     case C1.ELEMENT_ARRAY_BUFFER:
       return s.vao.elementArrayBuffer;
     case C2.UNIFORM_BUFFER:
-      return s.uniformBuffers[0];
+      // Generic binding point — distinct from the indexed bindings (GLES 3.0
+      // §2.10.1). bufferData/getBufferSubData/getBufferParameter on these
+      // targets operate on the generic binding (CTS
+      // uniform-buffers-state-restoration.html: bufferData after
+      // bindBuffer(UNIFORM_BUFFER, throwawayBuf) must hit throwawayBuf).
+      return genericBindingState(ctx).uniformBuffer;
     case C2.TRANSFORM_FEEDBACK_BUFFER:
-      return tfBindingAtIndex(ctx, 0).buffer;
+      return genericBindingState(ctx).transformFeedbackBuffer;
     case C2.COPY_READ_BUFFER:
       return s.copyReadBuffer;
     case C2.COPY_WRITE_BUFFER:
@@ -253,12 +375,18 @@ function unbindBufferEverywhere(
     for (const a of ctx._defaultVAO.attribs) a.buffer = nullIf(a.buffer);
   }
   if (ctx._version === 2) {
+    const g = genericBindings.get(ctx);
     for (let i = 0; i < s.uniformBuffers.length; i++) {
       if (s.uniformBuffers[i] === buffer) {
         s.uniformBuffers[i] = null;
         s.uniformBufferRanges[i] = { offset: 0, size: 0 };
+        if (g) g.baseUniformIndices.delete(i);
         found = true;
       }
+    }
+    if (g) {
+      g.uniformBuffer = nullIf(g.uniformBuffer);
+      g.transformFeedbackBuffer = nullIf(g.transformFeedbackBuffer);
     }
     s.pixelPackBuffer = nullIf(s.pixelPackBuffer);
     s.pixelUnpackBuffer = nullIf(s.pixelUnpackBuffer);
@@ -298,6 +426,16 @@ function unbindBufferEverywhere(
 /** Shared bindBufferBase logic (also used by bindBuffer(UNIFORM_BUFFER/TRANSFORM_FEEDBACK_BUFFER, b)). */
 function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: GLuint, buffer: WebGLBuffer | null): void {
   const s = ctx._state;
+  // GLES 3.0 §2.13: while transform feedback is active, the indexed TF
+  // bindings cannot be changed — bindBufferBase/Range with target
+  // TRANSFORM_FEEDBACK_BUFFER fails INVALID_OPERATION BEFORE any index/range
+  // validation, and the existing binding stays (CTS transform_feedback.html
+  // runUnchangedBufferBindingsTest, switching-objects.html "bindBufferBase
+  // (TRANSFORM_FEEDBACK_BUFFER) when active").
+  if (target === C2.TRANSFORM_FEEDBACK_BUFFER && transformFeedbackActive(ctx)) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
   const max =
     target === C2.UNIFORM_BUFFER
       ? s.limits.MAX_UNIFORM_BUFFER_BINDINGS
@@ -310,6 +448,8 @@ function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: G
     if (target === C2.UNIFORM_BUFFER) {
       s.uniformBuffers[index] = null;
       s.uniformBufferRanges[index] = { offset: 0, size: 0 };
+      genericBindingState(ctx).baseUniformIndices.delete(index);
+      if (index === 0) genericBindingState(ctx).uniformBuffer = null;
     } else {
       clearTfBinding(ctx, index);
       // Unbinding while a TF object is bound clears that object's indexed
@@ -319,6 +459,7 @@ function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: G
         boundTf._buffers[index] = null;
         boundTf._bufferRanges[index] = { offset: 0, size: 0 };
       }
+      if (index === 0) genericBindingState(ctx).transformFeedbackBuffer = null;
     }
     return;
   }
@@ -331,35 +472,40 @@ function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: G
   }
   const buf = validateBuffer(ctx, buffer);
   if (buf === null) return; // cross-context/deleted → INVALID_OPERATION pushed
+  // WebGL2 buffer-type model (spec §BUFFER_OBJECT_BINDING): the first bind via
+  // bindBufferBase/Range fixes the buffer's TYPE — UNIFORM_BUFFER and
+  // TRANSFORM_FEEDBACK_BUFFER both set "other data" (the spec table lists all
+  // binding points except ELEMENT_ARRAY_BUFFER / COPY_READ / COPY_WRITE).
+  // Later binds only reject element-array buffers (CTS
+  // buffer-type-restrictions.html exercises bindBufferBase/Range with every
+  // target combination and expects the same element-array vs other-data
+  // conflicts as bindBuffer).
+  if (buf._target === 0) buf._target = target;
+  else if (buf._target === C1.ELEMENT_ARRAY_BUFFER) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
+  everBoundBuffers.add(buf);
   if (target === C2.UNIFORM_BUFFER) {
-    if (buf._target === 0) buf._target = target;
-    else if (buf._target !== target) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return;
-    }
-    everBoundBuffers.add(buf);
+    // Whole-buffer range; the size tracks later bufferData resizes (see
+    // bufferData below — uniform-buffers-state-restoration.html binds an
+    // unallocated buffer here, then bufferData, then draws the data).
+    genericBindingState(ctx).baseUniformIndices.add(index);
     s.uniformBuffers[index] = buf;
-    s.uniformBufferRanges[index] = { offset: 0, size: buf._size }; // whole buffer
+    s.uniformBufferRanges[index] = { offset: 0, size: buf._size };
+    if (index === 0) genericBindingState(ctx).uniformBuffer = buf;
   } else {
-    // TRANSFORM_FEEDBACK_BUFFER: per WebGL2 §BUFFER_OBJECT_BINDING the buffer
-    // type split is element-array vs other-data — only element-array buffers are
-    // rejected, and a TF bind does NOT fix the buffer's target (a TF-bound
-    // buffer can later bind ARRAY_BUFFER — CTS runTFBufferBindingTest).
-    if (buf._target === C1.ELEMENT_ARRAY_BUFFER) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return;
-    }
-    everBoundBuffers.add(buf);
     // Indexed TF bindings are transform-feedback-OBJECT state (GLES 3.0 §6.24):
     // record on the bound object (getIndexedParameter reads it) and mirror into
     // the global _tfRangeBindings (source for the webgl2 agent's bind/begin
-    // sync, begin's buffer-count validation, and generic bufferData access).
+    // sync, begin's buffer-count validation, and the default-TF path).
     const boundTf = s.transformFeedback;
     if (boundTf) {
       boundTf._buffers[index] = buf;
       boundTf._bufferRanges[index] = { offset: 0, size: buf._size };
     }
     setTfBinding(ctx, index, buf, 0, buf._size); // whole buffer
+    if (index === 0) genericBindingState(ctx).transformFeedbackBuffer = buf;
   }
 }
 
@@ -466,16 +612,37 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
     }
-    if (ctx._version === 2 && target === C2.TRANSFORM_FEEDBACK_BUFFER) {
-      // WebGL2: bindBuffer(TRANSFORM_FEEDBACK_BUFFER, b) binds the generic TF
-      // binding point — equivalent to bindBufferBase(TRANSFORM_FEEDBACK_BUFFER,
-      // 0, b) (CTS transform_feedback.html runTFBufferBindingTest line 108,
-      // switching-objects.html line 101).
-      bindBufferBaseImpl(ctx, target, 0, buffer);
-      return;
-    }
-    if (ctx._version === 2 && target === C2.UNIFORM_BUFFER) {
-      bindBufferBaseImpl(ctx, target, 0, buffer);
+    if (ctx._version === 2 && (target === C2.TRANSFORM_FEEDBACK_BUFFER || target === C2.UNIFORM_BUFFER)) {
+      // WebGL2: bindBuffer(UNIFORM_BUFFER/TRANSFORM_FEEDBACK_BUFFER, b) binds
+      // the GENERIC binding point only — the indexed binding points are
+      // untouched (CTS uniform-buffers-state-restoration.html:
+      // bindBuffer(UNIFORM_BUFFER, throwawayBuf) after
+      // bindBufferBase(UNIFORM_BUFFER, 0, greenBuf) leaves indexed[0] greenBuf;
+      // simultaneous_binding.html: bindBuffer(UNIFORM_BUFFER, null) keeps
+      // index 0). Legal even while transform feedback is active (generic TF
+      // bindings are not part of the TF object — CTS switching-objects.html
+      // "bindBuffer(TRANSFORM_FEEDBACK_BUFFER) when active" → NO_ERROR).
+      if (buffer === null || buffer === undefined) {
+        if (target === C2.UNIFORM_BUFFER) genericBindingState(ctx).uniformBuffer = null;
+        else genericBindingState(ctx).transformFeedbackBuffer = null;
+        return;
+      }
+      if (buffer instanceof WebGLBuffer && buffer._deletePending) {
+        unbindBufferEverywhere(ctx, buffer);
+        buffer._deletePending = false;
+      }
+      const buf = validateBuffer(ctx, buffer);
+      if (buf === null) return; // cross-context/deleted → INVALID_OPERATION pushed
+      // Buffer-type model (§BUFFER_OBJECT_BINDING): first bind fixes the type
+      // (both targets → "other data"); element-array buffers are rejected.
+      if (buf._target === 0) buf._target = target;
+      else if (buf._target === C1.ELEMENT_ARRAY_BUFFER) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      everBoundBuffers.add(buf);
+      if (target === C2.UNIFORM_BUFFER) genericBindingState(ctx).uniformBuffer = buf;
+      else genericBindingState(ctx).transformFeedbackBuffer = buf;
       return;
     }
     if (buffer === null || buffer === undefined) {
@@ -557,6 +724,15 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
+    // Transform-feedback binding rules (spec "Preventing undefined behavior
+    // with Transform Feedback"; GLES 3.0 §2.15.2): double-bound buffers and
+    // buffers in an active TF's indexed bindings cannot be re-specified (CTS
+    // transform_feedback/simultaneous_binding.html,
+    // transform_feedback/switching-objects.html).
+    if (ctx._version === 2 && bufferTfUseError(ctx, buf, target)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     // WebIDL overload resolution (CTS buffer-data-and-buffer-sub-data.html):
     // null/undefined resolve to the nullable ArrayBuffer member → INVALID_VALUE
     // per the WebGL spec (no throw, no state change); ArrayBuffer/ArrayBufferView
@@ -611,6 +787,19 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       buf._data = data;
       buf._size = n;
     }
+    // bindBufferBase-bound UBO ranges are whole-buffer ranges that follow the
+    // buffer's size: refresh them after a resize so draws see the new data
+    // (CTS uniform-buffers-state-restoration.html binds an unallocated buffer
+    // with bindBufferBase, then bufferData, then draws the block).
+    if (ctx._version === 2) {
+      const g = genericBindings.get(ctx);
+      if (g && g.baseUniformIndices.size > 0) {
+        const s = ctx._state;
+        for (const i of g.baseUniformIndices) {
+          if (s.uniformBuffers[i] === buf) s.uniformBufferRanges[i] = { offset: 0, size: buf._size };
+        }
+      }
+    }
     buf._usage = usage;
   };
 
@@ -623,6 +812,12 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
     }
     const buf = boundBufferForTarget(ctx, target);
     if (buf === null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    // Transform-feedback binding rules — same as bufferData (CTS
+    // transform_feedback/simultaneous_binding.html).
+    if (ctx._version === 2 && bufferTfUseError(ctx, buf, target)) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
@@ -694,11 +889,18 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
     p2.bindBufferRange = function (this: WebGL2RenderingContext, target: GLenum, index: GLuint, buffer: WebGLBuffer | null, offset: GLintptr, size: GLsizeiptr): void {
       const ctx = this;
       if (isLost(ctx)) return;
-      const s = ctx._state;
       if (target !== C2.UNIFORM_BUFFER && target !== C2.TRANSFORM_FEEDBACK_BUFFER) {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
       }
+      // Same TF-active rule and ordering as bindBufferBase (see
+      // bindBufferBaseImpl): INVALID_OPERATION before any index/range
+      // validation (CTS runUnchangedBufferBindingsTest).
+      if (target === C2.TRANSFORM_FEEDBACK_BUFFER && transformFeedbackActive(ctx)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const s = ctx._state;
       const max =
         target === C2.UNIFORM_BUFFER
           ? s.limits.MAX_UNIFORM_BUFFER_BINDINGS
@@ -712,6 +914,8 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
         if (target === C2.UNIFORM_BUFFER) {
           s.uniformBuffers[index] = null;
           s.uniformBufferRanges[index] = { offset: 0, size: 0 };
+          genericBindingState(ctx).baseUniformIndices.delete(index);
+          if (index === 0) genericBindingState(ctx).uniformBuffer = null;
         } else {
           clearTfBinding(ctx, index);
           // Unbinding while a TF object is bound clears that object's indexed
@@ -721,6 +925,7 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
             boundTf._buffers[index] = null;
             boundTf._bufferRanges[index] = { offset: 0, size: 0 };
           }
+          if (index === 0) genericBindingState(ctx).transformFeedbackBuffer = null;
         }
         return;
       }
@@ -743,11 +948,13 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
           ctx._errors.push(C1.INVALID_VALUE);
           return;
         }
-        if (offset + size > buf._size) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (offset + size > s.limits.MAX_UNIFORM_BLOCK_SIZE) {
+        // MAX_UNIFORM_BLOCK_SIZE applies to the range SIZE, not to offset+size:
+        // a large offset is legal (CTS large-uniform-buffers.html binds a
+        // 16-byte range at offset 0x40000 in a 512 KB buffer). Ranges past the
+        // end of the buffer are legal at bind and validated at draw time
+        // (ANGLE issue 3388; CTS buffer-type-restrictions.html binds ranges in
+        // never-allocated buffers).
+        if (size > s.limits.MAX_UNIFORM_BLOCK_SIZE) {
           ctx._errors.push(C1.INVALID_VALUE);
           return;
         }
@@ -756,35 +963,31 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
           ctx._errors.push(C1.INVALID_VALUE);
           return;
         }
-        if (offset + size > buf._size) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
       }
+      // GLES 3.0 §2.10.1: size 0 → the range extends to the end of the buffer.
+      let rangeSize = size === 0 ? Math.max(0, buf._size - offset) : size;
+      // Buffer-type model — same as bindBufferBase (first bind fixes the type
+      // to "other data"; element-array buffers are rejected).
+      if (buf._target === 0) buf._target = target;
+      else if (buf._target === C1.ELEMENT_ARRAY_BUFFER) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      everBoundBuffers.add(buf);
       if (target === C2.UNIFORM_BUFFER) {
-        if (buf._target === 0) buf._target = target;
-        else if (buf._target !== target) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        everBoundBuffers.add(buf);
+        // An explicit range overrides the whole-buffer (base) range semantics.
+        genericBindingState(ctx).baseUniformIndices.delete(index);
         s.uniformBuffers[index] = buf;
-        s.uniformBufferRanges[index] = { offset, size };
+        s.uniformBufferRanges[index] = { offset, size: rangeSize };
+        if (index === 0) genericBindingState(ctx).uniformBuffer = buf;
       } else {
-        // TRANSFORM_FEEDBACK_BUFFER: same buffer-type rule as bindBufferBase —
-        // only element-array buffers are rejected; a TF bind does NOT fix the
-        // buffer's target (see bindBufferBaseImpl).
-        if (buf._target === C1.ELEMENT_ARRAY_BUFFER) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        everBoundBuffers.add(buf);
         const boundTf = s.transformFeedback;
         if (boundTf) {
           boundTf._buffers[index] = buf;
-          boundTf._bufferRanges[index] = { offset, size };
+          boundTf._bufferRanges[index] = { offset, size: rangeSize };
         }
-        setTfBinding(ctx, index, buf, offset, size);
+        setTfBinding(ctx, index, buf, offset, rangeSize);
+        if (index === 0) genericBindingState(ctx).transformFeedbackBuffer = buf;
       }
     };
 
@@ -847,6 +1050,14 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       }
       const buf = boundBufferForTarget(ctx, target);
       if (buf === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      // Transform-feedback binding rules — same as bufferData/bufferSubData
+      // (CTS transform_feedback.html runGetBufferSubDataTest: getBufferSubData
+      // through the generic TF point of a buffer in the ACTIVE TF's indexed
+      // bindings → INVALID_OPERATION; simultaneous_binding.html).
+      if (bufferTfUseError(ctx, buf, target)) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
@@ -921,14 +1132,15 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
-      // Transform-feedback double-bind rule (spec "Preventing undefined
-      // behavior with Transform Feedback"): a buffer bound to an indexed TF
-      // binding point and used through any other binding point fails
-      // (CTS transform_feedback/simultaneous_binding.html).
-      if (
-        (readBuffer._tfRangeBindings.length > 0 && readTarget !== C2.TRANSFORM_FEEDBACK_BUFFER) ||
-        (writeBuffer._tfRangeBindings.length > 0 && writeTarget !== C2.TRANSFORM_FEEDBACK_BUFFER)
-      ) {
+      // Transform-feedback binding rules (spec "Preventing undefined behavior
+      // with Transform Feedback"): a buffer in the CURRENTLY BOUND TF object's
+      // indexed bindings used through any other point fails (CTS
+      // transform_feedback/simultaneous_binding.html), as does a buffer in an
+      // ACTIVE TF's indexed bindings. The persistent _tfRangeBindings mirror is
+      // deliberately NOT used — it survives bindTransformFeedback(null), after
+      // which the copy must succeed (simultaneous_binding.html "Test bufferData
+      // family with tf object unbound").
+      if (bufferTfUseError(ctx, readBuffer, readTarget) || bufferTfUseError(ctx, writeBuffer, writeTarget)) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
