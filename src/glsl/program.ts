@@ -321,6 +321,16 @@ export interface VertexExecCtx extends BaseExecCtx {
     pointSize: number;
     /** Packed varying values per Program.varyings order (preallocated). */
     varyings: Float32Array;
+    /**
+     * gl_ClipDistance values (Float32Array(8), zeroed per draw — gl/ packs
+     * them into vertex-record slots 5-12 for raster). Present when the shader
+     * writes gl_ClipDistance; gl/draw.ts always provides it. Optional so
+     * hand-built selftest ctxs that don't exercise the builtin stay valid.
+     */
+    clipDistance?: Float32Array;
+    /** gl_CullDistance values (Float32Array(8), zeroed per draw — record
+     *  slots 13-20). Same optionality as `clipDistance`. */
+    cullDistance?: Float32Array;
   };
 }
 
@@ -349,6 +359,15 @@ export interface FragmentExecCtx extends BaseExecCtx {
   pointCoord: Float32Array;
   /** Reset by raster before run(); `discard` compiles to `discarded = true; return`. */
   discarded: boolean;
+  /**
+   * Interpolated gl_ClipDistance values per fragment (Float32Array(8);
+   * raster fills them from the vertex record with perspective-correct
+   * interpolation; unwritten slots stay 0). Optional so hand-built selftest
+   * ctxs that don't exercise the builtin stay valid.
+   */
+  clipDistance?: Float32Array;
+  /** Interpolated gl_CullDistance values per fragment (Float32Array(8)). */
+  cullDistance?: Float32Array;
   out: {
     /** Color per output location (preallocated Float32Array(4) each). */
     color: Float32Array[];

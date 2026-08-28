@@ -2,11 +2,18 @@
  * selftest-clip-cull.ts — GL_ANGLE_clip_cull_distance builtins
  * (gl_ClipDistance / gl_CullDistance float[8], gl_MaxCullDistances /
  * gl_MaxCombinedClipAndCullDistances) end to end: compile gating, codegen
- * lowering, and vertex-scratch round-trips.
+ * lowering, and record-transport round-trips.
+ *
+ * Transport model (wave-15/16 contract): VERTEX writes/reads land in
+ * ctx.out.clipDistance/cullDistance (Float32Array(8), zeroed per draw by
+ * gl/ — the record slots 5-12/13-20); FRAGMENT reads the interpolated
+ * ctx.clipDistance/cullDistance that raster fills per fragment. Self-reads
+ * (gl_ClipDistance[4] = gl_ClipDistance[0]) round-trip through ctx.out — the
+ * value read is the one being written this invocation.
  *
  * Every check FAILS on pre-fix code: the variables/constants were absent from
  * the 300 table (undeclared identifier), subPIdx threw "cannot index builtin",
- * and there was no scratch transport at all.
+ * and there was no transport at all.
  *
  * Run: npx tsx src/glsl/codegen/selftest-clip-cull.ts
  * Prints "selftest-clip-cull: N checks" and exits 0 only when all pass.
@@ -57,6 +64,10 @@ function fragmentCtx(prog: Program, extra: Record<string, unknown> = {}): any {
     frontFacing: true,
     pointCoord: new Float32Array([0, 0]),
     varyings: [],
+    // Interpolated clip/cull distances (raster fills them per fragment;
+    // zeroed here so unwritten slots read 0).
+    clipDistance: new Float32Array(8),
+    cullDistance: new Float32Array(8),
     ...extra,
   };
 }
@@ -69,7 +80,14 @@ function vertexCtx(prog: Program, extra: Record<string, unknown> = {}): any {
     blockIntStores: [],
     scratch: new Float32Array(Math.max(prog.scratchSize, 16)),
     intScratch: new Int32Array(Math.max(prog.intScratchSize, 16)),
-    out: { position: new Float32Array(4), pointSize: 0, varyings: new Float32Array(32) },
+    out: {
+      position: new Float32Array(4),
+      pointSize: 0,
+      varyings: new Float32Array(32),
+      // Transport arrays (gl zeroes them per draw; selftest mirrors that).
+      clipDistance: new Float32Array(8),
+      cullDistance: new Float32Array(8),
+    },
     attribs: [],
     attribIndices: new Int32Array(16),
     vertexId: 0,
@@ -253,7 +271,7 @@ void main()
 }
 
 /* ------------------------------------------------------------------ */
-/* g. RUNTIME round-trip through the vertex scratch:                   */
+/* g. RUNTIME round-trip through ctx.out.clipDistance:                 */
 /*    gl_ClipDistance[0] = dot(gl_Position, plane);                    */
 /*    gl_ClipDistance[4] = gl_ClipDistance[0];  cd = gl_ClipDistance[4] */
 /* ------------------------------------------------------------------ */
@@ -280,7 +298,6 @@ void main()
   check(l.ok, `g: link succeeds (${l.ok ? '' : l.log})`);
   if (l.ok) {
     const p = l.program;
-    check(p.scratchSize >= 8, `g: program.scratchSize covers the 8-float clip store (got ${p.scratchSize})`);
     const vctx = vertexCtx(p, {
       attribs: [new Float32Array([0.25, 0.25, 0, 1])],
       attribIndices: new Int32Array([0]),
@@ -294,20 +311,21 @@ void main()
     check(threw === null, `g: vertex.run must not throw (${threw ? threw.message : ''})`);
     const cd = vctx.out.varyings[0];
     // dot(vec4(0.25,0.25,0,1), vec4(1,0,0,0.5)) = 0.25 + 0.5 = 0.75.
-    check(Math.abs(cd - 0.75) < 1e-6, `g: varying cd carries the scratch round-trip value 0.75 (got ${cd})`);
+    check(Math.abs(cd - 0.75) < 1e-6, `g: varying cd carries the round-trip value 0.75 (got ${cd})`);
     // Both the direct write (index 0) and the self-read copy (index 4)
-    // landed in the scratch store.
-    const scratch = vctx.scratch;
+    // landed in the transport array; unwritten slots stay 0 (gl zeroes the
+    // array per draw).
+    const cdArr = vctx.out.clipDistance;
     check(
-      Math.abs(scratch[0] - 0.75) < 1e-6 && Math.abs(scratch[4] - 0.75) < 1e-6,
-      `g: scratch[0]=scratch[4]=0.75 (got [${Array.from(scratch.slice(0, 8)).join(', ')}])`,
+      Math.abs(cdArr[0] - 0.75) < 1e-6 && Math.abs(cdArr[4] - 0.75) < 1e-6 && cdArr[7] === 0,
+      `g: ctx.out.clipDistance[0]=[4]=0.75, [7]=0 (got [${Array.from(cdArr.slice(0, 8)).join(', ')}])`,
     );
   }
 }
 
 /* ------------------------------------------------------------------ */
 /* g2. RUNTIME dynamic index: gl_ClipDistance[i] with a uniform i      */
-/*     strides the scratch correctly (const + dynamic mixed).          */
+/*     strides the transport array correctly (const + dynamic mixed).  */
 /* ------------------------------------------------------------------ */
 
 {
@@ -340,15 +358,16 @@ void main()
     p.intStore[iLoc] = 3;
     p.vertex.run(vctx);
     check(
-      Math.abs(vctx.out.varyings[0] - 0.5) < 1e-6 && Math.abs(vctx.scratch[3] - 0.5) < 1e-6,
-      `g2: dynamic i=3 writes/reads scratch[3] (cd=${vctx.out.varyings[0]}, scratch=${Array.from(vctx.scratch.slice(0, 8)).join(',')})`,
+      Math.abs(vctx.out.varyings[0] - 0.5) < 1e-6 && Math.abs(vctx.out.clipDistance[3] - 0.5) < 1e-6,
+      `g2: dynamic i=3 writes/reads ctx.out.clipDistance[3] (cd=${vctx.out.varyings[0]}, arr=${Array.from(vctx.out.clipDistance.slice(0, 8)).join(',')})`,
     );
   }
 }
 
 /* ------------------------------------------------------------------ */
 /* h. RUNTIME zero-default: VS does NOT write gl_ClipDistance; the FS  */
-/*    reads gl_ClipDistance[0] into the color → 0.                     */
+/*    reads gl_ClipDistance[0] into the color → 0 (raster fills the    */
+/*    interpolated ctx.clipDistance per fragment; unwritten = 0).      */
 /* ------------------------------------------------------------------ */
 
 {
@@ -381,8 +400,75 @@ void main()
     const c = fctx.out.color[0];
     check(
       c[0] === 0 && c[1] === 0 && c[2] === 0 && c[3] === 0,
-      `h: FS output is (0,0,0,0) — un-transported reads default to 0 (got [${Array.from(c).join(', ')}])`,
+      `h: FS output is (0,0,0,0) — unwritten clip slots read 0 (got [${Array.from(c).join(', ')}])`,
     );
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* k. TRANSPORT round-trip: a VS writing gl_ClipDistance[0] = -v.y     */
+/*    lands in ctx.out.clipDistance[0] (the gl record slot source); an */
+/*    FS read returns the interpolated value when raster provides      */
+/*    ctx.clipDistance (here fed from the VS output).                  */
+/* ------------------------------------------------------------------ */
+
+{
+  const vs = mustCompile(
+    `#version 300 es
+#extension GL_ANGLE_clip_cull_distance : require
+in vec2 a_position;
+void main()
+{
+  gl_Position = vec4(a_position, 0.0, 1.0);
+  gl_ClipDistance[0] = -a_position.y;
+}`,
+    'VERTEX',
+    300,
+    'k: VS writing gl_ClipDistance[0] = -a_position.y',
+    EXT,
+  );
+  const l = linkProgram(vs!, fsTrivial.shader);
+  check(l.ok, `k: link succeeds (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    const vctx = vertexCtx(p, {
+      attribs: [new Float32Array([0.25, 0.75, 0, 1])],
+      attribIndices: new Int32Array([0]),
+    });
+    p.vertex.run(vctx);
+    check(
+      Math.abs(vctx.out.clipDistance[0] - -0.75) < 1e-6,
+      `k: ctx.out.clipDistance[0] carries -a_position.y = -0.75 (got ${vctx.out.clipDistance[0]})`,
+    );
+
+    const fs = mustCompile(
+      `#version 300 es
+#extension GL_ANGLE_clip_cull_distance : require
+precision highp float;
+out vec4 my_FragColor;
+void main()
+{
+  my_FragColor = vec4(gl_ClipDistance[0], 0.0, 0.0, 1.0);
+}`,
+      'FRAGMENT',
+      300,
+      'k: FS reading gl_ClipDistance[0]',
+      EXT,
+    );
+    const l2 = linkProgram(vsTrivial.shader, fs!);
+    check(l2.ok, `k: FS link succeeds (${l2.ok ? '' : l2.log})`);
+    if (l2.ok) {
+      const fctx = fragmentCtx(l2.program, {
+        // raster's per-fragment interpolation result (here: the VS value).
+        clipDistance: Float32Array.from(vctx.out.clipDistance),
+      });
+      l2.program.fragment.run(fctx);
+      const c = fctx.out.color[0];
+      check(
+        Math.abs(c[0] - -0.75) < 1e-6,
+        `k: FS read returns the interpolated ctx.clipDistance[0] = -0.75 (got ${c[0]})`,
+      );
+    }
   }
 }
 
@@ -414,7 +500,7 @@ void main()
 /* ------------------------------------------------------------------ */
 /* j. Whole-array identifier-level use: `float a[8]; a = gl_ClipDistance;` */
 /*    (legal ESSL 3.00 array assignment) — component-wise via the       */
-/*    const-index path (flatOff 0..7).                                 */
+/*    const-index path (flatOff 0..7) through ctx.out.clipDistance.     */
 /* ------------------------------------------------------------------ */
 
 {
@@ -447,7 +533,7 @@ void main()
     p.vertex.run(vctx);
     check(
       Math.abs(vctx.out.varyings[0] - 0.25) < 1e-6,
-      `j: whole-array copy reads the scratch (a[0]=0.25, a[7]=0 → cd=0.25; got ${vctx.out.varyings[0]})`,
+      `j: whole-array copy reads ctx.out.clipDistance (a[0]=0.25, a[7]=0 → cd=0.25; got ${vctx.out.varyings[0]})`,
     );
   }
 }

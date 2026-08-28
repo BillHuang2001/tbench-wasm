@@ -205,18 +205,20 @@ function leafRead(p: P, env: CodegenEnv, c: number): string {
         return `ctx.depthRange[${i}]`;
       case 'gl_ClipDistance':
       case 'gl_CullDistance': {
-        if (env.stage === 'FRAGMENT') {
-          // Interpolated clip/cull distances on the FragmentExecCtx
-          // (ctx.clipDistance[8]/ctx.cullDistance[8]) are a gl/raster task —
-          // reads default to 0 until the transport lands.
-          return '0';
-        }
-        // VERTEX: the scratch write-back (self-reads like
-        // `gl_ClipDistance[4] = gl_ClipDistance[0]` must round-trip). Single
-        // plane: vertex shaders never run dual mode.
-        const base = env.ensureClipScratch(p.builtin);
+        const arr = p.builtin === 'gl_ClipDistance' ? 'clipDistance' : 'cullDistance';
         const dyn = p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.stride}` : '';
-        return `ctx.scratch[${base} + ${i}${dyn}]`;
+        if (env.stage === 'FRAGMENT') {
+          // Interpolated per-fragment values: raster fills
+          // ctx.clipDistance[8]/ctx.cullDistance[8] from the vertex record
+          // (perspective-correct; unwritten slots are 0 — gl zeroes the
+          // arrays per draw).
+          return `ctx.${arr}[${i}${dyn}]`;
+        }
+        // VERTEX: reads see the value written this invocation (self-reads
+        // like `gl_ClipDistance[4] = gl_ClipDistance[0]` round-trip through
+        // ctx.out — the same convention as gl_Position); unwritten slots
+        // read 0 (gl zeroes the arrays per draw).
+        return `ctx.out.${arr}[${i}${dyn}]`;
       }
       default:
         throw new Error(`codegen: unsupported builtin '${p.builtin}'`);
@@ -363,9 +365,13 @@ function leafWrite(p: P, env: CodegenEnv, c: number): string {
           // stage); a fragment write fails here → link error.
           throw new Error(`codegen: '${p.builtin}' is read-only in fragment shaders`);
         }
-        const base = env.ensureClipScratch(p.builtin);
+        const arr = p.builtin === 'gl_ClipDistance' ? 'clipDistance' : 'cullDistance';
         const dyn = p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.stride}` : '';
-        return `ctx.scratch[${base} + ${i}${dyn}]`;
+        // Transport: gl packs ctx.out.clipDistance/cullDistance into the
+        // vertex record (slots 5-12 / 13-20), zeroed per draw — unwritten
+        // slots stay 0. Self-reads read the same arrays (see leafRead), so
+        // the value read is the one being written this invocation.
+        return `ctx.out.${arr}[${i}${dyn}]`;
       }
       default:
         throw new Error(`codegen: '${p.builtin}' is read-only`);
