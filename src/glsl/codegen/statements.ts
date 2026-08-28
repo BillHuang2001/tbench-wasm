@@ -437,10 +437,12 @@ function emitExprStmt(e: Expr, env: CodegenEnv, out: string[]): void {
     if (base === null || base === 'bool') throw new Error('codegen: cannot increment a bool');
     for (let c = 0; c < lv.targets.length; c++) {
       const tgt = lv.targets[c];
-      if (lv.bits && lv.bits[c]) {
-        // Packed uint varying cell (VERTEX): unpack the old value, increment
-        // with the uint wrap, repack (see packVaryingWrite).
-        out.push(`${tgt} = R.u2f(((${unpackVaryingCell(tgt)} + ${delta}) >>> 0));`);
+      const bitKind = lv.bits !== undefined ? lv.bits[c] : false;
+      if (bitKind) {
+        // Packed int/uint varying cell (VERTEX): unpack the old value,
+        // increment with the int32/uint32 wrap, repack (see packVaryingWrite).
+        const wrap = bitKind === 'int' ? '| 0' : '>>> 0';
+        out.push(`${tgt} = R.u2f(((${unpackVaryingCell(tgt, bitKind === 'int')} + ${delta}) ${wrap}));`);
       } else {
         out.push(
           base === 'float'
@@ -515,10 +517,11 @@ function emitAssignStmt(
       }
       const cop = op.replace('=', '');
       for (let c = 0; c < lv.targets.length; c++) {
-        // Packed uint varying cell (VERTEX): unpack the old value, apply the
-        // op with the uint wrap, repack (see packVaryingCompound).
-        if (lv.bits && lv.bits[c]) {
-          out.push(`${packVaryingCompound(cop, lv.targets[c], conv[c].v)};`);
+        const bitKind = lv.bits !== undefined ? lv.bits[c] : false;
+        // Packed int/uint varying cell (VERTEX): unpack the old value, apply
+        // the op with the int32/uint32 wrap, repack (see packVaryingCompound).
+        if (bitKind) {
+          out.push(`${packVaryingCompound(cop, lv.targets[c], conv[c].v, bitKind === 'int')};`);
         } else if (env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]) {
           // Dual mode, float target: linear ops (+=, -=) update all three planes
           // via dualWrite; non-linear compounds throw (C5a2 templates).
