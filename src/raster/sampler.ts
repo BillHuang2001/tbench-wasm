@@ -38,7 +38,10 @@
  *    ρ = max(ρx,ρy), ρx = max over axes of |∂coord_i/∂x|·size_i;
  *    λ = clamp(log2(ρ) + bias, minLod, maxLod) (bias added unclamped, GLES
  *    semantics — no GL_MAX_TEXTURE_LOD_BIAS in ES). Zero/absent derivatives
- *    → λ = minLod. textureLod passes the level directly. λ ≤ 0 → mag filter
+ *    → λ = minLod. Cube maps: ρx/ρy come from the derivatives of the
+ *    face-mapped coordinates (s = (sc/|ma|+1)/2 chain rule, see cubeRho) —
+ *    magnitude-invariant, matching deqp's computeCubeLodBoundsFromDerivates.
+ *    textureLod passes the level directly. λ ≤ 0 → mag filter
  *    at base level; λ > 0 → min filter.
  *    NEAREST_MIPMAP_NEAREST: level = round(λ); NEAREST_MIPMAP_LINEAR:
  *    floor(λ) + frac(λ) blend between d and d+1.
@@ -97,6 +100,10 @@ const _dir = new Float32Array(3);
 const _uv = new Float32Array(2);
 /** Cube corner tap = average of the other three taps. */
 const _cornerSum = new Float32Array(4);
+/** Cube face mapping scratch: {sc, tc, ma} (faceMap). */
+const _face: { sc: number; tc: number; ma: number } = { sc: 0, tc: 0, ma: 0 };
+/** Cube LOD footprint scratch: ρx/ρy (cubeRho). */
+const _rho: { x: number; y: number } = { x: 0, y: 0 };
 
 /* ================================================================== */
 /* Small helpers                                                       */
@@ -279,23 +286,29 @@ function lodGtZero(img: TextureImage, state: SamplerState, coord: SampleCoord, b
   let rhoY = 0;
   if (dx && dy) {
     const target = img.target;
-    let sx: number, sy: number, sz: number;
-    if (target === TEXTURE_CUBE_MAP) { sx = img.width; sy = img.height; sz = img.width; }
-    else if (target === TEXTURE_3D) { sx = img.width; sy = img.height; sz = img.depth; }
-    else { sx = img.width; sy = img.height; sz = 0; } // 2D / 2D_ARRAY: layer not filtered
-    rhoX = Math.abs(dx[0]) * sx;
-    const dyx = Math.abs(dx[1]) * sy;
-    if (dyx > rhoX) rhoX = dyx;
-    if (sz > 0 && dx.length > 2) {
-      const dzx = Math.abs(dx[2]) * sz;
-      if (dzx > rhoX) rhoX = dzx;
-    }
-    rhoY = Math.abs(dy[0]) * sx;
-    const dyy = Math.abs(dy[1]) * sy;
-    if (dyy > rhoY) rhoY = dyy;
-    if (sz > 0 && dy.length > 2) {
-      const dzy = Math.abs(dy[2]) * sz;
-      if (dzy > rhoY) rhoY = dzy;
+    if (target === TEXTURE_CUBE_MAP) {
+      if (cubeRho(img, coord.v, dx, dy, _rho)) {
+        rhoX = _rho.x;
+        rhoY = _rho.y;
+      }
+    } else {
+      let sx: number, sy: number, sz: number;
+      if (target === TEXTURE_3D) { sx = img.width; sy = img.height; sz = img.depth; }
+      else { sx = img.width; sy = img.height; sz = 0; } // 2D / 2D_ARRAY: layer not filtered
+      rhoX = Math.abs(dx[0]) * sx;
+      const dyx = Math.abs(dx[1]) * sy;
+      if (dyx > rhoX) rhoX = dyx;
+      if (sz > 0 && dx.length > 2) {
+        const dzx = Math.abs(dx[2]) * sz;
+        if (dzx > rhoX) rhoX = dzx;
+      }
+      rhoY = Math.abs(dy[0]) * sx;
+      const dyy = Math.abs(dy[1]) * sy;
+      if (dyy > rhoY) rhoY = dyy;
+      if (sz > 0 && dy.length > 2) {
+        const dzy = Math.abs(dy[2]) * sz;
+        if (dzy > rhoY) rhoY = dzy;
+      }
     }
   }
   if (rhoX === 0 && rhoY === 0) return false; // λ = minLod ≤ 0 (minLod > 0 returned above)
@@ -314,7 +327,9 @@ function lodGtZero(img: TextureImage, state: SamplerState, coord: SampleCoord, b
  * Implicit LOD: ρx = max over axes of |∂coord_i/∂x|·size_i (ρy likewise),
  * ρ = max(ρx, ρy), λ = clamp(log2(ρ) + bias, minLod, maxLod). Bias is added
  * unclamped (GLES has no GL_MAX_TEXTURE_LOD_BIAS). Zero/absent derivatives →
- * ρ = 0 → λ = minLod. Anisotropy applies to 2D with a mipmap min filter.
+ * ρ = 0 → λ = minLod. Cube maps use the face-mapped (s, t) chain rule instead
+ * (see cubeRho) — magnitude-invariant, matching deqp. Anisotropy applies to
+ * 2D with a mipmap min filter.
  */
 function computeLod(img: TextureImage, state: SamplerState, coord: SampleCoord, bias: number): number {
   const dx = coord.dx;
@@ -323,23 +338,29 @@ function computeLod(img: TextureImage, state: SamplerState, coord: SampleCoord, 
   let rhoY = 0;
   if (dx && dy) {
     const target = img.target;
-    let sx: number, sy: number, sz: number;
-    if (target === TEXTURE_CUBE_MAP) { sx = img.width; sy = img.height; sz = img.width; }
-    else if (target === TEXTURE_3D) { sx = img.width; sy = img.height; sz = img.depth; }
-    else { sx = img.width; sy = img.height; sz = 0; } // 2D / 2D_ARRAY: layer not filtered
-    rhoX = Math.abs(dx[0]) * sx;
-    const dyx = Math.abs(dx[1]) * sy;
-    if (dyx > rhoX) rhoX = dyx;
-    if (sz > 0 && dx.length > 2) {
-      const dzx = Math.abs(dx[2]) * sz;
-      if (dzx > rhoX) rhoX = dzx;
-    }
-    rhoY = Math.abs(dy[0]) * sx;
-    const dyy = Math.abs(dy[1]) * sy;
-    if (dyy > rhoY) rhoY = dyy;
-    if (sz > 0 && dy.length > 2) {
-      const dzy = Math.abs(dy[2]) * sz;
-      if (dzy > rhoY) rhoY = dzy;
+    if (target === TEXTURE_CUBE_MAP) {
+      if (cubeRho(img, coord.v, dx, dy, _rho)) {
+        rhoX = _rho.x;
+        rhoY = _rho.y;
+      }
+    } else {
+      let sx: number, sy: number, sz: number;
+      if (target === TEXTURE_3D) { sx = img.width; sy = img.height; sz = img.depth; }
+      else { sx = img.width; sy = img.height; sz = 0; } // 2D / 2D_ARRAY: layer not filtered
+      rhoX = Math.abs(dx[0]) * sx;
+      const dyx = Math.abs(dx[1]) * sy;
+      if (dyx > rhoX) rhoX = dyx;
+      if (sz > 0 && dx.length > 2) {
+        const dzx = Math.abs(dx[2]) * sz;
+        if (dzx > rhoX) rhoX = dzx;
+      }
+      rhoY = Math.abs(dy[0]) * sx;
+      const dyy = Math.abs(dy[1]) * sy;
+      if (dyy > rhoY) rhoY = dyy;
+      if (sz > 0 && dy.length > 2) {
+        const dzy = Math.abs(dy[2]) * sz;
+        if (dzy > rhoY) rhoY = dzy;
+      }
     }
   }
   let rho = rhoX > rhoY ? rhoX : rhoY;
@@ -531,8 +552,14 @@ function selectCubeFace(rx: number, ry: number, rz: number): number {
   return rx >= 0 ? 0 : 1;
 }
 
-/** Projects a direction onto `face`; writes [s, t] ∈ [0,1]² into `dst`. */
-function projectToFace(face: number, rx: number, ry: number, rz: number, dst: Float32Array): void {
+/**
+ * Cube face mapping (GLES 3.0 table 3.22 / deqp projectToFace): writes
+ * [sc, tc, ma] for `face` into `m` and returns ma (0 → degenerate direction,
+ * no dominant axis). Shared by the VALUE path (projectToFace) and the cube
+ * LOD chain rule (cubeRho), so the two paths use the SAME mapping and cannot
+ * drift.
+ */
+function faceMap(face: number, rx: number, ry: number, rz: number, m: { sc: number; tc: number; ma: number }): number {
   let sc: number, tc: number, ma: number;
   switch (face) {
     case 0: sc = -rz; tc = -ry; ma = rx; break;   // +X
@@ -542,6 +569,15 @@ function projectToFace(face: number, rx: number, ry: number, rz: number, dst: Fl
     case 4: sc = rx; tc = -ry; ma = rz; break;    // +Z
     default: sc = -rx; tc = -ry; ma = -rz; break; // −Z
   }
+  m.sc = sc;
+  m.tc = tc;
+  m.ma = ma;
+  return ma;
+}
+
+/** Projects a direction onto `face`; writes [s, t] ∈ [0,1]² into `dst`. */
+function projectToFace(face: number, rx: number, ry: number, rz: number, dst: Float32Array): void {
+  const ma = faceMap(face, rx, ry, rz, _face);
   if (ma === 0) {
     // Degenerate direction (e.g. vec3(0,0,0)): no dominant axis — fall back to
     // the face-center texel (0/0 would produce NaN, poisoning every compare).
@@ -549,8 +585,54 @@ function projectToFace(face: number, rx: number, ry: number, rz: number, dst: Fl
     dst[1] = 0.5;
     return;
   }
-  dst[0] = (sc / ma + 1) / 2;
-  dst[1] = (tc / ma + 1) / 2;
+  dst[0] = (_face.sc / ma + 1) / 2;
+  dst[1] = (_face.tc / ma + 1) / 2;
+}
+
+/**
+ * Cube-map footprint (ρx, ρy) — GLES 3.0 §3.8.9/3.8.10, deqp
+ * computeCubeLodBoundsFromDerivates. On the selected face
+ * s = (sc/|ma| + 1)/2, t = (tc/|ma| + 1)/2, so the chain rule gives
+ *   ∂s/∂x = ½·(∂sc/∂x·|ma| − sc·∂|ma|/∂x)/|ma|²,  ∂|ma|/∂x = sign(ma)·∂ma/∂x
+ * (and the same for t and y). deqp's verifier evaluates this with the
+ * MAGNITUDE of the major-axis derivative (|∂r_m/∂x| — the sign only flips
+ * the correction term, and only magnitudes enter ρ), and with the in-plane
+ * component indices below: the face-rotation sign flips of (sc, tc) cancel
+ * in the outer |·|, so faceMap's rotated components with raw derivative
+ * indices give IDENTICAL ρ to deqp's raw components.
+ * ρx = max(|∂s/∂x|, |∂t/∂x|)·faceSize, ρy likewise — the same structure as
+ * the 2D convention. Magnitude-invariant: scaling the direction by k scales
+ * every component and its derivatives by k, which cancels in the ratio.
+ * Writes ρx/ρy into `rho` and returns true; returns false for a degenerate
+ * direction (ma == 0 — the caller then uses ρ = 0, λ = minLod).
+ */
+function cubeRho(
+  img: TextureImage, v: Float32Array, dx: Float32Array, dy: Float32Array,
+  rho: { x: number; y: number },
+): boolean {
+  if (dx.length < 3 || dy.length < 3) return false;
+  const face = selectCubeFace(v[0], v[1], v[2]);
+  const ma = faceMap(face, v[0], v[1], v[2], _face); // same mapping as the VALUE path
+  if (ma === 0) return false;
+  const sc = _face.sc;
+  const tc = _face.tc;
+  const M = ma < 0 ? -ma : ma;
+  // Raw component indices (deqp): ±X → s = r_z, t = r_y; ±Y → s = r_x,
+  // t = r_z; ±Z → s = r_x, t = r_y; major axis 0/1 → x, 2/3 → y, 4/5 → z.
+  const sNdx = face === 0 || face === 1 ? 2 : 0;
+  const tNdx = face === 2 || face === 3 ? 2 : 1;
+  const maj = face >> 1;
+  const inv = 0.5 / (M * M);
+  const dmadx = dx[maj] < 0 ? -dx[maj] : dx[maj];
+  const dmady = dy[maj] < 0 ? -dy[maj] : dy[maj];
+  const dsdx = (dx[sNdx] * M - sc * dmadx) * inv;
+  const dtdx = (dx[tNdx] * M - tc * dmadx) * inv;
+  const dsdy = (dy[sNdx] * M - sc * dmady) * inv;
+  const dtdy = (dy[tNdx] * M - tc * dmady) * inv;
+  const size = img.width;
+  rho.x = Math.max(Math.abs(dsdx), Math.abs(dtdx)) * size;
+  rho.y = Math.max(Math.abs(dsdy), Math.abs(dtdy)) * size;
+  return true;
 }
 
 /** Inverse of projectToFace with ma = 1: face-local (sc, tc) → direction. */

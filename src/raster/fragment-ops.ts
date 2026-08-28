@@ -118,7 +118,7 @@ function rgbFactor(f: GLenum, sc: number, dc: number, sa: number, da: number, cc
     case ONE_MINUS_CONSTANT_COLOR: return 1 - cc;
     case CONSTANT_ALPHA: return ca;
     case ONE_MINUS_CONSTANT_ALPHA: return 1 - ca;
-    case SRC_ALPHA_SATURATE: return Math.min(sa, 1 - dc);
+    case SRC_ALPHA_SATURATE: return Math.min(sa, 1 - da);
     default: return 0;
   }
 }
