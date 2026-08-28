@@ -96,7 +96,7 @@ export const EXTENSION_SPECS: ExtensionSpec[] = [
   { name: 'OES_texture_float', versions: [1], status: 'implement' },
   { name: 'OES_texture_float_linear', versions: [1, 2], status: 'implement' },
   { name: 'OES_texture_half_float', versions: [1], status: 'implement' },
-  { name: 'OES_texture_half_float_linear', versions: [1, 2], status: 'implement' },
+  { name: 'OES_texture_half_float_linear', versions: [1], status: 'implement' },
   { name: 'OES_vertex_array_object', versions: [1], status: 'implement' },
   {
     name: 'WEBGL_depth_texture',
