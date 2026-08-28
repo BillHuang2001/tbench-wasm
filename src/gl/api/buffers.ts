@@ -167,6 +167,27 @@ function genericBindingState(ctx: WebGLRenderingContext): GenericBindings {
 }
 
 /**
+ * The buffer bound to the GENERIC (non-indexed) binding point of
+ * UNIFORM_BUFFER / TRANSFORM_FEEDBACK_BUFFER — i.e. what
+ * getParameter(UNIFORM_BUFFER_BINDING / TRANSFORM_FEEDBACK_BUFFER_BINDING)
+ * must report (GLES 3.0 §2.10.1: "the generic buffer binding point" is
+ * distinct from the indexed points; bindBuffer touches only it, while
+ * bindBufferBase/bindBufferRange with index 0 update both). getters.ts reads
+ * this instead of the indexed/old-model state (CTS switching-objects.html,
+ * uniform-buffers.html).
+ */
+export function getGenericBufferBinding(
+  ctx: WebGLRenderingContext,
+  target: GLenum,
+): WebGLBuffer | null {
+  const g = genericBindings.get(ctx);
+  if (!g) return null;
+  if (target === C2.UNIFORM_BUFFER) return g.uniformBuffer;
+  if (target === C2.TRANSFORM_FEEDBACK_BUFFER) return g.transformFeedbackBuffer;
+  return null;
+}
+
+/**
  * True when any transform feedback object is ACTIVE (begun and not ended —
  * paused counts as active per GLES 3.0 §2.13). Covers the bound object and
  * every created object: an active TF may be unbound while still active (CTS
