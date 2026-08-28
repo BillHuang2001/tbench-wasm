@@ -673,8 +673,15 @@ export function blitColorSurface(
     //   u = (d − dstOrigin + 0.5)·srcSize/dstSize − 0.5
     // texels = srcOrigin + floor(u), weight = frac(u). Integer formats fall
     // through to nearest (gl/ validates; linear on integer = nearest).
+    // A destination pixel is copied ONLY when its mapped CENTER lies inside
+    // the source surface (the rect condition is implied: the affine map of the
+    // iterated dst-rect pixels always falls inside the source rect). Pixels
+    // whose center lands outside retain their previous value (GLES 3.0 §4.3.2;
+    // CTS blitframebuffer-outside-readbuffer / -filter-outofbounds).
     for (let dy = y0; dy < y1; dy++) {
-      const fy = (dy - dstY + 0.5) * srcH / dstH - 0.5;
+      const vc = srcY + (dy - dstY + 0.5) * srcH / dstH;
+      if (vc < 0 || vc >= sh) continue;
+      const fy = vc - 0.5;
       const sy0f = Math.floor(fy);
       const wy = fy - sy0f;
       let sy0 = srcY + sy0f;
@@ -683,7 +690,9 @@ export function blitColorSurface(
       sy1 = Math.max(0, Math.min(sh - 1, sy1));
       let doff = (dy * dw + x0) * dbpp;
       for (let dx = x0; dx < x1; dx++) {
-        const fx = (dx - dstX + 0.5) * srcW / dstW - 0.5;
+        const uc = srcX + (dx - dstX + 0.5) * srcW / dstW;
+        if (uc < 0 || uc >= sw) { doff += dbpp; continue; }
+        const fx = uc - 0.5;
         const sx0f = Math.floor(fx);
         const wx = fx - sx0f;
         let sx0 = srcX + sx0f;
@@ -707,14 +716,21 @@ export function blitColorSurface(
       }
     }
   } else {
-    // NEAREST (also the fallback for integer formats with 'linear').
+    // NEAREST (also the fallback for integer formats with 'linear'). Same
+    // center-outside semantics as the LINEAR path: pixels whose mapped center
+    // lies outside the source surface are never written.
     for (let dy = y0; dy < y1; dy++) {
+      const vc = srcY + (dy - dstY + 0.5) * srcH / dstH;
+      if (vc < 0 || vc >= sh) continue;
       const sy = Math.max(0, Math.min(sh - 1, srcY + Math.floor((dy - dstY + 0.5) * srcH / dstH)));
       let doff = (dy * dw + x0) * dbpp;
       for (let dx = x0; dx < x1; dx++) {
-        const sx = Math.max(0, Math.min(sw - 1, srcX + Math.floor((dx - dstX + 0.5) * srcW / dstW)));
-        sInfo.decode(src.data, (sy * sw + sx) * sbpp, _blitOut);
-        dInfo.encode(dst.data, doff, _blitOut[0], _blitOut[1], _blitOut[2], _blitOut[3]);
+        const uc = srcX + (dx - dstX + 0.5) * srcW / dstW;
+        if (uc >= 0 && uc < sw) {
+          const sx = Math.max(0, Math.min(sw - 1, srcX + Math.floor((dx - dstX + 0.5) * srcW / dstW)));
+          sInfo.decode(src.data, (sy * sw + sx) * sbpp, _blitOut);
+          dInfo.encode(dst.data, doff, _blitOut[0], _blitOut[1], _blitOut[2], _blitOut[3]);
+        }
         doff += dbpp;
       }
     }
