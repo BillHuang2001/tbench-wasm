@@ -402,8 +402,13 @@ function flatNames(name: string, type: GLSLType): string[] {
           case 'struct':
             for (const mem of t.members) recType(`${base}__${mem.name}`, mem.type, o);
             break;
-          default:
-            throw new Error(`codegen: array member '${base}' inside a flat struct is unsupported`);
+          case 'array':
+            // Struct member arrays flatten per element (const sizes only —
+            // unsized members are rejected by semantics). The path model's
+            // const index folds k * flatComponents(element) into flatOff, so
+            // element i occupies compNames[base + i * elemComps .. +].
+            for (let i = 0; i < (t.size ?? 0); i++) recType(`${base}__${i}`, t.element, o);
+            break;
         }
       };
       recType(name, type, out);
