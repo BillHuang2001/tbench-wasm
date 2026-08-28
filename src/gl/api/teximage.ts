@@ -10,10 +10,16 @@
  * mutation is delegated to the teximage.ts engine module. Overload rules:
  *  - texImage2D: 6 args → (target, level, internalformat, format, type, source)
  *    DOM form; else the 9-arg buffer form (pixels optional; null allocates).
- *  - texImage3D: 6 args → DOM form (rejected: DOM sources are 2D-only, spec);
- *    else the 10-arg buffer form.
+ *  - texImage3D: 10 args with a DOM source → DOM form with explicit dims
+ *    (target, level, internalformat, w, h, d, border, format, type, source —
+ *    the 2D image fills the z=0 slice); else the 10-arg buffer form (number
+ *    pixels = PBO offset, view = client data). The 6-arg DOM form is NOT in
+ *    the spec and is rejected (INVALID_OPERATION).
  *  - texSubImage2D: 7 args → DOM form; else 9-arg buffer form.
- *  - texSubImage3D: 8 args → DOM form (rejected, 2D-only rule); else 11-arg.
+ *  - texSubImage3D: 11 args with a DOM source → DOM form with explicit dims
+ *    (target, level, xoffset, yoffset, zoffset, w, h, d, format, type,
+ *    source — one slice at zoffset); else the 11-arg buffer form. The 8-arg
+ *    DOM form is NOT in the spec and is rejected (INVALID_OPERATION).
  *  - WebGL2: buffer-form pixels may be a NUMBER (byte offset into
  *    PIXEL_UNPACK_BUFFER — must be bound; flipY/premultiplyAlpha must be off;
  *    offset+required ≤ buffer size).
@@ -1025,6 +1031,49 @@ function texImage3DBuffer(
   uploadTexImage(ctx, tex, target, level, internalformat, width, height, depth, border, format, type, pixels);
 }
 
+/**
+ * 10-arg DOM form (WebGL2 only): (target, level, internalformat, w, h, d,
+ * border, format, type, source). The width/height/depth arguments specify the
+ * texture level size; UNPACK_SKIP_PIXELS/UNPACK_SKIP_ROWS select a
+ * sub-rectangle of the source (WebGL2 spec §3.7.2). DOM sources are 2D — the
+ * engine divides the source into `depth` horizontal bands filling the level's
+ * slices (slice stride UNPACK_IMAGE_HEIGHT or height).
+ */
+function texImage3DDOMWithDims(
+  ctx: WebGLRenderingContext,
+  target: GLenum,
+  level: GLint,
+  internalformat: GLint,
+  width: GLsizei,
+  height: GLsizei,
+  depth: GLsizei,
+  border: GLint,
+  format: GLenum,
+  type: GLenum,
+  source: unknown,
+): void {
+  // WebIDL: GLint/GLsizei are `long` — convert via ToInt32 (truncate toward
+  // zero). Same rationale as the 2D cluster: the CTS passes fractional dims
+  // (e.g. canvas.width/2 = 128.5 for a 257px source) and relies on the
+  // conversion to 128; the copy math requires integer dimensions.
+  level = level | 0;
+  width = width | 0;
+  height = height | 0;
+  depth = depth | 0;
+  border = border | 0;
+  const tex = commonTexImageValidation(ctx, target, level, width, height, depth, border, true);
+  if (tex === null) return;
+  if (source === null || source === undefined) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return;
+  }
+  if (!w2ValidateDomFormatType(ctx, internalformat, format, type)) return;
+  uploadTexImage(
+    ctx, tex, target, level, internalformat, width, height, depth, border, format, type,
+    source as unknown as TexImageSourceArg, source,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // texSubImage2D / texSubImage3D
 // ---------------------------------------------------------------------------
@@ -1245,6 +1294,51 @@ function texSubImage3DDOM(
   }
   // DOM sources are only supported for 2D targets.
   ctx._errors.push(C1.INVALID_OPERATION);
+}
+
+/**
+ * 11-arg DOM form (WebGL2 only): (target, level, xoffset, yoffset, zoffset,
+ * w, h, d, format, type, source). The width/height/depth arguments (together
+ * with UNPACK_SKIP_PIXELS/UNPACK_SKIP_ROWS) specify a sub-rectangle of the
+ * source. DOM sources are 2D — the engine divides the source into `depth`
+ * horizontal bands filling slices zoffset..zoffset+depth-1; other slices keep
+ * their existing contents.
+ */
+function texSubImage3DDOMWithDims(
+  ctx: WebGLRenderingContext,
+  target: GLenum,
+  level: GLint,
+  xoffset: GLint,
+  yoffset: GLint,
+  zoffset: GLint,
+  width: GLsizei,
+  height: GLsizei,
+  depth: GLsizei,
+  format: GLenum,
+  type: GLenum,
+  source: unknown,
+): void {
+  if (source === null || source === undefined) {
+    // WebIDL: the TexImageSource overload is non-nullable → throw TypeError
+    // (mirrors the 2D texSubImage2DDOMWithDims convention; unreachable via
+    // dispatch, which requires isDomSource(arguments[10])).
+    throw new TypeError(`Argument is not of type 'TexImageSource'`);
+  }
+  // WebIDL: GLint/GLsizei are `long` — convert via ToInt32 (truncate toward
+  // zero), same rationale as the 2D DOM-with-dims path.
+  xoffset = xoffset | 0;
+  yoffset = yoffset | 0;
+  zoffset = zoffset | 0;
+  width = width | 0;
+  height = height | 0;
+  depth = depth | 0;
+  const tex = commonTexSubValidation(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, true);
+  if (tex === null) return;
+  if (!w2ValidateSubFormatType(ctx, tex._image!.internalFormat, format, type)) return;
+  uploadTexSubImage(
+    ctx, tex, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type,
+    source as unknown as TexImageSourceArg, source,
+  );
 }
 
 /** 11-arg buffer path for texSubImage3D. */
@@ -1972,6 +2066,12 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
         texImage3DDOM(ctx, target, level, internalformat, width as GLenum, height as GLenum, border);
         return;
       }
+      if (arguments.length === 10 && isDomSource(pixels)) {
+        // WebGL2 DOM form with explicit dimensions:
+        // (target, level, internalformat, width, height, depth, border, format, type, source)
+        texImage3DDOMWithDims(ctx, target, level, internalformat, width, height, depth, border, format, type, pixels);
+        return;
+      }
       texImage3DBuffer(ctx, target, level, internalformat, width, height, depth, border, format, type, pixels ?? null);
     };
 
@@ -1994,6 +2094,12 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       if (arguments.length === 8) {
         // DOM form: (target, level, xoffset, yoffset, zoffset, format, type, source)
         texSubImage3DDOM(ctx, target, level, xoffset, yoffset, zoffset, width as GLenum, height as GLenum, depth);
+        return;
+      }
+      if (arguments.length === 11 && isDomSource(pixels)) {
+        // WebGL2 DOM form with explicit dimensions:
+        // (target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, source)
+        texSubImage3DDOMWithDims(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
         return;
       }
       texSubImage3DBuffer(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels ?? null);
