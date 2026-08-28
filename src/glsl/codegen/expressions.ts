@@ -1951,7 +1951,14 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
 }
 
 function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Value[] {
-  const cond = materialize(emitExpr(e.cond, env), env)[0];
+  // The condition is a scalar bool embedded in EVERY result component's
+  // selects (and in the guarded arm hoists below) — hoist it ONCE when it
+  // carries side effects (Value.pre chains OR side effects folded into its v
+  // string — user calls nested in comparators), so per-component duplication
+  // cannot re-run them (BUG: multi-component ternary condition side effects
+  // ran n times). Pure conditions pass through unchanged (broadcastScalar).
+  const sharedPre: string[] = [];
+  const cond = broadcastScalar(emitExpr(e.cond, env)[0], e.cond, env, sharedPre);
   const a = emitExpr(e.whenTrue, env);
   const b = emitExpr(e.whenFalse, env);
   const n = flatComponents(e.resolvedType!);
@@ -1960,14 +1967,20 @@ function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Va
   // (v-only); its pres join the result's pre so materialized cond temps are
   // set even when only the dx/dy planes are consumed (dFdx(cond ? a : b)).
   const dual = env.dual && hasFloatLeaves(e.resolvedType!);
+  // Distinct arm pre arrays by IDENTITY: a multi-component user call shares
+  // ONE pre array (the inliner's IIFE). Only the FIRST component with a given
+  // pre embeds it in its guarded hoist; later components just read the temps
+  // it sets (their guarded lines run after comp0's in 0..n-1 order).
+  // Embedding the pre per component would run the arm's side effects once per
+  // component (BUG: multi-component ternary arm side effects ran n times).
+  const seenAPre = new Set<readonly string[]>();
+  const seenBPre = new Set<readonly string[]>();
   for (let c = 0; c < n; c++) {
     const ac = a[c];
     const bc = b[c];
     const ap = ac.pre && ac.pre.length > 0 ? ac.pre : null;
     const bp = bc.pre && bc.pre.length > 0 ? bc.pre : null;
     const pre: string[] = [];
-    const cp = cond.pre;
-    if (cp) pre.push(...cp);
     if (ap === null && bp === null) {
       // FAST PATH (no arm materializes — pres are the only reason
       // materialize would hoist): the select folds the raw arm strings, which
@@ -1998,8 +2011,16 @@ function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Va
     // set).
     const ta = ap !== null ? env.allocTemp() : null;
     const tb = bp !== null ? env.allocTemp() : null;
-    if (ta) pre.push(`${ta} = (${cond.v} ? (${foldPre(ap!, ac.v)}) : ${ta})`);
-    if (tb) pre.push(`${tb} = (${cond.v} ? ${tb} : (${foldPre(bp!, bc.v)}))`);
+    const aFirst = ap !== null && !seenAPre.has(ap);
+    if (aFirst) seenAPre.add(ap);
+    const bFirst = bp !== null && !seenBPre.has(bp);
+    if (bFirst) seenBPre.add(bp);
+    if (ta) {
+      pre.push(`${ta} = (${cond.v} ? ${aFirst ? `(${foldPre(ap!, ac.v)})` : `(${ac.v})`} : ${ta})`);
+    }
+    if (tb) {
+      pre.push(`${tb} = (${cond.v} ? ${tb} : ${bFirst ? `(${foldPre(bp!, bc.v)})` : `(${bc.v})`})`);
+    }
     const av = ta ?? ac.v;
     const bv = tb ?? bc.v;
     const val: Value =
@@ -2012,6 +2033,16 @@ function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Va
         : { v: `(${cond.v} ? (${av}) : (${bv}))` };
     if (pre.length > 0) val.pre = pre;
     out.push(val);
+  }
+  if (sharedPre.length > 0) {
+    // Attach the cond hoist ONLY to component 0 (the FIRST emitted/consumed
+    // component): statement emitters dedupe pres by array identity and
+    // expression-context consumers fold each component's pre INLINE in
+    // 0..n-1 order — comp0's pre runs first and sets the hoist temp, later
+    // components just read it (mirrors emitArith's sharedPre handling). A
+    // shared array on EVERY component would re-run the hoisted side effects
+    // per component in expression contexts.
+    out[0].pre = out[0].pre ? [...sharedPre, ...out[0].pre] : sharedPre;
   }
   return out;
 }

@@ -23,7 +23,7 @@
 import { compileShader } from '../compiler.js';
 import { CodegenEnv } from './env.js';
 import { emitStatements } from './statements.js';
-import { installUserFunctions } from './functions.js';
+import { installUserFunctions, installUserGlobals } from './functions.js';
 import { R } from './runtime.js';
 import type { CodegenLayout } from './index.js';
 import type { TranslationUnit, FunctionDefinition } from '../ast.js';
@@ -74,10 +74,14 @@ function runMain(
   if (!r.ok) throw new Error(`compile failed: ${JSON.stringify(r.errors)}`);
   const mainFn = findFn(r.shader.ast, 'main');
   const env = new CodegenEnv(stage, baseLayout(version, opts?.derivatives));
+  env.dual = !!opts?.derivatives; // mirror fragment.ts/vertex.ts stage assembly
+  // File-scope globals (scratch-backed) first — their init lines run before
+  // main's statements (mirrors vertex.ts/fragment.ts stage assembly).
+  const globalInit = installUserGlobals(r.shader.ast, env);
   installUserFunctions(r.shader.ast, env);
   if (opts?.structNames) for (const s of opts.structNames) env.structNames.add(s);
   const stmts = emitStatements(mainFn.body.body, env);
-  const body = [...(env.temps.length ? [`var ${env.temps.join(', ')};`] : []), ...stmts].join('\n');
+  const body = [...(env.temps.length ? [`var ${env.temps.join(', ')};`] : []), ...globalInit, ...stmts].join('\n');
   const fn = new Function('ctx', 'R', body);
   const ctx: Record<string, any> = {
     discarded: false,
@@ -483,6 +487,127 @@ void main() {
     100,
   );
   check(ctx.out.color[0][0] === 9, `determinant pre arg (got [${ctx.out.color[0].join(',')}])`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Ternary arm/cond side effects run EXACTLY ONCE (multi-component)     */
+/* ------------------------------------------------------------------ */
+
+// (r) MULTI-COMPONENT statement ternary with side-effect call arms: a vec2
+// user call shares ONE pre array (the inliner IIFE) across its components;
+// the guarded arm hoist must embed it once (comp0) — later components read
+// the temps it sets. Regression: the pre was embedded per component and the
+// arm's side effects ran once PER COMPONENT (counter hit 2 instead of 1).
+// Both cond polarities and both statement and decl-init positions.
+{
+  const { ctx } = runMain(
+    `precision mediump float;
+float counter = 0.0;
+vec2 f() { counter = counter + 1.0; return vec2(1.0, 2.0); }
+vec2 g() { counter = counter + 10.0; return vec2(3.0, 4.0); }
+void main() {
+  float c = 0.0;
+  (c < 1.0) ? f() : g();
+  vec2 v = (c < 1.0) ? f() : g();
+  c = 1.0;
+  (c < 1.0) ? f() : g();
+  vec2 w = (c < 1.0) ? f() : g();
+  gl_FragColor = vec4(counter, v.x, v.y, w.x);
+}`,
+    'FRAGMENT',
+    100,
+  );
+  check(
+    ctx.out.color[0][0] === 22,
+    `multi-comp ternary arms run exactly once each (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === 1 && ctx.out.color[0][2] === 2 && ctx.out.color[0][3] === 3,
+    `multi-comp ternary taken-arm values (got [${ctx.out.color[0].join(',')}])`,
+  );
+}
+
+// (s) SCALAR statement-position ternary with side-effect call arms: the
+// statement discards the result; the taken arm's hoisted pre (IIFE) must
+// execute exactly once, the untaken arm's never.
+{
+  const { ctx } = runMain(
+    `precision mediump float;
+float counter = 0.0;
+float f() { counter = counter + 1.0; return 1.0; }
+float g() { counter = counter + 10.0; return 2.0; }
+void main() {
+  float c = 0.0;
+  (c < 1.0) ? f() : g();
+  float r = (c < 1.0) ? f() : g();
+  gl_FragColor = vec4(counter, r, 0.0, 1.0);
+}`,
+    'FRAGMENT',
+    100,
+  );
+  check(
+    ctx.out.color[0][0] === 2,
+    `statement ternary taken arm runs exactly once (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(ctx.out.color[0][1] === 1, `statement ternary value (got ${ctx.out.color[0][1]})`);
+}
+
+// (t) MULTI-COMPONENT ternary whose CONDITION carries side effects (user call
+// folded into a comparison): the condition is embedded in every component's
+// select (v/dx/dy + guarded arm hoists) — it must be hoisted ONCE, not
+// re-run per component. Regression: the cond side effect ran n times.
+{
+  const { ctx } = runMain(
+    `precision mediump float;
+float counter = 0.0;
+float f() { counter = counter + 1.0; return 0.0; }
+void main() {
+  vec2 v = (f() < 1.0) ? vec2(1.0, 2.0) : vec2(3.0, 4.0);
+  gl_FragColor = vec4(counter, v.x, v.y, 1.0);
+}`,
+    'FRAGMENT',
+    100,
+  );
+  check(
+    ctx.out.color[0][0] === 1,
+    `multi-comp ternary cond side effect runs exactly once (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === 1 && ctx.out.color[0][2] === 2,
+    `multi-comp ternary cond-taken values (got [${ctx.out.color[0].join(',')}])`,
+  );
+}
+
+// (u) DUAL mode: multi-component ternary with a side-effect call arm — the
+// guarded v-plane hoist embeds the shared IIFE once (comp0); the dx/dy
+// selects read the dual ret temps the IIFE set. Regression: per-component
+// embedding ran the arm twice and re-set the dual temps between component
+// reads.
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+out vec4 color;
+float counter = 0.0;
+vec2 f() { counter = counter + 1.0; return vec2(1.0, 2.0); }
+void main() {
+  float c = 0.0;
+  vec2 v = (c < 1.0) ? f() : vec2(0.0);
+  float dx = dFdx(v.x);
+  color = vec4(counter, v.x, v.y, dx);
+}`,
+    'FRAGMENT',
+    300,
+    { derivatives: true },
+  );
+  check(
+    ctx.out.color[0][0] === 1,
+    `dual multi-comp ternary arm runs exactly once (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === 1 && ctx.out.color[0][2] === 2 && ctx.out.color[0][3] === 0,
+    `dual multi-comp ternary values (got [${ctx.out.color[0].join(',')}])`,
+  );
 }
 
 /* ------------------------------------------------------------------ */
