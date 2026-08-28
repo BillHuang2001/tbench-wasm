@@ -575,29 +575,27 @@ function checkAttachment(
     const tex = entry.texture;
     const image = tex._image;
     if (!image || entry.level < 0) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
-    // GLES3 §4.4.5 (pg 213): when the attached level is NOT the texture's
-    // TEXTURE_BASE_LEVEL, the level must lie in [levelbase, q] (q = highest
-    // defined level, capped by TEXTURE_MAX_LEVEL) and the texture must be
-    // mipmap complete. When the attached level IS the base level, only that
-    // level's image must be defined (checked below). CTS
-    // framebuffer-texture-level1.html: attaching level 1 with base level 0
-    // (only level 1 defined) is INCOMPLETE_ATTACHMENT until TEXTURE_BASE_LEVEL
-    // is raised to 1; mipmap-fbo.html: attaching level 1 of a texture with
-    // only level 0 defined is INCOMPLETE_ATTACHMENT.
-    {
+    // GLES 3.0 §4.4.5 (p213): the [level_base, q] range + mipmap-completeness
+    // rules apply only to textures that do not name an immutable-format
+    // texture; for immutable textures (texStorage2D/3D) the sole requirement
+    // is that the attached level's image exists (checked below). q per
+    // §3.8.10 (p150): q = min(floor(log2(maxSize)) + level_base, level_max),
+    // where maxSize is the max of the level-0 image dimensions (3D depth for
+    // TEXTURE_3D). The range check applies even when the attached level IS
+    // level_base (level_base > level_max → empty range → INCOMPLETE).
+    // CTS immutable-tex-render-feedback.html, framebuffer-texture-level1.html,
+    // mipmap-fbo.html.
+    if (!tex._immutable) {
       const baseLevel = tex._params[0x813c] ?? 0;
       const maxLevel = tex._params[0x813d] ?? 1000;
+      const maxSize = Math.max(image.width, image.height, image.target === C2.TEXTURE_3D ? image.depth : 1);
+      const q = Math.min(Math.floor(Math.log2(maxSize)) + baseLevel, maxLevel);
+      if (entry.level < baseLevel || entry.level > q) {
+        return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+      }
       if (entry.level !== baseLevel) {
-        // q = highest level with a defined image, clamped to TEXTURE_MAX_LEVEL.
-        let q = -1;
-        const n = image.levels.length;
-        for (let l = 0; l < n && l <= maxLevel; l++) {
-          if (image.levels[l]) q = l;
-        }
-        if (entry.level < baseLevel || entry.level > Math.min(q, maxLevel)) {
-          return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
-        }
-        // Mipmap complete over [baseLevel, q]: every level's image must exist.
+        // Mipmap complete over [baseLevel, q] (spec q): every level's image
+        // must exist.
         const isCube = isCubeFace(entry.face);
         for (let l = baseLevel; l <= q; l++) {
           const lvl = image.levels[l];
