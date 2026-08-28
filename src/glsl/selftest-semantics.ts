@@ -1001,6 +1001,64 @@ const u10 = errs('#version 300 es\nprecision mediump float;\nout vec4 o;\nvoid m
 check(hasErr(u10, 4, "'[' : cannot index a value of type 'float'"), '`a[]` on a variable → error line 4');
 
 /* ------------------------------------------------------------------ */
+/* 17. ES 3.00 sequence (comma) operator restrictions                  */
+/*     (CTS forbidden-operators.html + sequence-operator-returns-      */
+/*      non-constant.html — compile-level pins; the side-effect/       */
+/*      runtime pins live in codegen/selftest-predrop.ts)              */
+/* ------------------------------------------------------------------ */
+
+// Array operand: `float b[3] = (true, a);` must fail at 300 (WebGL 2.0 spec
+// "Unsupported variants of GLSL ES 3.00 operators" — forbidden-operators.html
+// fshader-array-sequence-operator).
+const c1 = errs(
+  '#version 300 es\nprecision mediump float;\nvoid main() {\n  float a[3];\n  float b[3] = (true, a);\n}',
+  300,
+  'FRAGMENT',
+);
+check(hasErr(c1, 5, "',' : sequence operator operands cannot be arrays or structures containing arrays"), '3.00 comma array operand → error line 5');
+// Struct containing an array: `MyStruct c = (true, b);` (fshader-struct-array-sequence-operator).
+const c2 = errs(
+  '#version 300 es\nprecision mediump float;\nstruct MyStruct { bool a[3]; };\nvoid main() {\n  MyStruct b;\n  MyStruct c = (true, b);\n}',
+  300,
+  'FRAGMENT',
+);
+check(hasErr(c2, 6, "',' : sequence operator operands cannot be arrays or structures containing arrays"), '3.00 comma struct-with-array operand → error line 6');
+// Void operand: `(foo(), foo());` (fshader-void-sequence-operator).
+const c3 = errs(
+  '#version 300 es\nprecision mediump float;\nvoid foo() {}\nvoid main() {\n  (foo(), foo());\n}',
+  300,
+  'FRAGMENT',
+);
+check(hasErr(c3, 5, "',' : cannot use a void expression as a sequence operator operand"), '3.00 comma void operand → error line 5');
+// The sequence result is NEVER a constant expression at 300: `const float a
+// = (0.0, 1.0);` must fail (sequence-operator-returns-non-constant.html).
+const c4 = errs(
+  '#version 300 es\nprecision mediump float;\nconst float a = (0.0, 1.0);\nvoid main() { }',
+  300,
+  'FRAGMENT',
+);
+check(hasErr(c4, 3, "'a' : initializer of const variable must be a constant expression"), '3.00 const comma initializer → error line 3');
+// Array size from a sequence: `float a[(2, 3)];` must fail at 300 (same page).
+const c5 = errs(
+  '#version 300 es\nprecision mediump float;\nvoid main() {\n  float a[(2, 3)];\n}',
+  300,
+  'FRAGMENT',
+);
+check(hasErr(c5, 4, 'array size must be a constant integer expression'), '3.00 comma array size → error line 4');
+// ES 1.00 keeps every one of these permissive (no graded restriction): all
+// five variants must still COMPILE at version 100.
+const c1v = okInfo('precision mediump float;\nvoid main() {\n  float a[3];\n  float b[3] = (true, a);\n}', 100, 'FRAGMENT');
+check(c1v !== null, '1.00 comma array operand still compiles');
+const c2v = okInfo('precision mediump float;\nstruct MyStruct { bool a[3]; };\nvoid main() {\n  MyStruct b;\n  MyStruct c = (true, b);\n}', 100, 'FRAGMENT');
+check(c2v !== null, '1.00 comma struct-with-array operand still compiles');
+const c3v = okInfo('precision mediump float;\nvoid foo() {}\nvoid main() {\n  (foo(), foo());\n}', 100, 'FRAGMENT');
+check(c3v !== null, '1.00 comma void operand still compiles');
+const c4v = okInfo('precision mediump float;\nconst float a = (0.0, 1.0);\nvoid main() { }', 100, 'FRAGMENT');
+check(c4v !== null, '1.00 all-constant comma const initializer still compiles');
+const c5v = okInfo('precision mediump float;\nvoid main() {\n  float a[(2, 3)];\n}', 100, 'FRAGMENT');
+check(c5v !== null, '1.00 all-constant comma array size still compiles');
+
+/* ------------------------------------------------------------------ */
 /* Summary                                                             */
 /* ------------------------------------------------------------------ */
 
