@@ -136,11 +136,11 @@ const W2_COLOR_RENDERABLE_CORE = new Set<GLenum>([
   0x8233 /* R16I */, 0x8234 /* R16UI */, 0x8235 /* R32I */, 0x8236 /* R32UI */,
   0x822b /* RG8 */, 0x8237 /* RG8I */, 0x8238 /* RG8UI */,
   0x8239 /* RG16I */, 0x823a /* RG16UI */, 0x823b /* RG32I */, 0x823c /* RG32UI */,
-  0x8d8a /* RGBA8I */, 0x8d7c /* RGBA8UI */,
+  C2.RGBA8I /* 0x8d8e — WebGL2 value (differs from GLES3's 0x8d8a) */, 0x8d7c /* RGBA8UI */,
   0x8d88 /* RGBA16I */, 0x8d76 /* RGBA16UI */,
   0x8d82 /* RGBA32I */, 0x8d70 /* RGBA32UI */,
   // GLES3 RGB integer formats (WebGL2 only removes RGB8 among unorm formats)
-  0x8d8b /* RGB8I */, 0x8d7d /* RGB8UI */,
+  C2.RGB8I /* 0x8d8f — WebGL2 value (differs from GLES3's 0x8d8b) */, 0x8d7d /* RGB8UI */,
   0x8d89 /* RGB16I */, 0x8d77 /* RGB16UI */,
   0x8d83 /* RGB32I */, 0x8d71 /* RGB32UI */,
 ]);
@@ -295,6 +295,23 @@ function isDepthStencilRenderable(ctx: WebGLRenderingContext, format: GLenum): b
 /* Attachment resolution                                               */
 /* ------------------------------------------------------------------ */
 
+/**
+ * WebGL2-spec enum → raster-registry key for Surface.format. The WebGL2 spec
+ * defines RGBA8I/RGB8I as the DESKTOP-GL values 0x8d8e/0x8d8f (CTS
+ * constants-and-properties-2.html hard-asserts them), while the raster formats
+ * registry keys those two formats by the GLES3 values 0x8d8a/0x8d8b
+ * (src/raster/gl-enums.ts). Surface.format is documented as the key into the
+ * raster formats registry (raster/types.ts) — readPixels' getPackConverter
+ * resolves through it — so surfaces for these two formats must carry the
+ * raster-registry key. The separate `info` field (decode/encode) is attached
+ * from the gl-side spec and is unaffected; both tables describe i8 storage.
+ */
+function surfaceFormatKey(internalFormat: GLenum): GLenum {
+  if (internalFormat === C2.RGBA8I /* 0x8d8e */) return 0x8d8a;
+  if (internalFormat === C2.RGB8I /* 0x8d8f */) return 0x8d8b;
+  return internalFormat;
+}
+
 /** Resolve ONE attachment entry to its raster Surface (null when unset/invalid). */
 function resolveAttachmentSurface(entry: FramebufferAttachment): Surface | null {
   if (entry.type === 'renderbuffer') {
@@ -313,7 +330,7 @@ function resolveAttachmentSurface(entry: FramebufferAttachment): Surface | null 
   return {
     width: lvl.width,
     height: lvl.height,
-    format: image.internalFormat,
+    format: surfaceFormatKey(image.internalFormat),
     info,
     data,
     stencilData: lvl.stencilData,
