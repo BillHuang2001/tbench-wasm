@@ -966,13 +966,24 @@ export function uploadTexImage(
   if (!spec) return;
   const img = ensureImage(texture, target);
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
-  const levelData = allocLevel(spec, width, height, depth, isCube);
+  // Cube faces are independent images: when re-uploading a face into an
+  // existing level of the same size/format, reuse the record so previously
+  // uploaded faces keep their data (cube completeness needs all 6 defined).
+  const prev = isCube ? img.levels[level] : undefined;
+  const reuse = !!(prev && prev.width === width && prev.height === height && img.internalFormat === internalformat);
+  const levelData = reuse ? prev : allocLevel(spec, width, height, depth, isCube);
   if (isCube) {
-    // Only the uploaded face is defined (cube completeness needs all 6).
     const face = cubeFaceIndex(target);
-    for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = undefined as unknown as ArrayBufferView;
+    if (!reuse) {
+      // Fresh record: only the uploaded face is defined (cube completeness needs all 6).
+      for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = undefined as unknown as ArrayBufferView;
+    } else if (levelData.data[face] === undefined) {
+      // Reused record: allocate the view for the face being (re)defined.
+      const perFace = width * height;
+      levelData.data[face] = new spec.ctor((perFace * spec.bytesPerPixel) / spec.bytesPerElement);
+    }
   }
-  img.levels[level] = levelData;
+  if (!reuse) img.levels[level] = levelData;
   texture._internalFormat = internalformat;
   texture._compressed = false;
   img.internalFormat = internalformat;
