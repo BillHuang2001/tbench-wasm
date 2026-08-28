@@ -5,6 +5,13 @@
  * are fed by the rasterizer through the draw-pipeline feedback hook (see
  * CONTEXT.md "Occlusion queries" design note) — the query must report a real
  * sample count for CTS occlusion tests, not a guess.
+ *
+ * `_resultAvailable` is the INTERNAL availability flag: the draw engine and
+ * endQuery set it once the (synchronous) result is computed, but the public
+ * QUERY_RESULT_AVAILABLE read in api/webgl2.ts is gated on a per-context
+ * pending set so it only becomes observable after control returns to the event
+ * loop (CTS occlusion-query.html / transform_feedback.html "became available
+ * too early").
  */
 
 import { WebGLObject } from './webgl-object';
@@ -17,7 +24,7 @@ export class WebGLQuery extends WebGLObject {
   _active = false;
   /** Number of samples that passed (accumulated; updated at endQuery). */
   _result = 0;
-  /** QUERY_RESULT_AVAILABLE. */
+  /** QUERY_RESULT_AVAILABLE (internal — see header comment). */
   _resultAvailable = false;
   /** EXT_disjoint_timer_query_webgl2: TIME_ELAPSED/TIMESTAMP result in ns. */
   _isTimerQuery = false;

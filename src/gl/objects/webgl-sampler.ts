@@ -2,14 +2,15 @@
  * src/gl/objects/webgl-sampler.ts — WebGLSampler (WebGL2).
  *
  * Sampler objects override the texture's filter/wrap/LOD/compare parameters at
- * sampling time. Defaults mirror the texture parameter defaults.
+ * sampling time. Defaults mirror the texture parameter defaults (WebGL enum
+ * convention: NEAREST_MIPMAP_LINEAR = 0x2702 — see constants.ts).
  */
 
 import { WebGLObject } from './webgl-object';
 
 export class WebGLSampler extends WebGLObject {
   _params: Record<string, number> = {
-    [0x2801]: 0x2700, // MIN_FILTER = NEAREST_MIPMAP_LINEAR
+    [0x2801]: 0x2702, // MIN_FILTER = NEAREST_MIPMAP_LINEAR
     [0x2800]: 0x2601, // MAG_FILTER = LINEAR
     [0x2802]: 0x2901, // WRAP_S = REPEAT
     [0x2803]: 0x2901, // WRAP_T = REPEAT

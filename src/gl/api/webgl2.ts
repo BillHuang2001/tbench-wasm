@@ -52,8 +52,12 @@
  *    deleting the BOUND VAO rebinds the default (vertex-array-object.html);
  *    isVertexArray requires a prior bind (WeakSet).
  *  - Transform feedback: begin/end/pause/resume operate on the BOUND TF (or the
- *    default TF when none bound — module-level WeakMap, NOT stored in
- *    state.transformFeedback so TRANSFORM_FEEDBACK_BINDING stays null per CTS).
+ *    default TF when none bound — module-level WeakMap). The default object is
+ *    kept OUT of state.transformFeedback so TRANSFORM_FEEDBACK_BINDING stays
+ *    null per CTS, EXCEPT during an active default-TF session: begin puts it
+ *    there (the draw engine's tfActive check reads state.transformFeedback),
+ *    end restores null, and bind(null) keeps it while a default session is
+ *    paused (capture resumes correctly).
  *    beginTransformFeedback → INVALID_OPERATION when the BOUND TF is active
  *    (switching-objects.html allows beginning a DIFFERENT TF while another is
  *    active-paused), no linked program in use, program has no TF varyings
@@ -188,6 +192,52 @@ function setActiveQuery(ctx: WebGLRenderingContext, target: number, q: WebGLQuer
   slots[target] = q;
 }
 
+/**
+ * Event-loop-deferred query availability. The renderer is synchronous, but the
+ * spec (and CTS occlusion-query.html / transform_feedback.html) require a
+ * query's result to become AVAILABLE only after control returns to the event
+ * loop — pages spin-loop with gl.finish() and assert QUERY_RESULT_AVAILABLE is
+ * false throughout the current task. The result VALUE is computed synchronously
+ * (the draw engine accumulates `_result`); only the availability flag is
+ * deferred: endQuery records the query in a per-context pending set and ONE
+ * setTimeout(0) flips `_resultAvailable` for the whole batch.
+ *
+ * The draw engine (draw.ts, read-only) sets `_resultAvailable = true`
+ * synchronously DURING the draw (between beginQuery and endQuery) — the
+ * pending-set gate in getQueryParameter keeps that unobservable until the
+ * timer fires. Module-level WeakMap so no new enumerable fields ever appear on
+ * the context object (CTS constants-and-properties* enumerate `for (var i in
+ * gl)`).
+ */
+interface QueryAvailabilityState {
+  pending: Set<WebGLQuery>;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+const queryAvailability = new WeakMap<WebGLRenderingContext, QueryAvailabilityState>();
+
+function queryAvailabilityState(ctx: WebGLRenderingContext): QueryAvailabilityState {
+  let st = queryAvailability.get(ctx);
+  if (!st) {
+    st = { pending: new Set(), timer: null };
+    queryAvailability.set(ctx, st);
+  }
+  return st;
+}
+
+/** Arm the deferral for `q`: availability stays false until the next event-loop turn. */
+function deferQueryAvailability(ctx: WebGLRenderingContext, q: WebGLQuery): void {
+  const st = queryAvailabilityState(ctx);
+  st.pending.add(q);
+  if (st.timer === null) {
+    st.timer = setTimeout(() => {
+      st.timer = null;
+      for (const qq of st.pending) qq._resultAvailable = true;
+      st.pending.clear();
+    }, 0);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Sync objects
 // ---------------------------------------------------------------------------
@@ -220,9 +270,15 @@ const COMPARE_FUNC_VALUES = new Set<number>([
   C1.ALWAYS,
 ]);
 
-/** EXT_texture_filter_anisotropic enabled for this context (getExtension never throws). */
+/**
+ * EXT_texture_filter_anisotropic enabled for this context. Checks the enabled
+ * registry (`_extensions`), NOT ctx.getExtension — getExtension ENABLES the
+ * extension, and CTS ext-texture-filter-anisotropic.html expects
+ * TEXTURE_MAX_ANISOTROPY_EXT on samplers to be INVALID_ENUM before any
+ * getExtension call (mirrors api/textures.ts).
+ */
 function anisotropyEnabled(ctx: WebGLRenderingContext): boolean {
-  return ctx.getExtension('EXT_texture_filter_anisotropic') !== null;
+  return ctx._extensions.has('EXT_texture_filter_anisotropic');
 }
 
 // ---------------------------------------------------------------------------
@@ -246,10 +302,12 @@ function defaultVAO(ctx: WebGLRenderingContext): VAOState {
 const everBoundTFs = new WeakSet<WebGLTransformFeedback>();
 
 /**
- * The default transform feedback object (active state when no TF object is
- * bound). Kept OUT of state.transformFeedback so
- * getParameter(TRANSFORM_FEEDBACK_BINDING) stays null (CTS
- * default_transform_feedback.html / transform_feedback.html bindings tests).
+ * The default transform feedback object (the active TF when no TF object is
+ * bound; name 0 per GLES 3.0 §2.15). Usually kept OUT of state.transformFeedback
+ * so getParameter(TRANSFORM_FEEDBACK_BINDING) stays null (CTS
+ * default_transform_feedback.html / transform_feedback.html bindings tests) —
+ * EXCEPT during an active default-TF session, when beginTransformFeedback
+ * exposes it there so the draw engine captures into it (see begin/end below).
  */
 const defaultTFs = new WeakMap<WebGLRenderingContext, WebGLTransformFeedback>();
 
@@ -403,6 +461,9 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       q._active = true;
       q._result = 0;
       q._resultAvailable = false;
+      // Availability is deferred to the event loop (the draw engine may set
+      // _resultAvailable synchronously during the session — see header note).
+      deferQueryAvailability(ctx, q);
       setActiveQuery(ctx, target, q);
     };
   }
@@ -421,10 +482,12 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         return;
       }
       q._active = false;
-      // Synchronous renderer: the result (accumulated by the draw engine into
-      // _result) is available immediately. TF-primitives-writtten queries keep
-      // whatever the draw engine accumulated (0 until it lands).
-      q._resultAvailable = true;
+      // The result (accumulated by the draw engine into _result) is final NOW,
+      // but QUERY_RESULT_AVAILABLE only becomes observable after control
+      // returns to the event loop (CTS occlusion-query.html "became available
+      // too early"; transform_feedback.html same). Re-arm in case the session
+      // spanned an event-loop turn and the previous timer already fired.
+      deferQueryAvailability(ctx, q);
       setActiveQuery(ctx, target, null);
     };
   }
@@ -457,6 +520,8 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         if (activeQueryAt(ctx, t) === query) setActiveQuery(ctx, t, null);
       }
       query._active = false;
+      // Drop a pending availability flip (deleted queries must stay invisible).
+      queryAvailabilityState(ctx).pending.delete(query);
       query._deleted = true;
       ctx._resources.untrack(query);
     };
@@ -503,7 +568,10 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         case C2.QUERY_RESULT:
           return q._result; // synchronous: no blocking (never-begun → 0)
         case C2.QUERY_RESULT_AVAILABLE:
-          return q._resultAvailable;
+          // Gated on the pending set: even though the draw engine may have set
+          // _resultAvailable synchronously, the flag is only observable after
+          // the deferred flip (see deferQueryAvailability).
+          return !queryAvailabilityState(ctx).pending.has(q) && q._resultAvailable;
         default:
           ctx._errors.push(C1.INVALID_ENUM);
           return null;
@@ -527,8 +595,16 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       const sync = createObject(ctx, Sync.make);
       sync._condition = condition;
       sync._flags = flags;
-      sync._signaled = true; // synchronous renderer: signaled immediately
+      // All GL work completes synchronously, but the spec (CTS
+      // sync-webgl-specific.html) requires the sync to become SIGNALED only
+      // after control returns to the event loop — pages spin-loop with
+      // readPixels and assert UNSIGNALED throughout the current task. A
+      // one-shot setTimeout(0) flips it (the timer cannot fire mid-task).
+      sync._signaled = false;
       sync._id = nextSyncId++;
+      setTimeout(() => {
+        sync._signaled = true;
+      }, 0);
       return sync;
     };
   }
@@ -578,9 +654,12 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         ctx._errors.push(C1.INVALID_OPERATION); // spec: timeout > MAX_CLIENT_WAIT_TIMEOUT_WEBGL
         return C2.WAIT_FAILED;
       }
-      // Syncs are signaled immediately (synchronous renderer) — any legal wait
-      // completes without blocking.
-      return C2.ALREADY_SIGNALED;
+      // The sync flips to SIGNALED on the event loop after fenceSync; before
+      // that a zero-timeout wait must report TIMEOUT_EXPIRED (CTS
+      // sync-webgl-specific.html spin-loop). Once signaled, ALREADY_SIGNALED
+      // (SYNC_FLUSH_COMMANDS_BIT is only a flush hint — the result is the
+      // same for a synchronous renderer).
+      return s._signaled ? C2.ALREADY_SIGNALED : C2.TIMEOUT_EXPIRED;
     };
   }
 
@@ -877,7 +956,15 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         return;
       }
       if (transformFeedback === null || transformFeedback === undefined) {
-        s.transformFeedback = null; // bind the default TF
+        // Bind the default transform feedback object. It stays OUT of
+        // state.transformFeedback so getParameter(TRANSFORM_FEEDBACK_BINDING)
+        // reports null (CTS transform_feedback.html / gl-get-calls.html) —
+        // EXCEPT while a default-TF session is active-paused: keep the default
+        // object exposed so the draw engine keeps capturing after
+        // resumeTransformFeedback (binding the default during a paused default
+        // session is a no-op bind per GLES 3.0 §2.15).
+        const def = defaultTFs.get(ctx);
+        s.transformFeedback = def && def._active ? def : null;
         return;
       }
       const tf = validateObject<WebGLTransformFeedback>(ctx, transformFeedback, Tf.any);
@@ -927,6 +1014,17 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         return;
       }
       const tf = bound !== null ? bound : getDefaultTF(ctx);
+      if (bound === null) {
+        // Default-TF session: expose the default object through
+        // state.transformFeedback so the draw engine's tfActive check
+        // (`!!s.transformFeedback && tf._active && !tf._paused`, draw.ts)
+        // captures into it. getParameter(TRANSFORM_FEEDBACK_BINDING) reads the
+        // same field and reports the object mid-session — no CTS page queries
+        // it during a default session (all null expectations in
+        // transform_feedback.html / gl-get-calls.html are outside sessions;
+        // endTransformFeedback restores null below).
+        s.transformFeedback = tf;
+      }
       syncTfBuffers(ctx, tf);
       tf._program = program;
       tf._active = true;
@@ -945,10 +1043,16 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         ctx._errors.push(C1.INVALID_OPERATION); // not active
         return;
       }
+      const isDefaultSession = tf === defaultTFs.get(ctx);
       tf._active = false;
       tf._paused = false;
       tf._program = null; // ES3: EndTransformFeedback resets the TF program binding
       tf._primitivesWritten = 0; // ES3: primitives-written counter resets on deactivation
+      if (isDefaultSession && ctx._state.transformFeedback === tf) {
+        // Restore the unbound state: TRANSFORM_FEEDBACK_BINDING → null (CTS
+        // transform_feedback.html expects null after binding the default).
+        ctx._state.transformFeedback = null;
+      }
     };
   }
 
