@@ -201,9 +201,12 @@ export class WebGLRenderingContext {
    * chainToNative() re-chains our prototypes under the native ones, the native
    * accessors would otherwise run on our non-native `this` and throw
    * "Illegal invocation" (WebIDL brand check). three.js/Babylon read AND assign
-   * these unguarded, so the setters must never throw (the renderer stays sRGB
-   * regardless of what is assigned — native enum validation is deliberately
-   * skipped to avoid crashing engines).
+   * these unguarded, so the setters must never throw. The drawing buffer stays
+   * sRGB regardless of drawingBufferColorSpace; unpackColorSpace IS honored:
+   * DOM-source texture uploads convert sRGB→display-p3 when it is 'display-p3'
+   * (see teximage.ts). Native enum validation is deliberately skipped (no
+   * TypeError) to avoid crashing engines — any string is stored, the upload
+   * path only acts on 'display-p3'.
    */
   get drawingBufferColorSpace(): string {
     return 'srgb';
@@ -212,10 +215,12 @@ export class WebGLRenderingContext {
     // no-op — software renderer always outputs sRGB
   }
   get unpackColorSpace(): string {
-    return 'srgb';
+    return this._state.pixelStore.unpack.unpackColorSpace;
   }
-  set unpackColorSpace(_value: string) {
-    // no-op — image uploads are interpreted as sRGB
+  set unpackColorSpace(value: string) {
+    if (typeof value === 'string') {
+      this._state.pixelStore.unpack.unpackColorSpace = value;
+    }
   }
   /** Format of the drawing buffer: RGBA8 (0x8058). */
   get drawingBufferFormat(): GLenum {

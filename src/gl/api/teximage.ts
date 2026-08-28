@@ -758,14 +758,23 @@ function w2ValidatePbo(ctx: WebGLRenderingContext, pixels: number): boolean {
 // DOM-source helpers
 // ---------------------------------------------------------------------------
 
-/** Width/height of a DOM TexImageSource (numbers only — mocks/ImageData included). */
+/**
+ * Width/height of a DOM TexImageSource (duck-typed, mirroring present/image.ts).
+ * HTMLVideoElement's `.width`/`.height` are the reflected content attributes
+ * (0 in Chromium) — the intrinsic frame size is `videoWidth`/`videoHeight`;
+ * images use `naturalWidth`/`naturalHeight`; canvas/ImageBitmap/ImageData use
+ * `.width`/`.height`. Returns null for anything without numeric dims.
+ */
 function sourceDims(source: unknown): { width: number; height: number } | null {
-  if (source !== null && typeof source === 'object') {
-    const s = source as { width?: unknown; height?: unknown };
-    if (typeof s.width === 'number' && typeof s.height === 'number') {
-      return { width: s.width, height: s.height };
-    }
+  if (source === null || typeof source !== 'object') return null;
+  const s = source as Record<string, unknown>;
+  if (typeof s.videoWidth === 'number' && typeof s.readyState === 'number') {
+    return typeof s.videoHeight === 'number' ? { width: s.videoWidth, height: s.videoHeight } : null;
   }
+  if (typeof s.naturalWidth === 'number') {
+    return typeof s.naturalHeight === 'number' ? { width: s.naturalWidth, height: s.naturalHeight } : null;
+  }
+  if (typeof s.width === 'number' && typeof s.height === 'number') return { width: s.width, height: s.height };
   return null;
 }
 

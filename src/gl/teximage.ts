@@ -667,6 +667,46 @@ function readSourceTexel(dv: DataView, byteOff: number, format: GLenum, type: GL
 }
 
 // ---------------------------------------------------------------------------
+// unpackColorSpace (display-p3) conversion for DOM-source uploads
+// ---------------------------------------------------------------------------
+
+/** sRGB EOTF: encoded [0,1] → linear light (display-p3 shares this curve). */
+function srgbToLinear(v: number): number {
+  return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+}
+
+/** sRGB OETF: linear light → encoded [0,1], clamped (display-p3 shares this curve). */
+function linearToSrgb(v: number): number {
+  if (v <= 0) return 0;
+  if (v >= 1) return 1;
+  return v <= 0.0031308 ? v * 12.92 : Math.pow(v, 1 / 2.4) * 1.055 - 0.055;
+}
+
+/**
+ * Convert straight-alpha RGBA8 pixels in place from sRGB to display-p3
+ * (gl.unpackColorSpace = 'display-p3' DOM uploads). Per the WebGL color-space
+ * rules and the CSS Color 4 "predefined-to-predefined" conversion: linearize
+ * with the sRGB EOTF, apply the linear-light sRGB→display-p3 primary matrix
+ * (0.8224621 0.177538 0 / 0.0331941 0.9668058 0 / 0.0170827 0.0723974
+ * 0.9104399), re-encode with the sRGB OETF. Alpha is preserved unchanged.
+ * Matches the CTS expectations (webgl-test-utils.js namedColorInColorSpace):
+ * sRGB red (255,0,0) → (234,51,35), green (0,255,0) → (117,251,76).
+ */
+function srgbToDisplayP3(data: Uint8ClampedArray): void {
+  for (let i = 0; i < data.length; i += 4) {
+    const r = srgbToLinear(data[i] / 255);
+    const g = srgbToLinear(data[i + 1] / 255);
+    const b = srgbToLinear(data[i + 2] / 255);
+    const rp = 0.8224621 * r + 0.177538 * g;
+    const gp = 0.0331941 * r + 0.9668058 * g;
+    const bp = 0.0170827 * r + 0.0723974 * g + 0.9104399 * b;
+    data[i] = Math.round(linearToSrgb(rp) * 255);
+    data[i + 1] = Math.round(linearToSrgb(gp) * 255);
+    data[i + 2] = Math.round(linearToSrgb(bp) * 255);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Row/slice copy
 // ---------------------------------------------------------------------------
 
@@ -700,12 +740,18 @@ function copyRows(
   dstZOffset: number,
 ): void {
   const out = new Float32Array(4);
+  const srcBytes = p.src.byteLength;
   for (let r = 0; r < height; r++) {
     const srcRow = srcRow0 + (p.flipY ? height - 1 - r : r);
     const dstY = yoff + r;
     const srcBase = srcRow * p.srcRowBytes + p.srcSkipPixels * p.srcBpp;
+    // Bounds clamp: a source shorter than the requested rect must not throw
+    // (and silently drop the whole copy via the API-boundary catch) — copy
+    // only the texels the source actually provides.
+    if (srcBase < 0 || srcBase >= srcBytes) continue;
+    const maxX = Math.min(width, Math.floor((srcBytes - srcBase) / p.srcBpp));
     const dstBase = (dstZOffset + dstY * dstW + xoff) * p.dstBpp;
-    for (let x = 0; x < width; x++) {
+    for (let x = 0; x < maxX; x++) {
       readSourceTexel(p.src, srcBase + x * p.srcBpp, p.srcFormat, p.srcType, p.domain, out);
       if (p.premultiply) { out[0] *= out[3]; out[1] *= out[3]; out[2] *= out[3]; }
       if (p.dstStencil !== undefined && p.srcFormat === C.DEPTH_STENCIL) {
@@ -866,6 +912,12 @@ function copyPixelsIntoLevel(
       const res = decodeImageSource(source as never) as { ok: boolean; image?: { width: number; height: number; data: Uint8ClampedArray } };
       if (res && res.ok && res.image) {
         const im = res.image;
+        // unpackColorSpace = 'display-p3': convert the decoded (sRGB) pixels to
+        // display-p3 before upload (WebGL color-space rules; CSS Color 4
+        // matrices). Integer formats store raw channel values and are exempt.
+        if (!spec.isInteger && ctx.unpackColorSpace === 'display-p3') {
+          srgbToDisplayP3(im.data);
+        }
         const dv = new DataView(im.data.buffer, im.data.byteOffset, im.data.byteLength);
         const p: CopyParams = {
           src: dv,
