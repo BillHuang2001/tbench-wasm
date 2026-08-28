@@ -478,9 +478,19 @@ function makeTex(): any {
     `array output const index 2 → color[2] (got [${Array.from(cols[2]).join(', ')}])`,
   );
   check(cols[0][0] === 0, `unwritten array slot color[0] stays zero (got ${cols[0][0]})`);
-  // Scalar int output: writes the int into color[4][0].
-  check(cols[4][0] === 7, `scalar int output → color[4][0] (got ${cols[4][0]})`);
-  // ivec4 output: same slot layout, components c = 0..3.
+  // Scalar int output: writes the int's BIT PATTERN into color[4][0] (R.u2f —
+  // the raster bit-reinterprets for integer attachments).
+  // Direct element store + alias read (NOT `new Float32Array([x])` — the
+  // array-literal conversion sometimes canonicalizes NaN payloads in V8).
+  const bitBuf = new ArrayBuffer(4);
+  const bitF32 = new Float32Array(bitBuf);
+  const bitI32 = new Int32Array(bitBuf);
+  const f2i = (x: number): number => {
+    bitF32[0] = x;
+    return bitI32[0];
+  };
+  check(f2i(cols[4][0]) === 7, `scalar int output → color[4][0] bit pattern of 7 (got f2i=${f2i(cols[4][0])})`);
+  // ivec4 output: same slot layout, components c = 0..3 (bit patterns).
   const r2 = runStage(
     `#version 300 es
      out ivec4 oI;
@@ -489,10 +499,10 @@ function makeTex(): any {
     baseLayout(300, { outputLocations: new Map([['oI', 1]]) }),
     { out: { color: [new Float32Array(4), new Float32Array(4)], fragDepth: 0 } },
   );
-  const ci = r2.ctx.out.color[1];
+  const ci = r2.ctx.out.color[1] as Float32Array;
   check(
-    ci[0] === 1 && ci[1] === 2 && ci[2] === 3 && ci[3] === 4,
-    `ivec4 output → color[1] components (got [${Array.from(ci).join(', ')}])`,
+    f2i(ci[0]) === 1 && f2i(ci[1]) === 2 && f2i(ci[2]) === 3 && f2i(ci[3]) === 4,
+    `ivec4 output → color[1] components as bit patterns (got f2i=[${Array.from(ci).map(f2i).join(', ')}])`,
   );
 }
 

@@ -495,8 +495,11 @@ const INT = 0x1404; // 5124
     const vctx = vertexCtx(p, { attribs: [new Float32Array([0, 0, 0, 1])], attribIndices: new Int32Array([0]) });
     p.vertex.run(vctx);
     const vg = vctx.out.varyings;
-    check(vg[0] === 1 && vg[1] === -2 && vg[2] === 3 && vg[3] === -4,
-      `ivec4 packed [1,-2,3,-4] (got [${Array.from(vg.slice(0, 4)).join(', ')}])`);
+    // INT varyings bit-pack (T1-A580): the record cells hold the int32 BIT
+    // PATTERNS (float32-reinterpreted), not float32 values.
+    const f2i = (x: number) => new Int32Array(new Float32Array([x]).buffer)[0];
+    check(f2i(vg[0]) === 1 && f2i(vg[1]) === -2 && f2i(vg[2]) === 3 && f2i(vg[3]) === -4,
+      `ivec4 cells carry BIT PATTERNS [1,-2,3,-4] (got f2i=[${[f2i(vg[0]), f2i(vg[1]), f2i(vg[2]), f2i(vg[3])].join(', ')}])`);
     const fctx = fragmentCtx(p, [vg]);
     p.fragment.run(fctx);
     const c = fctx.out.color[0];
@@ -2153,7 +2156,9 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
     }
   }
 
-  // Scalar INT output (vertex-id): type GL_INT, run writes the int value.
+  // Scalar INT output (vertex-id): type GL_INT; run writes the int value's
+  // BIT PATTERN into the output cell (R.u2f — the raster bit-reinterprets
+  // for integer attachments, e.g. R32I).
   {
     const vsI = compile(
       `#version 300 es
@@ -2182,7 +2187,16 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
       p.vertex.run(vctx);
       const fctx = fragmentCtx(p, [vctx.out.varyings]);
       p.fragment.run(fctx);
-      check(fctx.out.color[0][0] === 12345, `int output run writes 12345 (got ${fctx.out.color[0][0]})`);
+      // Direct element store + alias read (NOT `new Float32Array([x])` — the
+      // array-literal conversion sometimes canonicalizes NaN payloads in V8).
+      const bitBuf = new ArrayBuffer(4);
+      const bitF32 = new Float32Array(bitBuf);
+      const bitI32 = new Int32Array(bitBuf);
+      const f2i = (x: number): number => {
+        bitF32[0] = x;
+        return bitI32[0];
+      };
+      check(f2i(fctx.out.color[0][0]) === 12345, `int output run writes 12345 as BIT PATTERN (got f2i=${f2i(fctx.out.color[0][0])})`);
     }
   }
 

@@ -1,19 +1,37 @@
 /**
- * selftest-uint-varying.ts — bit-preserving UINT varying pack (T1-A573).
+ * selftest-uint-varying.ts — bit-preserving INT/UINT varying pack
+ * (T1-A573 uint, T1-A580 int) + integral FRAGMENT-output pack (T1-A593).
  *
- * UINT varyings pack their 32-bit VALUE's BIT PATTERN into the float32
- * vertex-record cell (`R.u2f`) instead of the float32-rounded value, so the
- * gl TF capture (draw.ts captureTransformFeedback — copies the record bits
- * RAW into the TF buffer) yields exact uint32s for getBufferSubData
- * (CTS get-buffer-sub-data-validity.html: srcData [1..8] read back through
- * a `flat out uint` transform-feedback varying). The fragment side and
- * vertex read-backs unpack via `R.f2u`. INT varyings stay float32-VALUE
- * packed (the int32 sign bit is the float32 sign bit — small negatives
- * would land on exponent-0xFF NaN bit patterns and corrupt in the
- * Float32Array store).
+ * INT and UINT varyings pack their 32-bit VALUE's BIT PATTERN into the
+ * float32 vertex-record cell (`R.u2f`) instead of the float32-rounded value:
+ * values > 2^24 (e.g. gl_VertexID = 0x7FFFFFFD, TF capture of large uints)
+ * would otherwise round in the record and corrupt fragment reads and vertex
+ * read-backs (CTS vertex-id.html, get-buffer-sub-data-validity.html). The
+ * fragment side and vertex read-backs unpack via `R.f2u` (uint32) / `R.f2i`
+ * (int32 reinterpret) — the record's float32 bits are the true 32-bit
+ * pattern. Writing a signed int to the Uint32Array view wraps via ToUint32
+ * (two's-complement bits exact), so one `R.u2f` write serves both families.
+ * Integral varyings are flat (GLSL ES 3.00 §4.3.6 — enforced at semantics;
+ * VaryingInfo.flat is implied for integral types) so the raster copies cells
+ * bit-exact with no interpolation. GLSL ES 1.00 cannot declare int/uint
+ * varyings at all ('varying variables must have a float type'), so no v100
+ * pin exists.
  *
- * Every check FAILS on the pre-fix code (the record holds float32-rounded
- * values; TF/fragment reads of values > 2^24 are garbage).
+ * Section 12 (T1-A593): int/uint FRAGMENT outputs use the same R.u2f bit
+ * pattern into their ctx.out.color cells, so the raster can bit-reinterpret
+ * for integer attachments (R32I/R32UI — CTS vertex-id.html values
+ * 2147483645/2147483646 were float32-rounded + encode-clamped). Reads of an
+ * integral output (read-after-write, assignment-expression values) unpack
+ * via R.f2i/R.f2u; float outputs stay unpacked (type-based decision).
+ *
+ * NaN-pattern payloads (exponent 0xFF: 0x7F800000-0x7FFFFFFF,
+ * 0xFF800000-0xFFFFFFFF) survive the Float32Array record round-trip
+ * BIT-EXACT in V8 (Node + headless Chromium) — sections 7/8 pin the manager-
+ * verified payload preservation (0x7FFFFFFD, 0x7FFFFFFF, 0xFFFFFFFF,
+ * 0x80000000 → −0.0, 0xFFFFFFFB all bit-exact).
+ *
+ * Every INT check FAILS on the pre-T1-A580 code (the record held
+ * float32-rounded values; fragment reads of |v| > 2^24 were garbage).
  *
  * Run: npx tsx src/glsl/codegen/selftest-uint-varying.ts
  * Prints "selftest-uint-varying: N checks" and exits 0 only when all pass.
@@ -77,8 +95,8 @@ function fragmentCtx(
   };
 }
 
-/** Link a VS/FS pair and run the vertex stage with one uint attribute value. */
-function runVertex(
+/** Link a VS/FS pair and run the vertex stage with one INT attribute value. */
+function runVertexInt(
   vsSrc: string,
   fsSrc: string,
   a: number,
@@ -89,7 +107,7 @@ function runVertex(
   if (!l.ok) throw new Error(`link failed: ${l.log}`);
   const prog = l.program;
   const vctx = vertexCtx(prog, {
-    attribs: [new Uint32Array([a])],
+    attribs: [new Int32Array([a])],
     attribIndices: new Int32Array([0]),
   });
   prog.vertex.run(vctx);
@@ -98,7 +116,26 @@ function runVertex(
 }
 
 const BIG = 0x04030201; // 67305985 > 2^24 — float32 rounding would corrupt it
-const R = { f2u: (x: number) => new Uint32Array(new Float32Array([x]).buffer)[0] };
+// Bit reinterpretation for cell checks. IMPORTANT: use the DIRECT element
+// store (f32v[0] = x; read the i32/u32 alias) — `new Float32Array([x])`
+// (array-literal conversion) sometimes canonicalizes NaN payloads in V8,
+// producing false failures on NaN-pattern cells (0x7FFFFFFD etc.). The
+// direct store is the same implementation the runtime R uses (verified
+// stable; runtime.ts f2i/f2u).
+const bitBuf = new ArrayBuffer(4);
+const bitF32 = new Float32Array(bitBuf);
+const bitI32 = new Int32Array(bitBuf);
+const bitU32 = new Uint32Array(bitBuf);
+const R = {
+  f2u: (x: number): number => {
+    bitF32[0] = x;
+    return bitU32[0];
+  },
+  f2i: (x: number): number => {
+    bitF32[0] = x;
+    return bitI32[0];
+  },
+};
 
 /* ------------------------------------------------------------------ */
 /* 1. Bit-exact pack + TF-capture simulation (CTS get-buffer-sub-data) */
@@ -110,14 +147,26 @@ const R = { f2u: (x: number) => new Uint32Array(new Float32Array([x]).buffer)[0]
      flat in uint v;
      out vec4 o;
      void main(){ o = (v == ${BIG}u) ? vec4(1.0, 0.0, 0.0, 1.0) : vec4(0.0, 0.0, 0.0, 1.0); }`;
-  const { prog, vg } = runVertex(
-    `#version 300 es
-     in uint a;
-     flat out uint v;
-     void main(){ v = a; gl_Position = vec4(0.0); }`,
-    fsSrc,
-    BIG,
-  );
+  const { prog, vg } = (() => {
+    const vs = compile(
+      `#version 300 es
+       in uint a;
+       flat out uint v;
+       void main(){ v = a; gl_Position = vec4(0.0); }`,
+      'VERTEX',
+      300,
+    );
+    const fs = compile(fsSrc, 'FRAGMENT', 300);
+    const l = linkProgram(vs, fs);
+    if (!l.ok) throw new Error(`link failed: ${l.log}`);
+    const prog = l.program;
+    const vctx = vertexCtx(prog, {
+      attribs: [new Uint32Array([BIG])],
+      attribIndices: new Int32Array([0]),
+    });
+    prog.vertex.run(vctx);
+    return { prog, vg: vctx.out.varyings as Float32Array };
+  })();
   check(prog.varyings.length === 1 && prog.varyings[0].flat === true && prog.varyings[0].components === 1,
     `varying flat flag + components (got ${JSON.stringify(prog.varyings)})`);
   check(R.f2u(vg[0]) === BIG,
@@ -144,14 +193,14 @@ const R = { f2u: (x: number) => new Uint32Array(new Float32Array([x]).buffer)[0]
 /* ------------------------------------------------------------------ */
 
 {
-  const { prog, vctx } = runVertex(
+  const { prog, vctx } = runVertexInt(
     `#version 300 es
-     in uint a;
+     in int a;
      flat out uint v;
      void main(){
-       v = a;
+       v = uint(a);
        // Vertex read-back of the packed varying must equal the source.
-       if (v != a) { gl_Position = vec4(1.0); return; }
+       if (v != uint(a)) { gl_Position = vec4(1.0); return; }
        // The assignment-expression VALUE is the assigned uint (unpacked).
        uint w = (v = ${BIG}u);
        gl_Position = vec4(w == ${BIG}u ? 2.0 : 1.0, 0.0, 0.0, 1.0);
@@ -165,6 +214,7 @@ const R = { f2u: (x: number) => new Uint32Array(new Float32Array([x]).buffer)[0]
   );
   check(vctx.out.position[0] === 2,
     `vertex read-back + assignment value correct (position.x=${vctx.out.position[0]})`);
+  void prog;
 }
 
 /* ------------------------------------------------------------------ */
@@ -172,11 +222,11 @@ const R = { f2u: (x: number) => new Uint32Array(new Float32Array([x]).buffer)[0]
 /* ------------------------------------------------------------------ */
 
 {
-  const { prog, vg } = runVertex(
+  const { prog, vg } = runVertexInt(
     `#version 300 es
-     in uint a;
+     in int a;
      flat out uint v;
-     void main(){ v = a; v += 1u; }`,
+     void main(){ v = uint(a); v += 1u; }`,
     `#version 300 es
      precision mediump float;
      flat in uint v;
@@ -187,11 +237,11 @@ const R = { f2u: (x: number) => new Uint32Array(new Float32Array([x]).buffer)[0]
   check(R.f2u(vg[0]) === ((BIG + 1) & 0xffffffff),
     `'v += 1u' packs 0x${((BIG + 1) >>> 0).toString(16)} (got f2u=${R.f2u(vg[0])})`);
 
-  const { prog: p2, vg: vg2 } = runVertex(
+  const { prog: p2, vg: vg2 } = runVertexInt(
     `#version 300 es
-     in uint a;
+     in int a;
      flat out uint v;
-     void main(){ v = a; v++; }`,
+     void main(){ v = uint(a); v++; }`,
     `#version 300 es
      precision mediump float;
      flat in uint v;
@@ -202,11 +252,11 @@ const R = { f2u: (x: number) => new Uint32Array(new Float32Array([x]).buffer)[0]
   check(R.f2u(vg2[0]) === ((BIG + 1) & 0xffffffff),
     `statement 'v++' packs 0x${((BIG + 1) >>> 0).toString(16)} (got f2u=${R.f2u(vg2[0])})`);
 
-  const { prog: p3, vctx: vctx3, vg: vg3 } = runVertex(
+  const { prog: p3, vctx: vctx3, vg: vg3 } = runVertexInt(
     `#version 300 es
-     in uint a;
+     in int a;
      flat out uint v;
-     void main(){ v = a; uint w = ++v; gl_Position = vec4(w == ${BIG + 1}u ? 2.0 : 1.0, 0.0, 0.0, 1.0); }`,
+     void main(){ v = uint(a); uint w = ++v; gl_Position = vec4(w == ${BIG + 1}u ? 2.0 : 1.0, 0.0, 0.0, 1.0); }`,
     `#version 300 es
      precision mediump float;
      flat in uint v;
@@ -278,7 +328,7 @@ const R = { f2u: (x: number) => new Uint32Array(new Float32Array([x]).buffer)[0]
 }
 
 /* ------------------------------------------------------------------ */
-/* 5. INT varyings stay float32-VALUE packed (no NaN-bit regression)    */
+/* 5. INT varying bit-packs its two's-complement bits (T1-A580)         */
 /* ------------------------------------------------------------------ */
 
 {
@@ -305,7 +355,9 @@ const R = { f2u: (x: number) => new Uint32Array(new Float32Array([x]).buffer)[0]
     const vctx = vertexCtx(prog);
     prog.vertex.run(vctx);
     const vg = vctx.out.varyings;
-    check(vg[0] === -5, `int varying keeps float32 VALUE -5 (got ${vg[0]})`);
+    // -5 → 0xFFFFFFFB (a NaN-pattern float) — bit-exact in the V8 store.
+    check(R.f2u(vg[0]) === 0xfffffffb,
+      `int varying packs BIT PATTERN of -5 (0xFFFFFFFB) (record float=${vg[0]}, f2u=${R.f2u(vg[0])})`);
     const fctx = fragmentCtx(prog, [{ v: vg.subarray(0, 1) }]);
     prog.fragment.run(fctx);
     check(fctx.out.color[0][0] === -5, `int varying fragment round-trip -5 (got ${fctx.out.color[0][0]})`);
@@ -350,6 +402,445 @@ const R = { f2u: (x: number) => new Uint32Array(new Float32Array([x]).buffer)[0]
     prog.fragment.run(fctx);
     check(fctx.out.color[0][1] === 1,
       `dual-mode fragment unpacks the uint varying (color [${Array.from(fctx.out.color[0]).join(', ')}])`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 7. THE vertex-id value: int 2147483645 (0x7FFFFFFD) bit-exact pack   */
+/*    + TF-capture byte simulation (raw LE bytes of the int32)          */
+/* ------------------------------------------------------------------ */
+
+{
+  const { prog, vg } = runVertexInt(
+    `#version 300 es
+     in int a;
+     flat out int v;
+     void main(){ v = a; gl_Position = vec4(0.0); }`,
+    `#version 300 es
+     precision mediump float;
+     flat in int v;
+     out vec4 o;
+     void main(){ o = (v == 2147483645) ? vec4(1.0, 0.0, 0.0, 1.0) : vec4(0.0, 0.0, 0.0, 1.0); }`,
+    2147483645,
+  );
+  check(prog.varyings[0].flat === true && prog.varyings[0].components === 1,
+    `int varying flat flag + components (got ${JSON.stringify(prog.varyings)})`);
+  check(R.f2u(vg[0]) === 0x7ffffffd,
+    `int varying packs 2147483645 BIT PATTERN 0x7FFFFFFD (record float=${vg[0]}, f2u=${R.f2u(vg[0])})`);
+
+  // TF capture byte simulation: the record cell's float32 bits ARE the int32
+  // bits (LE byte order — as CTS getBufferSubData reads).
+  const tfBytes = new Uint8Array(new Float32Array([vg[0]]).buffer);
+  const expect = [0xfd, 0xff, 0xff, 0x7f]; // LE bytes of int32 0x7FFFFFFD
+  check(
+    tfBytes[0] === expect[0] && tfBytes[1] === expect[1] &&
+      tfBytes[2] === expect[2] && tfBytes[3] === expect[3],
+    `int TF capture bytes = [FD,FF,FF,7F] (got [${Array.from(tfBytes).map((b) => b.toString(16)).join(',')}])`,
+  );
+
+  const fctx = fragmentCtx(prog, [{ v: vg.subarray(0, 1) }]);
+  prog.fragment.run(fctx);
+  check(fctx.out.color[0][0] === 1,
+    `fragment reads int 2147483645 back bit-exact (color [${Array.from(fctx.out.color[0]).join(', ')}])`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 8. INT value matrix: record bits + vertex read-back + assignment     */
+/*    value + fragment round-trip for NaN-pattern / edge values         */
+/* ------------------------------------------------------------------ */
+
+{
+  // 2147483647 (0x7FFFFFFF), -1 (0xFFFFFFFF), -2147483648 (0x80000000 →
+  // float -0.0), -5 (0xFFFFFFFB), 2147483645 (0x7FFFFFFD).
+  const values: { v: number; bits: number; fsLit: string }[] = [
+    { v: 2147483647, bits: 0x7fffffff, fsLit: '2147483647' },
+    { v: -1, bits: 0xffffffff, fsLit: '-1' },
+    { v: -2147483648, bits: 0x80000000, fsLit: '(-2147483647 - 1)' },
+    { v: -5, bits: 0xfffffffb, fsLit: '-5' },
+    { v: 2147483645, bits: 0x7ffffffd, fsLit: '2147483645' },
+  ];
+  for (const { v, bits, fsLit } of values) {
+    const { prog, vctx, vg } = runVertexInt(
+      `#version 300 es
+       in int a;
+       flat out int v;
+       void main(){
+         v = a;
+         // Vertex read-back of the packed varying must equal the source.
+         if (v != a) { gl_Position = vec4(1.0); return; }
+         // The assignment-expression VALUE is the assigned int (unpacked).
+         int w = (v = a);
+         gl_Position = vec4(w == a ? 2.0 : 1.0, 0.0, 0.0, 1.0);
+       }`,
+      `#version 300 es
+       precision mediump float;
+       flat in int v;
+       out vec4 o;
+       void main(){ o = (v == ${fsLit}) ? vec4(1.0, 0.0, 0.0, 1.0) : vec4(0.0, 0.0, 0.0, 1.0); }`,
+      v,
+    );
+    check(R.f2u(vg[0]) === bits,
+      `int ${v} packs bits 0x${bits.toString(16)} (record float=${vg[0]}, f2u=${R.f2u(vg[0])})`);
+    check(vctx.out.position[0] === 2,
+      `int ${v} vertex read-back + assignment value correct (position.x=${vctx.out.position[0]})`);
+    const fctx = fragmentCtx(prog, [{ v: vg.subarray(0, 1) }]);
+    prog.fragment.run(fctx);
+    check(fctx.out.color[0][0] === 1,
+      `int ${v} fragment round-trip bit-exact (color [${Array.from(fctx.out.color[0]).join(', ')}])`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 9. Compound ops / ++/-- on a packed INT varying (int vs uint ops)    */
+/* ------------------------------------------------------------------ */
+
+{
+  // `+=` (bit-identical to uint)
+  const { vg: vg1 } = runVertexInt(
+    `#version 300 es
+     in int a;
+     flat out int v;
+     void main(){ v = a; v += 1; }`,
+    `#version 300 es
+     precision mediump float;
+     flat in int v;
+     out vec4 o;
+     void main(){ o = vec4(0.0); }`,
+    -5,
+  );
+  check(R.f2u(vg1[0]) === 0xfffffffc,
+    `int 'v += 1' on -5 packs 0xFFFFFFFC (got f2u=${R.f2u(vg1[0])})`);
+
+  // `*=` via Math.imul (large operands would lose low bits with plain JS `*`)
+  const { vg: vg2 } = runVertexInt(
+    `#version 300 es
+     in int a;
+     flat out int v;
+     void main(){ v = a; v *= 3; }`,
+    `#version 300 es
+     precision mediump float;
+     flat in int v;
+     out vec4 o;
+     void main(){ o = vec4(0.0); }`,
+    BIG,
+  );
+  check(R.f2u(vg2[0]) === 0x0c090603,
+    `int 'v *= 3' on 0x04030201 uses Math.imul → 0x0C090603 (got f2u=${R.f2u(vg2[0])})`);
+
+  // `>>=` ARITHMETIC shift (uint would be logical): -7 >> 2 = -2
+  const { vg: vg3 } = runVertexInt(
+    `#version 300 es
+     in int a;
+     flat out int v;
+     void main(){ v = a; v >>= 2; }`,
+    `#version 300 es
+     precision mediump float;
+     flat in int v;
+     out vec4 o;
+     void main(){ o = vec4(0.0); }`,
+    -7,
+  );
+  check(R.f2i(vg3[0]) === -2,
+    `int 'v >>= 2' on -7 is ARITHMETIC → -2 (got f2i=${R.f2i(vg3[0])})`);
+
+  // `/=` truncates toward zero: -7 / 3 = -2 (uint would floor)
+  const { vg: vg4 } = runVertexInt(
+    `#version 300 es
+     in int a;
+     flat out int v;
+     void main(){ v = a; v /= 3; }`,
+    `#version 300 es
+     precision mediump float;
+     flat in int v;
+     out vec4 o;
+     void main(){ o = vec4(0.0); }`,
+    -7,
+  );
+  check(R.f2i(vg4[0]) === -2,
+    `int 'v /= 3' on -7 truncates toward zero → -2 (got f2i=${R.f2i(vg4[0])})`);
+
+  // `%=` sign-of-dividend: -7 % 3 = -1
+  const { vg: vg5 } = runVertexInt(
+    `#version 300 es
+     in int a;
+     flat out int v;
+     void main(){ v = a; v %= 3; }`,
+    `#version 300 es
+     precision mediump float;
+     flat in int v;
+     out vec4 o;
+     void main(){ o = vec4(0.0); }`,
+    -7,
+  );
+  check(R.f2i(vg5[0]) === -1,
+    `int 'v %= 3' on -7 keeps the dividend sign → -1 (got f2i=${R.f2i(vg5[0])})`);
+
+  // Statement `v++` on 2147483645 → 2147483646 (0x7FFFFFFE)
+  const { vg: vg6 } = runVertexInt(
+    `#version 300 es
+     in int a;
+     flat out int v;
+     void main(){ v = a; v++; }`,
+    `#version 300 es
+     precision mediump float;
+     flat in int v;
+     out vec4 o;
+     void main(){ o = vec4(0.0); }`,
+    2147483645,
+  );
+  check(R.f2u(vg6[0]) === 0x7ffffffe,
+    `statement 'v++' on 2147483645 packs 0x7FFFFFFE (got f2u=${R.f2u(vg6[0])})`);
+
+  // Prefix `++v` value (new value) + pack
+  const { vctx: vctx7, vg: vg7 } = runVertexInt(
+    `#version 300 es
+     in int a;
+     flat out int v;
+     void main(){ v = a; int w = ++v; gl_Position = vec4(w == a + 1 ? 2.0 : 1.0, 0.0, 0.0, 1.0); }`,
+    `#version 300 es
+     precision mediump float;
+     flat in int v;
+     out vec4 o;
+     void main(){ o = vec4(0.0); }`,
+    2147483645,
+  );
+  check(R.f2u(vg7[0]) === 0x7ffffffe && vctx7.out.position[0] === 2,
+    `prefix '++v' value (new) + pack on 2147483645 (value w=${vctx7.out.position[0] === 2 ? 'new' : 'WRONG'}, f2u=${R.f2u(vg7[0])})`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 10. ivec2 per-component pack + const-indexed int array element       */
+/* ------------------------------------------------------------------ */
+
+{
+  const vs = compile(
+    `#version 300 es
+     in int a;
+     flat out ivec2 vPair;
+     flat out int vArr[2];
+     void main(){
+       vPair = ivec2(a, -1);
+       vArr[1] = -2147483648;
+       gl_Position = vec4(0.0);
+     }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision mediump float;
+     flat in ivec2 vPair;
+     flat in int vArr[2];
+     out vec4 o;
+     void main(){
+       o = (vPair.x == 2147483645 && vPair.y == -1 && vArr[1] == -2147483648)
+         ? vec4(1.0, 0.0, 0.0, 1.0) : vec4(0.0, 0.0, 0.0, 1.0);
+     }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `ivec2/array pair links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const prog = l.program;
+    const vctx = vertexCtx(prog, { attribs: [new Int32Array([2147483645])], attribIndices: new Int32Array([0]) });
+    prog.vertex.run(vctx);
+    const vg = vctx.out.varyings;
+    // Packed order: vPair.x, vPair.y, vArr[0], vArr[1]
+    check(R.f2u(vg[0]) === 0x7ffffffd && R.f2u(vg[1]) === 0xffffffff,
+      `ivec2 per-component bit-exact (f2u=[${R.f2u(vg[0])},${R.f2u(vg[1])}])`);
+    check(R.f2u(vg[3]) === 0x80000000,
+      `const-indexed int array element packs -2147483648 bits (f2u=${R.f2u(vg[3])})`);
+    const fctx = fragmentCtx(prog, [
+      { v: vg.subarray(0, 2) },
+      { v: vg.subarray(2, 4) },
+    ]);
+    prog.fragment.run(fctx);
+    check(fctx.out.color[0][0] === 1,
+      `fragment round-trip of ivec2 + array (color [${Array.from(fctx.out.color[0]).join(', ')}])`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 11. Dual-mode fragment (derivatives) still unpacks the INT varying   */
+/* ------------------------------------------------------------------ */
+
+{
+  const vs = compile(
+    `#version 300 es
+     in int a;
+     flat out int v;
+     out vec2 p;
+     void main(){ v = a; p = vec2(0.5); gl_Position = vec4(0.0); }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision mediump float;
+     flat in int v;
+     in vec2 p;
+     out vec4 o;
+     void main(){ o = vec4(dFdx(p.x), v == 2147483645 ? 1.0 : 0.0, 0.0, 1.0); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `dual-mode int pair links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const prog = l.program;
+    const vctx = vertexCtx(prog, { attribs: [new Int32Array([2147483645])], attribIndices: new Int32Array([0]) });
+    prog.vertex.run(vctx);
+    const vg = vctx.out.varyings;
+    const fctx = fragmentCtx(prog, [
+      { v: vg.subarray(0, 1), ddx: new Float32Array(1), ddy: new Float32Array(1) },
+      { v: vg.subarray(1, 3), ddx: new Float32Array(2), ddy: new Float32Array(2) },
+    ]);
+    prog.fragment.run(fctx);
+    check(fctx.out.color[0][1] === 1,
+      `dual-mode fragment unpacks the int varying (color [${Array.from(fctx.out.color[0]).join(', ')}])`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 12. Integral FRAGMENT outputs pack BIT PATTERNS (integer attach-    */
+/*     ments — vertex-id R32I path; T1-A593)                            */
+/* ------------------------------------------------------------------ */
+
+// int/uint fragment outputs write their 32-bit BIT PATTERN into the output
+// cell (R.u2f, exactly like the varying pack) so the raster can bit-
+// reinterpret for integer attachments (R32I/R32UI etc.). Reads of an
+// integral output (read-after-write, assignment-expression values) unpack
+// via R.f2i/R.f2u. Float outputs stay unpacked (type-based decision).
+{
+  const vs = compile(
+    `#version 300 es
+     in vec4 a;
+     void main(){ gl_Position = a; }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision highp float;
+     layout(location = 0) out highp int oInt;
+     layout(location = 1) out highp uint oUint;
+     layout(location = 2) out ivec4 oVec;
+     void main(){
+       oInt = 2147483645;
+       oUint = 0xFFFFFFFFu;
+       oVec = ivec4(0x7FFFFFFD, -1, 0x80000000, 5);
+     }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `integral fragment outputs link (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const prog = l.program;
+    check(
+      prog.fragment.outputs.length === 3 &&
+        prog.fragment.outputs[0].location === 0 && prog.fragment.outputs[1].location === 1 &&
+        prog.fragment.outputs[2].location === 2 &&
+        prog.fragment.outputs[0].type === 0x1404 && prog.fragment.outputs[1].type === 0x1405,
+      `outputs → [{0,INT},{1,UNSIGNED_INT},{2,ivec4}] (got ${JSON.stringify(prog.fragment.outputs)})`,
+    );
+    const fctx = fragmentCtx(prog, [], {
+      out: { color: [new Float32Array(4), new Float32Array(4), new Float32Array(4)], fragDepth: 0 },
+    });
+    prog.fragment.run(fctx);
+    const c = fctx.out.color;
+    check(R.f2i(c[0][0]) === 2147483645,
+      `int output oInt packs 2147483645 BIT PATTERN 0x7FFFFFFD (got f2i=${R.f2i(c[0][0])})`);
+    check(R.f2u(c[1][0]) === 0xffffffff,
+      `uint output oUint packs 0xFFFFFFFF bits (got f2u=${R.f2u(c[1][0]).toString(16)})`);
+    check(
+      R.f2i(c[2][0]) === 0x7ffffffd && R.f2i(c[2][1]) === -1 &&
+        R.f2i(c[2][2]) === -2147483648 && R.f2i(c[2][3]) === 5,
+      `ivec4 output oVec per-component bit patterns (got f2i=[${Array.from(c[2] as Float32Array).map(R.f2i).join(', ')}])`,
+    );
+  }
+}
+
+// Assignment-EXPRESSION values, compound ops and read-after-write unpack on
+// integral outputs (the expression value of a packed write is the unpacked
+// post-write cell read — 5 here; `+=` yields the NEW value).
+{
+  const vs = compile(
+    `#version 300 es
+     in vec4 a;
+     void main(){ gl_Position = a; }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision highp float;
+     layout(location = 0) out highp int oInt;
+     layout(location = 1) out highp uint oUint;
+     layout(location = 2) out ivec4 oVec;
+     void main(){
+       int t = (oInt = 5);               // '=' assignment-expression: value 5
+       oVec.x = t + 1;                   // 6
+       oUint = 0x10000000u;
+       uint u = (oUint += 0x30000000u);  // compound-expression: value 0x40000000
+       oVec.y = int(u) == 1073741824 ? 1 : 0; // 1
+       oVec.z = oInt + 1;                // read-after-write of packed cell: 6
+       oVec.w = (oInt = 5) == 5 ? 1 : 0; // assignment-expression in condition: 1
+     }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `integral output expressions link (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const prog = l.program;
+    const fctx = fragmentCtx(prog, [], {
+      out: { color: [new Float32Array(4), new Float32Array(4), new Float32Array(4)], fragDepth: 0 },
+    });
+    prog.fragment.run(fctx);
+    const c = fctx.out.color;
+    check(R.f2i(c[0][0]) === 5,
+      `oInt cell = bits of 5 after expression writes (got f2i=${R.f2i(c[0][0])})`);
+    check(R.f2u(c[1][0]) === 0x40000000,
+      `oUint cell = bits of 0x40000000 after '+=' (got f2u=${R.f2u(c[1][0]).toString(16)})`);
+    check(
+      R.f2i(c[2][0]) === 6 && R.f2i(c[2][1]) === 1 && R.f2i(c[2][2]) === 6 && R.f2i(c[2][3]) === 1,
+      `oVec = [6,1,6,1] — assignment-expression value, compound value, read-back (got f2i=[${Array.from(c[2] as Float32Array).map(R.f2i).join(', ')}])`,
+    );
+  }
+}
+
+// Float outputs stay UNPACKED (float32 values) alongside integral ones —
+// the type-based decision must not leak into float attachment writes.
+{
+  const vs = compile(
+    `#version 300 es
+     in vec4 a;
+     void main(){ gl_Position = a; }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision highp float;
+     layout(location = 0) out highp int oInt;
+     layout(location = 1) out highp float oF;
+     void main(){ oInt = 7; oF = 0.5; }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `mixed int/float outputs link (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const prog = l.program;
+    const fctx = fragmentCtx(prog, [], {
+      out: { color: [new Float32Array(4), new Float32Array(4)], fragDepth: 0 },
+    });
+    prog.fragment.run(fctx);
+    const c = fctx.out.color;
+    check(R.f2i(c[0][0]) === 7, `int output stays packed beside a float output (f2i=${R.f2i(c[0][0])})`);
+    check(c[1][0] === 0.5, `float output stays a plain float32 value (got ${c[1][0]})`);
   }
 }
 
