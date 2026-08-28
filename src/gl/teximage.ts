@@ -560,7 +560,7 @@ function float11ToFloat(v: number): number {
   if (e === 31) return m === 0 ? Infinity : NaN;
   return (1 + m / 64) * 2 ** (e - 15);
 }
-/** 10-bit float (R11F_G11F_B10F R component) → float. */
+/** 10-bit float (R11F_G11F_B10F B component) → float. */
 function float10ToFloat(v: number): number {
   const e = (v >> 5) & 0x1f;
   const m = v & 0x1f;
@@ -600,7 +600,9 @@ function srcBytesPerTexel(format: GLenum, type: GLenum): number {
       return comps * 2;
     case C.UNSIGNED_SHORT_5_6_5: case C.UNSIGNED_SHORT_4_4_4_4: case C.UNSIGNED_SHORT_5_5_5_1:
       return 2; // packed types: 2 bytes/texel TOTAL regardless of component count
-    default: // UNSIGNED_INT, INT, UNSIGNED_INT_24_8, 2_10_10_10_REV, 10F_11F_11F_REV, 5_9_9_9_REV, FLOAT, FLOAT_32_UNSIGNED_INT_24_8_REV
+    case C.UNSIGNED_INT: case C.INT: case C.FLOAT:
+      return comps * 4; // 32-bit per component (RGBA32F → 16, etc.)
+    default: // UNSIGNED_INT_24_8, 2_10_10_10_REV, 10F_11F_11F_REV, 5_9_9_9_REV, FLOAT_32_UNSIGNED_INT_24_8_REV
       return 4;
   }
 }
@@ -661,8 +663,9 @@ function readSourceTexel(dv: DataView, byteOff: number, format: GLenum, type: GL
       break;
     }
     case C.UNSIGNED_INT_10F_11F_11F_REV: {
+      // GL layout: bits 0-10 = R (11-bit float), 11-21 = G, 22-31 = B (10-bit).
       const v = dv.getUint32(byteOff, true);
-      out[0] = float10ToFloat(v >>> 22); out[1] = float11ToFloat((v >>> 11) & 0x7ff); out[2] = float11ToFloat(v & 0x7ff); out[3] = 1;
+      out[0] = float11ToFloat(v & 0x7ff); out[1] = float11ToFloat((v >>> 11) & 0x7ff); out[2] = float10ToFloat(v >>> 22); out[3] = 1;
       break;
     }
     case C.UNSIGNED_INT_5_9_9_9_REV: {
@@ -1522,7 +1525,9 @@ export function allocateImmutableStorage(
     img.levels[l] = allocLevel(spec, w, h, d, isCube);
     w = Math.max(1, w >> 1);
     h = Math.max(1, h >> 1);
-    if (!isCube) d = Math.max(1, d >> 1);
+    // The mip pyramid halves depth only for TEXTURE_3D; TEXTURE_2D_ARRAY
+    // keeps a constant layer count (GLES 3.0 §3.8.14).
+    if (target === C.TEXTURE_3D) d = Math.max(1, d >> 1);
   }
   texture._immutable = true;
   texture._internalFormat = internalformat;

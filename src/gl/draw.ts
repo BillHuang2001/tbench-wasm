@@ -1755,8 +1755,8 @@ function outputTypeFamily(type: number): number {
     case 0x1404 /* GL_INT */: case 0x8b53 /* GL_INT_VEC2 */:
     case 0x8b54 /* GL_INT_VEC3 */: case 0x8b55 /* GL_INT_VEC4 */:
       return 1;
-    case 0x1405 /* GL_UNSIGNED_INT */: case 0x8b5c /* GL_UNSIGNED_INT_VEC2 */:
-    case 0x8b5d /* GL_UNSIGNED_INT_VEC3 */: case 0x8b5e /* GL_UNSIGNED_INT_VEC4 */:
+    case 0x1405 /* GL_UNSIGNED_INT */: case 0x8dc6 /* GL_UNSIGNED_INT_VEC2 */:
+    case 0x8dc7 /* GL_UNSIGNED_INT_VEC3 */: case 0x8dc8 /* GL_UNSIGNED_INT_VEC4 */:
       return 2;
     default:
       return 0;
