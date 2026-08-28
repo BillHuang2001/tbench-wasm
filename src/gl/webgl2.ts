@@ -31,7 +31,7 @@ import type {
 } from './types';
 import { C1, C2, installConstants } from './constants';
 import { createDefaultState } from './state';
-import { WebGLRenderingContext, CONTEXT_TOKEN } from './webgl1';
+import { WebGLRenderingContext, CONTEXT_TOKEN, makePrototypeMethodsNonEnumerable } from './webgl1';
 import { installAll } from './api';
 import { chainToNative } from './native-chain';
 import { DEFAULT_CONTEXT_ATTRIBUTES } from './types';
@@ -150,6 +150,11 @@ export class WebGL2RenderingContext extends WebGLRenderingContext {
   drawBuffers(buffers: GLenum[]): void { throw new Error('GL stub'); }
   renderbufferStorageMultisample(target: GLenum, samples: GLsizei, internalformat: GLenum, width: GLsizei, height: GLsizei): void { throw new Error('GL stub'); }
   getInternalformatParameter(target: GLenum, internalformat: GLenum, pname: GLenum): any { throw new Error('GL stub'); }
+  /**
+   * WebGL2 IDL — drawing-buffer storage. Declaration only (arity 3); the
+   * implementation is installed on the prototype by api/webgl2.ts.
+   */
+  drawingBufferStorage(internalformat: GLenum, width: GLint, height: GLint): void { throw new Error('GL stub'); }
 
   // ---- Instanced / ranged draws ----
   drawArraysInstanced(mode: GLenum, first: GLint, count: GLsizei, instanceCount: GLsizei): void { throw new Error('GL stub'); }
@@ -222,6 +227,11 @@ installConstants(WebGL2RenderingContext.prototype, C2);
 // Wire the api/ prototype mixins for WebGL2 (idempotent — entry.ts also calls
 // installAll; WebGL1 methods arrive via the prototype chain from webgl1.ts).
 installAll(WebGL2RenderingContext.prototype);
+// Native WebIDL layout: prototype methods are non-enumerable. On THIS prototype
+// every method is created fresh by installAll (plain assignment → enumerable),
+// so the pass is essential here — offscreencanvas/methods-2.html fails on any
+// enumerable method (getString/viewport/_transferToImageBitmap were flagged).
+makePrototypeMethodsNonEnumerable(WebGL2RenderingContext.prototype);
 
 // The class-body getters (canvas, drawingBufferWidth/Height, and the color-
 // space/format accessors) live ONLY on WebGLRenderingContext.prototype

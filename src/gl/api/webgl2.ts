@@ -89,7 +89,13 @@ import { validateObject, validateNonNullableObject } from '../validation';
 import { ensureProgramLinked } from './programs';
 import { defaultVAOState } from '../state';
 import type { VAOState } from '../state';
-import type { GLbitfield, GLboolean, GLenum, GLfloat, GLint, GLuint, GLuint64 } from '../types';
+import { executeClearBuffer } from '../draw';
+import { createSurface, getFormat, linearToSRGB } from '../../raster';
+import type { Surface } from '../../raster';
+import type {
+  GLbitfield, GLboolean, GLenum, GLfloat, GLint, GLsizei, GLuint, GLuint64,
+  Int32List, Uint32List,
+} from '../types';
 
 /**
  * Context-loss guard: no-op while lost WITHOUT generating an error (CTS
@@ -117,6 +123,43 @@ const Sync = ctorPair(WebGLSync);
 const Sampler = ctorPair(WebGLSampler);
 const Vao = ctorPair(WebGLVertexArrayObject);
 const Tf = ctorPair(WebGLTransformFeedback);
+
+// ---------------------------------------------------------------------------
+// drawingBufferStorage + clearBufferiv/uiv helpers
+// (installed in installWebGL2Api — see below)
+// ---------------------------------------------------------------------------
+
+/** WebIDL Int32List/Uint32List → typed array (TypeError on junk; mirrors api/draw.ts). */
+function toListLocal<T extends Int32Array | Uint32Array>(
+  values: Int32List | Uint32List,
+  Ctor: new (src: ArrayLike<number>) => T,
+  name: string,
+): T {
+  if (values instanceof Ctor) return values;
+  if (Array.isArray(values) || ArrayBuffer.isView(values)) {
+    return new Ctor(values as ArrayLike<number>);
+  }
+  throw new TypeError(`Argument is not of type '${name}'`);
+}
+
+/**
+ * Format info of the color surface mapped to draw-buffer slot `idx` by the
+ * CURRENT drawBuffers() state (the caller has already validated that the slot
+ * maps to a real attachment). Returns null when the attachment is missing —
+ * per the WebGL 2.0 spec §4.2.2, clearing a missing attachment of a complete
+ * framebuffer clears nothing and generates no error.
+ */
+function clearColorAttachmentInfo(ctx: WebGLRenderingContext, idx: number): Surface['info'] | null {
+  const fbo = ctx._state.drawFramebuffer;
+  if (fbo === null) {
+    const dfb = ctx._defaultFB;
+    return idx === 0 && dfb ? dfb.color.info : null;
+  }
+  const att = fbo._attachments.get(C1.COLOR_ATTACHMENT0 + idx);
+  if (!att) return null;
+  if (att.type === 'renderbuffer') return att.renderbuffer._surface?.info ?? null;
+  return att.texture._image?.info ?? null;
+}
 
 // ---------------------------------------------------------------------------
 // Queries
@@ -964,6 +1007,257 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       // CTS multisample-with-full-sample-counts test (samples 1..array[0] must
       // be accepted by renderbufferStorageMultisample).
       return new Int32Array([4]);
+    };
+  }
+
+  // ---- drawingBufferStorage (WebGL 1.0 IDL base method — WebGL2 prototype) ----
+  // The class-body declaration is added in parallel (webgl2.ts); install via a
+  // cast so this module is self-contained. Semantics (WebGL 1.0 spec
+  // "drawingBufferStorage"): respecify the drawing buffer size + format;
+  // alpha:false → INVALID_OPERATION; unsupported sizedFormat → INVALID_ENUM;
+  // width/height > MAX_RENDERBUFFER_SIZE → INVALID_VALUE; allocation failure →
+  // OUT_OF_MEMORY. On success drawingBufferFormat/Width/Height reflect the
+  // request and the buffer is cleared (spec: clearing behavior equivalent to
+  // setting HTMLCanvasElement.width/height).
+  if ('beginQuery' in proto) {
+    (proto as unknown as {
+      drawingBufferStorage(sizedFormat: GLenum, width: GLsizei, height: GLsizei): void;
+    }).drawingBufferStorage = function (this: WebGL2RenderingContext, sizedFormat: GLenum, width: GLsizei, height: GLsizei): void {
+      const ctx = this;
+      if (isLost(ctx)) return;
+      const s = ctx._state;
+      if (width > s.limits.MAX_RENDERBUFFER_SIZE || height > s.limits.MAX_RENDERBUFFER_SIZE) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (ctx._attrs.alpha === false) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      // Supported sized formats (spec): RGBA8 always; SRGB8_ALPHA8 (WebGL2
+      // core, WebGL1 needs EXT_sRGB); RGBA16F (WebGL2 needs
+      // EXT_color_buffer_float, WebGL1 EXT_color_buffer_half_float).
+      if (sizedFormat !== C2.RGBA8 && sizedFormat !== C2.SRGB8_ALPHA8 && sizedFormat !== C2.RGBA16F) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (sizedFormat === C2.RGBA16F) {
+        // RGBA16F must be "currently valid for renderbufferStorage", i.e. the
+        // enabling extension must already be ENABLED (a prior getExtension
+        // call) — WebGL1: EXT_color_buffer_half_float; WebGL2:
+        // EXT_color_buffer_float. Deliberately NOT ctx.getExtension(...):
+        // calling it here would ENABLE the extension and break the CTS
+        // expectation (drawingbuffer-storage-test testMissingExtension) that
+        // RGBA16F without a prior enable is INVALID_ENUM.
+        const ext = ctx._version === 2 ? 'EXT_color_buffer_float' : 'EXT_color_buffer_half_float';
+        if (!ctx._extensions.has(ext)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+      }
+      const w = Math.max(1, width);
+      const h = Math.max(1, height);
+      try {
+        // Canvas attribute mirror: the spec's clearing behavior is "equivalent
+        // to setting HTMLCanvasElement.width/height", and the draw engine's
+        // ensureCanvasSize keeps the drawing buffer in sync with the canvas
+        // dims (it reallocates + clears on mismatch) — mirror the storage size
+        // there so the next draw/clear does not reallocate the buffer back to
+        // the old canvas size. (No CTS page observes canvas.width/height
+        // across a drawingBufferStorage call.)
+        const canvas = ctx._canvas as { width: number; height: number };
+        if (canvas.width !== w) canvas.width = w;
+        if (canvas.height !== h) canvas.height = h;
+        // Present surface: resize BEFORE the color surface aliases its pixel
+        // buffer (a fresh surface is 0×0 — its first present() would
+        // auto-resize to the canvas dims, orphaning the alias).
+        let pixels: Uint8Array | null = null;
+        if (ctx._presentSurface) {
+          try {
+            (ctx._presentSurface as { resize?: (w: number, h: number) => void }).resize?.(w, h);
+            pixels = ctx._presentSurface.getPixels();
+          } catch {
+            pixels = null; // present stub — local surface fallback below
+          }
+        }
+        const base = getFormat(sizedFormat);
+        let color: Surface;
+        if (sizedFormat === C2.RGBA16F) {
+          // Float storage cannot alias the RGBA8 present buffer — allocate a
+          // real f32 surface (readPixels RGBA/FLOAT from the default buffer and
+          // canvas presentation of float buffers are draw.ts/present concerns).
+          color = createSurface(sizedFormat, w, h);
+        } else if (base && pixels && pixels.length >= w * h * 4) {
+          color = { width: w, height: h, format: sizedFormat, info: base, data: pixels };
+          if (sizedFormat === C2.SRGB8_ALPHA8) {
+            // sRGB store conversion: the raster fragment path converts
+            // linear→sRGB before info.encode, but the CLEAR path
+            // (clearColorSurface) encodes raw. Wrap encode so glClear stores
+            // sRGB-encoded bytes (CTS expects clear(linear values) →
+            // readPixels/canvas show sRGB bytes), and drop isSRGB so the
+            // fragment path's own conversion does not double-apply. (Blending
+            // onto this buffer then treats stored values as linear — no CTS
+            // coverage for blending onto the sRGB drawing buffer.)
+            const enc = base.encode;
+            color.info = {
+              ...base,
+              isSRGB: false,
+              encode(src, byteOffset, r, g, b, a) {
+                enc(src, byteOffset, linearToSRGB(r), linearToSRGB(g), linearToSRGB(b), a);
+              },
+            };
+          }
+        } else {
+          color = createSurface(sizedFormat, w, h);
+        }
+        let depth: Surface | null = null;
+        if (ctx._attrs.depth) {
+          try {
+            depth = createSurface(ctx._version === 2 ? C2.DEPTH_COMPONENT24 : C1.DEPTH_COMPONENT16, w, h);
+            (depth.data as Float32Array).fill(1.0); // cleared state
+          } catch {
+            depth = null;
+          }
+        }
+        let stencil: Surface | null = null;
+        if (ctx._attrs.stencil) {
+          try {
+            stencil = createSurface(C1.STENCIL_INDEX8, w, h);
+          } catch {
+            stencil = null;
+          }
+        }
+        ctx._defaultFB = { color, depth, stencil, width: w, height: h };
+        ctx._drawingBufferWidth = w;
+        ctx._drawingBufferHeight = h;
+        (ctx as unknown as { _drawingBufferFormat: number })._drawingBufferFormat = sizedFormat;
+        try {
+          ctx._presentSurface?.present(); // show the cleared frame (canvas tests)
+        } catch {
+          /* present stub */
+        }
+      } catch {
+        ctx._errors.push(C1.OUT_OF_MEMORY);
+      }
+    };
+
+    // drawingBufferFormat/Width/Height: the base-class getters (webgl1.ts) are
+    // LIVE canvas-dimension getters and hardcode RGBA8. After a
+    // drawingBufferStorage call the buffer's size/format no longer matches the
+    // canvas attributes — shadow them with the storage-tracked values. Before
+    // any storage call: live canvas semantics, except drawingBufferFormat
+    // reports RGB8 for alpha:false buffers (spec; CTS drawingbuffer-storage-test).
+    Object.defineProperty(proto, 'drawingBufferFormat', {
+      configurable: true,
+      get(this: WebGL2RenderingContext): GLenum {
+        const c = this as unknown as { _drawingBufferFormat?: number; _attrs: { alpha?: boolean } };
+        return c._drawingBufferFormat ?? (c._attrs.alpha === false ? C2.RGB8 : C2.RGBA8);
+      },
+    });
+    Object.defineProperty(proto, 'drawingBufferWidth', {
+      configurable: true,
+      get(this: WebGL2RenderingContext): GLsizei {
+        const c = this as unknown as { _drawingBufferFormat?: number; _drawingBufferWidth: number };
+        if (c._drawingBufferFormat !== undefined) return c._drawingBufferWidth;
+        const max = this._state.limits.MAX_VIEWPORT_DIMS[0];
+        const d = typeof this._canvas.width === 'number' ? Math.max(1, this._canvas.width) : 0;
+        return max > 0 && d > max ? max : d;
+      },
+    });
+    Object.defineProperty(proto, 'drawingBufferHeight', {
+      configurable: true,
+      get(this: WebGL2RenderingContext): GLsizei {
+        const c = this as unknown as { _drawingBufferFormat?: number; _drawingBufferHeight: number };
+        if (c._drawingBufferFormat !== undefined) return c._drawingBufferHeight;
+        const max = this._state.limits.MAX_VIEWPORT_DIMS[1];
+        const d = typeof this._canvas.height === 'number' ? Math.max(1, this._canvas.height) : 0;
+        return max > 0 && d > max ? max : d;
+      },
+    });
+  }
+
+  // ---- clearBufferiv / clearBufferuiv ----
+  // Overrides of the api/draw.ts installs: installWebGL2Api runs AFTER
+  // installDrawApi in installAll, so the assignments below win on the WebGL2
+  // prototype. Per the WebGL 2.0 spec (§4.2.2) the buffer argument is COLOR
+  // for every color variant — the FUNCTION selects the interpretation
+  // (signed integer → clearBufferiv, unsigned integer → clearBufferuiv,
+  // float/fixed → clearBufferfv). The api/draw.ts versions only accepted the
+  // GLES COLOR_INT/COLOR_UINT enums (0x8b8f/0x8b90), so
+  // gl.clearBufferiv(gl.COLOR, …) — the CTS usage — raised INVALID_OPERATION
+  // and never cleared. Also fixed here: the drawbuffer index is mapped through
+  // the current drawBuffers() state (slot → attachment; NONE → no-op, no
+  // error; missing attachment → no-op), and a type mismatch between the
+  // function and the mapped attachment raises INVALID_OPERATION.
+  if ('clearBufferiv' in proto) {
+    proto.clearBufferiv = function (this: WebGL2RenderingContext, buffer: GLenum, drawbuffer: GLint, values: Int32List): void {
+      const ctx = this;
+      if (isLost(ctx)) return;
+      const v = toListLocal(values, Int32Array, 'Int32List');
+      if (buffer !== C2.COLOR && buffer !== C2.DEPTH && buffer !== C2.STENCIL) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const s = ctx._state;
+      if (drawbuffer < 0 || drawbuffer >= s.limits.MAX_DRAW_BUFFERS) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (buffer !== C2.COLOR && drawbuffer !== 0) {
+        ctx._errors.push(C1.INVALID_OPERATION); // depth/stencil only clear drawbuffer 0
+        return;
+      }
+      if (v.length < (buffer === C2.COLOR ? 4 : 1)) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (buffer === C2.COLOR) {
+        const db = s.drawBuffers[drawbuffer] ?? C1.NONE;
+        if (db === C1.NONE) return; // DRAW_BUFFERi = NONE → nothing cleared, no error
+        const info = clearColorAttachmentInfo(ctx, db - C1.COLOR_ATTACHMENT0);
+        if (info && (!info.isInteger || !info.isSigned)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+      }
+      try {
+        executeClearBuffer(ctx, buffer, drawbuffer, v);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    };
+  }
+
+  if ('clearBufferuiv' in proto) {
+    proto.clearBufferuiv = function (this: WebGL2RenderingContext, buffer: GLenum, drawbuffer: GLint, values: Uint32List): void {
+      const ctx = this;
+      if (isLost(ctx)) return;
+      const v = toListLocal(values, Uint32Array, 'Uint32List');
+      if (buffer !== C2.COLOR) {
+        ctx._errors.push(C1.INVALID_ENUM); // unsigned color only
+        return;
+      }
+      const s = ctx._state;
+      if (drawbuffer < 0 || drawbuffer >= s.limits.MAX_DRAW_BUFFERS) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (v.length < 4) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      const db = s.drawBuffers[drawbuffer] ?? C1.NONE;
+      if (db === C1.NONE) return; // DRAW_BUFFERi = NONE → nothing cleared, no error
+      const info = clearColorAttachmentInfo(ctx, db - C1.COLOR_ATTACHMENT0);
+      if (info && (!info.isInteger || info.isSigned)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      try {
+        executeClearBuffer(ctx, C2.COLOR, drawbuffer, v);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
     };
   }
 }
