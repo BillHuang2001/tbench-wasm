@@ -109,6 +109,19 @@ export interface DrawRequest {
    * single draws. The vertex exec ctx reads it as `gl_DrawID`.
    */
   drawId?: number;
+  /**
+   * WEBGL_draw_instanced_base_vertex_base_instance /
+   * WEBGL_multi_draw_instanced_base_vertex_base_instance:
+   *  - baseVertex (GLint, indexed draws only): added to every element index
+   *    for attribute fetch AND to gl_VertexID. Per GLES 3.2 §10.5 the vertex
+   *    ID of the ith element of an indexed draw is basevertex + elementIndex.
+   *  - baseInstance (GLuint): added to the divisor-based instance attribute
+   *    fetch index (element = baseInstance + floor(instanceId/divisor)).
+   *    gl_InstanceID is NOT offset (always starts at 0).
+   * Omitted (0) for regular draws.
+   */
+  baseVertex?: number;
+  baseInstance?: number;
 }
 
 /* ================================================================== */
@@ -824,7 +837,13 @@ function buildAttribs(
         : new Int32Array(sc.intPool.buffer, base * 4, need);
       if (unsigned) uintBase += need; else intBase += need;
       for (let e = 0; e < elemCount; e++) {
-        const element = divisor > 0 ? e : (indices ? indices[e] : req.firstOrOffset + e);
+        // baseVertex offsets the element index (indexed draws); baseInstance
+        // offsets the instance element (divisor > 0). Both may push the fetch
+        // past the end of the buffer — read*Component bounds-checks and yields
+        // 0 (ANGLE issue 3764: robust access → NO_ERROR is legal).
+        const element = divisor > 0
+          ? (req.baseInstance ?? 0) + e
+          : (indices ? (req.baseVertex ?? 0) + indices[e] : req.firstOrOffset + e);
         const byteOff = aOffset + element * stride;
         for (let c = 0; c < comps; c++) {
           let v = 0;
@@ -840,7 +859,10 @@ function buildAttribs(
       const dst = new Float32Array(sc.floatPool.buffer, floatBase * 4, need);
       floatBase += need;
       for (let e = 0; e < elemCount; e++) {
-        const element = divisor > 0 ? e : (indices ? indices[e] : req.firstOrOffset + e);
+        // baseVertex/baseInstance offsets — see the integer path above.
+        const element = divisor > 0
+          ? (req.baseInstance ?? 0) + e
+          : (indices ? (req.baseVertex ?? 0) + indices[e] : req.firstOrOffset + e);
         const byteOff = aOffset + element * stride;
         for (let c = 0; c < comps; c++) {
           let v = 0;
@@ -1918,7 +1940,9 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
       ai[instancedLocs[k].loc] = (i / instancedLocs[k].divisor) | 0;
     }
     for (let j = 0; j < req.count; j++, r++) {
-      vctx.vertexId = req.indexed ? indices![j] : first + j;
+      // gl_VertexID = basevertex + element index for indexed draws (GLES 3.2
+      // §10.5; the base-vertex-base-instance extensions), first + j otherwise.
+      vctx.vertexId = req.indexed ? (req.baseVertex ?? 0) + indices![j] : first + j;
       vctx.instanceId = i;
       for (let k = 0; k < vertexLocs.length; k++) ai[vertexLocs[k]] = j;
       run(vctx);
@@ -2679,6 +2703,10 @@ export function validateDrawArrays(
   mode: GLenum, first: GLint, count: GLsizei,
   instanceCount: GLsizei = 1,
 ): DrawRequest | null {
+  // WebIDL conversion: GLenum is `unsigned long` → ToUint32 (undefined/NaN →
+  // 0 = POINTS; -1 → 0xFFFFFFFF; valid enums unchanged). WebGL validation
+  // then rejects values outside DRAW_MODES with INVALID_ENUM.
+  mode = mode >>> 0;
   if (!DRAW_MODES.has(mode)) { pushError(ctx, C1.INVALID_ENUM); return null; }
   if (first < 0 || count < 0 || instanceCount < 0) { pushError(ctx, C1.INVALID_VALUE); return null; }
   if (!validateCommonDraw(ctx, mode)) return null;
@@ -2703,6 +2731,11 @@ export function validateDrawElements(
   opts: DrawElementsOpts = {},
 ): DrawRequest | null {
   const instanceCount = opts.instanceCount ?? 1;
+  // WebIDL conversion: GLenum is `unsigned long` → ToUint32 (undefined/NaN →
+  // 0 = POINTS; -1 → 0xFFFFFFFF; valid enums unchanged). The WebGL validation
+  // below then rejects values outside the accepted set with INVALID_ENUM.
+  mode = mode >>> 0;
+  type = type >>> 0;
   if (!DRAW_MODES.has(mode)) { pushError(ctx, C1.INVALID_ENUM); return null; }
   if (count < 0 || instanceCount < 0) { pushError(ctx, C1.INVALID_VALUE); return null; }
   const s = ctx._state;
@@ -2881,6 +2914,83 @@ export function executeMultiDrawElementsInstanced(
       { instanceCount: instanceCounts[instanceCountsOffset + i] },
     );
     if (!req) return; // error already pushed; nothing drawn
+    reqs.push(req);
+  }
+  runMultiSubdraws(ctx, reqs);
+}
+
+/**
+ * multiDrawArraysInstancedBaseInstanceWEBGL engine entry (WEBGL_multi_draw_
+ * instanced_base_vertex_base_instance; same validate-all-first contract).
+ * baseInstances is a Uint32List (GLuint per extension.xml IDL) — each value is
+ * converted with ToUint32 (`>>> 0`) and applied to the subdraw's instance
+ * attribute fetch (element = baseInstance + floor(instanceId/divisor));
+ * gl_InstanceID stays 0-based.
+ */
+export function executeMultiDrawArraysInstancedBaseInstance(
+  ctx: WebGLRenderingContext,
+  mode: GLenum,
+  firsts: Int32Array | number[],
+  firstsOffset: number,
+  counts: Int32Array | number[],
+  countsOffset: number,
+  instanceCounts: Int32Array | number[],
+  instanceCountsOffset: number,
+  baseInstances: Uint32Array | number[],
+  baseInstancesOffset: number,
+  drawcount: number,
+): void {
+  const n = drawcount | 0;
+  if (n <= 0) return; // NO_ERROR no-op
+  const reqs: DrawRequest[] = [];
+  for (let i = 0; i < n; i++) {
+    const req = validateDrawArrays(
+      ctx, mode,
+      firsts[firstsOffset + i], counts[countsOffset + i],
+      instanceCounts[instanceCountsOffset + i],
+    );
+    if (!req) return; // error already pushed; nothing drawn
+    req.baseInstance = baseInstances[baseInstancesOffset + i] >>> 0;
+    reqs.push(req);
+  }
+  runMultiSubdraws(ctx, reqs);
+}
+
+/**
+ * multiDrawElementsInstancedBaseVertexBaseInstanceWEBGL engine entry
+ * (WEBGL_multi_draw_instanced_base_vertex_base_instance; same
+ * validate-all-first contract). baseVertices is an Int32List (GLint — may be
+ * negative) and baseInstances a Uint32List (GLuint); baseVertex offsets the
+ * element indices + gl_VertexID, baseInstance the instance attribute fetch.
+ */
+export function executeMultiDrawElementsInstancedBaseVertexBaseInstance(
+  ctx: WebGLRenderingContext,
+  mode: GLenum,
+  counts: Int32Array | number[],
+  countsOffset: number,
+  type: GLenum,
+  offsets: Int32Array | number[],
+  offsetsOffset: number,
+  instanceCounts: Int32Array | number[],
+  instanceCountsOffset: number,
+  baseVertices: Int32Array | number[],
+  baseVerticesOffset: number,
+  baseInstances: Uint32Array | number[],
+  baseInstancesOffset: number,
+  drawcount: number,
+): void {
+  const n = drawcount | 0;
+  if (n <= 0) return; // NO_ERROR no-op
+  const reqs: DrawRequest[] = [];
+  for (let i = 0; i < n; i++) {
+    const req = validateDrawElements(
+      ctx, mode,
+      counts[countsOffset + i], type, offsets[offsetsOffset + i],
+      { instanceCount: instanceCounts[instanceCountsOffset + i] },
+    );
+    if (!req) return; // error already pushed; nothing drawn
+    req.baseVertex = baseVertices[baseVerticesOffset + i] | 0;
+    req.baseInstance = baseInstances[baseInstancesOffset + i] >>> 0;
     reqs.push(req);
   }
   runMultiSubdraws(ctx, reqs);

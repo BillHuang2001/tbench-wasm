@@ -107,7 +107,7 @@ const UINT_COLOR_FORMATS = new Set<number>([
 ]);
 
 /** WebIDL Float32List/Int32List/Uint32List → typed array (TypeError on junk). */
-function toList<T extends Float32Array | Int32Array | Uint32Array>(
+export function toList<T extends Float32Array | Int32Array | Uint32Array>(
   values: Float32List | Int32List | Uint32List,
   Ctor: new (src: ArrayLike<number>) => T,
   name: string,

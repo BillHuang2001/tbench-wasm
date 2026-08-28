@@ -177,6 +177,14 @@ export interface WEBGL_multi_draw {
   multiDrawArraysInstancedWEBGL(mode: GLenum, firsts: Int32List, firstsOffset: GLuint, counts: Int32List, countsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei): void;
   multiDrawElementsInstancedWEBGL(mode: GLenum, counts: Int32List, countsOffset: GLuint, type: GLenum, offsets: Int32List, offsetsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei): void;
 }
+export interface WEBGL_draw_instanced_base_vertex_base_instance {
+  drawArraysInstancedBaseInstanceWEBGL(mode: GLenum, first: GLint, count: GLsizei, instanceCount: GLsizei, baseInstance: GLuint): void;
+  drawElementsInstancedBaseVertexBaseInstanceWEBGL(mode: GLenum, count: GLsizei, type: GLenum, offset: GLintptr, instanceCount: GLsizei, baseVertex: GLint, baseInstance: GLuint): void;
+}
+export interface WEBGL_multi_draw_instanced_base_vertex_base_instance {
+  multiDrawArraysInstancedBaseInstanceWEBGL(mode: GLenum, firsts: Int32List, firstsOffset: GLuint, counts: Int32List, countsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, baseInstances: Uint32List, baseInstancesOffset: GLuint, drawcount: GLsizei): void;
+  multiDrawElementsInstancedBaseVertexBaseInstanceWEBGL(mode: GLenum, counts: Int32List, countsOffset: GLuint, type: GLenum, offsets: Int32List, offsetsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, baseVertices: Int32List, baseVerticesOffset: GLuint, baseInstances: Uint32List, baseInstancesOffset: GLuint, drawcount: GLsizei): void;
+}
 export interface WEBGL_clip_cull_distance {
   readonly MAX_CLIP_DISTANCES_WEBGL: GLenum;
   readonly MAX_CULL_DISTANCES_WEBGL: GLenum;
