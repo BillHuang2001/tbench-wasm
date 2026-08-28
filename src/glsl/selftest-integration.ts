@@ -269,8 +269,17 @@ let uboDual: Program | null = null;
 
     /* Uniforms: write via uniformMap (the contract gl/ uses) */
     const um = p.uniformMap;
+    // NOTE (member-array contract): a struct MEMBER array reports ONE
+    // getActiveUniform entry ('<p>.m[0]', size = length) and uniformMap
+    // aliases every '<p>.m[k]' key → that same leaf. gl's getUniformLocation
+    // derives the element from the QUERY name ('u[0].b[1]' → elem 1) and
+    // writes at location + elem*stride — emulate that here (b is float[2],
+    // scalar-array stride 1).
     const setF = (key: string, v: number[]) => {
-      const loc = um.get(key)!.location;
+      const info = um.get(key)!;
+      const m = /\[(\d+)\]$/.exec(key);
+      const elem = m !== null && info.size > 1 ? parseInt(m[1], 10) : 0;
+      const loc = info.location + elem;
       for (let i = 0; i < v.length; i++) p.floatStore[loc + i] = v[i];
     };
     setF('u[0].a', [10, 20]);
