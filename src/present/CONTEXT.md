@@ -46,7 +46,7 @@ Exact names (gl/ and entry.ts import from `./present`):
 - The scratch 2D context is acquired as `getContext('2d')` with no attributes — transparent; `decodeViaScratch` clears it (setTransform + clearRect) before every drawImage, so the scratch must never be created with `{alpha:false}` (source-over over opaque black would force alpha 255).
 
 ## Test Strategy
-- `tests/unit/` (Node, vitest): NodeCanvasSurface resize/getPixels; decodeImageData (pure copy); decodeImageSource failure modes with duck-typed fakes (incomplete image, unsupported source); createCanvasSurface dispatch (fake canvas-like vs plain object). NOTE: `tests/unit/present.test.ts` currently imports `createNodeSurface` — an API name that never existed in this module's contract (stale drift from an earlier phase; the real API is `createCanvasSurface`/`NodeCanvasSurface`). It lives in the sibling `tests/unit/` node — fix/escalate via parent.
+- `tests/unit/` (Node, vitest): NodeCanvasSurface resize/getPixels; decodeImageData (pure copy); decodeImageSource failure modes with duck-typed fakes (incomplete image, unsupported source); createCanvasSurface dispatch (fake canvas-like vs plain object). The present tests import the real `createCanvasSurface`/`NodeCanvasSurface` (sibling `tests/unit/` node — read-only from here).
 - Browser paths are verified by the CTS (`conformance/textures/`, `canvas/` tests) and the three.js/Babylon screenshot suites (frames visible to `toHaveScreenshot`).
 
 ## Status
