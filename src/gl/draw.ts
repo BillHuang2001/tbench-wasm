@@ -2260,6 +2260,14 @@ export function executeClear(ctx: WebGLRenderingContext, mask: GLuint): void {
       const idx = db - C1.COLOR_ATTACHMENT0;
       const surf = fb.color[idx];
       if (!surf) continue;
+      // GLES 3.0 §4.2.1 (CTS clear-func-buffer-type-match.html): a float clear
+      // color against an INTEGER color attachment is INVALID_OPERATION — the
+      // base type of the clear value must match the buffer family (same
+      // surfFam rule as draw-time output matching above).
+      if (surf.info.isInteger) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
       const cm = s.colorMaskPerDrawBuffer.get(d) ?? s.colorMask;
       // WEBGL_render_shared_exponent: Clear is INVALID_OPERATION when an
       // enabled RGB9_E5 draw buffer's effective mask is neither all-true nor
