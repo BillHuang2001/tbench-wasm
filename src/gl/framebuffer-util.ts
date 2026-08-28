@@ -59,8 +59,11 @@
  *    RG8/RG8I/RG8UI, RG16I/RG16UI, RG32I/RG32UI, RGBA8I/RGBA8UI,
  *    RGBA16I/RGBA16UI, RGBA32I/RGBA32UI, plus the GLES3 RGB integer formats
  *    (RGB8I/RGB8UI/RGB16I/RGB16UI/RGB32I/RGB32UI — GLES3 Table 3.13; WebGL2
- *    only removes RGB8 among the unorm formats). RGB8 is NOT color-renderable
- *    in WebGL2 (objective; matches the known WebGL2 deviation from GLES3).
+ *    only removes RGB8 among the unorm formats), plus unsized RGBA (resolves to
+ *    RGBA8 — occlusion-query-scissor.html attaches texImage2D(RGBA) textures
+ *    and renders to them). RGB8 is NOT color-renderable in WebGL2 (objective;
+ *    matches the known WebGL2 deviation from GLES3) — see checkAttachment for
+ *    the texture/renderbuffer split; unsized RGB (→ RGB8) behaves like RGB8.
  *    EXT_color_buffer_float adds R16F/RG16F/RGBA16F/R32F/RG32F/RGBA32F/
  *    R11F_G11F_B10F; EXT_texture_norm16 adds R16_EXT/RG16_EXT/RGBA16_EXT;
  *    WEBGL_render_shared_exponent adds RGB9_E5. Snorm formats are not
@@ -126,7 +129,8 @@ const W1_COLOR_RENDERABLE = new Set<GLenum>([
 /** WebGL2 color-renderable core (GLES3 Table 3.13 minus RGB8; RGB10_A2UI included). */
 const W2_COLOR_RENDERABLE_CORE = new Set<GLenum>([
   0x8056 /* RGBA4 */, 0x8d62 /* RGB565 */, 0x8057 /* RGB5_A1 */,
-  0x8058 /* RGBA8 */, 0x8059 /* RGB10_A2 */, 0x906f /* RGB10_A2UI */,
+  0x8058 /* RGBA8 */, 0x1908 /* RGBA (unsized → RGBA8) */,
+  0x8059 /* RGB10_A2 */, 0x906f /* RGB10_A2UI */,
   0x8c43 /* SRGB8_ALPHA8 */,
   0x8229 /* R8 */, 0x8231 /* R8I */, 0x8232 /* R8UI */,
   0x8233 /* R16I */, 0x8234 /* R16UI */, 0x8235 /* R32I */, 0x8236 /* R32UI */,
@@ -565,9 +569,13 @@ function checkAttachment(
   switch (kind) {
     case 'color':
       if (!isColorRenderable(ctx, format)) {
-        // Objective-mandated exception: RGB8 at a color point in WebGL2.
-        if (ctx._version === 2 && format === 0x8051 /* RGB8 */) {
-          return C1.FRAMEBUFFER_UNSUPPORTED;
+        // Objective-mandated WebGL2 deviation: RGB8 (and unsized RGB, which
+        // resolves to RGB8) is NOT color-renderable. For TEXTURE attachments
+        // the deviation reports FRAMEBUFFER_UNSUPPORTED; RGB8 RENDERBUFFERS are
+        // color-renderable per GLES3 Table 3.13 → COMPLETE
+        // (read-pixels-from-rgb8-into-pbo-bug.html hard-asserts).
+        if (ctx._version === 2 && (format === 0x8051 /* RGB8 */ || format === 0x1907 /* RGB (unsized → RGB8) */)) {
+          return entry.type === 'texture' ? C1.FRAMEBUFFER_UNSUPPORTED : null;
         }
         return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
       }

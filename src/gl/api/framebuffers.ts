@@ -76,6 +76,8 @@
  *    INVALID_OPERATION; same read/draw FBO object (incl. both default) →
  *    INVALID_OPERATION; identical source/dest image (same texture+level+face+
  *    layer, or same renderbuffer) for any mask bit → INVALID_OPERATION;
+ *    incomplete read or draw FBO → INVALID_FRAMEBUFFER_OPERATION (GLES3
+ *    §4.4.4);
  *    multisample: draw-multisampled + read-single OR both multisampled →
  *    INVALID_OPERATION; read-multisampled + draw-single → OK (resolve, CTS
  *    multisampled-depth-renderbuffer-initialization.html). Then delegates to
@@ -204,6 +206,26 @@ function sameAttachmentObject(a: FramebufferAttachment, b: FramebufferAttachment
 }
 
 /**
+ * GLES3 §4.4.2 (framebufferTexture2D / framebufferTextureLayer): attaching a
+ * texture to DEPTH_ATTACHMENT requires its internal format to have a depth
+ * component, to STENCIL_ATTACHMENT a stencil component; WebGL2's
+ * DEPTH_STENCIL_ATTACHMENT (alias of both points) requires both. A
+ * depth-stencil format at DEPTH or STENCIL alone is legal. When the texture
+ * has no allocated image yet (internal format unknown — the record is created
+ * before the level exists), there is no mismatch: framebuffer completeness
+ * reports the unallocated level instead.
+ */
+function textureAttachmentFormatMismatch(tex: WebGLTexture, attachment: GLenum): boolean {
+  const image = tex._image;
+  if (!image) return false;
+  const d = localFormatDesc(image.internalFormat);
+  if (attachment === DEPTH_ATTACHMENT) return !d.isDepth;
+  if (attachment === STENCIL_ATTACHMENT) return !d.isStencil;
+  if (attachment === DEPTH_STENCIL_ATTACHMENT) return !(d.isDepth && d.isStencil);
+  return false;
+}
+
+/**
  * Resolve one attachment point's record. For WebGL2 DEPTH_STENCIL_ATTACHMENT
  * the record is returned only when the depth and stencil attachment points
  * hold the same attachment OBJECT (see sameAttachmentObject); a mismatch
@@ -217,9 +239,15 @@ function resolveAttachmentRecord(
   fbo: WebGLFramebuffer,
   attachment: GLenum,
 ): { rec: FramebufferAttachment | null; conflict: boolean } {
-  if (ctx._version === 2 && attachment === DEPTH_STENCIL_ATTACHMENT && fbo._attachments.has(DEPTH_ATTACHMENT)) {
+  if (ctx._version === 2 && attachment === DEPTH_STENCIL_ATTACHMENT) {
     const d = fbo._attachments.get(DEPTH_ATTACHMENT) ?? null;
     const s = fbo._attachments.get(STENCIL_ATTACHMENT) ?? null;
+    if (d === null && s === null) return { rec: null, conflict: false };
+    // The W2 alias is coherent only when BOTH points hold the same image:
+    // one empty point or two different images → INVALID_OPERATION (WebGL2
+    // spec; framebuffer-object-attachment.html "DEPTH_ATTACHMENT overwrites
+    // depth set by DEPTH_STENCIL_ATTACHMENT" expects the error also when only
+    // the depth point is occupied).
     if (d === null || s === null) return { rec: null, conflict: true };
     if (!sameAttachmentObject(d, s)) return { rec: null, conflict: true };
     return { rec: d, conflict: false };
@@ -300,7 +328,9 @@ function isValidRenderbufferFormat(ctx: WebGLRenderingContext, format: GLenum): 
   return false;
 }
 
-/** WebGL2 core renderbuffer formats (RGB16F/RGB32F are NOT legal — see above). */
+/** WebGL2 core renderbuffer formats (RGB16F/RGB32F are NOT legal — see above;
+ *  STENCIL_INDEX8 is a legal ES3 renderbuffer-only format — CTS
+ *  framebuffer-object-attachment.html renderbufferStorage(STENCIL_INDEX8)). */
 const W2_RB_FORMATS: ReadonlySet<GLenum> = new Set<GLenum>([
   C2.R8, C2.R8UI, C2.R8I, C2.R16UI, C2.R16I, C2.R32UI, C2.R32I,
   C2.RG8, C2.RG8UI, C2.RG8I, C2.RG16UI, C2.RG16I, C2.RG32UI, C2.RG32I,
@@ -310,6 +340,7 @@ const W2_RB_FORMATS: ReadonlySet<GLenum> = new Set<GLenum>([
   C2.RGB10_A2, C1.RGBA4, C1.RGB5_A1, C1.RGB565, C2.SRGB8_ALPHA8,
   C1.DEPTH_COMPONENT16, C2.DEPTH_COMPONENT24, C2.DEPTH_COMPONENT32F,
   C2.DEPTH24_STENCIL8, C2.DEPTH32F_STENCIL8, C1.DEPTH_STENCIL,
+  C1.STENCIL_INDEX8,
 ]);
 
 /** WebGL2 float renderbuffer formats (EXT_color_buffer_float / _half_float). */
@@ -810,6 +841,13 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_VALUE);
         return;
       }
+      // GLES3 §4.4.2: the texture's internal format must be compatible with the
+      // attachment point (depth component for DEPTH_ATTACHMENT, stencil for
+      // STENCIL_ATTACHMENT, both for the W2 DEPTH_STENCIL alias).
+      if (ctx._version === 2 && textureAttachmentFormatMismatch(tex, attachment)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
     }
     // Same-record sharing for DEPTH_STENCIL_ATTACHMENT (see framebufferRenderbuffer).
     const rec: FramebufferAttachment | null =
@@ -1126,6 +1164,11 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
           ctx._errors.push(C1.INVALID_VALUE);
           return;
         }
+        // GLES3 §4.4.2.4: same depth/stencil component rule as framebufferTexture2D.
+        if (textureAttachmentFormatMismatch(tex, attachment)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
       }
       // Same-record sharing for DEPTH_STENCIL_ATTACHMENT (see framebufferRenderbuffer).
       const rec: FramebufferAttachment | null =
@@ -1333,13 +1376,14 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_OPERATION); // same FBO object (incl. both default)
         return;
       }
-      // Both bound framebuffers must be complete.
+      // Both bound framebuffers must be complete (GLES3 §4.4.4:
+      // INVALID_FRAMEBUFFER_OPERATION when either is incomplete).
       if (readFbo !== null && computeFramebufferStatus(ctx, readFbo) !== C1.FRAMEBUFFER_COMPLETE) {
-        ctx._errors.push(C1.INVALID_OPERATION);
+        ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
         return;
       }
       if (drawFbo !== null && computeFramebufferStatus(ctx, drawFbo) !== C1.FRAMEBUFFER_COMPLETE) {
-        ctx._errors.push(C1.INVALID_OPERATION);
+        ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
         return;
       }
       // Identical source/dest image for any mask bit → INVALID_OPERATION
