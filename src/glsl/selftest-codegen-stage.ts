@@ -564,6 +564,59 @@ function makeTex(): any {
 }
 
 /* ------------------------------------------------------------------ */
+/* 14. EXTRA: CTS bug pins — matrix-ctor truncation with side effects  */
+/*     and exponent-form float literals (valid JS emission)            */
+/* ------------------------------------------------------------------ */
+
+{
+  // CTS glsl-construct-vec-mat-index: mat2(i++, vec4(i++)) must equal
+  // mat2(0,1,1,1) — both increments run once (left to right), the splat
+  // broadcasts the single evaluated value, and the 5 flattened components
+  // truncate to 4. Was: link failure ('too many components') and, after
+  // truncation alone, vec4(i++) re-ran its increment per component.
+  const layout = baseLayout(100);
+  const r = runStage(
+    `precision mediump float;
+     void main() {
+       int i = 0;
+       mat2 m = mat2(i++, vec4(i++));
+       gl_FragColor = (m[0][0] == 0.0 && m[1][0] == 1.0 && m[0][1] == 1.0 && m[1][1] == 1.0)
+         ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(1.0, 0.0, 0.0, 1.0);
+     }`,
+    'FRAGMENT',
+    layout,
+  );
+  const c = r.ctx.out.color[0];
+  check(
+    c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+    `mat2(i++, vec4(i++)) == mat2(0,1,1,1) (got [${Array.from(c).join(', ')}])`,
+  );
+}
+
+{
+  // CTS overflow_leak.vert / float_literal.vert: `highp float x = 1E100;`
+  // — exponent-form float literals must emit valid JS ('1e+100.0' is a
+  // SyntaxError inside new Function → link failure). The stage must compile,
+  // generate and run; the constant keeps its value.
+  const layout = baseLayout(100);
+  const r = runStage(
+    `precision mediump float;
+     void main() {
+       highp float big = 1E100;
+       highp float small = 1.5e-10;
+       gl_FragColor = (big > 0.0 && small > 0.0) ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(1.0, 0.0, 0.0, 1.0);
+     }`,
+    'FRAGMENT',
+    layout,
+  );
+  const c = r.ctx.out.color[0];
+  check(
+    c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+    `1E100 / 1.5e-10 literals compile and run (got [${Array.from(c).join(', ')}])`,
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
 

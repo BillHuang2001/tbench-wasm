@@ -245,18 +245,22 @@ export const builtinVariables100: BuiltinVariable[] = [
 ];
 
 /**
- * gl_Max* values = the EXACT WebGL 1.0 minimums (gl/getParameter returns the
- * implementation's real capability; these must stay consistent with gl/).
- * gl_MaxVertexTextureImageUnits is 16 here because the software renderer
- * supports 16 vertex texture units.
+ * gl_Max* values = the EXACT limits gl/ reports via getParameter
+ * (src/gl/state.ts defaultLimits — MAX_VERTEX_UNIFORM_VECTORS 4096,
+ * MAX_VARYING_VECTORS 64, MAX_COMBINED_TEXTURE_IMAGE_UNITS 32,
+ * MAX_TEXTURE_IMAGE_UNITS 16, MAX_FRAGMENT_UNIFORM_VECTORS 4096). The CTS
+ * (conformance/glsl/variables/glsl-built-ins.html) requires each builtin to
+ * EQUAL gl.getParameter's value. gl_MaxDrawBuffers stays 1 (WebGL1 core,
+ * no WEBGL_draw_buffers); gl_MaxVertexAttribs / gl_MaxVertexTextureImageUnits
+ * are 16 in defaultLimits.
  */
 export const builtinConstants100: BuiltinConstant[] = [
   { name: 'gl_MaxVertexAttribs', value: 16 },
-  { name: 'gl_MaxVertexUniformVectors', value: 128 },
-  { name: 'gl_MaxVaryingVectors', value: 8 },
+  { name: 'gl_MaxVertexUniformVectors', value: 4096 },
+  { name: 'gl_MaxVaryingVectors', value: 64 },
   { name: 'gl_MaxVertexTextureImageUnits', value: 16 },
-  { name: 'gl_MaxCombinedTextureImageUnits', value: 8 },
-  { name: 'gl_MaxTextureImageUnits', value: 8 },
-  { name: 'gl_MaxFragmentUniformVectors', value: 16 },
+  { name: 'gl_MaxCombinedTextureImageUnits', value: 32 },
+  { name: 'gl_MaxTextureImageUnits', value: 16 },
+  { name: 'gl_MaxFragmentUniformVectors', value: 4096 },
   { name: 'gl_MaxDrawBuffers', value: 1 },
 ];

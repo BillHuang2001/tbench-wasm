@@ -400,26 +400,39 @@ export const builtinVariables300: BuiltinVariable[] = [
   { name: 'gl_DepthRange', type: depthRangeParams, stage: 'BOTH', writable: false },
 ];
 
-/** gl_Max* values = the EXACT WebGL 2.0 minimums (must match gl/ getParameter). */
+/**
+ * gl_Max* values = the limits gl/ reports via getParameter on a WebGL2 context
+ * (src/gl/state.ts defaultLimits — the same Limits object serves WebGL1 and
+ * WebGL2, so every constant with a getParameter-backed limit equals it:
+ * MAX_VERTEX_UNIFORM_VECTORS 4096, MAX_FRAGMENT_UNIFORM_VECTORS 4096,
+ * MAX_VERTEX_OUTPUT_COMPONENTS/4 = 32, MAX_FRAGMENT_INPUT_COMPONENTS/4 = 32,
+ * MAX_DRAW_BUFFERS 8, MAX_UNIFORM_BUFFER_BINDINGS 72, MAX_UNIFORM_BLOCK_SIZE
+ * 65536, MAX_COMBINED_UNIFORM_BLOCKS 36). CTS checks these equalities
+ * (conformance2/rendering/draw-buffers.html: gl_MaxDrawBuffers ==
+ * getParameter(MAX_DRAW_BUFFERS)). gl_MaxImageUnits and
+ * gl_MaxCombinedShaderOutputResources have NO getParameter in gl/ and stay at
+ * the GLES 3.00 minimums; gl_MaxClipDistances matches the
+ * WEBGL_clip_cull_distance MAX_CLIP_DISTANCES_WEBGL value (8).
+ */
 export const builtinConstants300: BuiltinConstant[] = [
   { name: 'gl_MaxVertexAttribs', value: 16 },
-  { name: 'gl_MaxVertexUniformVectors', value: 256 },
-  { name: 'gl_MaxVertexOutputVectors', value: 16 },
+  { name: 'gl_MaxVertexUniformVectors', value: 4096 },
+  { name: 'gl_MaxVertexOutputVectors', value: 32 },
   { name: 'gl_MaxVertexTextureImageUnits', value: 16 },
-  { name: 'gl_MaxFragmentUniformVectors', value: 224 },
-  { name: 'gl_MaxFragmentInputVectors', value: 15 },
+  { name: 'gl_MaxFragmentUniformVectors', value: 4096 },
+  { name: 'gl_MaxFragmentInputVectors', value: 32 },
   { name: 'gl_MaxTextureImageUnits', value: 16 },
   { name: 'gl_MaxCombinedTextureImageUnits', value: 32 },
-  { name: 'gl_MaxDrawBuffers', value: 4 },
+  { name: 'gl_MaxDrawBuffers', value: 8 },
   { name: 'gl_MaxClipDistances', value: 8 },
   { name: 'gl_MaxTransformFeedbackSeparateAttribs', value: 4 },
   { name: 'gl_MaxTransformFeedbackInterleavedComponents', value: 64 },
   { name: 'gl_MaxTransformFeedbackSeparateComponents', value: 4 },
-  { name: 'gl_MaxUniformBufferBindings', value: 24 },
-  { name: 'gl_MaxUniformBlockSize', value: 16384 },
+  { name: 'gl_MaxUniformBufferBindings', value: 72 },
+  { name: 'gl_MaxUniformBlockSize', value: 65536 },
   { name: 'gl_MaxVertexUniformBlocks', value: 12 },
   { name: 'gl_MaxFragmentUniformBlocks', value: 12 },
-  { name: 'gl_MaxCombinedUniformBlocks', value: 24 },
+  { name: 'gl_MaxCombinedUniformBlocks', value: 36 },
   { name: 'gl_MaxImageUnits', value: 4 },
   { name: 'gl_MaxCombinedShaderOutputResources', value: 4 },
 ];

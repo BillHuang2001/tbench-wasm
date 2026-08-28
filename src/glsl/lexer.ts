@@ -72,9 +72,20 @@ export function tokenize(raw: RawToken[], version: 100 | 300): LexResult {
     }
 
     if (IDENT_RE.test(text)) {
-      tokens.push(isKeyword(text, version)
-        ? { kind: 'keyword', name: text, line, column }
-        : { kind: 'identifier', name: text, line, column });
+      if (isKeyword(text, version)) {
+        tokens.push({ kind: 'keyword', name: text, line, column });
+        continue;
+      }
+      // Reserved-identifier rules (WebGL §6.2 / ANGLE): GLSL ES 1.00
+      // future-reserved words, `__` anywhere, and the webgl_/_webgl prefixes
+      // are rejected as identifiers in BOTH version modes. `gl_` prefixes are
+      // NOT rejected here (needs a builtin whitelist — semantics Scope.declare).
+      const reservedMsg = reservedIdentifierError(text);
+      if (reservedMsg !== null) {
+        errors.push({ line, message: reservedMsg });
+        continue;
+      }
+      tokens.push({ kind: 'identifier', name: text, line, column });
       continue;
     }
 
@@ -162,6 +173,49 @@ function isKeyword(name: string, version: 100 | 300): boolean {
   if (KEYWORDS_COMMON.has(name) || KEYWORDS_BOTH.has(name)) return true;
   if (version === 100) return KEYWORDS_100_ONLY.has(name) || KEYWORDS_100_RESERVED.has(name);
   return KEYWORDS_300_ONLY.has(name) || KEYWORDS_100_RESERVED.has(name);
+}
+
+/**
+ * GLSL ES 1.00 §3.6 reserved-for-future-use words (the Khronos CTS
+ * `GLSL_1_0_17_FutureWords` list) that are NOT already keywords — rejected as
+ * identifiers in BOTH version modes (matches ANGLE; CTS reserved-words tests).
+ * Excluded here:
+ * - `switch`/`default`/`flat`/`sampler3D`/`sampler2DShadow` — already
+ *   keywords via KEYWORDS_100_RESERVED above (do not duplicate that path).
+ * - The ES 3.00-only keywords (`uint`, `layout`, `centroid`, `smooth`,
+ *   `noperspective`, `uvec2-4`, `mat2x2*`, `sampler2DArray`,
+ *   `sampler2DArrayShadow`, `samplerCubeShadow`, `isampler*`, `usampler*`,
+ *   `case`, `precise`, ...) — in version-100 shaders they lex as IDENTIFIERS
+ *   per the documented CTS deviation (shader-with-non-reserved-words tests
+ *   require them to compile as identifiers in WebGL1).
+ */
+const RESERVED_FUTURE: ReadonlySet<string> = new Set([
+  'asm', 'class', 'union', 'enum', 'typedef', 'template', 'this', 'packed',
+  'goto', 'inline', 'noinline', 'volatile', 'public', 'static', 'extern',
+  'external', 'interface', 'long', 'short', 'double', 'half', 'fixed',
+  'unsigned', 'superp', 'input', 'output',
+  'hvec2', 'hvec3', 'hvec4', 'dvec2', 'dvec3', 'dvec4',
+  'fvec2', 'fvec3', 'fvec4',
+  'sampler1D', 'sampler1DShadow', 'sampler2DRect', 'sampler3DRect',
+  'sampler2DRectShadow', 'sizeof', 'cast', 'namespace', 'using',
+]);
+
+/**
+ * Reserved-identifier rules (WebGL §6.2 "Identifiers", matching ANGLE):
+ * - GLSL ES 1.00 future-reserved words (RESERVED_FUTURE).
+ * - names containing `__` anywhere (`__foo`, `foo__bar`, `foo__bar__baz`).
+ * - names starting with `webgl_` or `_webgl`.
+ * Returns an error message or null. `gl_` prefixes are NOT rejected here —
+ * builtin-name shadowing is checked in semantics (Scope.declare) with a
+ * builtin whitelist.
+ */
+function reservedIdentifierError(name: string): string | null {
+  if (RESERVED_FUTURE.has(name)) return `'${name}' : reserved word`;
+  if (name.includes('__')) return `'${name}' : identifiers may not contain '__'`;
+  if (name.startsWith('webgl_') || name.startsWith('_webgl')) {
+    return `'${name}' : identifiers may not start with 'webgl_' or '_webgl'`;
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ */

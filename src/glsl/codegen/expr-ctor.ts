@@ -96,6 +96,34 @@ function padComp(base: string, v: string, env: CodegenEnv): Value {
   return out;
 }
 
+/** Pin a SIDE-EFFECTING scalar value to a temp so a multi-use broadcast
+ *  (vector splat, matrix diagonal) evaluates it EXACTLY ONCE. Postfix/prefix
+ *  `++`/`--` and assignments emit self-contained comma expressions with NO
+ *  `pre` (materialize() only hoists pre-carrying values), so without the pin
+ *  the broadcast would duplicate the string and re-run the effect per
+ *  component: vec4(i++) would yield vec4(1,2,3,4) — CTS
+ *  glsl-construct-vec-mat-index requires mat2(i++, vec4(i++)) ==
+ *  mat2(0,1,1,1), i.e. each i++ runs once and the splat broadcasts the single
+ *  evaluated value. The FIRST use carries the inline `(t = expr, t)`; all
+ *  later uses read the pure temp `t` (so a downstream materialize() — the
+ *  matrix-ctor general path — cannot duplicate the effect either). Pure
+ *  values (no assignment `=`) and pre-carrying values (already pinned by
+ *  materialize) return null and broadcast verbatim. */
+function pinSideEffect(v: Value, env: CodegenEnv): { first: Value; rest: Value } | null {
+  if (v.pre && v.pre.length > 0) return null;
+  if (!/=(?!=)/.test(v.v)) return null;
+  const t = env.allocTemp();
+  const first: Value = { v: `(${t} = ${v.v}, ${t})` };
+  const rest: Value = { v: t };
+  if (env.dual && v.dx !== undefined) {
+    first.dx = v.dx;
+    first.dy = v.dy;
+    rest.dx = v.dx;
+    rest.dy = v.dy;
+  }
+  return { first, rest };
+}
+
 /** Lower a constructor call (name is a builtin type name or a user struct). */
 export function emitConstructorCall(name: string, args: Expr[], retType: GLSLType, env: CodegenEnv): Value[] {
   switch (retType.kind) {
@@ -168,10 +196,14 @@ function emitVectorCtor(
   if (flat.length === 0) throw new Error(`codegen: empty '${name}' constructor`);
   if (flat.length === 1 && n > 1) {
     // Splat: one scalar argument fills every component (same Value object —
-    // its duals broadcast to all components).
+    // its duals broadcast to all components). Side-effecting arguments
+    // (i++ / assignments — comma expressions with no `pre`) are pinned so
+    // the effect runs once, not once per component (vec4(i++) must be
+    // vec4(1,1,1,1); CTS glsl-construct-vec-mat-index).
     const s = flat[0];
+    const pin = pinSideEffect(s, env);
     const out: Value[] = [];
-    for (let i = 0; i < n; i++) out.push(s);
+    for (let i = 0; i < n; i++) out.push(pin ? (i === 0 ? pin.first : pin.rest) : s);
     return out;
   }
   if (flat.length > n) flat.length = n; // permissive truncation (semantics rejects)
@@ -193,19 +225,27 @@ function emitMatrixCtor(
   const cols = retType.cols;
   const rows = retType.rows;
   const total = cols * rows;
-  // Lone scalar → diagonal.
+  // Lone scalar → diagonal. A side-effecting scalar (i++) is pinned so the
+  // diagonal broadcast evaluates it once (see pinSideEffect).
   if (args.length === 1 && args[0].resolvedType!.kind === 'scalar') {
-    const s = materialize(emitExpr(args[0], env), env)[0];
+    const s0 = materialize(emitExpr(args[0], env), env)[0];
+    const pin = pinSideEffect(s0, env);
+    const s = pin ? pin.first : s0;
+    const rest = pin ? pin.rest : s0;
     const out: Value[] = [];
+    let first = true;
     for (let c = 0; c < cols; c++) {
       for (let r = 0; r < rows; r++) {
-        out.push(
-          c === r
-            ? env.dual
-              ? ctorComp(s, scalarBaseOf(args[0].resolvedType!) ?? 'float', 'float', env)
-              : { v: use(s) }
-            : padComp('float', '0.0', env),
-        );
+        if (c === r) {
+          out.push(
+            env.dual
+              ? ctorComp(first ? s : rest, scalarBaseOf(args[0].resolvedType!) ?? 'float', 'float', env)
+              : { v: use(first ? s : rest) },
+          );
+          first = false;
+        } else {
+          out.push(padComp('float', '0.0', env));
+        }
       }
     }
     return out;
@@ -233,7 +273,13 @@ function emitMatrixCtor(
       flat.push(ctorComp(vv, scalarBaseOf(a.resolvedType!) ?? 'float', 'float', env));
     }
   }
-  if (flat.length > total) throw new Error(`codegen: '${name}' has too many components`);
+  // GLSL ES 1.00 §5.4.2: constructors SHORTEN — extra components are DROPPED,
+  // the first `total` (cols×rows) in column-major order are kept
+  // (mat2(float, vec4) = the scalar + the vec4's first 3 components). All
+  // arguments are evaluated in the loop BEFORE truncation, so side effects
+  // (mat2(i++, vec4(i++)) — CTS glsl-construct-vec-mat-index) always execute;
+  // semantics guarantees the dropped tail belongs to the LAST argument only.
+  if (flat.length > total) flat.length = total;
   const out: Value[] = [];
   for (let k = 0; k < total; k++) {
     if (k < flat.length) {
