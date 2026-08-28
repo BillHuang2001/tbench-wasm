@@ -1617,6 +1617,73 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
 }
 
 /* ------------------------------------------------------------------ */
+/* 19. struct with an ARRAY MEMBER passed by value to a user function  */
+/*     (pinned regression for CTS conformance/glsl/bugs/sampler-array- */
+/*     struct-function-arg.html). Before the `array` case in           */
+/*     flatNames's struct recursion (env.ts), makeParamLocal threw     */
+/*     "codegen: array member 'arg$c0__sam' inside a flat struct is    */
+/*     unsupported" → the linker caught it and the LINK failed (page:  */
+/*     1 PASS / 1 FAIL). The array case flattens per element           */
+/*     (arg__sam__0, arg__sam__1, ...), matching flatComponents, so    */
+/*     the inliner's per-component binding copies the uniform struct's */
+/*     sampler units into the param locals and arg.sam[0] reads the    */
+/*     right unit.                                                     */
+/* ------------------------------------------------------------------ */
+
+{
+  const vsa = compile(
+    `attribute vec4 aPos;
+     void main() { gl_Position = aPos; }`,
+    'VERTEX',
+    100,
+  );
+  const fsa = compile(
+    `precision mediump float;
+     struct S { sampler2D sam[2]; };
+     uniform S uni;
+     vec4 useSampler(S arg) { return texture2D(arg.sam[0], vec2(0.0, 0.0)); }
+     void main() { gl_FragColor = vec4(useSampler(uni)); }`,
+    'FRAGMENT',
+    100,
+  );
+  const la = linkProgram(vsa, fsa);
+  check(la.ok, `struct-with-array-member by-value param pair links (${la.ok ? '' : la.log})`);
+  if (la.ok) {
+    const p = la.program;
+    const sam0 = p.uniforms.find((u) => u.name === 'uni.sam[0]');
+    const sam1 = p.uniforms.find((u) => u.name === 'uni.sam[1]');
+    check(
+      !!sam0 && !!sam1 && sam0.location >= 0 && sam1.location >= 0,
+      `flattened sampler-array member uniforms 'uni.sam[0]'/'uni.sam[1]' present (got ${JSON.stringify(p.uniforms.map((u) => u.name))})`,
+    );
+    if (sam0 && sam1) {
+      p.intStore[sam0.location] = 5;
+      p.intStore[sam1.location] = 9;
+      let seenUnit = -1;
+      const tex: any = { out: new Float32Array(4) };
+      tex.sample2D = (unit: number): boolean => {
+        seenUnit = unit;
+        tex.out[0] = 1;
+        tex.out[1] = 0.5;
+        tex.out[2] = 0.25;
+        tex.out[3] = 1;
+        return true;
+      };
+      const fctx = fragmentCtx(p, [], { tex });
+      p.fragment.run(fctx);
+      check(
+        seenUnit === 5,
+        `arg.sam[0] bound the right sampler unit (got ${seenUnit}, want 5)`,
+      );
+      check(
+        fctx.out.color[0][0] === 1 && fctx.out.color[0][1] === 0.5,
+        `useSampler result color from tex.out (got [${Array.from(fctx.out.color[0]).join(', ')}])`,
+      );
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
 
