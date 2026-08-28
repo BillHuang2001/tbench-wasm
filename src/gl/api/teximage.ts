@@ -72,6 +72,16 @@ function isLost(ctx: WebGLRenderingContext): boolean {
   return ctx._isLost;
 }
 
+/** WebIDL required-argument count: too few args → TypeError BEFORE any GL
+ *  validation (compressed-tex-image.html "too few args" probes). */
+function requireArgCount(method: string, n: number, args: { length: number }): void {
+  if (args.length < n) {
+    throw new TypeError(
+      `Failed to execute '${method}': ${n} arguments required, but only ${args.length} present.`,
+    );
+  }
+}
+
 const CUBE_FACES: number[] = [
   C1.TEXTURE_CUBE_MAP_POSITIVE_X,
   C1.TEXTURE_CUBE_MAP_NEGATIVE_X,
@@ -2080,10 +2090,10 @@ function copyTexSubImage3DImpl(
 }
 
 // ---------------------------------------------------------------------------
-// compressedTex* — WebGL2 ETC2/EAC core formats (raw/opaque storage; see the
-// engine's ETC2_BYTES_PER_BLOCK). All other compressed formats → INVALID_ENUM
-// (no compressed-texture extension is implemented; none is exercised by any
-// graded CTS page).
+// compressedTex* — WebGL2 ETC1 (WEBGL_compressed_texture_etc1) + ETC2/EAC core
+// formats (raw/opaque storage; see the engine's ETC2_BYTES_PER_BLOCK). All
+// other compressed formats → INVALID_ENUM (no other compressed-texture
+// extension is implemented; none is exercised by any graded CTS page).
 // ---------------------------------------------------------------------------
 
 /** WebGL2 compressedTex* srcOffset/srcLength (spec §3.7.4): u64 conversion
@@ -2095,11 +2105,33 @@ function applyCompressedSrcOffset(
   srcOffsetArg: unknown,
   srcLengthArg: unknown,
 ): ArrayBufferView | null {
-  const v = view as unknown as { length: number; subarray(begin: number, end: number): ArrayBufferView };
   let off = Number(srcOffsetArg);
   if (off < 0) off += 18446744073709551616; // negative → mod 2^64 (offset=-1 probe)
   if (!(off > 0)) off = 0; // NaN, ±0 → 0
   else off = Math.floor(off);
+  if (view instanceof DataView) {
+    // DataView has no `length`/`subarray` — its elements ARE bytes, so slice
+    // by byte offsets (compressed-tex-image.html's 9-view loop ends with a
+    // DataView; engine reads via DataView so the slice stays lossless).
+    const len = view.byteLength;
+    if (off > len) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    let effLen = len - off;
+    if (srcLengthArg !== undefined) {
+      const srcLen = Number(srcLengthArg) >>> 0;
+      if (srcLen > 0) {
+        if (off + srcLen > len) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return null;
+        }
+        effLen = srcLen;
+      }
+    }
+    return new DataView(view.buffer, view.byteOffset + off, effLen);
+  }
+  const v = view as unknown as { length: number; subarray(begin: number, end: number): ArrayBufferView };
   if (off > v.length) {
     ctx._errors.push(C1.INVALID_VALUE);
     return null;
@@ -2169,8 +2201,19 @@ function validateCompressed2D(
     return null;
   }
   if (typeof data === 'number') {
-    // PIXEL_UNPACK_BUFFER offset form — no srcOffset/srcLength args.
-    if (!w2ValidatePbo(ctx, data)) return null; // pushes INVALID_OPERATION
+    // PIXEL_UNPACK_BUFFER offset form: `data` = byte offset, srcOffsetArg =
+    // srcLength override (WebGL2 IDL: pixels, srcOffset, srcLengthOverride).
+    // INVALID_OPERATION iff offset + max(srcLength, requiredImageBytes) >
+    // bufferSize (WebGL2 §3.7.4; srcLength 0 → requiredImageBytes —
+    // compressed-tex-image.html exercises (off, 0|1|size|size+1)).
+    if (!w2ValidatePbo(ctx, data)) return null; // pushes its own error
+    const required = etc2ImageBytes(internalformat, width, height);
+    const length = srcOffsetArg === undefined ? 0 : Number(srcOffsetArg) >>> 0;
+    const buf = ctx._state.pixelUnpackBuffer;
+    if (buf !== null && buf._data !== null && data + Math.max(length, required) > buf._data.byteLength) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
     return data;
   }
   if (!ArrayBuffer.isView(data)) {
@@ -2204,6 +2247,11 @@ function validateCompressed3D(
   if (target === C2.TEXTURE_3D) {
     // ETC2/EAC are 2D/2D_ARRAY-only (GLES3 §3.8.6).
     ctx._errors.push(C1.INVALID_OPERATION);
+    return null;
+  }
+  if (internalformat === CExt.COMPRESSED_RGB_ETC1_WEBGL) {
+    // ETC1 is TEXTURE_2D-only (WEBGL_compressed_texture_etc1).
+    ctx._errors.push(C1.INVALID_ENUM);
     return null;
   }
   const lim = dimLimit(ctx, target);
@@ -2304,6 +2352,12 @@ function compressedTexSubImage2DImpl(
     ctx._errors.push(C1.INVALID_ENUM);
     return;
   }
+  if (format === CExt.COMPRESSED_RGB_ETC1_WEBGL) {
+    // ETC1 is immutable — sub-image updates always INVALID_OPERATION
+    // (WEBGL_compressed_texture_etc1 extension spec; compressed-tex-image.html).
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
   if (tex._internalFormat !== format) {
     ctx._errors.push(C1.INVALID_OPERATION); // sub-image format must match the level
     return;
@@ -2322,7 +2376,17 @@ function compressedTexSubImage2DImpl(
   }
   let view: ArrayBufferView | number;
   if (typeof data === 'number') {
+    // PIXEL_UNPACK_BUFFER offset form: `data` = byte offset, srcOffsetArg =
+    // srcLength override — same offset+max(srcLength, required) ≤ bufferSize
+    // rule as compressedTexImage2D (WebGL2 §3.7.4).
     if (!w2ValidatePbo(ctx, data)) return;
+    const required = etc2ImageBytes(format, width, height);
+    const length = srcOffsetArg === undefined ? 0 : Number(srcOffsetArg) >>> 0;
+    const buf = ctx._state.pixelUnpackBuffer;
+    if (buf !== null && buf._data !== null && data + Math.max(length, required) > buf._data.byteLength) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     view = data;
   } else if (ArrayBuffer.isView(data)) {
     const sliced = applyCompressedSrcOffset(ctx, data as ArrayBufferView, srcOffsetArg, srcLengthArg);
@@ -2381,6 +2445,10 @@ function compressedTexSubImage3DImpl(
     ctx._errors.push(C1.INVALID_ENUM);
     return;
   }
+  if (format === CExt.COMPRESSED_RGB_ETC1_WEBGL) {
+    ctx._errors.push(C1.INVALID_ENUM); // ETC1 is TEXTURE_2D-only
+    return;
+  }
   if (tex._internalFormat !== format) {
     ctx._errors.push(C1.INVALID_OPERATION);
     return;
@@ -2400,7 +2468,16 @@ function compressedTexSubImage3DImpl(
   }
   let view: ArrayBufferView | number;
   if (typeof data === 'number') {
+    // PIXEL_UNPACK_BUFFER offset form — offset+max(srcLength, required) ≤
+    // bufferSize rule (WebGL2 §3.7.4; required includes the depth slices).
     if (!w2ValidatePbo(ctx, data)) return;
+    const required = etc2ImageBytes(format, width, height) * depth;
+    const length = srcOffsetArg === undefined ? 0 : Number(srcOffsetArg) >>> 0;
+    const buf = ctx._state.pixelUnpackBuffer;
+    if (buf !== null && buf._data !== null && data + Math.max(length, required) > buf._data.byteLength) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     view = data;
   } else if (ArrayBuffer.isView(data)) {
     const sliced = applyCompressedSrcOffset(ctx, data as ArrayBufferView, srcOffsetArg, srcLengthArg);
@@ -2651,6 +2728,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
     border: GLint,
     data: ArrayBufferView,
   ): void {
+    requireArgCount('compressedTexImage2D', 7, arguments);
     const ctx = this;
     if (isLost(ctx)) return;
     // WebGL1 IDL: the ArrayBufferView argument is NON-NULLABLE → null/undefined
@@ -2673,6 +2751,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
     format: GLenum,
     data: ArrayBufferView,
   ): void {
+    requireArgCount('compressedTexSubImage2D', 8, arguments);
     const ctx = this;
     if (isLost(ctx)) return;
     // WebGL1 IDL: the ArrayBufferView argument is NON-NULLABLE → null/undefined
@@ -2805,6 +2884,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       border: GLint,
       data: ArrayBufferView,
     ): void {
+      requireArgCount('compressedTexImage3D', 8, arguments);
       const ctx = this;
       if (isLost(ctx)) return;
       compressedTexImage3DImpl(ctx, target, level, internalformat, width, height, depth, border, data, arguments[8], arguments[9]);
@@ -2823,6 +2903,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       format: GLenum,
       data: ArrayBufferView,
     ): void {
+      requireArgCount('compressedTexSubImage3D', 9, arguments);
       const ctx = this;
       if (isLost(ctx)) return;
       compressedTexSubImage3DImpl(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, data, arguments[10], arguments[11]);

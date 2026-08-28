@@ -1687,13 +1687,17 @@ export function copyTexSubImage(
 }
 
 /**
- * ETC2/EAC formats (WebGL2 core; GLES3 Table 3.19) → bytes per 4×4 block.
- * These are the ONLY compressed formats the renderer accepts (stored raw —
- * the raster has no compressed sampler, and no graded CTS page samples a
- * compressed texture; the sole exercise is views-with-offsets' error +
- * storage semantics). All other compressed formats stay INVALID_ENUM (api).
+ * Accepted compressed formats → bytes per 4×4 block (the api layer's single
+ * source of truth for compressed-format validation). ETC2/EAC (WebGL2 core;
+ * GLES3 Table 3.19) plus COMPRESSED_RGB_ETC1_WEBGL (WEBGL_compressed_texture_etc1,
+ * 2D-only; its extension spec makes sub-image updates immutable →
+ * INVALID_OPERATION at the api layer). Stored raw — the raster has no
+ * compressed sampler, and no graded CTS page samples a compressed texture;
+ * the sole exercise is error + storage semantics. All other compressed
+ * formats stay INVALID_ENUM (api).
  */
 export const ETC2_BYTES_PER_BLOCK: Readonly<Record<number, number>> = {
+  [CExt.COMPRESSED_RGB_ETC1_WEBGL]: 8,
   [CExt.COMPRESSED_R11_EAC]: 8,
   [CExt.COMPRESSED_SIGNED_R11_EAC]: 8,
   [CExt.COMPRESSED_RG11_EAC]: 16,
@@ -1706,7 +1710,7 @@ export const ETC2_BYTES_PER_BLOCK: Readonly<Record<number, number>> = {
   [CExt.COMPRESSED_SRGB8_ALPHA8_ETC2_EAC]: 16,
 };
 
-/** Byte count of one ETC2 image (width/height are multiples of 4 — api-enforced). */
+/** Byte count of one ETC1/ETC2 compressed image (width/height are multiples of 4 — api-enforced). */
 export function etc2ImageBytes(fmt: number, width: number, height: number): number {
   const bpb = ETC2_BYTES_PER_BLOCK[fmt];
   if (!bpb) return 0;
