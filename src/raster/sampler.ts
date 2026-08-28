@@ -36,9 +36,10 @@
  *    mirror of (c mod 2·size).
  *  - Filters: NEAREST/LINEAR + all four mipmap combos. Implicit LOD:
  *    ρ = max(ρx,ρy), ρx = max over axes of |∂coord_i/∂x|·size_i;
- *    λ = clamp(log2(ρ) + bias, minLod, maxLod), bias clamped to ±2 (ES 3.0).
- *    Zero/absent derivatives → λ = minLod. textureLod passes the level
- *    directly. λ ≤ 0 → mag filter at base level; λ > 0 → min filter.
+ *    λ = clamp(log2(ρ) + bias, minLod, maxLod) (bias added unclamped, GLES
+ *    semantics — no GL_MAX_TEXTURE_LOD_BIAS in ES). Zero/absent derivatives
+ *    → λ = minLod. textureLod passes the level directly. λ ≤ 0 → mag filter
+ *    at base level; λ > 0 → min filter.
  *    NEAREST_MIPMAP_NEAREST: level = round(λ); NEAREST_MIPMAP_LINEAR:
  *    floor(λ) + frac(λ) blend between d and d+1.
  *  - EXT_texture_filter_anisotropic (2D + mipmap min filter only):
@@ -298,7 +299,7 @@ function lodGtZero(img: TextureImage, state: SamplerState, coord: SampleCoord, b
     }
   }
   if (rhoX === 0 && rhoY === 0) return false; // λ = minLod ≤ 0 (minLod > 0 returned above)
-  const b = bias < -2 ? -2 : (bias > 2 ? 2 : bias);
+  const b = bias;
   const rel = (rhoX > rhoY ? rhoX : rhoY) / (2 ** -b);
   if (rel > 1 + 1e-9) return true;
   if (rel < 1 - 1e-9) return false;
@@ -311,9 +312,9 @@ function lodGtZero(img: TextureImage, state: SamplerState, coord: SampleCoord, b
 
 /**
  * Implicit LOD: ρx = max over axes of |∂coord_i/∂x|·size_i (ρy likewise),
- * ρ = max(ρx, ρy), λ = clamp(log2(ρ) + bias, minLod, maxLod). Bias is
- * clamped to ±2 before adding (ES 3.0). Zero/absent derivatives → ρ = 0 →
- * λ = minLod. Anisotropy applies to 2D with a mipmap min filter.
+ * ρ = max(ρx, ρy), λ = clamp(log2(ρ) + bias, minLod, maxLod). Bias is added
+ * unclamped (GLES has no GL_MAX_TEXTURE_LOD_BIAS). Zero/absent derivatives →
+ * ρ = 0 → λ = minLod. Anisotropy applies to 2D with a mipmap min filter.
  */
 function computeLod(img: TextureImage, state: SamplerState, coord: SampleCoord, bias: number): number {
   const dx = coord.dx;
@@ -350,7 +351,7 @@ function computeLod(img: TextureImage, state: SamplerState, coord: SampleCoord, 
       rho = rho / Math.min(state.maxAnisotropy, rho / mn);
     }
   }
-  const b = bias < -2 ? -2 : (bias > 2 ? 2 : bias);
+  const b = bias;
   let lambda = Math.log2(rho) + b;
   if (lambda < state.minLod) lambda = state.minLod;
   else if (lambda > state.maxLod) lambda = state.maxLod;
@@ -541,6 +542,13 @@ function projectToFace(face: number, rx: number, ry: number, rz: number, dst: Fl
     case 4: sc = rx; tc = -ry; ma = rz; break;    // +Z
     default: sc = -rx; tc = -ry; ma = -rz; break; // −Z
   }
+  if (ma === 0) {
+    // Degenerate direction (e.g. vec3(0,0,0)): no dominant axis — fall back to
+    // the face-center texel (0/0 would produce NaN, poisoning every compare).
+    dst[0] = 0.5;
+    dst[1] = 0.5;
+    return;
+  }
   dst[0] = (sc / ma + 1) / 2;
   dst[1] = (tc / ma + 1) / 2;
 }
@@ -679,8 +687,13 @@ function sampleLevels(
     if (plan.hi <= plan.base) {
       level0 = plan.base;
     } else {
-      level0 = clampLevel(Math.floor(lambda), plan.base, plan.hi - 1);
+      // Per spec: level0 = clamp(⌊λ⌋, base, hi), level1 = min(level0+1, hi),
+      // f = frac(λ). floor(λ) may fall below base (e.g. 0 < λ < 1) and clamps
+      // UP to base; a floor(λ) ≥ hi reaches the top level (no hi−1 cap), with
+      // level1 == level0 == hi (self-blend at weight f is the level itself).
+      level0 = clampLevel(Math.floor(lambda), plan.base, plan.hi);
       level1 = level0 + 1;
+      if (level1 > plan.hi) level1 = plan.hi;
       f = lambda - Math.floor(lambda);
     }
   }

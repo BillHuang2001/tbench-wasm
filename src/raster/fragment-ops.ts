@@ -5,7 +5,8 @@
  *
  * Order of operations per GLES 3.0 §4.1:
  *   scissor test → sample coverage → stencil test → depth test → blending →
- *   dithering → (sRGB re-encode) → color write.
+ *   (dithering — accepted but a no-op, see below) → (sRGB re-encode) → color
+ *   write.
  * The two-phase protocol (FragmentOps.test / FragmentOps.finalize, see
  * types.ts) defers stencil-zpass/depth-write until AFTER the fragment shader
  * runs, so `discard` suppresses every write and gl_FragDepth shaders get a
@@ -23,10 +24,16 @@
  *    through unconverted (glClearColor is written as-is per spec).
  *  - Blending applies to output location 0 only (GLES 3.0 §4.1.7: with
  *    multiple color outputs, blending is applied to the first one).
- *  - Dither: 4×4 Bayer pattern applied to 8-bit unsigned-normalized targets,
- *    out8 = min(255, floor(c·255 + (bayer+0.5)/16)); the +0.5/16 offset
- *    centers the quantization error (average offset 0.5 instead of 0.469).
- *    Signed-normalized and 16-bit (4444/5551/565) targets are not dithered.
+ *  - Dither: the DITHER state is accepted (gl.enable/getParameter) but the
+ *    dithering algorithm is a NO-OP. The GL/WebGL specs leave the algorithm
+ *    implementation-defined, and every shipping WebGL implementation (ANGLE,
+ *    SwiftShader, native GL/Metal drivers) effectively does not dither — the
+ *    CTS is calibrated to that: exact-value readbacks (e.g.
+ *    EXT_texture_norm16's "should be 106" check for 0x6a35 in a u16 texture
+ *    rendered to an RGBA8 target) expect the plain round-to-nearest conversion
+ *    (GLES 2.0 §2.1.8: c = round(f·(2^b−1))). Any position-dependent dither
+ *    (e.g. a 4×4 Bayer offset) would turn round(105.79) = 106 into 105 at
+ *    some pixel and break those tests; no test verifies dither output.
  *  - Sample coverage is a deterministic per-fragment integer-lattice hash
  *    (documented approximation of the hardware coverage mask).
  *  - No depth/stencil attachment → the corresponding test always passes
@@ -185,7 +192,7 @@ export function blendColor(
 }
 
 /* ================================================================== */
-/* Sample coverage + dither (per-fragment deterministic helpers)       */
+/* Sample coverage (per-fragment deterministic helper)                 */
 /* ================================================================== */
 
 /**
@@ -203,32 +210,6 @@ function coverageHash(x: number, y: number): number {
   h = Math.imul(h ^ (h >>> 15), 0x846ca68b);
   h ^= h >>> 13;
   return (h >>> 0) / 4294967296;
-}
-
-/** 4×4 Bayer dither matrix, row-major (standard GL-style pattern). */
-const BAYER4 = [
-  0, 8, 2, 10,
-  12, 4, 14, 6,
-  3, 11, 1, 9,
-  15, 7, 13, 5,
-];
-
-/**
- * Dithers one normalized channel (0..1) for an 8-bit target: the Bayer offset
- * is added in the 0..255 domain,
- *   out8 = min(255, floor(c·255 + (bayer(x&3, y&3) + 0.5)/16))
- * returned as out8/255. The (bayer+0.5)/16 formulation centers the
- * quantization error (average offset exactly 0.5); encode() clamps any
- * negative result (e.g. from subtractive blending).
- */
-function ditherChannel(c: number, x: number, y: number): number {
-  const b = BAYER4[((y & 3) << 2) | (x & 3)];
-  return Math.min(255, Math.floor(c * 255 + (b + 0.5) / 16)) / 255;
-}
-
-/** True when dithering applies to this surface (8-bit unsigned normalized). */
-function isDitherable(s: Surface): boolean {
-  return s.info.normalized && s.info.storage === 'u8';
 }
 
 /* ================================================================== */
@@ -254,7 +235,6 @@ export class FragmentOpsImpl implements FragmentOps {
   private readonly depthTestEnabled: boolean;
   private readonly depthMask: boolean;
   private readonly blend: DrawCall['blend'];
-  private readonly dither: boolean;
   private readonly colorMask: readonly ColorMask[];
   private readonly drawBuffers: readonly number[];
   private readonly fbColors: readonly (Surface | null)[];
@@ -278,7 +258,6 @@ export class FragmentOpsImpl implements FragmentOps {
     this.depthTestEnabled = dc.depthTest.enabled;
     this.depthMask = dc.depthMask;
     this.blend = dc.blend;
-    this.dither = dc.dither;
     this.colorMask = dc.colorMask;
     this.drawBuffers = dc.drawBuffers;
     this.fbColors = dc.fb.color;
@@ -330,7 +309,7 @@ export class FragmentOpsImpl implements FragmentOps {
     return true;
   }
 
-  /** Depth write + stencil zpass + blend + dither + sRGB + colorMask + write. */
+  /** Depth write + stencil zpass + blend + sRGB + colorMask + write. */
   finalize(
     x: number, y: number, frontFacing: boolean, depth: number,
     colors: readonly Float32Array[],
@@ -375,7 +354,7 @@ export class FragmentOpsImpl implements FragmentOps {
   /**
    * Writes one fragment color output (location L) through the full pipeline:
    * blend (location 0 only, linear space for sRGB targets) → sRGB encode
-   * (RGB only) → dither → colorMask → surface write.
+   * (RGB only) → colorMask → surface write. (DITHER is a no-op — see header.)
    */
   private writeColor(L: number, x: number, y: number, colors: readonly Float32Array[]): void {
     const attach = this.drawBuffers[L];
@@ -410,10 +389,6 @@ export class FragmentOpsImpl implements FragmentOps {
     // Fragment colors are linear; sRGB targets convert on write (RGB only).
     if (isSRGB) {
       r = linearToSRGB(r); g = linearToSRGB(g); b = linearToSRGB(b);
-    }
-    if (this.dither && isDitherable(tgt)) {
-      r = ditherChannel(r, x, y); g = ditherChannel(g, x, y);
-      b = ditherChannel(b, x, y); a = ditherChannel(a, x, y);
     }
     // colorMask: masked channels keep their CURRENT surface value
     // (dstScratch holds the as-stored decode from the blend path above, or a
@@ -526,7 +501,9 @@ export function setupFragmentCtx(
   quadV: Float32Array, quadStride: number, pixel: number,
 ): void {
   const fc = ctx.fragCoord;
-  fc[0] = x; fc[1] = y; fc[2] = depth; fc[3] = w;
+  // gl_FragCoord.xy = window pixel center (GLSL ES 1.00 §7.1 / 3.00 §7.1):
+  // (x + 0.5, y + 0.5) for the pixel at integer window coords (x, y).
+  fc[0] = x + 0.5; fc[1] = y + 0.5; fc[2] = depth; fc[3] = w;
   const base = pixel * quadStride;
   const varyings = ctx.varyings;
   let offset = 0;

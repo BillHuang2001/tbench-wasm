@@ -42,8 +42,10 @@ import {
 import {
   getFormat, clamp, FILL_ZERO, FILL_ONE,
   readU32At, readCompAt, packDepth24Stencil, halfToFloat, floatToHalf,
-  unpack11, unpack10,
+  unpack11, unpack10, pack11, pack10, pack9E5,
   P_I_U8, P_I_I8, P_I_U16, P_I_I16, P_I_U32, P_I_I32,
+  R16_EXT, RG16_EXT, RGB16_EXT, RGBA16_EXT,
+  R16_SNORM_EXT, RG16_SNORM_EXT, RGB16_SNORM_EXT, RGBA16_SNORM_EXT,
 } from './formats';
 import type { PixelFormatInfo, PerCompParams, StorageKind } from './formats';
 
@@ -296,8 +298,8 @@ function texImageDstAllowed(srcFormat: GLenum, srcType: GLenum): ReadonlySet<num
       switch (srcType) {
         case UNSIGNED_BYTE: return new Set([R8, R8UI]);
         case BYTE: return new Set([R8_SNORM, R8I]);
-        case UNSIGNED_SHORT: return new Set([R16UI]);
-        case SHORT: return new Set([R16I]);
+        case UNSIGNED_SHORT: return new Set([R16UI, R16_EXT]);
+        case SHORT: return new Set([R16I, R16_SNORM_EXT]);
         case UNSIGNED_INT: return new Set([R32UI]);
         case INT: return new Set([R32I]);
         case HALF_FLOAT: return new Set([R16F]);
@@ -308,8 +310,8 @@ function texImageDstAllowed(srcFormat: GLenum, srcType: GLenum): ReadonlySet<num
       switch (srcType) {
         case UNSIGNED_BYTE: return new Set([RG8, RG8UI]);
         case BYTE: return new Set([RG8_SNORM, RG8I]);
-        case UNSIGNED_SHORT: return new Set([RG16UI]);
-        case SHORT: return new Set([RG16I]);
+        case UNSIGNED_SHORT: return new Set([RG16UI, RG16_EXT]);
+        case SHORT: return new Set([RG16I, RG16_SNORM_EXT]);
         case UNSIGNED_INT: return new Set([RG32UI]);
         case INT: return new Set([RG32I]);
         case HALF_FLOAT: return new Set([RG16F]);
@@ -322,8 +324,8 @@ function texImageDstAllowed(srcFormat: GLenum, srcType: GLenum): ReadonlySet<num
         case BYTE: return new Set([RGB8_SNORM, RGB8I]);
         case UNSIGNED_SHORT_5_6_5: return new Set([RGB565, RGB]);
         case UNSIGNED_INT_2_10_10_10_REV: return new Set([RGB10_A2, RGB10_A2UI]);
-        case UNSIGNED_SHORT: return new Set([RGB16UI]);
-        case SHORT: return new Set([RGB16I]);
+        case UNSIGNED_SHORT: return new Set([RGB16UI, RGB16_EXT]);
+        case SHORT: return new Set([RGB16I, RGB16_SNORM_EXT]);
         case UNSIGNED_INT: return new Set([RGB32UI]);
         case INT: return new Set([RGB32I]);
         case HALF_FLOAT: return new Set([RGB16F]);
@@ -339,8 +341,8 @@ function texImageDstAllowed(srcFormat: GLenum, srcType: GLenum): ReadonlySet<num
         case UNSIGNED_SHORT_4_4_4_4: return new Set([RGBA4, RGBA]);
         case UNSIGNED_SHORT_5_5_5_1: return new Set([RGB5_A1, RGBA]);
         case UNSIGNED_INT_2_10_10_10_REV: return new Set([RGB10_A2, RGB10_A2UI]);
-        case UNSIGNED_SHORT: return new Set([RGBA16UI]);
-        case SHORT: return new Set([RGBA16I]);
+        case UNSIGNED_SHORT: return new Set([RGBA16UI, RGBA16_EXT]);
+        case SHORT: return new Set([RGBA16I, RGBA16_SNORM_EXT]);
         case UNSIGNED_INT: return new Set([RGBA32UI]);
         case INT: return new Set([RGBA32I]);
         case HALF_FLOAT: return new Set([RGBA16F]);
@@ -634,6 +636,19 @@ function buildColorPack(info: PixelFormatInfo, packFormat: GLenum, packType: GLe
             const i = do_ >> 2;
             d[i] = _r4[0]; d[i + 1] = _r4[1]; d[i + 2] = _r4[2]; d[i + 3] = _r4[3];
           };
+        case UNSIGNED_INT_10F_11F_11F_REV:
+          // RGB packed as 11/11/10-bit floats (R top); alpha dropped.
+          return (src, so, dst, do_) => {
+            decode(src, so, _r4);
+            (dst as Uint32Array)[do_ >> 2] =
+              (pack11(_r4[0]) << 21) | (pack11(_r4[1]) << 10) | pack10(_r4[2]);
+          };
+        case UNSIGNED_INT_5_9_9_9_REV:
+          // RGB packed as shared-exponent 9/9/9/5 (R top); alpha dropped.
+          return (src, so, dst, do_) => {
+            decode(src, so, _r4);
+            (dst as Uint32Array)[do_ >> 2] = pack9E5(_r4[0], _r4[1], _r4[2]);
+          };
         default:
           return null;
       }
@@ -669,6 +684,17 @@ function buildColorPack(info: PixelFormatInfo, packFormat: GLenum, packType: GLe
             const d = dst as Float32Array;
             const i = do_ >> 2;
             d[i] = _r4[0]; d[i + 1] = _r4[1]; d[i + 2] = _r4[2];
+          };
+        case UNSIGNED_INT_10F_11F_11F_REV:
+          return (src, so, dst, do_) => {
+            decode(src, so, _r4);
+            (dst as Uint32Array)[do_ >> 2] =
+              (pack11(_r4[0]) << 21) | (pack11(_r4[1]) << 10) | pack10(_r4[2]);
+          };
+        case UNSIGNED_INT_5_9_9_9_REV:
+          return (src, so, dst, do_) => {
+            decode(src, so, _r4);
+            (dst as Uint32Array)[do_ >> 2] = pack9E5(_r4[0], _r4[1], _r4[2]);
           };
         default:
           return null;

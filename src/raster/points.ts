@@ -89,7 +89,9 @@ export function rasterizePoint(
     quadDepth[slot] = z;
     quadW[slot] = w;
     quadPC[slot * 2] = (cx - left) * invSize;
-    quadPC[slot * 2 + 1] = (cy - bottom) * invSize;
+    // t runs top-down per GLSL ES (t = 0 at the point's top). Window Y is
+    // bottom-up, so the point's top is the LARGER window Y (`top`).
+    quadPC[slot * 2 + 1] = (top - cy) * invSize;
     return inside;
   };
 
