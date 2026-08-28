@@ -2,7 +2,10 @@
  * image.ts — DOM image-source decoding for texImage2D / texSubImage2D.
  *
  * Decodes HTMLImageElement / HTMLCanvasElement / HTMLVideoElement /
- * ImageBitmap / ImageData into straight-alpha RGBA8 for texture upload.
+ * ImageBitmap / VideoFrame / ImageData into straight-alpha RGBA8 for texture
+ * upload. Preferred path: BYTE-EXACT readback through a dedicated scratch
+ * NATIVE WebGL1 context (texImage2D → framebufferTexture2D → readPixels),
+ * which applies no color management; fallback: 2D drawImage + getImageData.
  * DOM access is lazy and feature-detected (the bundle also runs in Node);
  * failures are reported as result objects, never exceptions — gl/ maps them
  * to GL errors (INVALID_VALUE for incomplete/tainted sources per spec).
@@ -24,7 +27,8 @@ export type ImageSource =
   | HTMLVideoElement
   | ImageBitmap
   | ImageData
-  | OffscreenCanvas;
+  | OffscreenCanvas
+  | VideoFrame;
 
 /** Result of a decode attempt; gl/ maps {ok:false} to INVALID_VALUE. */
 export type DecodeResult =
@@ -38,6 +42,71 @@ export type DecodeResult =
  */
 let scratchCanvas: HTMLCanvasElement | null = null;
 let scratchCtx: CanvasRenderingContext2D | null = null;
+
+/**
+ * NATIVE HTMLCanvasElement.prototype.getContext, captured at module scope.
+ * The test harness (src/context-intercept.ts) later overrides
+ * HTMLCanvasElement.prototype.getContext to route 'webgl'/'webgl2' requests to
+ * the software renderer — but module evaluation runs before that override is
+ * installed, so this reference stays the genuine native implementation.
+ * Invoking it via .call(scratchCanvas, 'webgl', attrs) on a dedicated scratch
+ * canvas bypasses the page's override and never recurses into the software
+ * renderer. Null in Node (no DOM).
+ */
+const NATIVE_GET_CONTEXT: ((type: string, attrs?: unknown) => unknown) | null =
+  typeof HTMLCanvasElement !== 'undefined'
+    ? (HTMLCanvasElement.prototype.getContext as unknown as (type: string, attrs?: unknown) => unknown)
+    : null;
+
+/**
+ * Dedicated scratch NATIVE WebGL1 context for byte-exact DOM-source decoding
+ * (see decodeViaNativeWebGL). This canvas must NEVER get a 2D context: a
+ * canvas that already has a 2D context returns null for getContext('webgl').
+ * Lazily created on first use; null when unavailable (Node, no WebGL).
+ */
+let glScratchCanvas: HTMLCanvasElement | null = null;
+let glScratchContext: WebGLRenderingContext | null = null;
+let glScratchTexture: WebGLTexture | null = null;
+let glScratchFramebuffer: WebGLFramebuffer | null = null;
+
+/**
+ * Returns the module-level scratch native WebGL1 context, creating it on first
+ * use. Returns null (and never throws) when no DOM / native WebGL is
+ * available. Created with premultipliedAlpha:false + preserveDrawingBuffer:true
+ * so readPixels returns exact straight RGBA; alpha:true so the alpha channel
+ * survives the readback (an {alpha:false} context would force alpha 255).
+ */
+function getNativeGLContext(): WebGLRenderingContext | null {
+  if (glScratchContext !== null) {
+    return glScratchContext;
+  }
+  if (NATIVE_GET_CONTEXT === null || typeof document === 'undefined') {
+    return null;
+  }
+  try {
+    if (glScratchCanvas === null) {
+      glScratchCanvas = document.createElement('canvas');
+    }
+    const gl = NATIVE_GET_CONTEXT.call(glScratchCanvas, 'webgl', {
+      alpha: true,
+      premultipliedAlpha: false,
+      preserveDrawingBuffer: true,
+      antialias: false,
+      depth: false,
+      stencil: false,
+    }) as WebGLRenderingContext | null;
+    if (gl === null) {
+      return null;
+    }
+    glScratchContext = gl;
+    glScratchTexture = gl.createTexture();
+    glScratchFramebuffer = gl.createFramebuffer();
+    return gl;
+  } catch {
+    glScratchContext = null;
+    return null;
+  }
+}
 
 /**
  * Returns the module-level scratch 2D context, creating it on first use.
@@ -100,12 +169,99 @@ function decodeViaScratch(source: unknown, width: number, height: number): Decod
 }
 
 /**
+ * Byte-exact DOM-source decode via a native WebGL1 scratch context:
+ * texImage2D(source) → framebufferTexture2D → readPixels. Unlike the 2D
+ * drawImage+getImageData path, the native GL upload applies NO color
+ * management (UNPACK_COLORSPACE_CONVERSION_WEBGL = NONE), so RGB levels
+ * survive the round trip bit-exact — the 2D path round-trips sRGB→linear→sRGB
+ * and collapses levels (~205 unique values instead of 256 on a 256-level
+ * ramp), and honors ICC profiles where the WebGL spec says uploads must be
+ * profile-ignored (CTS gl-teximage ICC subtests).
+ *
+ * The readback is TOP-DOWN straight RGBA8 (row 0 = source top row, never
+ * premultiplied, never flipped): gl/teximage.ts applies UNPACK_FLIP_Y and
+ * UNPACK_PREMULTIPLY_ALPHA itself, so the decode must apply neither.
+ *
+ * Any failure — no native WebGL, tainted source (SecurityError from
+ * texImage2D), incomplete framebuffer, GL error — maps to {ok:false}; never
+ * throws. A tainted-source reason is guaranteed to match
+ * /security|taint|insecure/i so gl/ rethrows a SecurityError to the page.
+ */
+function decodeViaNativeWebGL(source: unknown, width: number, height: number): DecodeResult {
+  if (!(width > 0) || !(height > 0) || !Number.isInteger(width) || !Number.isInteger(height)) {
+    return { ok: false, reason: `invalid source dimensions ${width}x${height}` };
+  }
+  const gl = getNativeGLContext();
+  if (gl === null) {
+    return { ok: false, reason: 'no native WebGL context available for image decode' };
+  }
+  try {
+    // Setting canvas.width/height RESETS all context state, so the pixel-store
+    // parameters are re-applied on every call (they are cheap) rather than only
+    // after a resize. UNPACK_COLORSPACE_CONVERSION_WEBGL = NONE is REQUIRED:
+    // the native upload must not color-manage (the 2D fallback path does).
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+    // readPixels is scissor-affected and canvas resizes reset scissor state,
+    // so keep the scissor test disabled before every readback.
+    gl.disable(gl.SCISSOR_TEST);
+    if (glScratchCanvas !== null && (glScratchCanvas.width !== width || glScratchCanvas.height !== height)) {
+      glScratchCanvas.width = width;
+      glScratchCanvas.height = height;
+    }
+    gl.bindTexture(gl.TEXTURE_2D, glScratchTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source as TexImageSource);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, glScratchFramebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, glScratchTexture, 0);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+      return { ok: false, reason: 'native framebuffer incomplete for image decode' };
+    }
+    const buf = new Uint8Array(width * height * 4);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    if (gl.getError() !== gl.NO_ERROR) {
+      return { ok: false, reason: 'native readback failed for image decode' };
+    }
+    return { ok: true, image: { width, height, data: new Uint8ClampedArray(buf) } };
+  } catch (e) {
+    // SecurityError from native texImage2D (tainted/cross-origin source).
+    // Chromium's message ("The image element contains cross-origin data, and
+    // may not be loaded.") does NOT contain the words security/taint/insecure,
+    // so prefix the DOMException name to keep gl/'s /security|taint|insecure/i
+    // mapping working.
+    const msg = e instanceof Error ? e.message : String(e);
+    const name = (e as { name?: unknown } | null)?.name;
+    if (name === 'SecurityError' && !/security|taint|insecure/i.test(msg)) {
+      return { ok: false, reason: `security: ${msg}` };
+    }
+    return { ok: false, reason: msg };
+  }
+}
+
+/**
+ * Native-WebGL readback with the 2D drawImage+getImageData path as fallback.
+ * Tainted-source failures propagate unchanged (gl/ must throw a SecurityError
+ * to the page); any other native failure — no native WebGL available (Node),
+ * a source the GL path cannot upload — falls back to the 2D path, which
+ * accepts the same sources and reports the same {ok:false} contract.
+ */
+function decodeViaNativeWebGLWithFallback(source: unknown, width: number, height: number): DecodeResult {
+  const res = decodeViaNativeWebGL(source, width, height);
+  if (res.ok || /security|taint|insecure/i.test(res.reason)) {
+    return res;
+  }
+  return decodeViaScratch(source, width, height);
+}
+
+/**
  * Decodes any supported DOM image source to straight-alpha RGBA8.
- * ImageData sources take the direct-copy path (no DOM needed); everything
- * else is drawn onto a lazily created scratch 2D canvas and read back via
- * getImageData. Returns {ok:false} — never throws — for incomplete images
- * (image not loaded or broken, video without current data), tainted canvases
- * (SecurityError from getImageData), and unsupported or null sources.
+ * ImageData sources take the direct-copy path (no DOM needed); everything else
+ * is decoded by the native-WebGL readback path (byte-exact, no color
+ * management) with the scratch-2D drawImage+getImageData path as fallback.
+ * ImageBitmap stays on the 2D path on purpose (see the (e) branch).
+ * Returns {ok:false} — never throws — for incomplete images (image not loaded
+ * or broken, video without current data), tainted canvases (SecurityError),
+ * and unsupported or null sources.
  */
 export function decodeImageSource(source: ImageSource): DecodeResult {
   if (source === null || typeof source !== 'object') {
@@ -129,7 +285,7 @@ export function decodeImageSource(source: ImageSource): DecodeResult {
     ) {
       return { ok: false, reason: 'image is not loaded or has no intrinsic size' };
     }
-    return decodeViaScratch(source, v.naturalWidth, v.naturalHeight);
+    return decodeViaNativeWebGLWithFallback(source, v.naturalWidth, v.naturalHeight);
   }
 
   // (c) HTMLVideoElement duck-type — require current frame data (readyState
@@ -143,15 +299,35 @@ export function decodeImageSource(source: ImageSource): DecodeResult {
     ) {
       return { ok: false, reason: 'video has no current frame data' };
     }
-    return decodeViaScratch(source, v.videoWidth, v.videoHeight);
+    return decodeViaNativeWebGLWithFallback(source, v.videoWidth, v.videoHeight);
+  }
+
+  // (c2) VideoFrame duck-type (native texImage2D and 2D drawImage both accept
+  // VideoFrame). Display size, not coded size — that is what drawImage paints.
+  // Placed BEFORE the canvas-like and generic branches.
+  if (
+    typeof v.format === 'string' &&
+    typeof v.displayWidth === 'number' &&
+    typeof v.displayHeight === 'number'
+  ) {
+    if (v.displayWidth <= 0 || v.displayHeight <= 0) {
+      return { ok: false, reason: 'video frame has no display size' };
+    }
+    return decodeViaNativeWebGLWithFallback(source, v.displayWidth, v.displayHeight);
   }
 
   // (d) Canvas-like (HTMLCanvasElement / OffscreenCanvas).
   if (typeof v.getContext === 'function') {
-    return decodeViaScratch(source, v.width as number, v.height as number);
+    return decodeViaNativeWebGLWithFallback(source, v.width as number, v.height as number);
   }
 
-  // (e) ImageBitmap duck-type.
+  // (e) ImageBitmap duck-type → 2D path only (NOT native readback): native
+  // readback returns the bitmap's RAW STORAGE bytes, which are premultiplied
+  // for default-created bitmaps — and gl/teximage.ts premultiplies AGAIN
+  // (bitmap.premultiply !== false → premultiply:true), double-premultiplying.
+  // The 2D drawImage+getImageData round trip always yields straight alpha,
+  // which is exactly what gl/ expects. Bitmaps created with
+  // premultiplyAlpha:'none' stay straight on both paths.
   if (typeof v.width === 'number' && typeof v.height === 'number') {
     return decodeViaScratch(source, v.width, v.height);
   }
@@ -213,6 +389,14 @@ export function isDecodableImageSource(value: unknown): boolean {
   }
   // HTMLVideoElement duck-type.
   if (typeof v.videoWidth === 'number' && typeof v.readyState === 'number') {
+    return true;
+  }
+  // VideoFrame duck-type.
+  if (
+    typeof v.format === 'string' &&
+    typeof v.displayWidth === 'number' &&
+    typeof v.displayHeight === 'number'
+  ) {
     return true;
   }
   // Canvas-like (HTMLCanvasElement / OffscreenCanvas).
