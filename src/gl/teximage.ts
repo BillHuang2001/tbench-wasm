@@ -560,7 +560,7 @@ function float11ToFloat(v: number): number {
   if (e === 31) return m === 0 ? Infinity : NaN;
   return (1 + m / 64) * 2 ** (e - 15);
 }
-/** 10-bit float (R11F_G11F_B10F R component) → float. */
+/** 10-bit float (R11F_G11F_B10F B component) → float. */
 function float10ToFloat(v: number): number {
   const e = (v >> 5) & 0x1f;
   const m = v & 0x1f;
@@ -661,8 +661,9 @@ function readSourceTexel(dv: DataView, byteOff: number, format: GLenum, type: GL
       break;
     }
     case C.UNSIGNED_INT_10F_11F_11F_REV: {
+      // GL layout: bits 0-10 = R (11-bit float), 11-21 = G, 22-31 = B (10-bit).
       const v = dv.getUint32(byteOff, true);
-      out[0] = float10ToFloat(v >>> 22); out[1] = float11ToFloat((v >>> 11) & 0x7ff); out[2] = float11ToFloat(v & 0x7ff); out[3] = 1;
+      out[0] = float11ToFloat(v & 0x7ff); out[1] = float11ToFloat((v >>> 11) & 0x7ff); out[2] = float10ToFloat(v >>> 22); out[3] = 1;
       break;
     }
     case C.UNSIGNED_INT_5_9_9_9_REV: {
