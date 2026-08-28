@@ -1522,7 +1522,9 @@ export function allocateImmutableStorage(
     img.levels[l] = allocLevel(spec, w, h, d, isCube);
     w = Math.max(1, w >> 1);
     h = Math.max(1, h >> 1);
-    if (!isCube) d = Math.max(1, d >> 1);
+    // The mip pyramid halves depth only for TEXTURE_3D; TEXTURE_2D_ARRAY
+    // keeps a constant layer count (GLES 3.0 §3.8.14).
+    if (target === C.TEXTURE_3D) d = Math.max(1, d >> 1);
   }
   texture._immutable = true;
   texture._internalFormat = internalformat;
