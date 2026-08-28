@@ -59,8 +59,9 @@ import {
   DST_COLOR, EQUAL, FUNC_REVERSE_SUBTRACT, FUNC_SUBTRACT, GEQUAL, GREATER,
   INCR, INCR_WRAP, INVERT, KEEP, LEQUAL, LESS, MAX, MIN, NEVER, NOTEQUAL,
   ONE, ONE_MINUS_CONSTANT_ALPHA, ONE_MINUS_CONSTANT_COLOR, ONE_MINUS_DST_ALPHA,
-  ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_ALPHA, ONE_MINUS_SRC_COLOR, REPLACE,
-  SRC_ALPHA, SRC_ALPHA_SATURATE, SRC_COLOR, ZERO,
+  ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_ALPHA, ONE_MINUS_SRC_COLOR,
+  ONE_MINUS_SRC1_ALPHA, ONE_MINUS_SRC1_COLOR, REPLACE,
+  SRC_ALPHA, SRC_ALPHA_SATURATE, SRC_COLOR, SRC1_ALPHA, SRC1_COLOR, ZERO,
 } from './gl-enums';
 
 /** DrawCall extended with the optional occlusion-query counter (gl/ attaches
@@ -103,8 +104,15 @@ export function depthPass(func: GLenum, z: number, stored: number): boolean {
   }
 }
 
-/** RGB blend factor for one channel (sc/dc/cc = that channel of src/dst/const). */
-function rgbFactor(f: GLenum, sc: number, dc: number, sa: number, da: number, cc: number, ca: number): number {
+/**
+ * RGB blend factor for one channel (sc/dc/cc = that channel of src/dst/const;
+ * s1c = that channel of the SECONDARY color (dual-source index-1 output),
+ * s1a = the secondary color's alpha).
+ */
+function rgbFactor(
+  f: GLenum, sc: number, dc: number, sa: number, da: number, cc: number, ca: number,
+  s1c: number, s1a: number,
+): number {
   switch (f) {
     case ZERO: return 0;
     case ONE: return 1;
@@ -121,12 +129,20 @@ function rgbFactor(f: GLenum, sc: number, dc: number, sa: number, da: number, cc
     case CONSTANT_ALPHA: return ca;
     case ONE_MINUS_CONSTANT_ALPHA: return 1 - ca;
     case SRC_ALPHA_SATURATE: return Math.min(sa, 1 - da);
+    // Dual-source blending (GLES 3.0 table 4.2): SRC1_* read the SECONDARY
+    // fragment color (output index 1). SRC1_COLOR = the secondary's channel,
+    // SRC1_ALPHA = the secondary's alpha.
+    case SRC1_COLOR: return s1c;
+    case ONE_MINUS_SRC1_COLOR: return 1 - s1c;
+    case SRC1_ALPHA: return s1a;
+    case ONE_MINUS_SRC1_ALPHA: return 1 - s1a;
     default: return 0;
   }
 }
 
-/** Alpha blend factor (color-ish factors use the alpha of that color). */
-function alphaFactor(f: GLenum, sa: number, da: number, ca: number): number {
+/** Alpha blend factor (color-ish factors use the alpha of that color; s1a =
+ *  the secondary color's alpha — dual-source). */
+function alphaFactor(f: GLenum, sa: number, da: number, ca: number, s1a: number): number {
   switch (f) {
     case ZERO: return 0;
     case ONE: return 1;
@@ -143,6 +159,12 @@ function alphaFactor(f: GLenum, sa: number, da: number, ca: number): number {
     case ONE_MINUS_CONSTANT_COLOR:
     case ONE_MINUS_CONSTANT_ALPHA: return 1 - ca;
     case SRC_ALPHA_SATURATE: return 1;
+    // Dual-source blending: the alpha equation uses the secondary's ALPHA for
+    // every SRC1_* factor (GLES 3.0 table 4.2).
+    case SRC1_COLOR:
+    case SRC1_ALPHA: return s1a;
+    case ONE_MINUS_SRC1_COLOR:
+    case ONE_MINUS_SRC1_ALPHA: return 1 - s1a;
     default: return 0;
   }
 }
@@ -152,15 +174,21 @@ function alphaFactor(f: GLenum, sa: number, da: number, ca: number): number {
  * Equations: FUNC_ADD / FUNC_SUBTRACT / FUNC_REVERSE_SUBTRACT (factors
  * applied) and MIN / MAX (factors ignored). Results are NOT clamped — callers
  * write through encode(), which clamps for normalized targets.
+ * `src1` = the SECONDARY fragment color (output index 1) for the SRC1_* blend
+ * factors; when absent (no dual-source output) SRC1_* factors yield 0.
  */
 export function blendColor(
   src: Float32Array, dst: Float32Array, out: Float32Array,
   srcRGB: number, dstRGB: number, srcAlpha: number, dstAlpha: number,
   eqRGB: number, eqAlpha: number, constColor: [number, number, number, number],
+  src1?: Float32Array | null,
 ): void {
   const sr = src[0], sg = src[1], sb = src[2], sa = src[3];
   const dr = dst[0], dg = dst[1], db = dst[2], da = dst[3];
   const cr = constColor[0], cg = constColor[1], cb = constColor[2], ca = constColor[3];
+  // Dual-source secondary color; SRC1_* factors read it (0 when absent).
+  const s1r = src1 ? src1[0] : 0, s1g = src1 ? src1[1] : 0;
+  const s1b = src1 ? src1[2] : 0, s1a = src1 ? src1[3] : 0;
   if (eqRGB === MIN || eqRGB === MAX) {
     if (eqRGB === MIN) {
       out[0] = Math.min(sr, dr); out[1] = Math.min(sg, dg); out[2] = Math.min(sb, db);
@@ -168,12 +196,12 @@ export function blendColor(
       out[0] = Math.max(sr, dr); out[1] = Math.max(sg, dg); out[2] = Math.max(sb, db);
     }
   } else {
-    const fsr = rgbFactor(srcRGB, sr, dr, sa, da, cr, ca);
-    const fdr = rgbFactor(dstRGB, sr, dr, sa, da, cr, ca);
-    const fsg = rgbFactor(srcRGB, sg, dg, sa, da, cg, ca);
-    const fdg = rgbFactor(dstRGB, sg, dg, sa, da, cg, ca);
-    const fsb = rgbFactor(srcRGB, sb, db, sa, da, cb, ca);
-    const fdb = rgbFactor(dstRGB, sb, db, sa, da, cb, ca);
+    const fsr = rgbFactor(srcRGB, sr, dr, sa, da, cr, ca, s1r, s1a);
+    const fdr = rgbFactor(dstRGB, sr, dr, sa, da, cr, ca, s1r, s1a);
+    const fsg = rgbFactor(srcRGB, sg, dg, sa, da, cg, ca, s1g, s1a);
+    const fdg = rgbFactor(dstRGB, sg, dg, sa, da, cg, ca, s1g, s1a);
+    const fsb = rgbFactor(srcRGB, sb, db, sa, da, cb, ca, s1b, s1a);
+    const fdb = rgbFactor(dstRGB, sb, db, sa, da, cb, ca, s1b, s1a);
     if (eqRGB === FUNC_SUBTRACT) {
       out[0] = fsr * sr - fdr * dr; out[1] = fsg * sg - fdg * dg; out[2] = fsb * sb - fdb * db;
     } else if (eqRGB === FUNC_REVERSE_SUBTRACT) {
@@ -185,8 +213,8 @@ export function blendColor(
   if (eqAlpha === MIN || eqAlpha === MAX) {
     out[3] = eqAlpha === MIN ? Math.min(sa, da) : Math.max(sa, da);
   } else {
-    const fsa = alphaFactor(srcAlpha, sa, da, ca);
-    const fda = alphaFactor(dstAlpha, sa, da, ca);
+    const fsa = alphaFactor(srcAlpha, sa, da, ca, s1a);
+    const fda = alphaFactor(dstAlpha, sa, da, ca, s1a);
     if (eqAlpha === FUNC_SUBTRACT) out[3] = fsa * sa - fda * da;
     else if (eqAlpha === FUNC_REVERSE_SUBTRACT) out[3] = fda * da - fsa * sa;
     else out[3] = fsa * sa + fda * da;
@@ -317,7 +345,7 @@ export class FragmentOpsImpl implements FragmentOps {
   /** Depth write + stencil zpass + blend + sRGB + colorMask + write. */
   finalize(
     x: number, y: number, frontFacing: boolean, depth: number,
-    colors: readonly Float32Array[],
+    colors: readonly Float32Array[], secondary?: readonly Float32Array[],
   ): void {
     // Stencil face/current value for the zpass/zfail ops (ops only apply when
     // the stencil test is enabled AND a stencil buffer exists).
@@ -347,7 +375,7 @@ export class FragmentOpsImpl implements FragmentOps {
     }
     // Color writes (per output location; DRAW_BUFFERi = NONE skips the write).
     const n = Math.min(colors.length, this.drawBuffers.length);
-    for (let L = 0; L < n; L++) this.writeColor(L, x, y, colors);
+    for (let L = 0; L < n; L++) this.writeColor(L, x, y, colors, secondary);
   }
 
   /** Stencil write with writeMask: (newVal & mask) | (current & ~mask). */
@@ -361,8 +389,13 @@ export class FragmentOpsImpl implements FragmentOps {
    * blend (per-draw-buffer state when the DrawCall carries it, else the global
    * BLEND state — always in linear space for sRGB targets) → sRGB encode (RGB
    * only) → colorMask → surface write. (DITHER is a no-op — see header.)
+   * `secondary` = the per-location SECONDARY fragment colors (dual-source
+   * index-1 outputs); `secondary[L]` feeds the SRC1_* blend factors.
    */
-  private writeColor(L: number, x: number, y: number, colors: readonly Float32Array[]): void {
+  private writeColor(
+    L: number, x: number, y: number,
+    colors: readonly Float32Array[], secondary?: readonly Float32Array[],
+  ): void {
     const db = this.drawBuffers[L];
     if (db === -1) return; // DRAW_BUFFERi = NONE
     // Defensive normalization for legacy/raw draw-buffer enums: gl.drawBuffers([BACK])
@@ -410,6 +443,7 @@ export class FragmentOpsImpl implements FragmentOps {
         bEntry ? bEntry.eqRGB : this.blend.eqRGB,
         bEntry ? bEntry.eqAlpha : this.blend.eqAlpha,
         bEntry ? bEntry.color : this.blend.color,
+        secondary ? secondary[L] : null,
       );
       r = this.blendOut[0]; g = this.blendOut[1]; b = this.blendOut[2]; a = this.blendOut[3];
     }
@@ -471,6 +505,16 @@ export function runQuad(rs: RasterState, qx: number, qy: number, inside: number)
         const c = outColors[l];
         c[0] = 0; c[1] = 0; c[2] = 0; c[3] = 1;
       }
+      const secOuts = ctx.out.secondary;
+      if (secOuts) {
+        // Dual-source secondary colors default to (0,0,0,1) like primaries
+        // (spec: an unwritten secondary color is undefined — deterministic
+        // choice, matches the primary convention).
+        for (let l = 0; l < nOut; l++) {
+          const s = secOuts[l];
+          s[0] = 0; s[1] = 0; s[2] = 0; s[3] = 1;
+        }
+      }
       setupFragmentCtx(ctx, x, y, rs.quadDepth[p], rs.quadW[p], rs.quadV, rs.totalVaryComponents, p);
       ctx.pointCoord[0] = rs.quadPointCoord[2 * p];
       ctx.pointCoord[1] = rs.quadPointCoord[2 * p + 1];
@@ -482,6 +526,7 @@ export function runQuad(rs: RasterState, qx: number, qy: number, inside: number)
         x, y, rs.frontFacing,
         prog.fragment.usesFragDepth ? ctx.out.fragDepth : rs.quadDepth[p],
         ctx.out.color,
+        ctx.out.secondary,
       );
     }
   }
@@ -508,6 +553,13 @@ export function runFragment(
     const c = outColors[l];
     c[0] = 0; c[1] = 0; c[2] = 0; c[3] = 1;
   }
+  const secOuts = ctx.out.secondary;
+  if (secOuts) {
+    for (let l = 0; l < outColors.length; l++) {
+      const s = secOuts[l];
+      s[0] = 0; s[1] = 0; s[2] = 0; s[3] = 1;
+    }
+  }
   setupFragmentCtx(ctx, x, y, depth, w, rs.quadV, total, pixel);
   ctx.pointCoord[0] = rs.quadPointCoord[2 * pixel];
   ctx.pointCoord[1] = rs.quadPointCoord[2 * pixel + 1];
@@ -518,6 +570,7 @@ export function runFragment(
       x, y, rs.frontFacing,
       dc.program.fragment.usesFragDepth ? ctx.out.fragDepth : depth,
       ctx.out.color,
+      ctx.out.secondary,
     );
   }
 }

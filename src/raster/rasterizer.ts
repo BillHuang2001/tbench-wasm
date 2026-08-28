@@ -210,13 +210,17 @@ export function createRasterState(dc: DrawCall): RasterState {
   }
 
   // One color scratch per output location (0..maxOutputLocation); codegen may
-  // index any location, so always allocate at least one.
+  // index any location, so always allocate at least one. A parallel SECONDARY
+  // array backs dual-source blending (outputs with blend index 1 — the SRC1_*
+  // factor source); codegen only writes it for programs with such outputs.
   let maxLocation = 0;
   for (const out of dc.program.fragment.outputs) {
     if (out.location > maxLocation) maxLocation = out.location;
   }
   const colorOuts: Float32Array[] = [];
   for (let i = 0; i <= maxLocation; i++) colorOuts.push(new Float32Array(4));
+  const secondaryOuts: Float32Array[] = [];
+  for (let i = 0; i <= maxLocation; i++) secondaryOuts.push(new Float32Array(4));
 
   // Default-block int store: glsl Program.intStore (FLOAT-index convention —
   // samplers/ints/bools/uints share it). Empty fallback for programs without
@@ -282,7 +286,7 @@ export function createRasterState(dc: DrawCall): RasterState {
     scratch,
     intScratch,
     tex: createTextureEnv(dc.textures),
-    out: { color: colorOuts, fragDepth: 0 },
+    out: { color: colorOuts, secondary: secondaryOuts, fragDepth: 0 },
     discarded: false,
   };
 
