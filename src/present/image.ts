@@ -181,6 +181,13 @@ function decodeViaScratch(source: unknown, width: number, height: number): Decod
  * The readback is TOP-DOWN straight RGBA8 (row 0 = source top row, never
  * premultiplied, never flipped): gl/teximage.ts applies UNPACK_FLIP_Y and
  * UNPACK_PREMULTIPLY_ALPHA itself, so the decode must apply neither.
+ * The caller passes the ACTUAL upload dimensions — for SVG images that is the
+ * element's width/height PROPERTIES (Chromium rasterizes SVGs at the
+ * element's specified size, which can be SMALLER than naturalWidth; reading
+ * back at naturalWidth silently clips — readPixels beyond the texture is
+ * truncated with NO GL error — and returns zero rows), and the intrinsic size
+ * for bitmap/video/canvas sources. The decoded image carries those dims so
+ * gl/teximage.ts scales (or not) against the real pixel data.
  *
  * Any failure — no native WebGL, tainted source (SecurityError from
  * texImage2D), incomplete framebuffer, GL error — maps to {ok:false}; never
@@ -212,6 +219,13 @@ function decodeViaNativeWebGL(source: unknown, width: number, height: number): D
     }
     gl.bindTexture(gl.TEXTURE_2D, glScratchTexture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source as TexImageSource);
+    // width/height here are the ACTUAL upload dimensions (decodeImageSource
+    // resolves them: SVG → element width/height properties, everything else →
+    // intrinsic size), so the readback below is exactly the texture extent —
+    // never beyond it (readPixels past the texture is silently truncated with
+    // NO GL error, which would corrupt the decoded dims). getTexParameter
+    // TEXTURE_WIDTH/HEIGHT cannot be used for this: they are GL 4.x queries,
+    // invalid in GLES 2.0/3.0 (Chromium returns null + INVALID_ENUM).
     gl.bindFramebuffer(gl.FRAMEBUFFER, glScratchFramebuffer);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, glScratchTexture, 0);
     if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
@@ -222,6 +236,8 @@ function decodeViaNativeWebGL(source: unknown, width: number, height: number): D
     if (gl.getError() !== gl.NO_ERROR) {
       return { ok: false, reason: 'native readback failed for image decode' };
     }
+    // The decoded image carries the ACTUAL upload dims so gl/teximage.ts
+    // scales (and honors UNPACK_FLIP_Y) against the real pixel data.
     return { ok: true, image: { width, height, data: new Uint8ClampedArray(buf) } };
   } catch (e) {
     // SecurityError from native texImage2D (tainted/cross-origin source).
@@ -274,8 +290,16 @@ export function decodeImageSource(source: ImageSource): DecodeResult {
     return decodeImageData(source as ImageData);
   }
 
-  // (b) HTMLImageElement duck-type — always use naturalWidth/naturalHeight
-  // (intrinsic size), never clientWidth/offsetWidth (CSS size).
+  // (b) HTMLImageElement duck-type — the upload size is the INTRINSIC size
+  // (naturalWidth/naturalHeight) for bitmap images, but the CURRENT VALUES OF
+  // THE WIDTH/HEIGHT PROPERTIES for SVG images (WebGL spec "Texture Upload
+  // Width and Height"): Chromium rasterizes the SVG at the element's specified
+  // size, so for a viewBox-only SVG naturalWidth (150 — Chromium's CSS default
+  // used size, not an intrinsic size) can EXCEED the actual texture (e.g. 100
+  // after image.width = 100). Reading back at naturalWidth would silently clip
+  // (readPixels past the texture is truncated with NO GL error) and return
+  // zero rows, which gl/teximage.ts would then scale from the wrong dims.
+  // Never clientWidth/offsetWidth (CSS size).
   if (typeof v.naturalWidth === 'number') {
     if (
       typeof v.naturalHeight !== 'number' ||
@@ -284,6 +308,17 @@ export function decodeImageSource(source: ImageSource): DecodeResult {
       v.complete !== true
     ) {
       return { ok: false, reason: 'image is not loaded or has no intrinsic size' };
+    }
+    // SVG detection mirrors gl/api/teximage.ts isSvgSource (present is a leaf
+    // module and cannot import gl/): data:image/svg+xml URIs or *.svg URLs.
+    const src = String((v as { currentSrc?: unknown }).currentSrc ?? (v as { src?: unknown }).src ?? '');
+    if (/image\/svg\+xml/i.test(src) || /\.svg(\?|#|$)/i.test(src)) {
+      const w = v.width as number;
+      const h = v.height as number;
+      if (!(w > 0) || !(h > 0)) {
+        return { ok: false, reason: 'SVG image has no width/height properties' };
+      }
+      return decodeViaNativeWebGLWithFallback(source, w, h);
     }
     return decodeViaNativeWebGLWithFallback(source, v.naturalWidth, v.naturalHeight);
   }
