@@ -26,7 +26,7 @@ linkProgram:    uniform merge → attrib locations → varying match/pack → un
 - `preprocessor.ts` (1186 lines — over the 1000 guideline, deliberately not split; see Known Issues) → `lexer.ts` → `parser.ts`/`parser-stmt.ts`/`parser-expr.ts` → `semantics.ts`/`semantics-expr.ts`/`semantics-stmt.ts`/`semantics-decl.ts` (type checking, symbol tables, overload resolution, const folding, precision rules, extension gating, ShaderInfo) → `linker.ts`.
 - `builtins/` — builtin SIGNATURE tables + VARIABLES + gl_Max* constants: `100.ts` (216 sigs, 7 vars, 8 constants), `300.ts` (625 sigs, 8 vars, 20 constants), `extensions.ts` (OES_standard_derivatives, EXT_shader_texture_lod (fragment-only), EXT_frag_depth, EXT_draw_buffers), `index.ts`.
 - `codegen/` — `env.ts` (CodegenEnv: storage access, scratch/temp allocation, dualWrite hook), `expressions.ts` (+`expr-builtins.ts`, `expr-ctor.ts`; non-dual + dual-number lowering), `statements.ts` (control flow, discard), `functions.ts` (user-function inliner), `vertex.ts`/`fragment.ts` (stage assembly), `runtime.ts` (shared `R` helper object: math/pack/bitfield/texture wrappers), `index.ts` (CodegenLayout seam + stage entry + Value).
-- `selftest-*.ts` — 23 committed count-reporting tsx suites (see Test Strategy; `codegen/selftest-predrop.ts` is the Value.pre-drop regression suite).
+- `selftest-*.ts` — 26 committed count-reporting tsx suites (see Test Strategy; `codegen/selftest-predrop.ts` is the Value.pre-drop regression suite).
 
 ## Design Decisions (implemented; deviations from the original plan are noted)
 
