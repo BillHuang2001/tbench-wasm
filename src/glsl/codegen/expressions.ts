@@ -57,6 +57,9 @@ import {
   attribRead,
   attribDeclComps,
   outputAccess,
+  unpackVaryingCell,
+  packVaryingWrite,
+  packVaryingCompound,
 } from './env.js';
 import type { Value } from './index.js';
 import { emitConstructorCall } from './expr-ctor.js';
@@ -142,8 +145,12 @@ function leafRead(p: P, env: CodegenEnv, c: number): string {
         return uniformPathRead(env, st.key, p.type, p.dyn, flatC);
       case 'block':
         return blockPathRead(env, st.blockIndex, st.key, p.type, p.dyn, flatC);
-      case 'varying':
-        return varyingPathRead(env, st.key, p.type, p.dyn, flatC);
+      case 'varying': {
+        const s = varyingPathRead(env, st.key, p.type, p.dyn, flatC);
+        // Packed uint varying read-back (VERTEX stage — see packVaryingWrite):
+        // the cell holds the value's bit pattern — unpack to the uint value.
+        return env.stage === 'VERTEX' && isUintType(p.type) ? unpackVaryingCell(s) : s;
+      }
       case 'attrib':
         // BUG 5: fetch stride = DECLARED comps (st.declComps), not p.type's
         // (swizzles retype p.type to the swizzle width).
@@ -995,10 +1002,42 @@ export interface LValue {
   /** Dual-mode write slots per component: [dx, dy] lvalues (null = no dual
    *  planes — int/bool components, outputs). Absent in non-dual mode. */
   dualTargets?: ([string, string] | null)[];
+  /** Per-component true when the target cell is a PACKED uint varying
+   *  (VERTEX stage — see packVaryingWrite): the cell stores the value's BIT
+   *  PATTERN as float32, so writes must pack (`R.u2f`) and the cell read back
+   *  unpack (`R.f2u`). Absent when no component is packed. */
+  bits?: boolean[];
   /** Statements that must run BEFORE the writes (dynamic-index temps, spill copy-in). */
   prelude?: string;
   /** Statements that must run AFTER the writes (spill copy-out). */
   copyBack?: string;
+}
+
+/** Per-flat-component packed-ness of an lvalue path (parallel to writes():
+ *  struct/array recursion; a leaf is packed when it is a VERTEX-stage uint
+ *  varying — the only shapes that store bit patterns in the record). */
+function writeBitKinds(p: P, env: CodegenEnv): boolean[] {
+  const t = p.type;
+  if (t.kind === 'struct') {
+    const out: boolean[] = [];
+    let off = 0;
+    for (const m of t.members) {
+      out.push(...writeBitKinds(subP(p, m.name, m.type, off, env), env));
+      off += flatComponents(m.type);
+    }
+    return out;
+  }
+  if (t.kind === 'array') {
+    const out: boolean[] = [];
+    const n = t.size ?? 0;
+    for (let k = 0; k < n; k++) out.push(...writeBitKinds(subPIdx(p, k, t.element, env), env));
+    return out;
+  }
+  const packed = env.stage === 'VERTEX' && p.storage?.kind === 'varying' && isUintType(t);
+  const n = flatComponents(t);
+  const out: boolean[] = new Array(n);
+  out.fill(packed);
+  return out;
 }
 
 /** Emit one JS expression per flat component (column-major; scalar → 1). */
@@ -1052,9 +1091,11 @@ export function emitLValue(e: Expr, env: CodegenEnv): LValue {
   const p = walk(e, env);
   if (!p.lvalue) throw new Error('codegen: expression is not an lvalue');
   const targets = writes(p, env);
+  const bits = writeBitKinds(p, env);
   return {
     type: p.type,
     targets,
+    bits: bits.some((b) => b) ? bits : undefined,
     dualTargets: env.dual ? dualWrites(p, env) : undefined,
     prelude: p.pre.length ? p.pre.join('; ') + ';' : undefined,
     copyBack: p.post.length ? p.post.join('; ') + ';' : undefined,
@@ -1247,21 +1288,39 @@ function emitUnary(e: Extract<Expr, { kind: 'unary' }>, env: CodegenEnv): Value[
     for (let c = 0; c < n; c++) {
       const target = lv.targets[c];
       if (base === null || base === 'bool') throw new Error('codegen: cannot increment a bool');
-      const wrap = (rhs: string): string =>
+      // Packed uint varying cell (see packVaryingWrite): the old value is the
+      // UNPACKED cell read; the write re-packs the incremented value; the
+      // expression's value is the unpacked post-write cell (new value for
+      // prefix, old for postfix).
+      const packed = lv.bits !== undefined && lv.bits[c];
+      const read = packed ? unpackVaryingCell(target) : target;
+      const write = (rhs: string): string =>
         base === 'float'
           ? `${target} = ${rhs}`
           : base === 'int'
             ? `${target} = ((${rhs}) | 0)`
-            : `${target} = ((${rhs}) >>> 0)`;
+            : packed
+              ? `${target} = R.u2f(((${rhs}) >>> 0))`
+              : `${target} = ((${rhs}) >>> 0)`;
       let s: string;
-      if (e.postfix) {
+      if (packed) {
+        // Packed cell: the write re-packs; the expression's value is the
+        // unpacked post-write cell read (new value for prefix, old for postfix
+        // via the snapshot temp).
+        if (e.postfix) {
+          const t = env.allocTemp();
+          s = `(${t} = ${read}, ${write(`${t} + ${delta}`)}, ${t})`;
+        } else {
+          s = `(${write(`${read} + ${delta}`)}, ${read})`;
+        }
+      } else if (e.postfix) {
         // Postfix result = OLD value: snapshot the target BEFORE the write,
         // then write old ± 1, then yield the snapshot:
         // (t = target, target = t ± 1, t).
         const t = env.allocTemp();
-        s = `(${t} = ${target}, ${wrap(`${t} + ${delta}`)}, ${t})`;
+        s = `(${t} = ${target}, ${write(`${t} + ${delta}`)}, ${t})`;
       } else {
-        s = `(${wrap(`${target} + ${delta}`)})`;
+        s = `(${write(`${target} + ${delta}`)})`;
       }
       // Prelude (dyn-index temps / spill copy-in) runs BEFORE the write, the
       // spill copy-back AFTER it — and the expression's VALUE must be the
@@ -2007,11 +2066,22 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
       for (let c = 0; c < n; c++) {
         const cp = conv[c].pre;
         const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
-        pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }));
+        if (lv.bits && lv.bits[c]) {
+          // Packed uint varying cell (VERTEX): store the value's BIT PATTERN;
+          // the write composite ends with the unpacked read (the assignment's
+          // value is the assigned uint).
+          pre.push(packVaryingWrite(lv.targets[c], rv));
+        } else {
+          pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }));
+        }
       }
       if (post) pre.push(...post.split(', '));
       for (let c = 0; c < n; c++) {
-        out.push({ v: lv.targets[c], dx: conv[c].dx ?? '0', dy: conv[c].dy ?? '0', pre });
+        if (lv.bits && lv.bits[c]) {
+          out.push({ v: unpackVaryingCell(lv.targets[c]), dx: '0', dy: '0', pre });
+        } else {
+          out.push({ v: lv.targets[c], dx: conv[c].dx ?? '0', dy: conv[c].dy ?? '0', pre });
+        }
       }
       return out;
     }
@@ -2034,9 +2104,11 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
       // assigned value. Semicolons are invalid inside parens, so fold copyBack
       // as comma terms via a temp: (t = (target = rv), cb, t).
       let v =
-        env.dual && lv.dualTargets
-          ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv })
-          : `(${lv.targets[c]} = ${rv})`;
+        lv.bits && lv.bits[c]
+          ? packVaryingWrite(lv.targets[c], rv)
+          : env.dual && lv.dualTargets
+            ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv })
+            : `(${lv.targets[c]} = ${rv})`;
       if (post) {
         const t = env.allocTemp();
         v = `(${t} = ${v}, ${post}, ${t})`;
@@ -2137,7 +2209,11 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
     // Dual mode, float target: linear ops (+=, -=) update all three planes
     // via dualWrite; non-linear compounds throw (C5a2 templates).
     let v: string;
-    if (env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]) {
+    if (lv.bits && lv.bits[c]) {
+      // Packed uint varying cell (VERTEX): unpack the old value, apply the op
+      // with the uint wrap, repack (packVaryingCompound mirrors compoundOp).
+      v = packVaryingCompound(cop, lv.targets[c], rv);
+    } else if (env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]) {
       v = env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }, cop);
     } else {
       v = compoundOp(cop, lv.targets[c], rv, base);
