@@ -209,10 +209,20 @@ function readComboOK(
       return format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5);
     case C1.RGB: case C2.RGB8:
       if (floatStorage) return floatStorageReadOK(ctx, format, type);
-      return format === C1.RGB && type === C1.UNSIGNED_BYTE;
+      // WebGL 1.0 §5.14.12: RGBA/UNSIGNED_BYTE (+ RGBA pack types) must be
+      // accepted for ANY complete framebuffer — RGB attachments expand to
+      // RGBA on read ((R,G,B,1)). RGB/UNSIGNED_BYTE and RGB/565 remain valid
+      // for RGB attachments.
+      return (format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5)) ||
+        (format === C1.RGBA &&
+          (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4 || type === C1.UNSIGNED_SHORT_5_5_5_1));
     case C1.LUMINANCE: case C1.LUMINANCE_ALPHA: case C1.ALPHA:
       if (floatStorage) return floatStorageReadOK(ctx, format, type);
-      return false;
+      // WebGL 1.0 §5.14.12: RGBA/UNSIGNED_BYTE (+ RGBA pack types) must be
+      // accepted for ANY complete framebuffer — LUMINANCE/LA/ALPHA attachments
+      // expand to RGBA on read (L→(L,L,L,1), A→(0,0,0,A)).
+      return format === C1.RGBA &&
+        (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4 || type === C1.UNSIGNED_SHORT_5_5_5_1);
     case C2.R8: return format === C2.RED && type === C1.UNSIGNED_BYTE;
     case C2.RG8: return format === C2.RG && type === C1.UNSIGNED_BYTE;
     case C2.RGB10_A2: return format === C1.RGBA && type === C2.UNSIGNED_INT_2_10_10_10_REV;
@@ -306,7 +316,8 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
   proto.drawArrays = function (this: WebGLRenderingContext, mode: GLenum, first: GLint, count: GLsizei): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    const req = validateDrawArrays(ctx, mode, first, count, 1);
+    // WebIDL: GLint/GLsizei convert via ToInt32 (0xffffffff → -1 → INVALID_VALUE).
+    const req = validateDrawArrays(ctx, mode, first | 0, count | 0, 1);
     if (!req) return;
     try { executeDraw(ctx, req); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
   };
@@ -314,7 +325,8 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
   proto.drawElements = function (this: WebGLRenderingContext, mode: GLenum, count: GLsizei, type: GLenum, offset: GLintptr): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    const req = validateDrawElements(ctx, mode, count, type, offset);
+    // count is GLsizei (ToInt32); offset is GLintptr (64-bit, left untouched).
+    const req = validateDrawElements(ctx, mode, count | 0, type, offset);
     if (!req) return;
     try { executeDraw(ctx, req); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
   };
@@ -442,7 +454,8 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
     p2.drawArraysInstanced = function (this: WebGL2RenderingContext, mode: GLenum, first: GLint, count: GLsizei, instanceCount: GLsizei): void {
       const ctx = this;
       if (isLost(ctx)) return;
-      const req = validateDrawArrays(ctx, mode, first, count, instanceCount);
+      // WebIDL: GLint/GLsizei convert via ToInt32.
+      const req = validateDrawArrays(ctx, mode, first | 0, count | 0, instanceCount | 0);
       if (!req) return;
       try { executeDraw(ctx, req); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
@@ -452,7 +465,8 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
     p2.drawElementsInstanced = function (this: WebGL2RenderingContext, mode: GLenum, count: GLsizei, type: GLenum, offset: GLintptr, instanceCount: GLsizei): void {
       const ctx = this;
       if (isLost(ctx)) return;
-      const req = validateDrawElements(ctx, mode, count, type, offset, { instanceCount });
+      // count/instanceCount are GLsizei (ToInt32); offset is GLintptr (untouched).
+      const req = validateDrawElements(ctx, mode, count | 0, type, offset, { instanceCount: instanceCount | 0 });
       if (!req) return;
       try { executeDraw(ctx, req); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
@@ -462,7 +476,8 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
     p2.drawRangeElements = function (this: WebGL2RenderingContext, mode: GLenum, start: GLuint, end: GLuint, count: GLsizei, type: GLenum, offset: GLintptr): void {
       const ctx = this;
       if (isLost(ctx)) return;
-      const req = validateDrawElements(ctx, mode, count, type, offset, { range: [start, end] });
+      // start/end are GLuint (ToUint32); count is GLsizei (ToInt32); offset untouched.
+      const req = validateDrawElements(ctx, mode, count | 0, type, offset, { range: [start >>> 0, end >>> 0] });
       if (!req) return;
       try { executeDraw(ctx, req); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
