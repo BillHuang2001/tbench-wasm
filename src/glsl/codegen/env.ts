@@ -952,13 +952,6 @@ export class CodegenEnv {
   scratchSize = 0;
   /** Max int scratch used (StageCodegenResult.intScratchSize). */
   intScratchSize = 0;
-  /** Lazily-allocated float scratch bases for the gl_ClipDistance and
-   *  gl_CullDistance builtin arrays (VERTEX stage only; vertex shaders never
-   *  run dual mode, so the single plane is exact). Allocated on first use —
-   *  emission order is deterministic, so the bases are stable; scratchSize
-   *  grows automatically and gl/ allocates ctx.scratch from it. */
-  clipScratchBase: number | null = null;
-  cullScratchBase: number | null = null;
 
   constructor(stage: ShaderStage, layout: CodegenLayout) {
     this.stage = stage;
@@ -1118,18 +1111,6 @@ export class CodegenEnv {
     this.intScratchTop_ += n;
     if (this.intScratchTop_ > this.intScratchSize) this.intScratchSize = this.intScratchTop_;
     return base;
-  }
-
-  /** Scratch base of a float[8] clip/cull builtin array, allocating 8 floats
-   *  lazily on first use. VERTEX stage only (fragment reads/writes are
-   *  lowered elsewhere — see expressions.ts leafRead/leafWrite). */
-  ensureClipScratch(name: 'gl_ClipDistance' | 'gl_CullDistance'): number {
-    if (name === 'gl_CullDistance') {
-      if (this.cullScratchBase === null) this.cullScratchBase = this.allocScratch(8);
-      return this.cullScratchBase;
-    }
-    if (this.clipScratchBase === null) this.clipScratchBase = this.allocScratch(8);
-    return this.clipScratchBase;
   }
 
   /** Allocate one temp var name (`t0`, `t1`, ...) for index materialization. */
@@ -1513,23 +1494,23 @@ function builtinRef(env: CodegenEnv, info: Extract<GlobalInfo, { kind: 'builtin'
     case 'gl_CullDistance':
       // Whole-array identifier-level access (legal ESSL 3.00 array
       // assignment). Same lowering as expressions.ts leafRead/leafWrite:
-      // VERTEX reads/writes the per-program vertex scratch; FRAGMENT reads
-      // default to 0 (interpolated transport is a gl/raster task) and writes
-      // are a link error.
+      // VERTEX reads/writes ctx.out.clipDistance/cullDistance (the gl
+      // transport record, zeroed per draw); FRAGMENT reads the interpolated
+      // ctx.clipDistance/cullDistance and writes are a link error.
       return mkPath(
         type,
         true,
         (c) => {
-          if (env.stage === 'FRAGMENT') return '0';
-          const base = env.ensureClipScratch(name);
-          return `ctx.scratch[${base} + ${c}]`;
+          const arr = name === 'gl_ClipDistance' ? 'clipDistance' : 'cullDistance';
+          if (env.stage === 'FRAGMENT') return `ctx.${arr}[${c}]`;
+          return `ctx.out.${arr}[${c}]`;
         },
         (c) => {
           if (env.stage !== 'VERTEX') {
             throw new Error(`codegen: '${name}' is read-only in fragment shaders`);
           }
-          const base = env.ensureClipScratch(name);
-          return `ctx.scratch[${base} + ${c}]`;
+          const arr = name === 'gl_ClipDistance' ? 'clipDistance' : 'cullDistance';
+          return `ctx.out.${arr}[${c}]`;
         },
       );
     default:
