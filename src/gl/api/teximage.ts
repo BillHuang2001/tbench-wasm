@@ -1191,6 +1191,14 @@ function texImage3DBuffer(
     if (!w2ValidatePbo(ctx, pixels)) return;
     if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type, true)) return;
   } else if (ArrayBuffer.isView(pixels)) {
+    // WebGL2 spec: UNPACK_FLIP_Y_WEBGL / UNPACK_PREMULTIPLY_ALPHA_WEBGL are
+    // not supported for texImage3D client-data uploads → INVALID_OPERATION
+    // (the PBO path is already rejected in w2ValidatePbo).
+    const unpack = ctx._state.pixelStore.unpack;
+    if (unpack.flipY || unpack.premultiplyAlpha) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type, true)) return;
   }
   uploadTexImage(ctx, tex, target, level, internalformat, width, height, depth, border, format, type, pixels);
@@ -1556,6 +1564,14 @@ function texSubImage3DBuffer(
     if (!w2ValidatePbo(ctx, pixels)) return;
     if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type, true)) return;
   } else if (ArrayBuffer.isView(pixels)) {
+    // WebGL2 spec: UNPACK_FLIP_Y_WEBGL / UNPACK_PREMULTIPLY_ALPHA_WEBGL are
+    // not supported for texSubImage3D client-data uploads → INVALID_OPERATION
+    // (the PBO path is already rejected in w2ValidatePbo).
+    const unpack = ctx._state.pixelStore.unpack;
+    if (unpack.flipY || unpack.premultiplyAlpha) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type, true)) return;
   } else {
     ctx._errors.push(C1.INVALID_OPERATION);
