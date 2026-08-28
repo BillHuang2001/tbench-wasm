@@ -460,6 +460,39 @@ function runVertex(src: string, opts?: { version?: 100 | 300 }): RunResult {
 }
 
 /* ------------------------------------------------------------------ */
+/* 25. STRUCT param with an ARRAY MEMBER, passed by value (flatNames   */
+/*     struct recursion must flatten per element). Pinned regression   */
+/*     for CTS conformance/glsl/bugs/sampler-array-struct-function-    */
+/*     arg.html (`struct S { sampler2D sam[2]; }; vec4 useSampler(S    */
+/*     arg) { return texture2D(arg.sam[0], ...); }`): before the       */
+/*     `array` case in flatNames's struct recursion (env.ts),          */
+/*     makeParamLocal hit `default:` and threw "codegen: array member  */
+/*     'arg$c0__f' inside a flat struct is unsupported" → the link     */
+/*     failed (page: 1 PASS / 1 FAIL). The array case flattens per     */
+/*     element (`arg__f__0`, `arg__f__1`, ...), matching flatComponents */
+/*     and the path model's const-index folding, so the inliner's      */
+/*     per-component binding copies `arg.f[0]` into the right local.   */
+/* ------------------------------------------------------------------ */
+
+{
+  const r = runVertex(
+    `struct S { float f[2]; float g; };
+     float useS(S arg) { return arg.f[0] + arg.f[1] + arg.g; }
+     void main() {
+       S s;
+       s.f[0] = 1.0;
+       s.f[1] = 2.0;
+       s.g = 3.0;
+       gl_Position = vec4(useS(s), 0.0, 0.0, 1.0);
+     }`,
+  );
+  check(
+    r.ctx.out.position[0] === 6,
+    `struct param with array member by value: useS(s) === 6 (got ${r.ctx.out.position[0]})`,
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
 
