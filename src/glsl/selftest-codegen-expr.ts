@@ -17,7 +17,7 @@ import type { Expr, LiteralExpr, TranslationUnit, ExternalDecl, FunctionDefiniti
 import type { GLSLType } from './types.js';
 import { compileShader } from './compiler.js';
 import { CodegenEnv } from './codegen/env.js';
-import { emitExpr, emitLValue } from './codegen/expressions.js';
+import { emitExpr, emitLValue, materializeSharedPre } from './codegen/expressions.js';
 import { emitStatements } from './codegen/statements.js';
 import type { Value } from './codegen/index.js';
 import type { CodegenLayout } from './codegen/index.js';
@@ -1255,6 +1255,132 @@ void main() { }`,
     body.includes('v__0 = (ctx.scratch[0 + 0])'),
     `return-context copy-back folds as comma terms (got:\n${body})`,
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* ES 3.00 arrays: ==/!=, .length(), materializeSharedPre              */
+/* (hand-built ASTs — semantics lands array typing in a parallel wave) */
+/* ------------------------------------------------------------------ */
+
+const arrT = (elem: GLSLType, size: number): GLSLType => ({ kind: 'array', element: elem, size });
+const memCall = (obj: Expr, t: GLSLType): Expr => ({
+  kind: 'call',
+  loc,
+  callee: { kind: 'member', loc, object: obj, name: 'length', resolvedType: { kind: 'void' } },
+  args: [],
+  resolvedType: t,
+});
+const assignE = (target: Expr, value: Expr, t: GLSLType): Expr => ({
+  kind: 'assign',
+  loc,
+  op: '=',
+  target,
+  value,
+  resolvedType: t,
+});
+
+{
+  // `a.length()` on a scratch-backed local: static size, object's component
+  // reads materialize into pre (side effects of the OBJECT expression run).
+  const e = env('VERTEX', 300);
+  e.declareLocal('a', arrT(iT(), 3));
+  const v = emitExpr(memCall(ident('a', arrT(iT(), 3)), iT()), e)[0];
+  check(v.v === '3', `a.length() → v='3' (got '${v.v}')`);
+  check(
+    v.pre !== undefined && v.pre.length === 3 && v.pre[0] === 't0 = ctx.intScratch[0 + 0 + 0]',
+    `a.length() pre = per-component reads (got ${JSON.stringify(v.pre)})`,
+  );
+}
+
+{
+  // `(a = b).length()`: the assignment's side effects land in pre exactly
+  // once (one line per component), value is the static size.
+  const e = env('VERTEX', 300);
+  e.declareLocal('a', arrT(iT(), 2));
+  e.declareLocal('b', arrT(iT(), 2));
+  const v = emitExpr(memCall(assignE(ident('a', arrT(iT(), 2)), ident('b', arrT(iT(), 2)), arrT(iT(), 2)), iT()), e)[0];
+  check(v.v === '2', `(a = b).length() → v='2' (got '${v.v}')`);
+  check(
+    v.pre !== undefined &&
+      v.pre.length === 2 &&
+      v.pre[0] === 't0 = (ctx.intScratch[0 + 0 + 0] = ctx.intScratch[2 + 0 + 0])' &&
+      v.pre[1] === 't1 = (ctx.intScratch[0 + 1 + 0] = ctx.intScratch[2 + 1 + 0])',
+    `(a = b).length() pre = assignment lines once per component (got ${JSON.stringify(v.pre)})`,
+  );
+}
+
+{
+  // Array == on locals: both sides materialized to temps (single evaluation),
+  // leaves compare with `&&` per component.
+  const e = env('VERTEX', 300);
+  e.declareLocal('a', arrT(iT(), 2));
+  e.declareLocal('b', arrT(iT(), 2));
+  const v = emitExpr(bin('==', ident('a', arrT(iT(), 2)), ident('b', arrT(iT(), 2)), bT()), e)[0];
+  check(
+    v.v === '((t0 === (t2)) && (t1 === (t3)))',
+    `array == → per-component && chain (got '${v.v}')`,
+  );
+  check(
+    v.pre !== undefined &&
+      v.pre.length === 4 &&
+      v.pre[0] === 't0 = ctx.intScratch[0 + 0 + 0]' &&
+      v.pre[2] === 't2 = ctx.intScratch[2 + 0 + 0]',
+    `array == pre = left then right operand reads (got ${JSON.stringify(v.pre)})`,
+  );
+  const decl = e.temps.length ? `var ${e.temps.join(', ')}; ` : '';
+  const pres = v.pre!.join('; ') + '; ';
+  const res = new Function('ctx', 'R', `${decl}${pres}return ${v.v};`)({ intScratch: new Int32Array([1, 2, 1, 2]) }, R);
+  check(res === true, `[1,2] == [1,2] → true (got ${res})`);
+}
+
+{
+  // Array != on locals: `||` per component.
+  const e = env('VERTEX', 300);
+  e.declareLocal('a', arrT(iT(), 2));
+  e.declareLocal('c', arrT(iT(), 2));
+  const v = emitExpr(bin('!=', ident('a', arrT(iT(), 2)), ident('c', arrT(iT(), 2)), bT()), e)[0];
+  check(
+    v.v === '((t0 !== (t2)) || (t1 !== (t3)))',
+    `array != → per-component || chain (got '${v.v}')`,
+  );
+  const decl = e.temps.length ? `var ${e.temps.join(', ')}; ` : '';
+  const pres = v.pre!.join('; ') + '; ';
+  const res = new Function('ctx', 'R', `${decl}${pres}return ${v.v};`)({ intScratch: new Int32Array([1, 2, 1, 3]) }, R);
+  check(res === true, `[1,2] != [1,3] → true (got ${res})`);
+}
+
+{
+  // materializeSharedPre: N values sharing ONE pre buffer (a call result's
+  // [iife]) must emit the buffer's lines exactly ONCE and hand every
+  // component the SAME buffer back (consumers dedupe by identity).
+  const e = env('VERTEX', 300);
+  const shared = ['t9 = 42'];
+  const vals: Value[] = [
+    { v: 't0', pre: shared },
+    { v: 't1', pre: shared },
+  ];
+  const out = materializeSharedPre(vals, e);
+  check(out.length === 2, 'materializeSharedPre keeps component count');
+  check(out[0].v === 't0' && out[1].v === 't1', 'materializeSharedPre returns temp names');
+  check(out[0].pre === out[1].pre, 'materializeSharedPre: all components share ONE pre buffer');
+  check(
+    out[0].pre !== undefined && out[0].pre.length === 3 && out[0].pre[0] === 't9 = 42',
+    `materializeSharedPre: shared lines emitted once, then per-component temps (got ${JSON.stringify(out[0].pre)})`,
+  );
+  check(e.temps.length === 2, `materializeSharedPre allocates 2 temps (got ${e.temps.join(',')})`);
+}
+
+{
+  // `.length()` on a NON-array type is a codegen error.
+  const e = env('VERTEX', 300);
+  e.declareLocal('x', iT());
+  let threw = false;
+  try {
+    emitExpr(memCall(ident('x', iT()), iT()), e);
+  } catch {
+    threw = true;
+  }
+  check(threw, `.length() on a scalar throws 'codegen: .length() on a non-array type'`);
 }
 
 /* ------------------------------------------------------------------ */
