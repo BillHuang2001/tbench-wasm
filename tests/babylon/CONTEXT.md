@@ -46,6 +46,16 @@ Curated default (16): file — Sponza, Windows cafe, Espilit, The car (`errorRat
 - Unit: `npx vitest run tests/babylon` — `scenes.test.ts` (BOM parsing, kind detection, curated/full/filter selection, missing-golden skip), `compare.test.ts` (identical→pass, diff-within-ratio→pass, beyond-ratio→fail, threshold semantics, sanitization).
 - Real renderer: run against built `renderer.js`, iterate renderer until scenes converge toward goldens (diffs > 0.035 threshold or > ratio still reported per scene).
 
+## Known Issues (first real-renderer run, wave-5 bundle: 16 scenes, 0 passed)
+- **ALL 16 screenshots were pure black (every scene, including the 11 that timed out)** — combination of two renderer bugs + one driver gap:
+  1. `schedulePreserveClear` (`src/gl/draw.ts:331-372`) rAF-clear wipes the drawing buffer and re-presents BLACK after the render loop stops (`preserveDrawingBuffer:false` default). This wipe is CTS-required (buffer-preserve tests), so it cannot be removed — the DRIVER must create the Engine with `preserveDrawingBuffer: true` in the options (driver.ts engine-creation site). Proven by instrumentation: Lines draw #1 renders 9,899 pixels — EXACTLY the golden's white-pixel count — then the frame goes black before screenshot.
+  2. Default-VAO duplication: the constructor VAO (state.ts:390) vs the separate `ctx._defaultVAO` (created at lost.ts:250 with a NULL element-array-buffer); first `bindVertexArray(null)` (webgl2.ts:920-922) switches state to the EAB-less VAO; Babylon's EAB cache then skips rebinding → INVALID_OPERATION queued silently → zero pixels on later draws. One-line fix: `ctx._state.vao = ctx._defaultVAO` after lost.ts:250 (+ rebuild renderer.js via scripts/build.mjs).
+- **The 11 scene timeouts (ok:false, ready:false, ~120s) are hangs on a black path** — `scene.isReady()` never true / `executeWhenReady` never fires while frames present black; NOT slow-but-rendering (fog.png/lens.png are pure black, mean RGB 0). Fixes above (1)+(2) are expected to unblock readiness.
+- **Lines (ok:true, ready:true, 1.4–2.4s, diff 0.0412 vs maxDiffPixelRatio 0.011) is a STRUCTURAL failure, not AA**: actual = 100% black; diffPixels = 9,899 = exactly the golden's own white pixels; bounding box spans the full frame. No subpixel component.
+- **Harness gaps (tests/babylon — driver fixes)**:
+  - `window.canvas` is NEVER set: driver.ts creates the Engine with a local `canvas` var; upstream sets `window.canvas = document.getElementById("babylon-canvas")` in `evaluateInitEngineForVisualization` (visualizationPlaywright.utils.ts:367). Cached `shadows.js`/`gui.js` scenes use bare `canvas` (e.g. `camera.attachControl(canvas, true)`) → `ReferenceError: canvas is not defined` (Self shadowing, GUI).
+  - `empty.html` loads only the 4 vendor UMDs; upstream empty.html loads `earcut.min.js` (+ ammo.js, recast.js, cannon.js, Oimo.js, havok UMDs) BEFORE babylon.js. Babylon core uses the global `earcut` as default triangulator → `ReferenceError: earcut is not defined` (Polygon). No curated scene needs the physics engines (`enablePhysics` unused); earcut is the only required add.
+
 ## Routing Table
 - `run.ts` → CLI entry: args, orchestration, worker pool, report, exit code
 - `scenes.ts` → config.json parsing, scene model, curated lists, selection
