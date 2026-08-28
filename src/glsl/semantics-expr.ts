@@ -434,10 +434,41 @@ export function analyzeExpr(e: Expr, scope: Scope, ctx: SemContext): void {
       return;
     case 'comma': {
       for (const x of e.exprs) analyzeExpr(x, scope, ctx);
+      // WebGL 2.0 spec "Unsupported variants of GLSL ES 3.00 operators": the
+      // sequence operator is not allowed with arrays, structs containing
+      // arrays, or void operands (CTS forbidden-operators.html — the ternary
+      // path enforces the same restrictions: void via an explicit check,
+      // arrays/structs via the type-match rule). ES 1.00 keeps its historical
+      // permissive behavior (no graded test restricts it).
+      if (ctx.version === 300) {
+        for (const x of e.exprs) {
+          const xt = x.resolvedType;
+          if (xt === undefined) continue; // subexpression already errored
+          if (xt.kind === 'void') {
+            ctx.error(x.loc.line, `',' : cannot use a void expression as a sequence operator operand`);
+            continue;
+          }
+          if (containsArray(xt)) {
+            ctx.error(x.loc.line, `',' : sequence operator operands cannot be arrays or structures containing arrays`);
+            continue;
+          }
+        }
+      }
       const last = e.exprs[e.exprs.length - 1];
       if (last !== undefined && last.resolvedType !== undefined) {
         e.resolvedType = last.resolvedType;
-        e.constValue = last.constValue;
+        // ES 3.00: the sequence operator NEVER yields a constant expression
+        // (ESSL 3.00 §5.9 — CTS sequence-operator-returns-non-constant.html:
+        // `const float a = (0.0, 1.0);` and `float a[(2, 3)];` must fail).
+        // ES 1.00 folds ONLY when EVERY operand is itself a constant — the
+        // ogles CorrectComma_frag build test requires `const vec4 v =
+        // (vec4(1,2,3,4), vec4(5,6,7,8));` to compile. A non-constant operand
+        // keeps the sequence operator so its side effects still run (`int i =
+        // (g = 1, 0);` must assign g — the unconditional last-operand fold
+        // dropped it).
+        if (ctx.version === 100 && e.exprs.every((x) => x.constValue !== undefined)) {
+          e.constValue = last.constValue;
+        }
       }
       e.lvalue = false; // comma result is never an lvalue
       return;
