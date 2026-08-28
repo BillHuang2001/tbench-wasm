@@ -31,6 +31,38 @@ export type SceneResult = {
 const RENDERER_INACTIVE_MSG =
   "renderer bundle not active (window.__createSoftwareWebGLContext missing) — page ran WITHOUT the software renderer";
 
+// Page-console capture bounds: the ring buffer keeps the last
+// CONSOLE_BUFFER_MAX error/warning lines; a failure summary shows the first
+// CONSOLE_SUMMARY_MAX_LINES of those, each truncated to
+// CONSOLE_SUMMARY_LINE_MAX chars.
+const CONSOLE_BUFFER_MAX = 200;
+const CONSOLE_SUMMARY_MAX_LINES = 6;
+const CONSOLE_SUMMARY_LINE_MAX = 200;
+
+/**
+ * Appends a summary of the page console (error/warning) lines to a failure
+ * error string. Renderer-side shader-compile failures (Babylon logs "Error
+ * compiling effect" / "VERTEX SHADER ERROR ... syntax error" via
+ * console.error) only surface in the page console — they never throw across
+ * the evaluate bridge, so without this enrichment the failure reason would
+ * just be "timeout after 120s" with zero diagnostics.
+ */
+function withConsoleSummary(error: string, consoleLines: string[]): string {
+  if (consoleLines.length === 0) return error;
+  const lines = consoleLines
+    .slice(0, CONSOLE_SUMMARY_MAX_LINES)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .map((line) =>
+      line.length > CONSOLE_SUMMARY_LINE_MAX
+        ? line.slice(0, CONSOLE_SUMMARY_LINE_MAX) + "…"
+        : line
+    );
+  const dropped = consoleLines.length - lines.length;
+  let summary = ` | page console: [${lines.join("] [")}]`;
+  if (dropped > 0) summary += ` (${dropped} more console lines dropped)`;
+  return error + summary;
+}
+
 /**
  * Runs one Babylon scene in a fresh browser context:
  *   1. injects the software renderer (via buildInterceptScript)
@@ -65,6 +97,10 @@ export function runScene(
     let contextClosed = false;
     let settled = false;
 
+    // Bounded buffer of page console error/warning lines for this scene run
+    // (populated by the listener attached after newPage below).
+    const consoleLines: string[] = [];
+
     const closeContext = async () => {
       if (context && !contextClosed) {
         contextClosed = true;
@@ -87,12 +123,21 @@ export function runScene(
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      // Enrich failures with page-console diagnostics so failing scenes are
+      // self-diagnosing (shader compile errors etc. only appear in the page
+      // console). Skipped for RENDERER_INACTIVE_MSG: a dead bundle means the
+      // console is meaningless.
+      const error =
+        !result.ok && result.error && result.error !== RENDERER_INACTIVE_MSG
+          ? withConsoleSummary(result.error, consoleLines)
+          : result.error;
       resolve({
         title: entry.title,
         reference: entry.referenceImage ?? entry.title,
         kind: entry.kind,
         elapsedMs: Date.now() - startedAt,
         ...result,
+        error,
       });
     };
 
@@ -134,6 +179,18 @@ export function runScene(
 
         context = await browser.newContext({ viewport: { width: 600, height: 400 } });
         const page = await context.newPage();
+        // Capture page console errors/warnings: renderer-side failures (e.g.
+        // Babylon's "Error compiling effect" / "VERTEX SHADER ERROR" logs)
+        // only surface in the page console — they never throw across the
+        // evaluate bridge, so without this a failing scene would just report
+        // "timeout after Ns" with zero diagnostics. Ring buffer, oldest
+        // dropped past CONSOLE_BUFFER_MAX.
+        page.on("console", (msg) => {
+          if (msg.type() === "error" || msg.type() === "warning") {
+            consoleLines.push(msg.text());
+            if (consoleLines.length > CONSOLE_BUFFER_MAX) consoleLines.shift();
+          }
+        });
         await page.addInitScript(interceptScript);
         await page.goto(serverUrl + "/empty.html", { timeout: 30_000, waitUntil: "load" });
         await page.waitForSelector("#babylon-canvas");
