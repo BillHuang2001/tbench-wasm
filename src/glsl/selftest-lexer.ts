@@ -252,6 +252,57 @@ expect(['a', '_b', 'c1'], 300, ['id:a', 'id:_b', 'id:c1']);
 expect(['x', '1', 'y'], 100, ['id:x', 'int:1', 'id:y']);
 
 /* ------------------------------------------------------------------ */
+/* Reserved identifiers (WebGL §6.2 / ANGLE)                           */
+/* ------------------------------------------------------------------ */
+
+// GLSL ES 1.00 future-reserved words: identifiers in NEITHER version (they
+// are not keywords, so the lexer rejects them as reserved words; previously
+// they lexed as identifiers and compiled — CTS reserved-words cluster).
+for (const w of ['asm', 'class', 'union', 'enum', 'typedef', 'template', 'this', 'packed',
+  'goto', 'inline', 'noinline', 'volatile', 'public', 'static', 'extern', 'external',
+  'interface', 'long', 'short', 'double', 'half', 'fixed', 'unsigned', 'superp',
+  'input', 'output', 'hvec2', 'hvec3', 'hvec4', 'dvec2', 'dvec3', 'dvec4',
+  'fvec2', 'fvec3', 'fvec4', 'sampler1D', 'sampler1DShadow', 'sampler2DRect',
+  'sampler3DRect', 'sampler2DRectShadow', 'sizeof', 'cast', 'namespace', 'using']) {
+  lexErr([w], 100, 'reserved word');
+  lexErr([w], 300, 'reserved word');
+}
+
+// Double underscores anywhere in the name: rejected in both versions
+// (ANGLE rule; CTS reserved-words `__foo` / `foo__bar`).
+lexErr(['__foo'], 100, "'__'");
+lexErr(['__foo'], 300, "'__'");
+lexErr(['foo__bar'], 100, "'__'");
+lexErr(['foo__bar'], 300, "'__'");
+lexErr(['foo__bar__baz'], 100, "'__'");
+
+// Reserved prefixes `webgl_` / `_webgl`: rejected in both versions (the 8
+// conformance/glsl/reserved/*.vert pages + the 2 misc identifier pages).
+lexErr(['webgl_foo'], 100, "'webgl_'");
+lexErr(['webgl_foo'], 300, "'webgl_'");
+lexErr(['_webgl_foo'], 100, "'_webgl'");
+lexErr(['_webgl_foo'], 300, "'_webgl'");
+
+// `gl_` prefixes are NOT lexer errors (builtin shadowing is a semantics
+// concern with a builtin whitelist): plain identifiers here.
+expect(['gl_foo'], 100, ['id:gl_foo']);
+expect(['gl_Foo'], 300, ['id:gl_Foo']);
+
+// The ES 3.00-only keywords stay IDENTIFIERS in 100 (CTS deviation —
+// shader-with-non-reserved-words requires them to compile in WebGL1),
+// including the sampler2DArray/isampler*/usampler* family and
+// samplerCubeArray (not a GLSL ES 3.00 keyword at all).
+for (const w of ['uint', 'layout', 'centroid', 'smooth', 'noperspective',
+  'uvec2', 'uvec3', 'uvec4', 'mat2x2', 'mat3x2', 'mat4x4',
+  'sampler2DArray', 'sampler2DArrayShadow', 'samplerCubeShadow',
+  'samplerCubeArray', 'samplerCubeArrayShadow',
+  'isampler2D', 'isampler3D', 'isamplerCube', 'isampler2DArray',
+  'usampler2D', 'usampler3D', 'usamplerCube', 'usampler2DArray',
+  'case', 'precise']) {
+  expect([w], 100, ['id:' + w]);
+}
+
+/* ------------------------------------------------------------------ */
 /* Invalid characters & string tokens                                  */
 /* ------------------------------------------------------------------ */
 

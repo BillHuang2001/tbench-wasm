@@ -220,10 +220,41 @@ expectErr('void main() { vec2 v; vec3 w = v.xy; }', 100, 'VERTEX'); // vec2 → 
 /* 10. Recursion detection                                             */
 /* ------------------------------------------------------------------ */
 
+// Same-signature self-call → recursion (still an error with the
+// signature-aware call graph: `f(int)` reaches itself).
 expectErr('int f(int x) { return f(x); }', 100, 'VERTEX', undefined, /recursion/);
+// Mutual recursion through DISTINCT functions → recursion (cycle across
+// different names is a cycle in the signature graph too).
 expectErr('int a(int x) { return b(x); } int b(int x) { return a(x); }', 100, 'VERTEX', undefined, /recursion/);
+// Prototype + definition mutual recursion → recursion (definition reuses the
+// prototype FnSymbol, so the cycle still closes on the same node).
 expectErr(
   'int a(int x); int b(int x) { return a(x); } int a(int x) { return b(x); }',
+  100,
+  'VERTEX',
+  undefined,
+  /recursion/,
+);
+// Calling a DIFFERENT overload of the same name is NOT recursion (ogles
+// CorrectFuncOverload_vert: `process(S1)` calls `process(S2)` — edges are
+// keyed by the resolved signature, so this is not a self-edge). Previously
+// pinned as a recursion ERROR by the name-only call graph.
+expectOk(
+  'struct S2 { float f; }; struct S1 { float f; S2 s2; };' +
+    'float process(S1 s1) { return s1.f + process(s1.s2); }' +
+    'float process(S2 s2) { return s2.f; }' +
+    'void main() { S1 s1 = S1(1.0, S2(1.0)); gl_Position = vec4(process(s1)); }',
+  100,
+  'VERTEX',
+);
+// A call CYCLE ACROSS overloads (`a(S1)` → `a(S2)` → `a(S1)`) is still
+// recursion: the signatures form a cycle in the resolved call graph, which
+// GLSL ES bans ("not even statically through nested function calls").
+expectErr(
+  'struct S1 { float f; }; struct S2 { float f; };' +
+    'float a(S1 x) { return a(S2(1.0)); }' +
+    'float a(S2 x) { return a(S1(1.0)); }' +
+    'void main() { }',
   100,
   'VERTEX',
   undefined,
@@ -237,8 +268,21 @@ expectErr(
 expectErr('void main() { if (1) {} }', 100, 'VERTEX', undefined, /boolean/);
 expectErr('void main() { break; }', 100, 'VERTEX', undefined, /break/);
 expectErr('void main() { continue; }', 100, 'VERTEX', undefined, /continue/);
-expectOk('void main() { while (true) { break; } }', 100, 'VERTEX');
+// WebGL 1.0 §6.26: while loops are DISALLOWED in ESSL 1.00 (optional in
+// GLSL ES 1.00 Appendix A) — pinned here (previously expected to compile).
+expectErr('void main() { while (true) { break; } }', 100, 'VERTEX', undefined, /while/);
+expectErr('void main() { do { break; } while (true); }', 100, 'VERTEX', undefined, /do-while/);
+// ... but ESSL 3.00 (WebGL 2.0) keeps while/do-while.
+expectOk('#version 300 es\nvoid main() { while (true) { break; } }', 300, 'VERTEX');
+expectOk('#version 300 es\nvoid main() { do { break; } while (true); }', 300, 'VERTEX');
+// WebGL 1.0 §6.26: for-loop conditions must be `index op constant-expression`
+// (const RHS); a non-const local RHS fails while literal/const RHS passes.
+expectErr('void main() { int n = 3; for (int i = 0; i < n; i++) { } }', 100, 'VERTEX', undefined, /constant expression/);
+expectOk('void main() { const int n = 3; for (int i = 0; i < n; i++) { } }', 100, 'VERTEX');
+expectOk('void main() { for (int i = 0; i < 3 + 3; i++) { } }', 100, 'VERTEX');
 expectOk('void main() { for (int i = 0; i < 3; i++) { continue; } }', 100, 'VERTEX');
+// ESSL 3.00 for-conditions are unrestricted (uniform/any expression OK).
+expectOk('#version 300 es\nuniform int u_n; void main() { for (int i = 0; i < u_n; i++) { } }', 300, 'VERTEX');
 expectOk('#version 300 es\nvoid main() { switch (1) { case 1: break; default: break; } }', 300, 'VERTEX');
 expectErr('#version 300 es\nvoid main() { switch (1.0) { } }', 300, 'VERTEX', undefined, /switch/);
 expectErr('#version 300 es\nvoid main() { case 1: }', 300, 'VERTEX', undefined, /case/);
@@ -305,8 +349,21 @@ expectErr('void main() { bool b = 1 == true; }', 100, 'VERTEX'); // int vs bool
 expectErr('#version 300 es\nvoid main() { float z = ~1.0; }', 300, 'VERTEX'); // ~ on float
 expectOk('#version 300 es\nvoid main() { int x = 5 % 2; uint u = 5u % 2u; int s = 1 << 2; }', 300, 'VERTEX');
 expectOk('void main() { int x = 5 % 2; }', 100, 'VERTEX'); // % is 1.00-legal for ints
-expectErr('float x; void main() { float x; }', 100, 'VERTEX', undefined, /redefinition/);
-expectErr('void main() { float x; { float x; } }', 100, 'VERTEX', undefined, /redefinition/);
+// CROSS-SCOPE SHADOWING IS LEGAL (scope-model rework: Scope.declare rejects
+// only same-scope redefinition) — CTS shader-struct-scope.html,
+// struct-nesting-of-variable-names.html, local-variable-shadowing-outer-
+// function.html, in-parameter-passed-as-inout-argument-and-global.html,
+// ogles build CorrectFull_vert/CorrectPreprocess5. OLD BEHAVIOR (bug): these
+// were rejected as redefinitions.
+expectOk('float x; void main() { float x; }', 100, 'VERTEX'); // local shadows GLOBAL var
+expectOk('void main() { float x; { float x; } }', 100, 'VERTEX'); // block shadows enclosing-block var
+expectOk('float f(float x) { return x; } void main() { float f = f(1.0); }', 100, 'VERTEX'); // local var shadows GLOBAL FUNCTION; init still resolves to the fn (declaration-time scoping)
+expectOk('vec3 p; void F(in vec3 p) { p.x = 1.0; } void main() { }', 100, 'VERTEX'); // param shadows global var
+expectOk('struct S { float a; }; void main() { S S; S.a = 1.0; }', 100, 'VERTEX'); // var shadows struct TYPE (struct-nesting)
+expectOk('void main() { if (true) int g = 1; else int g = 2; }', 100, 'FRAGMENT'); // if/else substatements: separate scopes
+// SAME-SCOPE redefinition still errors (GLSL ES single namespace).
+expectErr('void main() { float x; float x; }', 100, 'VERTEX', undefined, /redefinition/);
+expectErr('struct S { float a; }; struct S { float b; }; void main() { }', 100, 'VERTEX', undefined, /redefinition/);
 expectOk('float f(float x); float f(float y) { return y; }', 100, 'VERTEX');
 expectOk('float f(float x); float f(float y) { return y; } float g() { return f(1.0); }', 100, 'VERTEX');
 expectErr('void f() { } void main() { float x = f(); }', 100, 'VERTEX'); // void call as value
@@ -367,9 +424,50 @@ expectOk('void main() { struct S { float x; }; S s = S(1.0); float a = s.x; }', 
 expectOk('void main() { struct B { float x; }; struct A { B b; }; A a; float y = a.b.x; }', 100, 'VERTEX'); // nested
 expectOk('void main() { struct B { float x; }; struct A { B b; }; A a = A(B(1.0)); float y = a.b.x; }', 100, 'VERTEX'); // nested ctor
 expectOk('void main() { { struct S { float x; }; S s; float a = s.x; } }', 100, 'VERTEX'); // block-scoped struct
-expectErr('void main() { struct S { float x; }; { struct S { float y; }; } }', 100, 'VERTEX', undefined, /redefinition/); // GLSL: no shadowing
+// OLD BEHAVIOR (bug): a block struct shadowing an enclosing-scope struct was
+// rejected — cross-scope shadowing is legal (CTS shader-struct-scope.html).
+expectOk('void main() { struct S { float x; }; { struct S { float y; }; } }', 100, 'VERTEX');
+// Same-scope struct redefinition still errors (CTS shader-struct-scope
+// shader-vs-bad).
+expectErr('void main() { struct S { float x; }; struct S { float y; }; }', 100, 'VERTEX', undefined, /redefinition/);
 // BUG 4 + BUG 6 combined: local struct with a builtin function name.
 expectOk('void main() { struct sign { float x; }; sign s; s.x = 1.0; }', 100, 'VERTEX');
+
+/* ------------------------------------------------------------------ */
+/* 20. Empty declarators + in-body precision statements (CTS pages)     */
+/* ------------------------------------------------------------------ */
+
+// Empty declarators (conformance/glsl/misc/empty-declaration.html): the
+// parser produces no VarDeclarator for the empty slot, so semantics has
+// nothing to declare — OLD BEHAVIOR (bug): the parser rejected these.
+expectOk('void main() { float; gl_Position = vec4(0.0); }', 100, 'VERTEX');
+expectOk('void main() { float, a = 0.0; gl_Position = vec4(a); }', 100, 'VERTEX');
+expectOk('struct S { float member; }, a; void main() { a.member = 0.0; gl_Position = vec4(a.member); }', 100, 'VERTEX');
+expectOk('float;', 100, 'VERTEX'); // global-scope empty declarator too
+
+// In-body precision statements (conformance/glsl/misc/
+// ternary-operators-in-initializers.html): the parsed PrecisionDecl is
+// hoisted to just before the enclosing function definition, so the fragment
+// float-declaration default-precision check sees it — OLD BEHAVIOR (bug):
+// "syntax error, unexpected 'precision'" at parse time.
+expectOk(
+  'void main() { precision mediump float; float i = 2.0, j = (i > 1.0) ? 1.0 : 0.0; gl_FragColor = vec4(0.0, j, 0.0, 1.0); }',
+  100,
+  'FRAGMENT',
+);
+// Without the in-body precision statement the same float declaration still
+// fails (no default float precision in fragment shaders) — the hoist is what
+// makes the statement effective, it must not silently swallow the check.
+expectErr(
+  'void main() { float i = 2.0; gl_FragColor = vec4(0.0, i, 0.0, 1.0); }',
+  100,
+  'FRAGMENT',
+  undefined,
+  /No precision specified/,
+);
+// Same pattern in ES 3.00 and in vertex shaders (int default is built-in).
+expectOk('#version 300 es\nvoid main() { precision mediump float; vec2 i = vec2(2.0); }', 300, 'FRAGMENT');
+expectOk('void main() { precision mediump float; float i = 2.0; gl_Position = vec4(i); }', 100, 'VERTEX');
 
 /* ------------------------------------------------------------------ */
 /* Report + exit                                                       */

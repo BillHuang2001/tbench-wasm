@@ -151,6 +151,29 @@ function evalParams(v: Value, e: CodegenEnv, params: string[], args: number[]): 
 }
 
 {
+  // Exponent-form float constants must emit VALID JS: appending `.0` to
+  // "1e+100" yields "1e+100.0", a SyntaxError inside new Function → link
+  // failure (CTS float_literal.vert / overflow_leak.vert use 1E100). The
+  // plain numeric form ("1e+100") is a valid JS literal. Integer-valued
+  // floats without an exponent keep the `.0` suffix; >2^53 ints stay rounded
+  // doubles (existing accepted behavior).
+  const e = env('VERTEX', 100);
+  check(e.emitConstNumber(1e100, fT()) === '1e+100', `emitConstNumber(1e100) → '1e+100' (got '${e.emitConstNumber(1e100, fT())}')`);
+  check(new Function(`return ${e.emitConstNumber(1e100, fT())};`)() === 1e100, `'1e+100' is valid JS evaluating to 1e100`);
+  check(e.emitConstNumber(1.0, fT()) === '1.0', `emitConstNumber(1.0) → '1.0'`);
+  check(e.emitConstNumber(0.5, fT()) === '0.5', `emitConstNumber(0.5) → '0.5'`);
+  check(e.emitConstNumber(1.5e-10, fT()) === '1.5e-10', `emitConstNumber(1.5e-10) → '1.5e-10'`);
+  // >2^53 ints emit as rounded doubles (existing accepted behavior) — the
+  // emission must stay VALID JS and round-trip to the same double.
+  const big = e.emitConstNumber(4611686018427387903, fT());
+  check(
+    new Function(`return ${big};`)() === 4611686018427387903,
+    `emitConstNumber(4611686018427387903) → '${big}' (valid JS, same rounded double)`,
+  );
+  check(e.emitConstNumber(-0, fT()) === '0.0', `emitConstNumber(-0) → '0.0' (valid JS)`);
+}
+
+{
   const e = env('VERTEX', 100);
   const v = emitExpr(bin('+', lit(1, iT()), lit(0.5, fT()), fT()), e)[0];
   check(v.v === '(1 + 0.5)', `int+float binary → '(1 + 0.5)' (got '${v.v}')`);
@@ -276,6 +299,92 @@ function evalParams(v: Value, e: CodegenEnv, params: string[], args: number[]): 
   check(
     vals.map((x) => x.v).join(',') === 'm3__0,m3__1,m3__3,m3__4',
     `mat2(mat3) overlapping copy (got ${vals.map((x) => x.v).join(',')})`,
+  );
+}
+
+{
+  // CTS glsl-construct-mat2: matrix constructors SHORTEN — extra components
+  // beyond cols×rows are DROPPED, the first N in column-major order are kept
+  // (GLSL ES 1.00 §5.4.2). mat2(float, vec4) = the scalar + the vec4's first
+  // 3 components. Was: codegen throw 'too many components' → link failed.
+  const e = env('VERTEX', 100);
+  const vals = emitExpr(
+    call('mat2', [lit(1.0, fT()), call('vec4', [lit(2.0, fT()), lit(3.0, fT()), lit(4.0, fT()), lit(5.0, fT())], vT('float', 4))], mT(2, 2)),
+    e,
+  );
+  check(
+    vals.map((x) => x.v).join(',') === '1.0,2.0,3.0,4.0',
+    `mat2(float, vec4) truncates to first 4 column-major components (got ${vals.map((x) => x.v).join(',')})`,
+  );
+}
+
+{
+  // CTS glsl-construct-mat3: mat3(vec2,vec2,vec2,vec2,vec2) — 10 components
+  // truncated to the first 9 (column-major).
+  const e = env('VERTEX', 100);
+  const v2 = call('vec2', [lit(1.0, fT()), lit(2.0, fT())], vT('float', 2));
+  const vals = emitExpr(call('mat3', [v2, v2, v2, v2, v2], mT(3, 3)), e);
+  check(
+    vals.map((x) => x.v).join(',') === '1.0,2.0,1.0,2.0,1.0,2.0,1.0,2.0,1.0',
+    `mat3(5×vec2) truncates to first 9 column-major components (got ${vals.map((x) => x.v).join(',')})`,
+  );
+}
+
+{
+  // CTS glsl-construct-vec-mat-index: vec4(i++) splats a side-effecting
+  // scalar — the postfix increment must run EXACTLY ONCE, not once per
+  // component. The pin emits `(t = <inc>, t)` for the first component and
+  // pure temp reads for the rest (was: the comma expression duplicated →
+  // vec4(1,2,3,4)).
+  const e = env('VERTEX', 100);
+  e.declareLocal('i', iT());
+  const post = (x: Expr): Expr => ({ kind: 'unary', loc, op: '++', postfix: true, operand: x, resolvedType: iT() });
+  const vals = emitExpr(call('vec4', [post(ident('i', iT()))], vT('float', 4)), e);
+  check(
+    /^\(t\d+ = .*i = .*\)$/.test(vals[0].v) && /^t\d+$/.test(vals[1].v) && vals[1].v === vals[2].v && vals[2].v === vals[3].v,
+    `vec4(i++) pins the increment: first '(t = i, i = ..., t)', rest pure temp reads (got ${vals.map((x) => x.v).join(' | ')})`,
+  );
+  const decl = e.temps.length ? `var ${e.temps.join(', ')}; ` : '';
+  const res = new Function('ctx', 'R', 'i', `${decl}return [${vals.map((x) => x.v).join(', ')}, i];`)({}, R, 0);
+  check(
+    res[0] === 0 && res[1] === 0 && res[2] === 0 && res[3] === 0 && res[4] === 1,
+    `vec4(i++) evaluates i++ once → (0,0,0,0), i=1 (got ${res.slice(0, 4).join(',')}, i=${res[4]})`,
+  );
+}
+
+{
+  // CTS glsl-construct-vec-mat-index: mat2(i++, vec4(i++)) — both postfix
+  // increments run exactly once, left to right; the 5 flattened components
+  // truncate to 4: i++ → 0 (i=1), vec4(i++) → vec4(1,1,1,1) (i=2), flat
+  // [0,1,1,1,1] → [0,1,1,1] == mat2(0,1,1,1) column-major (the page's
+  // expected result).
+  const e = env('VERTEX', 100);
+  e.declareLocal('i', iT());
+  const post = (x: Expr): Expr => ({ kind: 'unary', loc, op: '++', postfix: true, operand: x, resolvedType: iT() });
+  const vals = emitExpr(
+    call('mat2', [post(ident('i', iT())), call('vec4', [post(ident('i', iT()))], vT('float', 4))], mT(2, 2)),
+    e,
+  );
+  const decl = e.temps.length ? `var ${e.temps.join(', ')}; ` : '';
+  const res = new Function('ctx', 'R', 'i', `${decl}return [${vals.map((x) => x.v).join(', ')}, i];`)({}, R, 0);
+  check(
+    res[0] === 0 && res[1] === 1 && res[2] === 1 && res[3] === 1 && res[4] === 2,
+    `mat2(i++, vec4(i++)) → (0,1,1,1), i=2 (got ${res.slice(0, 4).join(',')}, i=${res[4]})`,
+  );
+}
+
+{
+  // mat2(i++) diagonal — the side-effecting scalar runs once; both diagonal
+  // entries read the pinned value (same pin as the vector splat).
+  const e = env('VERTEX', 100);
+  e.declareLocal('i', iT());
+  const post = (x: Expr): Expr => ({ kind: 'unary', loc, op: '++', postfix: true, operand: x, resolvedType: iT() });
+  const vals = emitExpr(call('mat2', [post(ident('i', iT()))], mT(2, 2)), e);
+  const decl = e.temps.length ? `var ${e.temps.join(', ')}; ` : '';
+  const res = new Function('ctx', 'R', 'i', `${decl}return [${vals.map((x) => x.v).join(', ')}, i];`)({}, R, 0);
+  check(
+    res[0] === 0 && res[1] === 0 && res[2] === 0 && res[3] === 0 && res[4] === 1,
+    `mat2(i++) diagonal evaluates i++ once → (0,0,0,0), i=1 (got ${res.slice(0, 4).join(',')}, i=${res[4]})`,
   );
 }
 

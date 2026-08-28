@@ -5,9 +5,10 @@
  * Responsibilities (CORE, Phase 2a — the follow-up task adds declaration
  * qualifier/stage/precision rules + ShaderInfo assembly on top of this):
  * - symbol tables (`Scope`): ONE namespace for variables/functions/structs
- *   (GLSL ES §4.2), GLSL shadowing rules (declaring a name that exists in ANY
- *   enclosing scope is an error), builtin registration (functions, variables,
- *   gl_Max* constants — gated by the shader's enabled extensions).
+ *   (GLSL ES §4.2), GLSL shadowing rules (same-scope redefinition is an
+ *   error; CROSS-scope shadowing is legal — builtin variables/constants stay
+ *   shadow-proof), builtin registration (functions, variables, gl_Max*
+ *   constants — gated by the shader's enabled extensions).
  * - a global PRE-PASS over `TranslationUnit.declarations` registering
  *   structs, global variables and function signatures (with overloads) in
  *   source order, then per-function BODY analysis (params + statements) and
@@ -30,7 +31,7 @@ import type {
 import type { GLSLType, Precision, SamplerKind, StorageClass, StructMember } from './types.js';
 import { isFloat, typeEquals, typeName } from './types.js';
 import { analyzeExpr, convertible } from './semantics-expr.js';
-import { evalConstExpr } from './semantics-const.js';
+import { evalConstExpr, validateGlobalInit } from './semantics-const.js';
 import { analyzeStatement } from './semantics-stmt.js';
 import {
   builtinConstants, builtinSignatures, builtinVariables,
@@ -178,8 +179,14 @@ export interface FnSymbol extends BaseSymbol {
   /** declaration line (definition line when defined). */
   line: number;
   builtin: boolean;
-  /** user function NAMES this function's body calls (recursion detection). */
-  calls: Set<string>;
+  /**
+   * user function SIGNATURES this function's body calls (recursion detection).
+   * Edges are keyed by the RESOLVED callee FnSymbol, never the bare name: a
+   * call to a DIFFERENT overload of the same name (`process(S1)` calling
+   * `process(S2)`) is not a self-edge, while same-signature self-recursion and
+   * mutual-recursion cycles still form cycles in this graph.
+   */
+  calls: Set<FnSymbol>;
   /** all signatures of this name (overloads); includes self. */
   siblings: FnSymbol[];
 }
@@ -223,9 +230,13 @@ export type Symbol = VarSymbol | FnSymbol | StructSymbol | BuiltinVarSymbol | Bu
  * - `lookup(name): Symbol | undefined` — nearest declaration, walking up.
  * - `lookupLocal(name): Symbol | undefined` — this scope only.
  * - `declare(sym, ctx, line): boolean` — register with GLSL shadowing rules:
- *   a name already declared in THIS scope or ANY enclosing scope is an error
- *   (GLSL ES forbids shadowing — single namespace) and nothing is
- *   registered. Returns false on failure.
+ *   a name already declared in THIS scope is an error (same-scope
+ *   redefinition — single namespace) and nothing is registered; a name that
+ *   only exists in an ENCLOSING scope may be shadowed (CTS: shader-struct-
+ *   scope, struct-nesting-of-variable-names, local-variable-shadowing-outer-
+ *   function, conditional scoping, ogles build*). Builtin VARIABLES (gl_*)
+ *   and gl_Max* constants stay shadow-proof from any scope. Returns false on
+ *   failure.
  * - `forceDeclare(sym)` — register without checks (builtin pre-pass).
  */
 export class Scope {
@@ -251,24 +262,41 @@ export class Scope {
   }
 
   /**
-   * Declare `sym`. GLSL ES forbids shadowing: if the name exists in this
-   * scope or any enclosing scope → error `'name' : redefinition` and the
-   * symbol is NOT registered. Returns true on success.
+   * Declare `sym`. Same-scope redefinition is an error (`'name' :
+   * redefinition`) and the symbol is NOT registered; a name that exists only
+   * in an ENCLOSING scope MAY be shadowed (cross-scope shadowing is legal
+   * GLSL ES — CTS shader-struct-scope, struct-nesting-of-variable-names,
+   * local-variable-shadowing-outer-function, in-parameter-passed-as-inout-
+   * argument-and-global, ogles build CorrectFull_vert/CorrectPreprocess5),
+   * with ONE exception: builtin VARIABLES (gl_*) and gl_Max* constants
+   * (kind 'builtin-var'/'builtin-const') remain shadow-proof from any scope
+   * (GLSL ES: builtin names cannot be redeclared). Function overloads are
+   * handled by registerPrototype/registerDefinition (lookupLocal), never
+   * here. Returns true on success.
    *
    * Exception (GLSL ES single namespace): a builtin FUNCTION name that no
    * user code has claimed yet (the pre-pass placeholder FnSymbol with no user
-   * overloads attached) does not reserve the name — user variables/structs
-   * may reuse it. The placeholder is replaced in this scope's map (a later
-   * function decl with the same name then hits the variable and errors
-   * 'redefinition', which is the correct GLSL behavior). Once a user
-   * function overload claims the name, or the existing symbol is a builtin
-   * VARIABLE (gl_*) or gl_Max* constant, the name is NOT free.
+   * overloads attached) does not reserve the name in THIS scope — user
+   * variables/structs may reuse it. The placeholder is replaced in this
+   * scope's map (a later function decl with the same name then hits the
+   * variable and errors 'redefinition', which is the correct GLSL behavior).
+   * Once a user function overload claims the name, or the existing symbol is
+   * a builtin VARIABLE (gl_*) or gl_Max* constant, the name is NOT free.
    */
   declare(sym: Symbol, ctx: SemContext, line: number): boolean {
-    const existing = this.lookup(sym.name);
+    const existing = this.lookupLocal(sym.name);
     if (existing !== undefined && !isFreeBuiltinFnName(existing)) {
       ctx.error(line, `'${sym.name}' : redefinition`);
       return false;
+    }
+    // Cross-scope shadowing is legal for every symbol kind, except builtin
+    // variables/constants (kept shadow-proof — see header comment).
+    for (let s: Scope | null = this.parent; s !== null; s = s.parent) {
+      const outer = s.lookupLocal(sym.name);
+      if (outer !== undefined && (outer.kind === 'builtin-var' || outer.kind === 'builtin-const')) {
+        ctx.error(line, `'${sym.name}' : redefinition`);
+        return false;
+      }
     }
     this.symbols.set(sym.name, sym);
     return true;
@@ -538,6 +566,14 @@ export function declareVariables(
           constValue = constData[0];
         }
       }
+    } else if (scope.parent === null && d.init !== null) {
+      // GLOBAL (non-const) initializers: ANGLE ValidateGlobalInitializer
+      // parity (WebGL CTS global-variable-init.html) — uniforms and other
+      // globals are allowed in WebGL1 (legacy compatibility), but texture
+      // lookups, attributes/varyings/builtin non-constants, user function
+      // calls and lvalue operations are compile errors. Const globals are
+      // already covered by the evalConstExpr check above.
+      validateGlobalInit(d.init, scope, ctx);
     }
     scope.declare({ kind: 'var', name: d.name, type, storage: spec.qualifiers.storage, constValue, constData }, ctx, d.loc.line);
   }
@@ -794,15 +830,27 @@ function registerInterfaceBlock(d: InterfaceBlockDecl, scope: Scope, ctx: SemCon
   }
   const blockType: GLSLType = { kind: 'struct', name: d.blockName, members };
   scope.declare({ kind: 'struct', name: d.blockName, type: blockType }, ctx, d.loc.line);
+  // The block instance (and bare members of instance-less blocks) carries the
+  // block's OWN storage qualifier (GLSL ES 3.00 §4.3.9): uniform blocks →
+  // 'uniform'; `out` (vertex) / `in` (fragment) varying blocks → 'out'/'in'.
+  // varIsWritable then allows writes to vertex `out` block members and
+  // rejects writes to fragment `in` (global input) and uniform block
+  // members. Absent storage is treated as uniform (matches
+  // analyzeInterfaceBlock's UBO path). Block members carry no storage of
+  // their own (parser rejects member storage qualifiers); member-access
+  // writability inherits from this instance symbol via analyzeMember.
+  const storage = d.qualifiers.storage === undefined ? 'uniform' : d.qualifiers.storage;
   if (d.instanceName !== null && d.instanceName !== '') {
     const t = wrapArrayDims(blockType, d.arrayDims, scope, ctx, false, d.loc.line);
-    scope.declare({ kind: 'var', name: d.instanceName, type: t, storage: 'uniform' }, ctx, d.loc.line);
+    scope.declare({ kind: 'var', name: d.instanceName, type: t, storage }, ctx, d.loc.line);
   } else {
     // Instance-less block: members are accessed by BARE name (GLSL ES 3.00
-    // §4.3.7) — register them as global read-only uniforms so expression
-    // analysis resolves them. The linker keeps them OUT of the default block.
+    // §4.3.7) — register them as global variables carrying the block's own
+    // storage qualifier ('uniform' read-only for uniform blocks; 'out'/'in'
+    // for instance-less varying blocks, which the linker supports). The
+    // linker keeps UBO members OUT of the default block.
     for (const m of members) {
-      scope.declare({ kind: 'var', name: m.name, type: m.type, storage: 'uniform' }, ctx, d.loc.line);
+      scope.declare({ kind: 'var', name: m.name, type: m.type, storage }, ctx, d.loc.line);
     }
   }
 }
@@ -826,7 +874,15 @@ function analyzeFunctionBody(d: FunctionDefinition, sig: FnSymbol, global: Scope
     if (p.name === '') continue; // unnamed param: no symbol
     fnScope.declare({ kind: 'var', name: p.name, type: p.type, storage: p.storage }, ctx, d.loc.line);
   }
-  analyzeStatement(d.body, fnScope, ctx, { returnType: sig.retType });
+  // GLSL ES: a function's params and body form a SINGLE scope (spec 4.2.2;
+  // CTS shader-with-functional-scoping.html) — the body compound (always a
+  // compound per the grammar) does NOT push a scope. Nested blocks inside
+  // the body push their own scopes (shadowing legal).
+  if (d.body.kind === 'compound') {
+    for (const st of d.body.body) analyzeStatement(st, fnScope, ctx, { returnType: sig.retType });
+  } else {
+    analyzeStatement(d.body, fnScope, ctx, { returnType: sig.retType });
+  }
   ctx.currentFunction = savedFn;
   ctx.loopDepth = savedLoop;
   ctx.breakableDepth = savedBreak;
@@ -838,46 +894,67 @@ function analyzeFunctionBody(d: FunctionDefinition, sig: FnSymbol, global: Scope
 /* ------------------------------------------------------------------ */
 
 /**
- * DFS over the user-function call graph (edges recorded by name during body
- * analysis). Direct and mutual recursion → one error per detected cycle:
+ * DFS over the user-function call graph. Nodes are the RESOLVED callee
+ * signatures recorded during body analysis (`FnSymbol.calls`) — overloads are
+ * DISTINCT nodes, so `process(S1)` calling `process(S2)` is legal (no cycle),
+ * while a function signature reaching itself — directly (same-signature
+ * self-call) or through a chain of other functions (mutual recursion, incl.
+ * cycles across overloads) — is a cycle → one error per detected cycle:
  * "'name' : recursion is not allowed" (both versions).
  */
 function detectRecursion(ctx: SemContext): void {
-  const adj = new Map<string, Set<string>>();
-  const lines = new Map<string, number>();
+  const adj = new Map<FnSymbol, Set<FnSymbol>>();
   for (const f of ctx.userFns) {
-    if (!adj.has(f.name)) {
-      adj.set(f.name, new Set());
-      lines.set(f.name, f.line);
+    let set = adj.get(f);
+    if (set === undefined) {
+      set = new Set();
+      adj.set(f, set);
     }
-    for (const callee of f.calls) adj.get(f.name)!.add(callee);
+    for (const callee of f.calls) set.add(callee);
   }
-  const colors = new Map<string, number>(); // 0 white, 1 gray, 2 black
-  const visit = (name: string): boolean => {
-    const c = colors.get(name) ?? 0;
+  const colors = new Map<FnSymbol, number>(); // 0 white, 1 gray, 2 black
+  const visit = (f: FnSymbol): boolean => {
+    const c = colors.get(f) ?? 0;
     if (c === 1) {
-      ctx.error(lines.get(name) ?? 1, `'${name}' : recursion is not allowed`);
+      ctx.error(f.line, `'${f.name}' : recursion is not allowed`);
       return true;
     }
     if (c === 2) return false;
-    colors.set(name, 1);
-    const callees = adj.get(name);
+    colors.set(f, 1);
+    const callees = adj.get(f);
     if (callees !== undefined) {
       for (const callee of callees) {
         if (visit(callee)) return true;
       }
     }
-    colors.set(name, 2);
+    colors.set(f, 2);
     return false;
   };
-  for (const name of adj.keys()) {
-    if (visit(name)) return; // one cycle error is enough
+  for (const f of adj.keys()) {
+    if (visit(f)) return; // one cycle error is enough
   }
 }
 
 /* ------------------------------------------------------------------ */
 /* Entry point                                                         */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Builtin variables the standalone `invariant <name>;` statement may name
+ * (GLSL ES 1.00 §4.6.1): vertex outputs gl_Position/gl_PointSize, fragment
+ * built-in varyings gl_FragCoord/gl_PointCoord, and fragment outputs
+ * gl_FragColor/gl_FragData (CTS fragcolor-fragdata-invariant.html declares
+ * the latter two invariant). Every other builtin variable (gl_FrontFacing,
+ * gl_FragDepthEXT, gl_VertexID, gl_InstanceID, ...) is a compile error.
+ */
+const INVARIANT_BUILTIN_ALLOWLIST = new Set([
+  'gl_Position',
+  'gl_PointSize',
+  'gl_FragCoord',
+  'gl_PointCoord',
+  'gl_FragColor',
+  'gl_FragData',
+]);
 
 /**
  * Run the CORE semantic analysis over a parsed shader: register builtins,
@@ -919,8 +996,25 @@ export function analyzeProgram(ast: TranslationUnit, ctx: SemContext): void {
         // Default precision statements take effect from their point onward.
         ctx.defaultPrecisions.set(d.base, d.precision);
         break;
+      case 'invariant-decl': {
+        // GLSL ES 1.00 §4.6.1 / 3.00 §4.6: the standalone `invariant <name>;`
+        // statement must FOLLOW the declaration of the named variable (CTS
+        // shaders-with-invariance cases 7/8 — `invariant v_varying;` before
+        // `varying vec4 v_varying;` must fail compilation), and may name only
+        // the invariant-capable builtin variables (cases 9-14 pass; case 16
+        // `invariant gl_FrontFacing;` must fail). Builtins are pre-registered
+        // in the global scope before this pre-pass, so "declared earlier" is
+        // exactly "found in the global scope here".
+        const sym = global.lookup(d.name);
+        if (sym === undefined) {
+          ctx.error(d.loc.line, `'${d.name}' : invariant declaration must follow the variable declaration`);
+        } else if (sym.kind === 'builtin-var' && !INVARIANT_BUILTIN_ALLOWLIST.has(d.name)) {
+          ctx.error(d.loc.line, `'${d.name}' : invariant cannot be applied to this built-in variable`);
+        }
+        break;
+      }
       default:
-        break; // extension-decl / invariant-decl: no scope effect
+        break; // extension-decl: no scope effect
     }
   }
 

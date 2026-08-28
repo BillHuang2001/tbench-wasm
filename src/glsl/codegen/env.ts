@@ -331,10 +331,21 @@ export interface LocalVar {
 
 /** One inlined call's scope (C3b): the call's param LocalVars (per-call-site
  *  unique JS names) + the function's local names (pre-scanned from its body,
- *  so an inner local shadows an outer same-named param in resolveLocal). */
+ *  so an inner local shadows an outer same-named param in resolveLocal) +
+ *  the function's OWN locals, materialized per call site with unique JS
+ *  names (frameLocal — a callee local can never alias a caller's same-named
+ *  local, and nested same-named locals never share scratch). */
 export interface ParamFrame {
   params: Map<string, LocalVar>;
   localNames: Set<string>;
+  /** Per-call-site LocalVars for the function's own body locals, keyed by
+   *  GLSL name. Created lazily by frameLocal at each declaration statement
+   *  (decl-before-use ⇒ the entry always exists before any read); sibling
+   *  re-declarations reuse the cached entry. */
+  locals: Map<string, LocalVar>;
+  /** The call site's JS-name suffix generator (the inliner's ctx.suffix).
+   *  null for frames created without one (no such callers today). */
+  suffix: (() => string) | null;
 }
 
 /** Struct member → relative flat offset (within the struct). */
@@ -391,8 +402,13 @@ function flatNames(name: string, type: GLSLType): string[] {
           case 'struct':
             for (const mem of t.members) recType(`${base}__${mem.name}`, mem.type, o);
             break;
-          default:
-            throw new Error(`codegen: array member '${base}' inside a flat struct is unsupported`);
+          case 'array':
+            // Struct member arrays flatten per element (const sizes only —
+            // unsized members are rejected by semantics). The path model's
+            // const index folds k * flatComponents(element) into flatOff, so
+            // element i occupies compNames[base + i * elemComps .. +].
+            for (let i = 0; i < (t.size ?? 0); i++) recType(`${base}__${i}`, t.element, o);
+            break;
         }
       };
       recType(name, type, out);
@@ -703,13 +719,34 @@ export class CodegenEnv {
 
   /** Active inlined-call scopes (C3b): innermost last. Each frame holds the
    *  call's param LocalVars + the function's local names; resolveLocal
-   *  consults them top-down so same-named params/locals of nested calls
-   *  never collide (locals_ alone cannot hold two entries per GLSL name). */
+   *  consults the CURRENT function's frame (bodyDepth - 1) so same-named
+   *  params/locals of nested calls never collide (locals_ alone cannot hold
+   *  two entries per GLSL name) while caller frames stay invisible. */
   private paramFrames_: ParamFrame[] = [];
 
-  /** Push a frame for one inlined call (the inliner pops it after the body). */
-  pushParamFrame(): ParamFrame {
-    const frame: ParamFrame = { params: new Map(), localNames: new Set() };
+  /**
+   * Inlined-callee BODY-emission depth (functions.ts increments it around
+   * emitStatements of each inlined body). The CURRENT function's frame is
+   * `paramFrames_[bodyDepth - 1]` (bodyDepth 0 = top-level main → no frame).
+   * GLSL scoping gives a function body ONLY its own params/locals + globals
+   * — NEVER the caller's locals — so frames at index < bodyDepth - 1 (caller
+   * frames) must not resolve anything. Frames at index >= bodyDepth are
+   * pushed solely for a nested call's ARG MATERIALIZATION (its body has not
+   * started; params/locals are not registered yet), so they resolve nothing
+   * either: a read there is an expression of the current function.
+   */
+  bodyDepth = 0;
+
+  /** Push a frame for one inlined call (the inliner pops it after the body).
+   *  `suffix` is the call site's JS-name suffix generator — frameLocal uses
+   *  it to give the function's OWN locals unique per-call-site JS names. */
+  pushParamFrame(suffix: (() => string) | null = null): ParamFrame {
+    const frame: ParamFrame = {
+      params: new Map(),
+      localNames: new Set(),
+      locals: new Map(),
+      suffix,
+    };
     this.paramFrames_.push(frame);
     return frame;
   }
@@ -766,17 +803,58 @@ export class CodegenEnv {
   }
 
   /**
-   * Resolve an identifier for READS: active param frames first (innermost
-   * frame's params, then its locals — an inner local shadows an outer
-   * param), then declared locals. Declarations use lookupLocal (locals_
-   * only — statements.ts's sibling re-declaration path must not see frames).
+   * The per-call-site LocalVar for a local declared inside an INLINED
+   * function body (statements.ts's emitDeclStmt consults this BEFORE the
+   * locals_ reuse path — a callee local must never alias a caller's
+   * same-named local, even when the types differ). Returns null when the
+   * innermost frame does not declare `name` (→ the caller falls back to
+   * locals_).
+   *
+   * The var is created lazily on the FIRST declaration (unique JS names via
+   * the frame's per-call-site suffix, per-call-site scratch for arrays) and
+   * cached for sibling-scope re-declarations — mirror of makeParamLocal's
+   * naming/scratch machinery, so dual-mode dx/dy triples and struct member
+   * offsets come for free.
+   */
+  frameLocal(name: string, type: GLSLType): LocalVar | null {
+    const frame = this.paramFrames_[this.paramFrames_.length - 1];
+    if (!frame || !frame.localNames.has(name) || frame.suffix === null) return null;
+    let lv = frame.locals.get(name);
+    if (lv === undefined) {
+      lv = this.makeParamLocal(name, type, frame.suffix());
+      frame.locals.set(name, lv);
+    }
+    return lv;
+  }
+
+  /**
+   * Resolve an identifier for READS: the CURRENT function's scope only —
+   * its param frame (params first, then per-call-site locals — an inner
+   * local shadows an outer same-named param), then globals (locals_).
+   * Caller frames (index < bodyDepth - 1) are NEVER consulted: per GLSL
+   * scoping a function body sees only its own scope + globals, so a free
+   * name matching a caller's param/local resolves to the global instead
+   * (in-parameter-passed-as-inout-argument-and-global: callee G reads the
+   * global `p` while caller F's param `p` is live). Frames at index >=
+   * bodyDepth are pushed for a nested call's ARG MATERIALIZATION (its body
+   * has not started — params/locals are not yet registered), so they
+   * resolve nothing either; a read of a name the inner call DECLARES but
+   * has not materialized yet refers to the current function's scope
+   * (decl-before-use ⇒ `g(x)` inside f where g declares a local x: the arg
+   * x is f's x, read while g's frame is already active — the current
+   * function's frame is found directly, no outward walk needed).
+   *
+   * Declarations use lookupLocal (locals_ only — statements.ts's sibling
+   * re-declaration path must not see frames).
    */
   resolveLocal(name: string): LocalVar | null {
-    for (let i = this.paramFrames_.length - 1; i >= 0; i--) {
-      const f = this.paramFrames_[i];
+    const cur = this.bodyDepth - 1;
+    if (cur >= 0) {
+      const f = this.paramFrames_[cur];
       const p = f.params.get(name);
       if (p) return p;
-      if (f.localNames.has(name)) return this.locals_.get(name) ?? null;
+      const l = f.locals.get(name);
+      if (l) return l;
     }
     return this.locals_.get(name) ?? null;
   }
@@ -887,17 +965,12 @@ export class CodegenEnv {
    * (Int32Array reads come back signed).
    */
   ensureDynScratch(name: string): { base: number; int: boolean; copyIn: string[]; copyOut: string[] } {
-    let lv = this.locals_.get(name);
-    if (!lv) {
-      // Frame params (inlined calls) live outside locals_ — resolve them too.
-      for (let i = this.paramFrames_.length - 1; i >= 0; i--) {
-        const p = this.paramFrames_[i].params.get(name);
-        if (p) {
-          lv = p;
-          break;
-        }
-      }
-    }
+    // Same scope rule as resolveLocal (current function's frame, then
+    // globals): the callers always pass p.local.name, so this must find the
+    // var resolveLocal produced — never a same-named global shadowed by a
+    // current-frame param/local, and never a caller frame's var (a callee
+    // body cannot see caller locals).
+    const lv = this.resolveLocal(name);
     if (!lv) throw new Error(`codegen: unknown local '${name}'`);
     if (lv.kind === 'scratch') {
       throw new Error(`codegen: '${name}' is already scratch-backed (cannot dyn-spill)`);
@@ -1101,6 +1174,12 @@ export class CodegenEnv {
       return `(${target} = ${target} ${op} ${val.v}, ${dual[0]} = ${dual[0]} ${op} ${dxv}, ${dual[1]} = ${dual[1]} ${op} ${dyv}, ${target})`;
     }
     if (op === '*') {
+      // Matrix×matrix '*=' NEVER reaches this template — the assignment
+      // emitters (statements.ts emitAssignStmt/updateString, expressions.ts
+      // emitAssign) intercept it and lower via matrixCompoundMul (matrix
+      // PRODUCT with LHS snapshot + RHS materialization; dual aware). This
+      // per-component product rule serves scalar/vector targets and mat×scalar
+      // broadcast only.
       const t = this.allocTemp();
       return `(${t} = ${val.v}, ${dual[0]} = ${dual[0]} * ${t} + ${target} * ${dxv}, ${dual[1]} = ${dual[1]} * ${t} + ${target} * ${dyv}, ${target} = ${target} * ${t}, ${target})`;
     }
@@ -1173,10 +1252,16 @@ export class CodegenEnv {
       case 'scalar':
         switch (type.base) {
           case 'float': {
-            if (Number.isInteger(v) && Number.isFinite(v)) return `${v}.0`;
+            const s = String(v);
+            // Integer-valued floats get a `.0` suffix so JS keeps them float —
+            // but never when the string form already carries an exponent:
+            // "1e+100.0" is a JS SyntaxError inside new Function, while
+            // "1e+100" alone is a valid JS numeric literal (CTS
+            // float_literal.vert / overflow_leak.vert use 1E100 literals).
+            if (Number.isInteger(v) && Number.isFinite(v) && !/[eE]/.test(s)) return `${s}.0`;
             if (v === Infinity) return 'Infinity';
             if (v === -Infinity) return '-Infinity';
-            return String(v);
+            return s;
           }
           case 'uint':
             return String(v >>> 0);

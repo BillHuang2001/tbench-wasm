@@ -206,22 +206,33 @@ function runFragment(src: string): RunResult {
 /* 3. while + do-while                                                 */
 /* ------------------------------------------------------------------ */
 
+// NOTE: WebGL 1.0 §6.26 disallows while/do-while in ESSL 1.00 shaders
+// (semantics-stmt.ts rejects them at version 100). These codegen checks
+// therefore run as ESSL 3.00 (`#version 300 es`) — where the statements are
+// legal — so the statement-lowering path stays covered.
+
 {
   const r = runVertex(
-    `void main() { float s = 0.0; int i = 0; while (i < 4) { s = s +float(i); i++; } gl_Position.x = s; }`,
+    `#version 300 es
+     void main() { float s = 0.0; int i = 0; while (i < 4) { s = s +float(i); i++; } gl_Position.x = s; }`,
+    { version: 300 },
   );
   check(r.ctx.out.position[0] === 6, `while loop: s === 6 (got ${r.ctx.out.position[0]})`);
 }
 {
   const r = runVertex(
-    `void main() { float s = 0.0; int i = 0; do { s = s +float(i); i++; } while (i < 4); gl_Position.x = s; }`,
+    `#version 300 es
+     void main() { float s = 0.0; int i = 0; do { s = s +float(i); i++; } while (i < 4); gl_Position.x = s; }`,
+    { version: 300 },
   );
   check(r.ctx.out.position[0] === 6, `do-while loop: s === 6 (got ${r.ctx.out.position[0]})`);
 }
 {
   // do-while runs its body at least once even when the cond is false.
   const r = runVertex(
-    `void main() { float s = 0.0; int i = 0; do { s = s +1.0; } while (i > 5); gl_Position.x = s; }`,
+    `#version 300 es
+     void main() { float s = 0.0; int i = 0; do { s = s +1.0; } while (i > 5); gl_Position.x = s; }`,
+    { version: 300 },
   );
   check(r.ctx.out.position[0] === 1, `do-while runs once on false cond: s === 1 (got ${r.ctx.out.position[0]})`);
 }
@@ -444,6 +455,38 @@ void main() { gl_FragColor = vec4(0.25, 0.5, 0.75, 1.0); }`,
   );
   check(r.ctx.out.position[0] === 4, `empty stmts + assign/compound-assign exprs: x === 4 (got ${r.ctx.out.position[0]})`);
 }
+
+{
+  // Empty declarators (conformance/glsl/misc/empty-declaration.html): the
+  // parser produces no VarDeclarator for the empty slot, so codegen emits
+  // nothing for it — OLD BEHAVIOR (bug): the parser rejected these.
+  const r = runVertex(
+    `void main() {
+      float;
+      float, a = 0.0;
+      gl_Position = vec4(a);
+    }`,
+  );
+  check(r.ctx.out.position[0] === 0 && r.ctx.out.position[1] === 0, `empty-declarator stmts compile+run (got [${r.ctx.out.position.slice(0, 2).join(', ')}])`);
+}
+
+{
+  // In-body precision statement (conformance/glsl/misc/
+  // ternary-operators-in-initializers.html): the statement slot lowers to an
+  // `empty` node (no-op) while the hoisted PrecisionDecl carries the
+  // semantics effect — OLD BEHAVIOR (bug): "syntax error, unexpected
+  // 'precision'" at parse time.
+  const r = runFragment(
+    `void main() {
+      precision mediump float;
+      float i = 2.0, j = (i > 1.0) ? 1.0 : 0.0;
+      gl_FragColor = vec4(0.0, j, 0.0, 1.0);
+    }`,
+  );
+  const c = r.ctx.out.color[0];
+  check(c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1, `precision-stmt fragment writes color (got [${c.join(', ')}])`);
+}
+
 {
   // Expression-only for-init with a COMPOUND-assign update.
   const r = runVertex(

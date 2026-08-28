@@ -103,6 +103,10 @@ export interface AttributeDecl {
   type: GLSLType; // element type (arrays: element)
   arraySize: number; // 1 for non-arrays
   location: number | null;
+  /** Set to true by scanUses when the VERTEX shader reads the attribute.
+   *  Inactive attributes consume no generic slots at link (native behavior)
+   *  and are omitted from getActiveAttrib/getAttribLocation. */
+  used: boolean;
 }
 
 /**
@@ -267,7 +271,9 @@ export type LinkResult = { ok: true; program: Program } | { ok: false; log: stri
  * Returns the annotated Shader on success or 1-based compile errors.
  */
 export function compileShader(source: string, opts: CompileOptions): CompileResult {
-  const pp = preprocess(source, { version: opts.version, defines: opts.defines, extensions: opts.extensions });
+  // Pass the stage through so the preprocessor defines GL_FRAGMENT_PRECISION_HIGH
+  // (=1) for FRAGMENT shaders only (see preprocessor.ts `preprocess`).
+  const pp = preprocess(source, { version: opts.version, type: opts.type, defines: opts.defines, extensions: opts.extensions });
   if (!pp.ok) return { ok: false, errors: pp.errors.slice(0, MAX_COMPILE_ERRORS) };
   const lex = tokenize(pp.tokens, pp.version);
   if (!lex.ok) return { ok: false, errors: lex.errors.slice(0, MAX_COMPILE_ERRORS) };

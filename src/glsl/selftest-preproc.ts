@@ -5,11 +5,13 @@
  *
  * Verifies: object/function-like macros, `#` stringize, `##` paste, argument
  * pre-expansion, recursion suppression, predefined macros, #if arithmetic /
- * defined() / short-circuit, conditional nesting and skipped-branch token
- * absorption, #version rules, #extension validation (incl. `all`, last-wins),
- * #error, #line remapping, unterminated comment/#if, redefinition errors,
- * backslash-newline splicing and comment stripping. Prints "OK" and exits 0
- * on success.
+ * defined() / short-circuit / undefined-identifier errors, conditional
+ * nesting and skipped-branch token absorption (incl. ignored malformed
+ * directives in inactive groups), #version rules (single occurrence),
+ * #extension validation (incl. `all`, last-wins), #error, #line remapping
+ * (1-arg in ESSL 1.00; optional integer source-string-number in 3.00),
+ * unterminated comment/#if, redefinition errors, backslash-newline splicing
+ * and comment stripping. Prints "OK" and exits 0 on success.
  */
 import { preprocess } from './preprocessor.js';
 import type { PreprocessResult } from './preprocessor.js';
@@ -27,12 +29,13 @@ function check(cond: boolean, msg: string): void {
 
 interface Opts {
   version?: 100 | 300;
+  type?: 'VERTEX' | 'FRAGMENT';
   defines?: Record<string, string>;
   extensions?: Set<string>;
 }
 
 function run(src: string, opts?: Opts): PreprocessResult {
-  return preprocess(src, { version: opts?.version ?? 100, defines: opts?.defines, extensions: opts?.extensions });
+  return preprocess(src, { version: opts?.version ?? 100, type: opts?.type, defines: opts?.defines, extensions: opts?.extensions });
 }
 
 function texts(src: string, opts?: Opts): string[] {
@@ -164,11 +167,17 @@ expect('#ifdef GL_ES\nok\n#endif', ['ok']);
 expect('#ifndef GL_ES\nno\n#else\nok\n#endif', ['ok']);
 expect('#define FOO\n#ifdef FOO\nok\n#endif', ['ok']);
 expect('#undef FOO\n#ifdef FOO\nno\n#else\nok\n#endif', ['ok']);
-// defined() / defined NAME; undefined identifiers are 0.
+// defined() / defined NAME.
 expect('#if defined(FOO)\nno\n#else\nok\n#endif', ['ok']);
 expect('#define FOO 1\n#if defined FOO\nok\n#endif', ['ok']);
 expect('#if !defined(FOO)\nok\n#endif', ['ok']);
-expect('#if UNDEFINED_IDENT == 0\nok\n#endif', ['ok']);
+// GLSL ES §3.4: an identifier remaining after macro expansion that is not a
+// defined macro is UNDEFINED, and undefined identifiers in #if are an ERROR
+// (unlike C, which substitutes 0). CTS:
+// conformance/glsl/misc/shader-with-undefined-preprocessor-symbol.frag.html
+// expects this shader to FAIL to compile.
+expectErr('#if UNDEFINED_IDENT == 0\nok\n#endif', 'invalid expression in #if');
+expectErr('#if UNDEFINED_IDENT\nno\n#else\nok\n#endif', 'invalid expression in #if');
 // Short-circuit: unevaluated branches must not error.
 expect('#if 0 && UNDEFINED_IDENT\nno\n#endif\nok', ['ok']);
 expect('#if 1 || UNDEFINED_IDENT\nok\n#endif', ['ok']);
@@ -184,6 +193,15 @@ expect('#if __VERSION__ == 100\nok\n#endif', ['ok']);
 // Skipped branches: tokens consumed, macros NOT defined, no output.
 expect('#if 0\n#define BAD 1\nBAD\n#error hidden\n#endif\nok', ['ok']);
 expect('#if 1\nok\n#if 0\nBAD\n#endif\n#endif', ['ok']);
+// Directive lines inside an inactive group are ignored ENTIRELY, even when
+// malformed (`#$`, `#"`, non-ASCII names) — the preprocessor does not parse
+// directives in skipped groups (GLSL ES §3.4). CTS:
+// conformance/glsl/bugs/character-set.html ('in ifdef-out #preproc').
+expect('#if 0\n#$ \n#" \n#一些注释 \n#endif\nok', ['ok']);
+expect('#if 0\n##line 42 "foo.glsl"\n#endif\nok', ['ok']);
+// In an ACTIVE group the same malformed directives are errors.
+expectErr('#$ \nfoo', 'invalid directive');
+expectErr('#" \nfoo', 'invalid directive');
 // Malformed conditionals.
 expectErr('#if 1\nno', 'unterminated #if');
 expectErr('#endif', '#endif without #if');
@@ -208,9 +226,11 @@ expectErr('#version 300\nfoo', 'invalid #version');
 expectErr('#version 100 es\nfoo', 'invalid #version');
 expectErr('foo\n#version 100', 'must appear before any other content');
 expectErr('#define X 1\n#version 100', 'must appear before any other content');
-// A second #version is accepted (last one wins). GLSL ES 3.00 says only one
-// #version may occur in a shader, but the preprocessor does not enforce it.
-expect('#version 100\n#version 300 es\nfoo', ['foo'], { version: 300 });
+// At most one #version directive may appear in a shader; a duplicate is an
+// error. CTS: conformance/ogles/GL/build/build_025_to_032.html
+// (DuplicateVersion1_V100 expects compile failure).
+expectErr('#version 100\n#version 100\nfoo', 'duplicate #version');
+expectErr('#version 100\n#version 300 es\nfoo', 'duplicate #version', { version: 300 });
 // Comments/whitespace before #version are fine.
 expect('// comment\n/* block */\n#version 100\nfoo', ['foo']);
 
@@ -294,6 +314,15 @@ expectLine('#line 100\nfoo\nbar', 100);
 // __LINE__ after #line.
 expect('#line 7\n#if __LINE__ == 7\nok\n#endif', ['ok']);
 expectErr('#line x\nfoo', 'invalid #line');
+// GLSL ES 1.00 has no source-string form: #line takes exactly ONE argument.
+// CTS: conformance/glsl/bugs/character-set.html (`#line 42 "foo.glsl"` must
+// fail to compile). GLSL ES 3.00 adds `#line line source-string-number`
+// (integer second argument); a string second argument stays an error.
+expectErr('#line 42 "foo.glsl"\nfoo', 'invalid #line');
+expectErr('#line 42 5\nfoo', 'invalid #line');
+expect('#version 300 es\n#line 42 5\nfoo', ['foo'], { version: 300 });
+expectErr('#version 300 es\n#line 42 "foo.glsl"\nfoo', 'invalid #line', { version: 300 });
+expectErr('#version 300 es\n#line 42 5 6\nfoo', 'invalid #line', { version: 300 });
 
 /* ------------------------------------------------------------------ */
 /* Comments and splicing                                               */
@@ -338,6 +367,29 @@ expect('FOO', ['1', '+', '2'], { defines: { FOO: '1 + 2' } });
 expect('#ifdef FOO\nok\n#endif', ['ok'], { defines: { FOO: '1' } });
 // Defines are overridden by explicit #define.
 expect('#undef FOO\nFOO', ['FOO'], { defines: { FOO: '1' } });
+
+/* ------------------------------------------------------------------ */
+/* GL_FRAGMENT_PRECISION_HIGH (stage-gated predefined macro)            */
+/* ------------------------------------------------------------------ */
+
+// Pinned behavior (CTS conformance/glsl/misc/shader-precision-format-obeyed.html):
+// the macro is defined to 1 in FRAGMENT shaders — gl/ reports HIGH_FLOAT/
+// HIGH_INT fragment support via getShaderPrecisionFormat, so the spec requires
+// the macro (GLSL ES 1.00 §4.5.3 / 3.00 §3.9.5) — and is UNDEFINED in VERTEX
+// shaders. compileShader plumbed the stage through PreprocessOptions.type
+// (preprocessor.ts `preprocess`); stage-less preprocess() callers get the
+// old (undefined) behavior.
+expect('#ifdef GL_FRAGMENT_PRECISION_HIGH\nok\n#endif', ['ok'], { type: 'FRAGMENT' });
+expect('#ifndef GL_FRAGMENT_PRECISION_HIGH\nok\n#endif', ['ok'], { type: 'VERTEX' });
+expect('#if GL_FRAGMENT_PRECISION_HIGH == 1\nok\n#endif', ['ok'], { type: 'FRAGMENT' });
+// Expansion yields the literal 1.
+expect('GL_FRAGMENT_PRECISION_HIGH', ['1'], { type: 'FRAGMENT' });
+// No stage → old behavior: macro stays undefined.
+expect('#ifndef GL_FRAGMENT_PRECISION_HIGH\nok\n#endif', ['ok']);
+// 3.00 fragment shaders get the macro too (highp is core there).
+expect('#ifdef GL_FRAGMENT_PRECISION_HIGH\nok\n#endif', ['ok'], { version: 300, type: 'FRAGMENT' });
+// User defines still win (injected after the predefined macro).
+expect('GL_FRAGMENT_PRECISION_HIGH', ['2'], { type: 'FRAGMENT', defines: { GL_FRAGMENT_PRECISION_HIGH: '2' } });
 
 /* ------------------------------------------------------------------ */
 /* Report + exit                                                       */

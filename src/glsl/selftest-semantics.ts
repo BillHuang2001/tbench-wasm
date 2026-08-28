@@ -26,6 +26,10 @@
  *    paths) incl. the #extension-in-source + opts.extensions contract;
  *  - version rules (#version 300 es in a 100 context, uint in 100,
  *    attribute/varying keywords in 300);
+ *  - standalone `invariant <name>;` rules (GLSL ES 1.00 §4.6.1: must FOLLOW
+ *    the variable's declaration; only the invariant-capable builtins
+ *    gl_Position/gl_PointSize/gl_FragCoord/gl_PointCoord/gl_FragColor/
+ *    gl_FragData may be named — gl_FrontFacing and unknown names are errors);
  *  - compileShader result shape (error lines, infoLog '', extensions set,
  *    version/type) and the direct analyze() entry.
  */
@@ -108,12 +112,16 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
 /* ------------------------------------------------------------------ */
 
 {
-  const info = okInfo('attribute vec4 p; attribute vec2 q[3]; uniform mat4 m; void main() { gl_Position = p; }', 100, 'VERTEX');
+  // 1.00 attributes must be scalar: `attribute vec2 q;` (attribute ARRAYS are
+  // an error in ESSL 1.00 — GLSL ES 1.00 Appendix A §5, CTS
+  // shader-with-attrib-array.vert.html + ogles build attribute2_vert; version
+  // 300 is unaffected, see info2 below).
+  const info = okInfo('attribute vec4 p; attribute vec2 q; uniform mat4 m; void main() { gl_Position = p; }', 100, 'VERTEX');
   check(info.attributes.length === 2, 'two attributes in declaration order');
   check(info.attributes[0].name === 'p' && info.attributes[0].arraySize === 1 && info.attributes[0].location === null, 'attr p: name/arraySize/location null');
   checkType(info.attributes[0].type, V4, 'attr p element type');
-  check(info.attributes[1].name === 'q' && info.attributes[1].arraySize === 3 && info.attributes[1].location === null, 'array attr q: bare name, arraySize 3');
-  checkType(info.attributes[1].type, V2, 'array attr q element type');
+  check(info.attributes[1].name === 'q' && info.attributes[1].arraySize === 1 && info.attributes[1].location === null, 'attr q: bare name, arraySize 1');
+  checkType(info.attributes[1].type, V2, 'attr q element type');
   check(info.uniforms.length === 1 && info.uniforms[0].name === 'm', 'uniform m collected');
   checkType(info.uniforms[0].type, M4, 'uniform m full type');
   check(info.uniforms[0].precision === 'highp', 'vertex float uniform defaults highp');
@@ -127,8 +135,8 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   checkType(info2.attributes[1].type, V3, '3.00 array attribute element type');
 
   okInfo('#version 300 es\nin ivec3 v;\nvoid main() {}', 300, 'VERTEX'); // integral vertex input OK in 3.00
-  okInfo('attribute vec2 q[3]; void main() { gl_Position = q[0].xyxy; }', 100, 'VERTEX'); // 1.00 attribute arrays OK
-
+  const eArr = errs('attribute vec2 q[3]; void main() { gl_Position = q[0].xyxy; }', 100, 'VERTEX');
+  check(hasErr(eArr, 1, "'q' : attribute variables cannot be arrays in GLSL ES 1.00"), '1.00 attribute array → error');
   const e1 = errs('attribute vec4 p; void main() { gl_FragColor = p; }', 100, 'FRAGMENT');
   check(hasErr(e1, 1, "'attribute' : only valid in vertex shaders"), 'attribute in fragment → stage error line 1');
 
@@ -614,6 +622,142 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   check(m6.length > 0, 'radians(bool): neither user overload nor builtin matches → error');
   // Fragment variant of the ogles CorrectBuiltInOveride pattern.
   okInfo('precision mediump float;\nint radians(int x) { return x; }\nvoid main() { int f = 45; f = radians(f); gl_FragColor = vec4(1.0); }', 100, 'FRAGMENT');
+}
+
+/* ------------------------------------------------------------------ */
+/* 14. Standalone `invariant <name>;` declarations                     */
+/* ------------------------------------------------------------------ */
+
+{
+  // GLSL ES 1.00 §4.6.1 / 3.00 §4.6: the short-form `invariant <name>;`
+  // statement must FOLLOW the declaration of the named variable (CTS
+  // shaders-with-invariance cases 7/8). Wrong order → compile error at the
+  // invariant statement's line; correct order compiles. Pins the semantics
+  // case in analyzeProgram's global pre-pass (global.lookup order check).
+  const w1 = errs(
+    'invariant v_varying;\nvarying vec4 v_varying;\nvoid main() { gl_Position = v_varying; }',
+    100,
+    'VERTEX',
+  );
+  check(hasErr(w1, 1, "'v_varying' : invariant declaration must follow the variable declaration"), '1.00 VS wrong-order invariant → error line 1');
+  const w2 = errs(
+    'precision mediump float;\ninvariant v_varying;\nvarying vec4 v_varying;\nvoid main() { gl_FragColor = v_varying; }',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(w2, 2, "'v_varying' : invariant declaration must follow the variable declaration"), '1.00 FS wrong-order invariant → error line 2');
+  const w3 = errs(
+    '#version 300 es\ninvariant v;\nout vec4 v;\nvoid main() { v = vec4(1.0); }',
+    300,
+    'VERTEX',
+  );
+  check(hasErr(w3, 2, "'v' : invariant declaration must follow the variable declaration"), '3.00 wrong-order invariant → error line 2');
+  // Unknown name (no declaration at all) is the same wrong-order error.
+  const w4 = errs('invariant nope;\nvoid main() { gl_Position = vec4(1.0); }', 100, 'VERTEX');
+  check(hasErr(w4, 1, "'nope' : invariant declaration must follow the variable declaration"), 'invariant on undeclared name → error line 1');
+
+  // Correct order: `varying vec4 v_varying;` THEN `invariant v_varying;`
+  // (CTS shaders-with-invariance cases 5/6, invariant-does-not-leak case 1).
+  okInfo('varying vec4 v_varying;\ninvariant v_varying;\nvoid main() { gl_Position = v_varying; }', 100, 'VERTEX');
+  okInfo('precision mediump float;\nvarying vec4 v_varying;\ninvariant v_varying;\nvoid main() { gl_FragColor = v_varying; }', 100, 'FRAGMENT');
+
+  // Invariant-capable builtins (CTS shaders-with-invariance cases 9-14 +
+  // fragcolor-fragdata-invariant.html): gl_Position/gl_PointSize (VS),
+  // gl_FragCoord/gl_PointCoord (FS), gl_FragColor/gl_FragData (FS outputs).
+  okInfo('invariant gl_Position;\nvoid main() { gl_Position = vec4(0.0); }', 100, 'VERTEX');
+  okInfo('invariant gl_PointSize;\nvoid main() { gl_PointSize = 1.0; gl_Position = vec4(0.0); }', 100, 'VERTEX');
+  okInfo('precision mediump float;\ninvariant gl_FragCoord;\nvoid main() { gl_FragColor = gl_FragCoord; }', 100, 'FRAGMENT');
+  okInfo('precision mediump float;\ninvariant gl_PointCoord;\nvoid main() { gl_FragColor = vec4(gl_PointCoord, 0.0, 0.0); }', 100, 'FRAGMENT');
+  okInfo('precision mediump float;\ninvariant gl_FragColor;\ninvariant gl_FragData;\nvoid main() { gl_FragColor = vec4(1.0); }', 100, 'FRAGMENT');
+  okInfo('#version 300 es\ninvariant gl_Position;\nvoid main() { gl_Position = vec4(1.0); }', 300, 'VERTEX');
+
+  // Other builtins cannot be invariant (CTS shaders-with-invariance case 16:
+  // `invariant gl_FrontFacing;` must fail compilation).
+  const b1 = errs(
+    'precision mediump float;\ninvariant gl_FrontFacing;\nvoid main() { gl_FragColor = gl_FrontFacing ? vec4(1.0) : vec4(0.0, 0.0, 0.0, 1.0); }',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(b1, 2, "'gl_FrontFacing' : invariant cannot be applied to this built-in variable"), 'invariant gl_FrontFacing → error line 2');
+  const b2 = errs('precision mediump float;\ninvariant gl_FragDepthEXT;\nvoid main() { gl_FragColor = vec4(1.0); }', 100, 'FRAGMENT', ['GL_EXT_frag_depth']);
+  check(b2.length > 0, 'invariant on other builtin (gl_FragDepthEXT) → error');
+}
+
+/* ------------------------------------------------------------------ */
+/* 15. Scope: for/function-body no-new-scope + struct-with-array rules */
+/* ------------------------------------------------------------------ */
+
+{
+  // GLSL ES §4.2.2: the for body is a statement-no-new-scope — the for-init
+  // declaration's scope extends over the body, so a braced body does NOT push
+  // a scope; `for (int i...) { int i; }` is a SAME-SCOPE redefinition (CTS
+  // shader-with-for-scoping.html). Blocks nested INSIDE the body still push
+  // their own scopes (shadowing legal).
+  const f1 = errs(
+    'precision mediump float;\nvoid main() {\n  int k = 0;\n  for (int i = 0; i < 10; i++) { int i = k+i; }\n  gl_FragColor = vec4(float(k));\n}',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(f1, 4, "'i' : redefinition"), 'for body redeclares for-init i → redefinition error line 4');
+  okInfo(
+    'precision mediump float;\nvoid main() {\n  int k = 0;\n  for (int i = 0; i < 10; i++) { { int i = k+i; } }\n  gl_FragColor = vec4(float(k));\n}',
+    100,
+    'FRAGMENT',
+  );
+
+  // Params + body form a SINGLE scope (CTS shader-with-functional-scoping.
+  // html): a body-level redeclaration of a param is a redefinition; a nested
+  // block shadowing a param is legal.
+  const f2 = errs(
+    'precision mediump float;\nint f(int k) {\n  int k = k + 3;\n  return k;\n}\nvoid main() { gl_FragColor = vec4(1.0); }',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(f2, 3, "'k' : redefinition"), 'function body redeclares param k → redefinition error line 3');
+  okInfo(
+    'precision mediump float;\nint f(int k) {\n  { int k = k + 3; }\n  return k;\n}\nvoid main() { gl_FragColor = vec4(1.0); }',
+    100,
+    'FRAGMENT',
+  );
+  okInfo(
+    '#version 300 es\nint f(int k) {\n  { int k = k + 3; }\n  return k;\n}\nvoid main() { }',
+    300,
+    'FRAGMENT',
+  );
+
+  // Structs containing arrays are not assignable / not comparable (GLSL ES
+  // 1.00 §5.7/§5.8; CTS struct-assign.html / struct-equals.html) — the rule
+  // is version-independent (100 AND 300).
+  const s1 = errs(
+    'precision mediump float;\nstruct S { float f[3]; };\nvoid main() {\n  S a, b;\n  a = b;\n  gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n}',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(s1, 5, "'=' : cannot assign a struct containing an array"), 'struct-with-array assignment → error line 5');
+  const s2 = errs(
+    'precision mediump float;\nstruct S { float f[3]; };\nvoid main() {\n  S a, b;\n  bool c = (a == b);\n  gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n}',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(s2, 5, "'==' : cannot compare structs containing an array"), 'struct-with-array == → error line 5');
+  const s3 = errs(
+    'precision mediump float;\nstruct S { float f[3]; };\nvoid main() {\n  S a, b;\n  bool c = (a != b);\n  gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n}',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(s3, 5, "'!=' : cannot compare structs containing an array"), 'struct-with-array != → error line 5');
+  const s4 = errs(
+    '#version 300 es\nstruct S { float f[3]; };\nout vec4 o;\nvoid main() {\n  S a, b;\n  a = b;\n  o = vec4(1.0);\n}',
+    300,
+    'FRAGMENT',
+  );
+  check(hasErr(s4, 6, "'=' : cannot assign a struct containing an array"), '3.00 struct-with-array assignment → error line 6');
+  const s5 = errs(
+    '#version 300 es\nstruct S { float f[3]; };\nout vec4 o;\nvoid main() {\n  S a, b;\n  bool c = (a == b);\n  o = vec4(1.0);\n}',
+    300,
+    'FRAGMENT',
+  );
+  check(hasErr(s5, 6, "'==' : cannot compare structs containing an array"), '3.00 struct-with-array == → error line 6');
 }
 
 /* ------------------------------------------------------------------ */

@@ -458,7 +458,7 @@ function analyzeIdentifier(e: IdentifierExpr, scope: Scope, ctx: SemContext): vo
   switch (sym.kind) {
     case 'var':
       e.resolvedType = sym.type;
-      e.lvalue = sym.storage !== 'const';
+      e.lvalue = varIsWritable(sym, ctx, scope);
       if (sym.constValue !== undefined) e.constValue = sym.constValue;
       // GLOBAL const AGGREGATES have no codegen storage — every read must
       // fold at semantics. Mutate the identifier node in place into an
@@ -493,6 +493,73 @@ function analyzeIdentifier(e: IdentifierExpr, scope: Scope, ctx: SemContext): vo
     case 'struct':
       ctx.error(e.loc.line, `'${e.name}' : type name used as a value`);
       return;
+  }
+}
+
+/**
+ * Writability of a variable symbol as an lvalue (assignment / ++ / -- / out
+ * or inout argument). GLSL ES 1.00 §4.3.3/§4.3.5/§4.3.6: uniforms, attributes
+ * and fragment-stage varyings are read-only; `const` variables are read-only.
+ * ES 3.00 `in` GLOBAL inputs (vertex attributes / fragment varyings) are
+ * read-only, but `in` PARAMETERS are writable local copies (GLSL ES §6.1.1 —
+ * the ogles CorrectFull_vert writes to plain `in` params). Vertex-stage
+ * varyings (1.00) and ES 3.00 `out` variables (vertex varying / fragment
+ * output) ARE writable. Storage `undefined` = plain variable. Scope
+ * distinguishes params (non-global) from global `in` inputs.
+ */
+function varIsWritable(sym: VarSymbol, ctx: SemContext, scope: Scope): boolean {
+  switch (sym.storage) {
+    case undefined:
+      return true;
+    case 'const':
+    case 'uniform':
+    case 'attribute':
+      return false;
+    case 'in':
+      return scope.parent !== null; // param copy (writable) vs global input (read-only)
+    case 'varying':
+      return ctx.stage === 'VERTEX';
+    case 'out':
+      return true;
+    default:
+      return true; // 'inout' never appears on variables
+  }
+}
+
+/**
+ * True when a (possibly nested/arrayed) struct type contains a sampler
+ * member — sampler-typed struct members make the struct non-assignable and
+ * non-comparable (GLSL ES: samplers may only be uniform variables/params).
+ */
+function containsSampler(t: GLSLType): boolean {
+  switch (t.kind) {
+    case 'sampler':
+      return true;
+    case 'struct':
+      return t.members.some((m) => containsSampler(m.type));
+    case 'array':
+      return containsSampler(t.element);
+    default:
+      return false;
+  }
+}
+
+/**
+ * True when a (possibly nested) type contains an array member — GLSL ES 1.00
+ * §5.7/§5.8: "The assignment and equality operators are not defined for
+ * structures that contain arrays or sampler types"; "structures containing
+ * arrays ... may not be used as the target of an assignment". The CTS
+ * struct-assign/struct-equals pages require struct-with-array assignment and
+ * comparison to fail to compile.
+ */
+function containsArray(t: GLSLType): boolean {
+  switch (t.kind) {
+    case 'array':
+      return true;
+    case 'struct':
+      return t.members.some((m) => containsArray(m.type));
+    default:
+      return false;
   }
 }
 
@@ -544,8 +611,11 @@ function analyzeUnary(e: UnaryExpr, scope: Scope, ctx: SemContext): void {
         ctx.error(e.loc.line, `'${e.op}' : operand must be an lvalue`);
         return;
       }
-      if (!isNumericScalarOrVector(t)) {
-        ctx.error(e.loc.line, `'${e.op}' : operand must be a numeric scalar or vector`);
+      // GLSL ES 1.00 §5.9: ++/-- apply to numeric scalars, VECTORS and
+      // MATRICES (the ogles CorrectFull_vert shader increments vec2/mat2 —
+      // the ES 1.00 spec added vector/matrix increments over desktop GLSL).
+      if (!isNumericScalarOrVector(t) && t.kind !== 'matrix') {
+        ctx.error(e.loc.line, `'${e.op}' : operand must be a numeric scalar, vector or matrix`);
         return;
       }
       e.resolvedType = t;
@@ -625,7 +695,20 @@ function analyzeBinary(e: BinaryExpr, scope: Scope, ctx: SemContext): void {
       } else if (lt.kind === 'matrix' && rt.kind === 'matrix' && lt.cols === rt.cols && lt.rows === rt.rows) ok = true;
       // GLSL ES 1.00 §5.9 / ES 3.00 §5.9: equality is defined for STRUCTS of
       // the same type (result: one bool); ARRAYS are never comparable.
-      else if (lt.kind === 'struct' && rt.kind === 'struct') ok = typeEquals(lt, rt);
+      // Structs containing a sampler are NOT comparable (samplers may not be
+      // struct members per §4.1.7 — the CTS struct-equals page requires the
+      // comparison to fail to compile).
+      else if (lt.kind === 'struct' && rt.kind === 'struct') {
+        if (containsSampler(lt)) {
+          ctx.error(e.loc.line, `'${e.op}' : cannot compare structs containing a sampler`);
+          return;
+        }
+        if (containsArray(lt)) {
+          ctx.error(e.loc.line, `'${e.op}' : cannot compare structs containing an array`);
+          return;
+        }
+        ok = typeEquals(lt, rt);
+      }
       if (!ok) {
         ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(lt)}' and '${typeName(rt)}' cannot be compared`);
         return;
@@ -707,6 +790,18 @@ function analyzeAssign(e: AssignExpr, scope: Scope, ctx: SemContext): void {
   if (e.op === '=') {
     if (!convertible(vt, tt, ctx.version)) {
       ctx.error(e.value.loc.line, `cannot convert from '${typeName(vt)}' to '${typeName(tt)}'`);
+      return;
+    }
+    // GLSL ES: structs containing a sampler or an ARRAY cannot be assigned
+    // (samplers may not be struct members; arrays may not be assignment
+    // targets — spec §5.7/§5.8; the CTS struct-assign page requires both to
+    // fail to compile).
+    if (containsSampler(tt)) {
+      ctx.error(e.loc.line, `'=' : cannot assign a struct containing a sampler`);
+      return;
+    }
+    if (containsArray(tt)) {
+      ctx.error(e.loc.line, `'=' : cannot assign a struct containing an array`);
       return;
     }
     e.resolvedType = tt;
@@ -1153,7 +1248,11 @@ function pickBest<T extends { params: GLSLType[]; ret: GLSLType }>(
 }
 
 function analyzeUserCall(e: CallExpr, sym: FnSymbol, ctx: SemContext): void {
-  const sigs = sym.siblings.map((s) => ({ params: s.params.map((p) => p.type), ret: s.retType }));
+  const sigs = sym.siblings.map((s) => ({
+    params: s.params.map((p) => p.type),
+    storage: s.params.map((p) => p.storage),
+    ret: s.retType,
+  }));
   const best = pickBest(sigs, e.args, ctx, sym.name, e.loc.line);
   if (best === null) {
     if (ctx.errors.length === 0 || !ctx.errors[ctx.errors.length - 1].message.includes('ambiguous')) {
@@ -1161,8 +1260,23 @@ function analyzeUserCall(e: CallExpr, sym: FnSymbol, ctx: SemContext): void {
     }
     return;
   }
+  // GLSL ES §6.1.1: `out`/`inout` arguments are written by the callee — they
+  // must be writable lvalues. Uniforms/attributes/fragment varyings/consts
+  // are read-only (their identifiers are not lvalues), so passing one here is
+  // an error (ogles build function4: `function(uniformInt)` with `out int i`).
+  for (let i = 0; i < e.args.length; i++) {
+    const st = best.storage[i];
+    if ((st === 'out' || st === 'inout') && e.args[i].lvalue !== true) {
+      ctx.error(e.args[i].loc.line, `'${sym.name}' : out/inout argument must be a writable lvalue`);
+      return;
+    }
+  }
   e.resolvedType = best.ret;
-  ctx.currentFunction?.calls.add(sym.name); // recursion-detection edge
+  // Recursion-detection edge keyed by the RESOLVED callee signature: calling a
+  // DIFFERENT overload of the same name is legal (`process(S1)` calling
+  // `process(S2)` — ogles CorrectFuncOverload); only a same-signature self-call
+  // (or a call cycle through distinct signatures) is recursion.
+  ctx.currentFunction?.calls.add(sym.siblings[sigs.indexOf(best)]);
 }
 
 function analyzeBuiltinCall(e: CallExpr, name: string, ctx: SemContext): void {
@@ -1261,7 +1375,10 @@ function analyzeHybridCall(e: CallExpr, sym: FnSymbol, ctx: SemContext): void {
   }
   e.resolvedType = best.ret;
   if (best.user) {
-    ctx.currentFunction?.calls.add(name); // recursion-detection edge
+    // Recursion-detection edge keyed by the RESOLVED user overload (a call to
+    // a different overload of the same name is not a self-edge).
+    const userSigs = sym.siblings.filter((s) => !s.builtin);
+    ctx.currentFunction?.calls.add(userSigs[userCands.indexOf(best)]);
   } else {
     e.constValue = foldBuiltin(name, best.ret, e.args);
   }

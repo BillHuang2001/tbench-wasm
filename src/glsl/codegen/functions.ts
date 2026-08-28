@@ -39,18 +39,34 @@
  * (env.pushParamFrame) holding per-call-site LocalVars (unique JS names
  * `<name>$c<N>` — `$` is not a GLSL identifier char, so they can never
  * collide with GLSL-derived names or temps) plus the function's local names
- * (pre-scanned from the body). env.resolveLocal consults the frames
- * top-down, so same-named params/locals of nested calls never collide
- * (locals_ alone can hold only ONE entry per GLSL name).
+ * (pre-scanned from the body). env.resolveLocal consults the CURRENT
+ * function's frame (env.bodyDepth - 1), so same-named params/locals of
+ * nested calls never collide (locals_ alone can hold only ONE entry per
+ * GLSL name), while CALLER frames stay invisible to the inlined body:
+ * a callee body sees only its own scope + globals, exactly as GLSL scoping
+ * requires (in-parameter-passed-as-inout-argument-and-global — a free name
+ * matching the caller's param must resolve to the global). Arg
+ * materialization runs BEFORE the body (bodyDepth not yet incremented), so
+ * the args of a nested call resolve in the CALLER's scope, where they
+ * belong.
+ *
+ * The function's OWN body locals get the SAME per-call-site treatment
+ * (env.frameLocal, consulted by statements.ts's emitDeclStmt BEFORE the
+ * locals_ reuse path): the first declaration of each local inside the
+ * inlined body materializes it through makeParamLocal with the call site's
+ * `<name>$c<N>` suffix, so a callee local can never alias a caller's
+ * same-named local (ogles functions pages — without this, the shared
+ * locals_ registration made the callee's `var` shadow the caller's values
+ * via IIFE hoisting) and nested same-named locals never share scratch.
+ * Sibling-scope re-declarations inside one body reuse the frame's var.
  *
  * KNOWN LIMITATIONS (reported):
- * - Same-named LOCALS of different types in different functions: statements.ts
- *   reuses the first registration (locals_ is keyed by GLSL name); a wider
- *   re-declaration throws a clear link-time error. Same-typed reuse is safe
- *   (each inline has its own IIFE var scope).
- * - Nested same-named ARRAY locals share one scratch region (silent aliasing).
+ * - A local declared in DIFFERENT sibling scopes of one inlined body with a
+ *   WIDER type than the first declaration throws a clear link-time error
+ *   (same rule as the locals_ path — the frame var keeps the first type).
  * - Call-site frames are NOT visible to statements.ts's decl-reuse path
- *   (lookupLocal stays locals_-only by design — see env.resolveLocal).
+ *   (lookupLocal stays locals_-only by design — see env.resolveLocal;
+ *   emitDeclStmt checks env.frameLocal first).
  */
 import type {
   CompoundStmt,
@@ -130,10 +146,15 @@ export function installUserFunctions(ast: TranslationUnit, env: CodegenEnv): voi
     }
     const key = best.key;
     const fn = fns.get(key)!;
-    if (stack.includes(name)) {
+    // Signature-aware recursion backstop: the stack holds the signature KEYS
+    // of in-progress inlinings, so an overload call (`process(S1)` calling
+    // `process(S2)` — different key) is NOT flagged; only a true same-signature
+    // self-call or a call cycle through signatures is (semantics rejects those
+    // at compile time — this guard is defensive).
+    if (stack.includes(key)) {
       throw new Error(`codegen: recursive call to '${name}' (semantics should reject recursion)`);
     }
-    stack.push(name);
+    stack.push(key);
     try {
       return inlineCall(fn, args, argTypes, rawArgs ?? [], env, fnLocalNames.get(key) ?? new Set(), {
         label: () => `EP_${nextLabel++}`,
@@ -360,7 +381,7 @@ function inlineCall(
       );
     }
   }
-  const frame = env.pushParamFrame();
+  const frame = env.pushParamFrame(ctx.suffix);
   try {
     for (const n of fnLocalNames) frame.localNames.add(n);
 
@@ -464,12 +485,23 @@ function inlineCall(
 
     /* ---------- 4. inlined body ---------- */
     const label = ctx.label();
-    const bodyLines = emitStatements(fn.body.body, env, {
-      retTemps,
-      retDualTemps,
-      epilogueLabel: label,
-      retType,
-    });
+    // Callee-body mode: while emitting THIS function's body, free-name
+    // resolution must see only this function's frame + globals — never the
+    // caller's frames (GLSL scoping; env.resolveLocal uses bodyDepth - 1 as
+    // the current-function frame index). Arg materialization above stays in
+    // the CALLER's scope (bodyDepth unchanged).
+    env.bodyDepth++;
+    let bodyLines: string[];
+    try {
+      bodyLines = emitStatements(fn.body.body, env, {
+        retTemps,
+        retDualTemps,
+        epilogueLabel: label,
+        retType,
+      });
+    } finally {
+      env.bodyDepth--;
+    }
 
     /* ---------- 5. write-backs (after the labeled block — a
      * `break EP_<n>` from a return lands right after `}` and still runs) ---- */

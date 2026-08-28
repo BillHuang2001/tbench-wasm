@@ -30,6 +30,10 @@
  *   9. scalar-RHS broadcast on vector/matrix lvalues: +=/-=/*=//= (and ES3
  *      %= on ivec4) with a scalar RHS — statement, expression and for-update
  *      contexts, matrix lvalues, ES 1.00 + ES 3.00, and dual mode.
+ *  10. mat×mat compound '*=' is a MATRIX PRODUCT (CTS
+ *      matrix-compound-multiply regression): CTS pattern (mat2/3/4),
+ *      distinct-values statement, aliasing `a *= a`, expression-value,
+ *      for-update, and dual mode.
  *
  * Run: npx tsx src/glsl/selftest-integration.ts
  * Prints "OK" and exits 0 on success; non-zero exit on failure.
@@ -208,7 +212,11 @@ let uboDual: Program | null = null;
   );
   const fs = compile(
     `#version 300 es
-     precision mediump float;
+     // PIN: highp must match the vertex stage's default (the VS declares no
+     // precision statement, so its default is highp). A mediump default here
+     // makes the shared struct uniform 'u' mismatch (highp vs mediump) — a
+     // link error per CTS shader-with-global-variable-precision-mismatch.html.
+     precision highp float;
      struct S { vec2 a; float b[2]; };
      in VS_OUT { vec4 c; float d; } fs;
      in float vPlain;
@@ -261,8 +269,17 @@ let uboDual: Program | null = null;
 
     /* Uniforms: write via uniformMap (the contract gl/ uses) */
     const um = p.uniformMap;
+    // NOTE (member-array contract): a struct MEMBER array reports ONE
+    // getActiveUniform entry ('<p>.m[0]', size = length) and uniformMap
+    // aliases every '<p>.m[k]' key → that same leaf. gl's getUniformLocation
+    // derives the element from the QUERY name ('u[0].b[1]' → elem 1) and
+    // writes at location + elem*stride — emulate that here (b is float[2],
+    // scalar-array stride 1).
     const setF = (key: string, v: number[]) => {
-      const loc = um.get(key)!.location;
+      const info = um.get(key)!;
+      const m = /\[(\d+)\]$/.exec(key);
+      const elem = m !== null && info.size > 1 ? parseInt(m[1], 10) : 0;
+      const loc = info.location + elem;
       for (let i = 0; i < v.length; i++) p.floatStore[loc + i] = v[i];
     };
     setF('u[0].a', [10, 20]);
@@ -528,6 +545,33 @@ let uboDual: Program | null = null;
     `recursion → compile error (got ${JSON.stringify(rRec.ok ? 'ok' : rRec.errors)})`,
   );
 
+  // (b2) calling a DIFFERENT overload of the same name is NOT recursion (ogles
+  // CorrectFuncOverload_vert: `process(S1)` calls `process(S2)`). Compiles,
+  // LINKS and runs through codegen — the inliner's recursion backstop must be
+  // signature-aware too, or link would fail with "codegen: recursive call".
+  {
+    const vsOvl = compile(
+      `struct S2 { float f; };
+       struct S1 { float f; S2 s2; };
+       float process(S1 s1) { return s1.f + process(s1.s2); }
+       float process(S2 s2) { return s2.f; }
+       void main() {
+         S1 s1 = S1(1.0, S2(1.0));
+         gl_Position = vec4(process(s1), 0.0, 0.0, 1.0);
+       }`,
+      'VERTEX',
+      100,
+    );
+    const lOvl = linkProgram(vsOvl, fs);
+    check(lOvl.ok, `overload cross-call links (${lOvl.ok ? '' : lOvl.log})`);
+    if (lOvl.ok) {
+      const vctx = vertexCtx(lOvl.program);
+      lOvl.program.vertex.run(vctx);
+      // process(S1(1.0, S2(1.0))) = 1.0 + process(S2(1.0)) = 2.0 (inlined).
+      near(vctx.out.position[0], 2, `overload cross-call vertex result x (inlined process(S1)→process(S2))`);
+      near(vctx.out.position[1], 0, `overload cross-call vertex result y`);
+    }
+  }
   // (c) gl_FragColor + gl_FragData both written → COMPILE error
   const rBoth = compileErr(
     `#extension GL_EXT_draw_buffers : require
@@ -927,21 +971,25 @@ let uboDual: Program | null = null;
       void main() { int m = 5; int r = twice(m++); gl_Position = vec4(float(r), float(m), 0.0, 1.0); }`);
     check(pos[0] === 10 && pos[1] === 6, `twice(m++): r=10, m=6 (got ${pos[0]}, ${pos[1]})`);
   }
-  // Postfix in loop conditions (while + do-while bodies).
+  // Postfix in loop conditions (while + do-while bodies). NOTE: WebGL 1.0
+  // §6.26 disallows while/do-while in ESSL 1.00 (semantics-stmt.ts), so these
+  // run as ESSL 3.00 to keep covering the postfix-in-condition lowering.
   {
-    const pos = runVertexPos(`void main() {
-      int s = 0; int i = 0;
-      while (i++ < 4) s += i;
-      gl_Position = vec4(float(s), float(i), 0.0, 1.0);
-    }`);
+    const pos = runVertexPos(`#version 300 es
+      void main() {
+        int s = 0; int i = 0;
+        while (i++ < 4) s += i;
+        gl_Position = vec4(float(s), float(i), 0.0, 1.0);
+      }`, 300);
     check(pos[0] === 10 && pos[1] === 5, `while (i++ < 4): s=10, i=5 (got ${pos[0]}, ${pos[1]})`);
   }
   {
-    const pos = runVertexPos(`void main() {
-      int s = 0; int i = 0;
-      do { s += i; } while (i++ < 4);
-      gl_Position = vec4(float(s), float(i), 0.0, 1.0);
-    }`);
+    const pos = runVertexPos(`#version 300 es
+      void main() {
+        int s = 0; int i = 0;
+        do { s += i; } while (i++ < 4);
+        gl_Position = vec4(float(s), float(i), 0.0, 1.0);
+      }`, 300);
     check(pos[0] === 10 && pos[1] === 5, `do { s+=i; } while (i++ < 4): s=10, i=5 (got ${pos[0]}, ${pos[1]})`);
   }
   // Float postfix/prefix.
@@ -969,7 +1017,390 @@ let uboDual: Program | null = null;
   }
 }
 
-/* 11. Dynamic uniform-array element reads carry the FULL vecN (BUG d)*/
+/* 11. Side-effect order regressions (CTS glsl/bugs + misc pages)       */
+/* ================================================================== */
+/* - comma (sequence) expressions in declarator initializers: EVERY flat
+ *   component of an intermediate vector operand's assignment must run
+ *   (`b = vec2(0.0, 1.0)` writes b.x AND b.y — emitComma emitted only [0]
+ *   before the fix, leaving b.y unassigned → the final value read NaN).
+ *   Page: conformance/glsl/misc/expression-list-in-declarator-initializer.
+ * - ternary: the NOT-taken arm's side effects must NOT run — before the fix
+ *   emitTernary materialized both arms eagerly, so `wrong()` in the untaken
+ *   arm of `a > 0.0 ? 1.0 : wrong()` set a global bool → black frame.
+ *   Page: conformance/glsl/bugs/sequence-operator-evaluation-order.
+ * - scalar broadcast of a COMPOUND-ASSIGNMENT subexpression: the RHS must be
+ *   evaluated ONCE — before the fix `v + (x *= 2.0)` duplicated the compound
+ *   per component, re-mutating x between components ((2, 4, 8, 16)).
+ *   Page: conformance/glsl/bugs/vector-scalar-arithmetic-inside-loop.       */
+
+{
+  // BUG 1a: comma initializer with a vec2 intermediate (a.y must be set).
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       void main() {
+         vec2 b = vec2(0.0, 0.0);
+         vec2 a = vec2(0.0, 0.0);
+         vec2 c = (b = vec2(0.0, 1.0), a = b);
+         gl_FragColor = vec4(a.x, a.y, c.x, c.y);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `comma-initializer vec2 links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [0, 1, 0, 1].forEach((e, c) => near(o[c], e, `comma-init vec2 → out[${c}]`));
+    }
+  }
+
+  // BUG 1b: same with an ivec2 intermediate (integral components).
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       void main() {
+         ivec2 b = ivec2(0, 0);
+         ivec2 a = ivec2(0, 0);
+         ivec2 c = (b = ivec2(0, 2), a = b);
+         gl_FragColor = vec4(vec2(a) / 2.0, vec2(c) / 2.0);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `comma-initializer ivec2 links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [0, 1, 0, 1].forEach((e, c) => near(o[c], e, `comma-init ivec2 → out[${c}]`));
+    }
+  }
+
+  // BUG 2a: ternary — untaken TRUE arm's side effect must not run.
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       bool correct = true;
+       float wrong() { correct = false; return 0.0; }
+       void main() {
+         float a = -0.5;
+         float green = (a++, a > 0.0 ? 1.0 : wrong());
+         gl_FragColor = vec4(0.0, correct ? green : 0.0, 0.0, 1.0);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `ternary lazy-true-arm links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [0, 1, 0, 1].forEach((e, c) => near(o[c], e, `ternary lazy true-arm → out[${c}]`));
+    }
+  }
+
+  // BUG 2b: ternary — untaken FALSE arm's side effect must not run.
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       bool correct = true;
+       float wrong() { correct = false; return 0.0; }
+       void main() {
+         float a = -0.5;
+         float green = (a++, a > 1.0 ? wrong() : 1.0);
+         gl_FragColor = vec4(0.0, correct ? green : 0.0, 0.0, 1.0);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `ternary lazy-false-arm links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [0, 1, 0, 1].forEach((e, c) => near(o[c], e, `ternary lazy false-arm → out[${c}]`));
+    }
+  }
+
+  // BUG 3a: `v + (x *= 2.0)` — compound RHS evaluated once, broadcast.
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       void main() {
+         vec4 v = vec4(0.0);
+         float x = 1.0;
+         gl_FragColor = v + (x *= 2.0);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `vector + (x *= 2.0) links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [2, 2, 2, 2].forEach((e, c) => near(o[c], e, `v + (x *= 2.0) → out[${c}]`));
+    }
+  }
+
+  // BUG 3b: `v + (x /= 2.0)` — halving variant (CTS page's 2nd fail).
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       void main() {
+         vec4 v = vec4(0.0);
+         float x = 1.0;
+         gl_FragColor = v + (x /= 2.0);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `vector + (x /= 2.0) links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [0.5, 0.5, 0.5, 0.5].forEach((e, c) => near(o[c], e, `v + (x /= 2.0) → out[${c}]`));
+    }
+  }
+
+  // BUG 3c: compound-assign broadcast of a compound RHS in EXPRESSION context
+  // (`(v += (x *= 2.0)).x` — statement-context compound assigns lower via
+  // statements.ts's own protocol, which is out of scope here).
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       void main() {
+         vec4 v = vec4(1.0);
+         float x = 1.0;
+         float r = (v += (x *= 2.0)).x;
+         gl_FragColor = vec4(r, v.y, v.z, v.w);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `(v += (x *= 2.0)).x links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [3, 3, 3, 3].forEach((e, c) => near(o[c], e, `(v += (x *= 2.0)).x → out[${c}]`));
+    }
+  }
+}
+
+/* ================================================================== */
+/* 10. mat×mat compound '*=' lowers to a MATRIX PRODUCT                */
+/* ================================================================== */
+/* Regression: CTS conformance/glsl/matrices/matrix-compound-multiply.html
+ * rendered black (3 fails — mat2/mat3/mat4 "should be green"). `a *= b` on
+ * matrices is a MATRIX PRODUCT (`a = a * b`) per GLSL, but all four
+ * compound-assign emitters lowered it COMPONENT-WISE (Hadamard): for the CTS
+ * values (a[1][1]=3, b[0][1]=2) the product is (0,6,0,0) while component-wise
+ * gives (0,0,0,0) — diff 6 → black. The fix emits the emitArith mat×mat
+ * expansion with the LHS SNAPSHOTTED into temps before any write (every
+ * output column reads ALL LHS columns — a sequential write corrupts later
+ * reads) and the RHS materialized into temps (it may ALIAS the LHS). These
+ * pins cover statement / expression / for-update contexts, aliasing, and dual
+ * mode. */
+
+{
+  // 10a. The exact CTS pattern for all three sizes: `a *= b` must equal `a * b`
+  // (green iff |a−c| < 0.01); a[0][1] pins the product value 6.
+  for (const type of ['mat2', 'mat3', 'mat4'] as const) {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       void main() {
+         ${type} a = ${type}(0.0);
+         ${type} b = ${type}(0.0);
+         a[1][1] = 3.0;
+         b[0][1] = 2.0;
+         ${type} c = a * b;
+         a *= b;
+         ${type} d = a - c;
+         float diff = length(d[0]) + length(d[1]);
+         gl_FragColor = vec4(a[0][1], diff < 0.01 ? 1.0 : 0.0, 0.0, 1.0);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `${type} *= (CTS pattern) links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      near(o[0], 6, `${type} *= → a[0][1] == 6 (matrix product)`);
+      check(o[1] === 1, `${type} *= == a * b → diff < 0.01 (green; got ${o[1]})`);
+    }
+  }
+}
+
+{
+  // 10b. Distinct full matrices, statement context — pins the ABSOLUTE product
+  // (a naive both-wrong implementation would pass a pure diff check).
+  // a = cols (1,2,3),(4,5,6),(7,8,9); b = cols (9,8,7),(6,5,4),(3,2,1);
+  // a*b = cols (90,114,138),(54,69,84),(18,24,30) — flat [90,114,138, 54,69,84, 18,24,30].
+  const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+  const fs = compile(
+    `precision mediump float;
+     void main() {
+       mat3 a = mat3(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0);
+       mat3 b = mat3(9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0);
+       mat3 c = a * b;
+       a *= b;
+       mat3 d = a - c;
+       float diff = length(d[0]) + length(d[1]) + length(d[2]);
+       gl_FragColor = vec4(a[0][0], a[1][0], a[0][1], a[1][1]) + vec4(diff);
+     }`,
+    'FRAGMENT',
+    100,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `mat3 *= distinct matrices links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const fctx = fragmentCtx(l.program);
+    l.program.fragment.run(fctx);
+    const o = fctx.out.color[0];
+    [90, 54, 114, 69].forEach((e, c) => near(o[c], e, `mat3 *= product → out[${c}]`));
+  }
+}
+
+{
+  // 10c. Aliasing: `a *= a` — the RHS IS the LHS; without RHS materialization
+  // the write expressions would read already-clobbered slots.
+  // a = cols (1,2),(3,4); a*a = cols (7,10),(15,22) — flat [7,10,15,22].
+  const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+  const fs = compile(
+    `precision mediump float;
+     void main() {
+       mat2 a = mat2(1.0, 2.0, 3.0, 4.0);
+       a *= a;
+       gl_FragColor = vec4(a[0][0], a[0][1], a[1][0], a[1][1]);
+     }`,
+    'FRAGMENT',
+    100,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `mat2 *= self (a *= a) links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const fctx = fragmentCtx(l.program);
+    l.program.fragment.run(fctx);
+    const o = fctx.out.color[0];
+    [7, 10, 15, 22].forEach((e, c) => near(o[c], e, `a *= a → out[${c}]`));
+  }
+}
+
+{
+  // 10d. Expression context (emitAssign path — the assignment's VALUE is
+  // consumed: `(a *= b)[1][1]`). a = cols (1,2),(3,4); b = swap cols (0,1),(1,0);
+  // a*b = cols (3,4),(1,2) → (a *= b)[1][1] == 2.
+  const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+  const fs = compile(
+    `precision mediump float;
+     void main() {
+       mat2 a = mat2(1.0, 2.0, 3.0, 4.0);
+       mat2 b = mat2(0.0, 1.0, 1.0, 0.0);
+       float r = (a *= b)[1][1];
+       gl_FragColor = vec4(r, a[0][0], a[0][1], a[1][0]);
+     }`,
+    'FRAGMENT',
+    100,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `mat2 *= in expression links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const fctx = fragmentCtx(l.program);
+    l.program.fragment.run(fctx);
+    const o = fctx.out.color[0];
+    [2, 3, 4, 1].forEach((e, c) => near(o[c], e, `(a *= b)[1][1] → out[${c}]`));
+  }
+}
+
+{
+  // 10e. For-update slot (updateString path): two swap-multiplies return the
+  // original matrix (1,2,3,4); the old component-wise path gave (0,4,9,0).
+  const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+  const fs = compile(
+    `precision mediump float;
+     void main() {
+       mat2 a = mat2(1.0, 2.0, 3.0, 4.0);
+       mat2 b = mat2(0.0, 1.0, 1.0, 0.0);
+       for (int i = 0; i < 2; a *= b) { i++; }
+       gl_FragColor = vec4(a[0][0], a[0][1], a[1][0], a[1][1]);
+     }`,
+    'FRAGMENT',
+    100,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `mat2 *= in for-update links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const fctx = fragmentCtx(l.program);
+    l.program.fragment.run(fctx);
+    const o = fctx.out.color[0];
+    [1, 2, 3, 4].forEach((e, c) => near(o[c], e, `a *= b ×2 in for-update → out[${c}]`));
+  }
+}
+
+{
+  // 10f. Dual mode (fragment derivatives): mat2 *= mat2 updates all three
+  // planes via the product rule. x = cols (1,2),(3,4) ddx (5,6),(7,8);
+  // y = cols (9,10),(11,12) ddx (13,14),(15,16).
+  // a = x*y = flat [39,58,47,70]; d(a) per output:
+  //   d[0] = 5*9+1*13+7*10+3*14 = 170; d[1] = 6*9+2*13+8*10+4*14 = 216;
+  //   d[3] = 6*11+2*15+8*12+4*16 = 256.
+  const vs = compile(
+    `attribute vec4 aPos;
+     varying mat2 x; varying mat2 y;
+     void main() { x = mat2(1.0); y = mat2(2.0); gl_Position = aPos; }`,
+    'VERTEX',
+    100,
+  );
+  const fs = compile(
+    `#extension GL_OES_standard_derivatives : enable
+     precision mediump float;
+     varying mat2 x; varying mat2 y;
+     void main() {
+       mat2 a = x;
+       a *= y;
+       gl_FragColor = vec4(dFdx(a[0][0]), dFdx(a[0][1]), a[1][1], dFdx(a[1][1]));
+     }`,
+    'FRAGMENT',
+    100,
+    ['GL_OES_standard_derivatives'],
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `dual mat2 *= links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    check(l.program.fragment.usesDerivatives === true, `dual mat2 *= usesDerivatives true`);
+    const fctx = fragmentCtx(l.program, [
+      { v: new Float32Array([1, 2, 3, 4]), ddx: new Float32Array([5, 6, 7, 8]), ddy: new Float32Array([0, 0, 0, 0]) },
+      { v: new Float32Array([9, 10, 11, 12]), ddx: new Float32Array([13, 14, 15, 16]), ddy: new Float32Array([0, 0, 0, 0]) },
+    ]);
+    l.program.fragment.run(fctx);
+    const o = fctx.out.color[0];
+    [170, 216, 70, 256].forEach((e, c) => near(o[c], e, `dual mat2 *= → out[${c}]`));
+  }
+}
+
+/* 12. Dynamic uniform-array element reads carry the FULL vecN (BUG d)*/
 /* ================================================================== */
 /* Regression: the linker's '[0]' dynamic-index prefix entry was
  * overwritten by the element-0 leaf entry (stride 0), so EVERY

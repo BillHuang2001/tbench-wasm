@@ -43,14 +43,14 @@
  * declaration order (matched fs inputs read the same offsets). Struct varyings
  * flatten to per-member leaves ('v.m'), each with its own (index, offset).
  */
-import type { Stmt, StructDefinition, TranslationUnit } from './ast.js';
+import type { Stmt, StructDefinition, StructMemberDecl, TranslationUnit } from './ast.js';
 import type { LinkLimits, LinkOptions, LinkResult, Shader, ShaderUses, TransformFeedbackSpec, UniformBlockDecl, UniformDecl } from './compiler.js';
 import type { AttribInfo, FragmentExecCtx, Program, TransformFeedbackVarying, UniformBlockInfo, UniformBlockMemberInfo, UniformInfo, VaryingInfo, VertexExecCtx } from './program.js';
 import { generateFragmentStage, generateVertexStage, R } from './codegen/index.js';
 import type { BlockMemberLayout, CodegenLayout, StageCodegenResult, UniformSlot, VaryingLayout } from './codegen/index.js';
 import { flatComponents, isIntegralFamily } from './codegen/env.js';
 import { isIntegral, isSampler, toGLenum, typeComponents, typeEquals, typeName } from './types.js';
-import type { GLSLType } from './types.js';
+import type { GLSLType, Precision, TypeQualifiers } from './types.js';
 
 /* ------------------------------------------------------------------ */
 /* Limits (WebGL minimums per version; gl/ passes its own via opts)    */
@@ -121,6 +121,37 @@ function slotCount(t: GLSLType): number {
       // occupy whole vec4 slots each.
       if (e.kind === 'scalar' || e.kind === 'sampler') return Math.ceil(n / 4);
       return slotCount(e) * n;
+    }
+    case 'void':
+      return 0;
+  }
+}
+
+/**
+ * Per-element rows for the API resource-limit accounting (GLSL ES 1.00
+ * Appendix A packing rules, as CTS conformance/glsl/misc/
+ * shader-uniform-packing-restrictions.html / shader-varying-packing-restrictions.html
+ * demand): a scalar/vector element occupies ONE row, a matC element C rows
+ * ("the spec says mat2 takes 4 columns, 2 rows"), structs sum their members,
+ * arrays multiply the element rows by the element count. This is the API
+ * LIMIT CHECK ONLY — it is deliberately independent of the (denser) packed
+ * storage layout in slotCount/emitType: scalar arrays pack 4-per-vec4 in the
+ * store, but the limit must still count every element (uniform float[4097]
+ * exceeds MAX_*_UNIFORM_VECTORS 4096 even though it packs into 1025 slots).
+ */
+function limitRows(t: GLSLType): number {
+  switch (t.kind) {
+    case 'scalar':
+    case 'vector':
+    case 'sampler':
+      return 1;
+    case 'matrix':
+      return t.cols;
+    case 'struct':
+      return t.members.reduce((n, m) => n + limitRows(m.type), 0);
+    case 'array': {
+      const n = t.size ?? 0;
+      return limitRows(t.element) * n;
     }
     case 'void':
       return 0;
@@ -239,13 +270,170 @@ function emitType(path: string, t: GLSLType, cursor: number, st: AllocState): { 
 
 /** One merged default-block uniform (same name in both stages). */
 interface MergedUniform {
+  /** The vertex-stage declaration when declared in both stages (the first
+   *  seen); the fragment twin is kept separately for precision/struct checks. */
   decl: UniformDecl;
+  fsDecl: UniformDecl | null;
   inVs: boolean;
   inFs: boolean;
 }
 
+/* ------------------------------------------------------------------ */
+/* Cross-stage precision + struct-identity matching                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Replay the stage's `precision` statements to get the effective default
+ * precision map (GLSL ES §4.5.3). NOTE the deliberate divergence from
+ * semantics' defaultPrecisions: semantics seeds the VERTEX int default as
+ * 'mediump', but the SPEC default is highp, and
+ * shader-with-global-variable-precision-mismatch.html depends on the spec
+ * default (VS `uniform int foo;` = highp vs FS default mediump must fail).
+ * Sampler defaults are never consulted (sampler precision is exempt from the
+ * comparison).
+ */
+function stageDefaultPrecisions(shader: Shader): Map<string, Precision> {
+  const m = new Map<string, Precision>();
+  if (shader.type === 'VERTEX') {
+    m.set('float', 'highp');
+    m.set('int', 'highp');
+  } else {
+    m.set('int', 'mediump');
+  }
+  for (const d of shader.ast.declarations) {
+    if (d.kind === 'precision-decl') m.set(d.base, d.precision);
+  }
+  return m;
+}
+
+/** Effective precision of a type: the explicit qualifier, else the default in
+ *  effect at the declaration (arrays unwrap to their element; uint shares the
+ *  int default). bool/sampler/struct → null (bool has no precision; sampler
+ *  precision is exempt from the cross-stage comparison). */
+function effectivePrecision(explicit: Precision | undefined, t: GLSLType, defaults: Map<string, Precision>): Precision | null {
+  if (explicit !== undefined) return explicit;
+  let e = t;
+  while (e.kind === 'array') e = e.element;
+  switch (e.kind) {
+    case 'scalar':
+    case 'vector':
+      return e.base === 'float' || e.base === 'int' || e.base === 'uint'
+        ? (defaults.get(e.base === 'uint' ? 'int' : e.base) ?? null)
+        : null;
+    case 'matrix':
+      return defaults.get('float') ?? null;
+    default:
+      return null; // sampler / struct / bool
+  }
+}
+
+/**
+ * Locate the definition of user struct `name` in one stage's AST (either a
+ * bare `struct S { ... };` or an inline `struct S { ... } v;` definition) and
+ * return the effective precision of each member, in declaration order, or
+ * null when the struct is not defined in that stage. Struct-member precision
+ * is NOT part of ShaderInfo (UniformDecl carries only the uniform's own
+ * precision) — the AST qualifiers + replayed defaults are the only source.
+ */
+function structMemberPrecisions(shader: Shader, structName: string): (Precision | null)[] | null {
+  const defaults = stageDefaultPrecisions(shader);
+  for (const d of shader.ast.declarations) {
+    let members: StructMemberDecl[] | null = null;
+    if (d.kind === 'struct-decl' && d.name === structName) members = d.members;
+    else if (d.kind === 'global-var-decl' && d.type.base.kind === 'struct-definition' && d.type.base.name === structName) {
+      members = d.type.base.members;
+    }
+    if (members !== null) {
+      return members.map((m) => effectivePrecision(m.type.qualifiers.precision, m.type.resolved ?? { kind: 'void' }, defaults));
+    }
+  }
+  return null;
+}
+
+/**
+ * Unwrap every array layer of a type (struct arrays compare their element
+ * struct; nested arrays are legal in ES 3.00).
+ */
+function unwrapArrays(t: GLSLType): GLSLType {
+  let e = t;
+  while (e.kind === 'array') e = e.element;
+  return e;
+}
+
+/**
+ * Member-level structural identity for matched struct uniforms (GLSL ES 1.00
+ * §4.2.4 — same name, same sequence of type names, same type definitions and
+ * field names; the CTS also requires matching member precision). The top-level
+ * `typeEquals` check only compares struct NAMES, so two same-named structs
+ * with different members link today — this rejects them. `a` is the vertex
+ * decl, `b` the fragment decl (both have the SAME struct name — typeEquals
+ * passed). Returns an error string or null when the definitions agree.
+ */
+function structUniformConflict(a: UniformDecl, b: UniformDecl, vs: Shader, fs: Shader): string | null {
+  const sa = unwrapArrays(a.type);
+  const sb = unwrapArrays(b.type);
+  if (sa.kind !== 'struct' || sb.kind !== 'struct') return null; // typeEquals already rejected
+  if (sa.members.length !== sb.members.length) {
+    return `linker: uniform '${a.name}' struct '${sa.name}' member count mismatch`;
+  }
+  const pa = structMemberPrecisions(vs, sa.name);
+  const pb = structMemberPrecisions(fs, sb.name);
+  for (let i = 0; i < sa.members.length; i++) {
+    const ma = sa.members[i];
+    const mb = sb.members[i];
+    if (ma.name !== mb.name) {
+      return `linker: uniform '${a.name}' struct '${sa.name}' member name mismatch ('${ma.name}' vs '${mb.name}')`;
+    }
+    if (!typeEquals(ma.type, mb.type)) {
+      return `linker: uniform '${a.name}' struct '${sa.name}' member '${ma.name}' type mismatch`;
+    }
+    const precA = pa !== null && pa.length === sa.members.length ? pa[i] : null;
+    const precB = pb !== null && pb.length === sb.members.length ? pb[i] : null;
+    if (precA !== null && precB !== null && precA !== precB) {
+      return `linker: uniform '${a.name}' struct '${sa.name}' member '${ma.name}' precision mismatch (${precA} vs ${precB})`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Effective precision of a top-level default-block uniform: the explicit
+ * qualifier on its declaration (AST), else the stage default for its base
+ * type. Samplers/bool return null (exempt / no precision).
+ */
+function uniformPrecision(shader: Shader, name: string, type: GLSLType): Precision | null {
+  const defaults = stageDefaultPrecisions(shader);
+  for (const d of shader.ast.declarations) {
+    if (d.kind !== 'global-var-decl') continue;
+    for (const dec of d.declarators) {
+      if (dec.name === name) return effectivePrecision(d.type.qualifiers.precision, type, defaults);
+    }
+  }
+  // No AST declaration found (should not happen for a merged uniform) — fall
+  // back to the recorded effective precision.
+  return null;
+}
+
+/** Cross-stage precision consistency for one matched default-block uniform:
+ *  float/int/uint types compare their effective precision; structs compare
+ *  member-by-member (name/type/precision); samplers and bools are exempt. */
+function uniformPrecisionConflict(a: UniformDecl, b: UniformDecl, vs: Shader, fs: Shader): string | null {
+  const ta = unwrapArrays(a.type);
+  if (ta.kind === 'struct') {
+    return structUniformConflict(a, b, vs, fs);
+  }
+  const pa = uniformPrecision(vs, a.name, a.type);
+  const pb = uniformPrecision(fs, b.name, b.type);
+  if (pa !== null && pb !== null && pa !== pb) {
+    return `linker: uniform '${a.name}' precision mismatch (${pa} vs ${pb})`;
+  }
+  return null;
+}
+
 /** Combine vs + fs default-block uniforms by name; same name must be
- *  type-identical in both stages (GLSL link rule). */
+ *  type-identical in both stages (GLSL link rule) and, when the type is
+ *  float/int/uint or a struct, must carry the same precision (structs compare
+ *  member-by-member — see uniformPrecisionConflict). */
 function mergeUniforms(vs: Shader, fs: Shader): MergedUniform[] | { error: string } {
   const byName = new Map<string, MergedUniform>();
   const order: string[] = [];
@@ -255,11 +443,17 @@ function mergeUniforms(vs: Shader, fs: Shader): MergedUniform[] | { error: strin
       if (!typeEquals(ex.decl.type, decl.type)) {
         return `linker: uniform '${decl.name}' type conflict (${typeName(ex.decl.type)} vs ${typeName(decl.type)})`;
       }
-      if (stage === 'vs') ex.inVs = true;
-      else ex.inFs = true;
+      if (stage === 'vs') {
+        ex.inVs = true;
+      } else {
+        ex.inFs = true;
+        ex.fsDecl = decl;
+        // Both stages now known: cross-stage precision/struct-identity check.
+        return uniformPrecisionConflict(ex.decl, decl, vs, fs);
+      }
       return null;
     }
-    byName.set(decl.name, { decl, inVs: stage === 'vs', inFs: stage === 'fs' });
+    byName.set(decl.name, { decl, fsDecl: stage === 'fs' ? decl : null, inVs: stage === 'vs', inFs: stage === 'fs' });
     order.push(decl.name);
     return null;
   };
@@ -275,8 +469,15 @@ function mergeUniforms(vs: Shader, fs: Shader): MergedUniform[] | { error: strin
 }
 
 /** Visit every flattened LEAF path of a type in allocation order (struct
- *  members recurse; array elements expand per index — matching emitType's
- *  uniformSlots keys). */
+ *  members recurse; TOP-LEVEL array elements expand per index — matching
+ *  emitType's uniformSlots keys). STRUCT MEMBER arrays stay WHOLE: one leaf
+ *  '<p>.m[0]' carrying the array type, so getActiveUniform reports a single
+ *  entry with size = array length — only the top-level array dimension expands
+ *  (CTS shader-with-array-of-structs-containing-arrays.html expects 4 entries
+ *  for `my_struct { vec4 color1[2]; vec4 color2[2]; } u_colors[2];`, not 8).
+ *  Arrays whose element chain leads to a struct still expand per element: a
+ *  struct-array member has no GLenum, so it cannot be reported as one entry
+ *  (leafInfo would throw on toGLenum(struct)). */
 function walkLeaves(path: string, t: GLSLType, cb: (path: string, leaf: GLSLType) => void): void {
   switch (t.kind) {
     case 'scalar':
@@ -286,7 +487,7 @@ function walkLeaves(path: string, t: GLSLType, cb: (path: string, leaf: GLSLType
       cb(path, t);
       return;
     case 'struct':
-      for (const m of t.members) walkLeaves(`${path}.${m.name}`, m.type, cb);
+      for (const m of t.members) walkMember(`${path}.${m.name}`, m.type, cb);
       return;
     case 'array': {
       const n = t.size ?? 0;
@@ -296,6 +497,19 @@ function walkLeaves(path: string, t: GLSLType, cb: (path: string, leaf: GLSLType
     case 'void':
       return;
   }
+}
+
+/** Member walk: non-array types recurse through walkLeaves (nested structs
+ *  keep expanding); arrays of leaf types (scalar/vector/matrix/sampler) stay
+ *  whole as ONE leaf at '<p>.m[0]' — getActiveUniform expands only the
+ *  top-level array dimension of a struct uniform. Struct-element arrays expand
+ *  per element (see walkLeaves). */
+function walkMember(path: string, t: GLSLType, cb: (path: string, leaf: GLSLType) => void): void {
+  if (t.kind === 'array' && unwrapArrays(t).kind !== 'struct') {
+    cb(`${path}[0]`, t);
+    return;
+  }
+  walkLeaves(path, t, cb);
 }
 
 interface UniformLayoutResult {
@@ -318,9 +532,12 @@ function layoutUniforms(merged: MergedUniform[], limits: LinkLimits): UniformLay
   let fragmentSlots = 0;
   for (const u of merged) {
     const t = u.decl.type;
-    const slots = slotCount(t);
-    if (u.inVs) vertexSlots += slots;
-    if (u.inFs) fragmentSlots += slots;
+    // API limit accounting is PER ELEMENT (limitRows), not per packed slot:
+    // a 4097-element scalar array must exceed 4096 uniform vectors even
+    // though the store packs it densely (see limitRows).
+    const rows = limitRows(t);
+    if (u.inVs) vertexSlots += rows;
+    if (u.inFs) fragmentSlots += rows;
     const r = emitType(u.decl.name, t, cursor, st);
     if ('error' in r) return { error: r.error };
     // Ancestor prefix for the root name (arrays/structs; leaves already keyed it).
@@ -352,12 +569,22 @@ function layoutUniforms(merged: MergedUniform[], limits: LinkLimits): UniformLay
       uniformMap.set(u.decl.name, uniformMap.get(leaves[0].path)!);
     } else {
       // Struct / struct-array: getActiveUniform entries per flattened leaf
-      // ('u.m', 'u[0].m', 'u[2].m'; size 1 each). uniformMap: leaf paths +
-      // bare name → first leaf; struct arrays also key 'u[0]' → first leaf.
+      // ('u.m', 'u[0].m', 'u[2].m'). MEMBER arrays stay whole: one entry
+      // '<p>.m[0]' with size = array length (only the TOP-LEVEL array expands —
+      // CTS shader-with-array-of-structs-containing-arrays.html). uniformMap:
+      // leaf paths + bare names ('u', 'u[0]', '<p>.m') → first leaf; member
+      // array elements '<p>.m[k]' (k < size) alias the SAME leaf — gl's
+      // getUniformLocation derives the element from the QUERY name.
       for (const l of leaves) {
-        const info = leafInfo(l.path, l.type, 1);
+        const size = l.type.kind === 'array' ? l.type.size ?? 1 : 1;
+        const info = leafInfo(l.path, l.type, size);
         uniforms.push(info);
         uniformMap.set(l.path, info);
+        if (l.type.kind === 'array') {
+          const bare = l.path.slice(0, -3); // strip the trailing '[0]'
+          uniformMap.set(bare, info);
+          for (let k = 0; k < size; k++) uniformMap.set(`${bare}[${k}]`, info);
+        }
       }
       const first = uniformMap.get(leaves[0].path)!;
       uniformMap.set(u.decl.name, first);
@@ -808,6 +1035,27 @@ interface VaryingLayoutResult {
   infos: VaryingInfo[];
 }
 
+/** Names of the `invariant <name>;` SHORT-FORM declarations in a shader
+ *  (parser.ts produces 'invariant-decl' AST nodes; semantics gives them no
+ *  ShaderInfo effect — the qualifier form `invariant varying vec4 v;` is
+ *  already recorded on VaryingDecl.invariant, so this only adds the short
+ *  form: `varying vec4 v; invariant v;`). */
+function invariantDeclNames(s: Shader): Set<string> {
+  const names = new Set<string>();
+  for (const d of s.ast.declarations) {
+    if (d.kind === 'invariant-decl') names.add(d.name);
+  }
+  return names;
+}
+
+/** True when the shader source contains `#pragma STDGL invariant(all)`.
+ *  The preprocessor DROPS pragma lines entirely (preprocessor.ts case
+ *  'pragma'), so the directive is undetectable in the AST — scan the
+ *  ORIGINAL source (Shader.source) instead. */
+function hasInvariantAllPragma(s: Shader): boolean {
+  return /^\s*#\s*pragma\s+STDGL\s+invariant\s*\(\s*all\s*\)\s*$/m.test(s.source);
+}
+
 /** The linker-side match identity of one varying: plain varyings match by
  *  NAME; varying-interface-block members match by (blockName, memberName) —
  *  instance names may differ between stages (`out VS_OUT { vec4 c; } a;` vs
@@ -841,6 +1089,35 @@ function varyingMatchKey(v: { blockName: string | null; name: string }): string 
  *  fragment key (read side), sharing one (index, offset) — Program.varyings
  *  keeps ONE entry per vertex leaf. */
 function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayoutResult | { error: string } {
+  // INVARIANCE (GLSL ES 1.00 §4.6.4 "Invariance and linkage"): a matched
+  // varying must be invariant in BOTH stages or NEITHER. The invariant flag
+  // is the qualifier-form `invariant varying vec4 v;` (VaryingDecl.invariant,
+  // recorded by semantics) OR the short form `invariant v;` (an
+  // 'invariant-decl' AST node — semantics records no ShaderInfo effect for
+  // it, so the linker reads the AST). `#pragma STDGL invariant(all)` marks
+  // every OUTPUT of the stage invariant — the preprocessor DROPS pragma
+  // lines, so it is detected in the original source. The pragma affects ONLY
+  // outputs: in the vertex stage that is the varyings + gl_Position +
+  // gl_PointSize; in the fragment stage it is gl_FragColor/gl_FragData only,
+  // so fragment varyings (INPUTS) and gl_FragCoord/gl_PointCoord are NOT
+  // made invariant by it (shaders-with-invariance case 17: variant VS +
+  // pragma-only FS links).
+  const vsInvNames = invariantDeclNames(vs);
+  const fsInvNames = invariantDeclNames(fs);
+  const vsPragma = hasInvariantAllPragma(vs);
+  const invariantOf = (v: (typeof vs.info.varyings)[number], stage: 'vs' | 'fs'): boolean =>
+    v.invariant || (stage === 'vs' ? vsInvNames : fsInvNames).has(v.name) || (stage === 'vs' && vsPragma);
+  // Builtin cross-stage invariance: gl_FragCoord derives from gl_Position and
+  // gl_PointCoord from gl_PointSize — `invariant gl_FragCoord` / `invariant
+  // gl_PointCoord` in the fragment shader require the vertex output to be
+  // invariant (cases 10/13 of shaders-with-invariance.html). The reverse
+  // direction is NOT required (cases 11/14 link).
+  if (fsInvNames.has('gl_FragCoord') && !(vsInvNames.has('gl_Position') || vsPragma)) {
+    return { error: `linker: 'invariant gl_FragCoord' requires 'invariant gl_Position'` };
+  }
+  if (fsInvNames.has('gl_PointCoord') && !(vsInvNames.has('gl_PointSize') || vsPragma)) {
+    return { error: `linker: 'invariant gl_PointCoord' requires 'invariant gl_PointSize'` };
+  }
   const vsByKey = new Map<string, typeof vs.info.varyings[number]>();
   for (const v of vs.info.varyings) vsByKey.set(varyingMatchKey(v), v);
   const fsByKey = new Map<string, typeof fs.info.varyings[number]>();
@@ -857,6 +1134,9 @@ function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayo
     }
     if (f.flat !== v.flat) {
       return { error: `linker: varying '${f.name}' flat qualifier mismatch` };
+    }
+    if (invariantOf(f, 'fs') !== invariantOf(v, 'vs')) {
+      return { error: `linker: varying '${f.name}' invariance mismatch` };
     }
   }
   const map = new Map<string, VaryingLayout>();
@@ -905,7 +1185,10 @@ function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayo
       if (fsLeaves !== null) map.set(fsLeaves[li].key, layout);
       infos.push({ name: leaf.key, type: toGLenum(leaf.type), components: comps, flat: v.flat });
       offset += comps;
-      vectors += Math.ceil(comps / 4);
+      // API limit accounting is PER ELEMENT (matC = C rows), matching the
+      // CTS varying-packing page (float[65] must exceed 64 varying vectors
+      // even though 65 floats pack into 17 vec4s).
+      vectors += limitRows(leaf.type) * leaf.arraySize;
     }
   }
   if (vectors > limits.maxVaryingVectors) {
@@ -1076,6 +1359,7 @@ function layoutAttributes(vs: Shader, opts: LinkOptions, limits: LinkLimits): At
   };
 
   for (const a of vs.info.attributes) {
+    if (!a.used) continue; // inactive attributes consume no generic slots (native behavior; getActiveAttrib omits them)
     const elemLocations = a.type.kind === 'matrix' ? a.type.cols : 1;
     const need = elemLocations * a.arraySize;
     let loc: number;
