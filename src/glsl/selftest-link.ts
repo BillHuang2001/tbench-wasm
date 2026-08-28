@@ -43,6 +43,12 @@
  *      → the leaf; round-trip run.
  *  16. struct-ELEMENT member arrays still expand per element ('u.a[0].c',
  *      'u.a[1].c' — a struct-array member has no GLenum for one entry).
+ *  17. UBO arrays of structs (uniform-blocks-with-arrays.html crash pin):
+ *      struct members flatten per element ('d.s.a', 'd.s.b'), arrays of
+ *      structs expand EVERY element ('lights[0].intensity'/'lights[1].intensity'
+ *      @0/@16, size 1), structs containing arrays recurse
+ *      ('lights[0].intensity[0]' size 3 stride 16, offsets 0/48), and the
+ *      arrayed-block variant ('ld[0].lights[0].intensity' ... @0/16/32/48).
  *  18. gl_DepthRange builtin uniform reflection: usage-gated active-uniform
  *      entries ('gl_DepthRange.near/far/diff', GL_FLOAT, size 1) backed by 3
  *      real float-store slots appended after user uniforms (1.00 vertex /
@@ -1767,6 +1773,187 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
       p.uniformMap.get('u.a[0].c') !== undefined && p.uniformMap.get('u.a[1].c') !== undefined &&
         p.uniformMap.get('u') === p.uniformMap.get('u.a[0].c'),
       `struct-array member leaves in uniformMap`,
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 17. UBO arrays of structs (uniform-blocks-with-arrays.html crash    */
+/*     pin): struct members flatten per element; arrays of structs     */
+/*     expand EVERY element; structs containing arrays recurse;        */
+/*     arrayed-block variant. Before the collectBlockLeaves fix the    */
+/*     leaf for `light_t lights[2]` carried the STRUCT type →          */
+/*     memberInfo's toGLenum threw 'struct type light_t has no         */
+/*     GLenum' → linkProgram threw → CTS page 'Loading program         */
+/*     failed'.                                                        */
+/* ------------------------------------------------------------------ */
+
+{
+  // (a) NON-array struct member: flattened 'd.s.a'/'d.s.b' leaves.
+  const vsa = compile(
+    `#version 300 es
+     struct Pair { vec2 a; float b; };
+     uniform Data { Pair s; } d;
+     in vec4 aPos;
+     void main(){ gl_Position = aPos + vec4(d.s.a.x, d.s.a.y, d.s.b, 0.0); }`,
+    'VERTEX',
+    300,
+  );
+  const fsa = compile(`#version 300 es
+     precision mediump float; out vec4 o; void main(){ o = vec4(1.0); }`, 'FRAGMENT', 300);
+  const la = linkProgram(vsa, fsa);
+  check(la.ok, `(a) struct-member block links (${la.ok ? '' : la.log})`);
+  if (la.ok) {
+    const p = la.program;
+    check(p.uniformBlocks.length === 1 && p.uniformBlocks[0].size === 16,
+      `(a) block size 16 (got ${JSON.stringify(p.uniformBlocks.map((b) => b.size))})`);
+    const m = new Map(p.uniformBlocks[0].activeUniforms.map((u) => [u.name, u]));
+    check(
+      m.get('d.s.a')?.offset === 0 && m.get('d.s.a')?.type === FLOAT_VEC2 && m.get('d.s.a')?.size === 1 &&
+        m.get('d.s.b')?.offset === 8 && m.get('d.s.b')?.type === FLOAT && m.get('d.s.b')?.size === 1,
+      `(a) flattened members d.s.a@0 vec2, d.s.b@8 float (got ${JSON.stringify([...m].map(([k, v]) => [k, v.offset, v.type, v.size]))})`,
+    );
+    const store = new Float32Array(4);
+    store[0] = 1; store[1] = 2; store[2] = 3; // d.s.a, d.s.b
+    const vctx = vertexCtx(p, {
+      blockStores: [store],
+      attribs: [new Float32Array([0, 0, 0, 1])],
+      attribIndices: new Int32Array([0]),
+    });
+    p.vertex.run(vctx);
+    check(vctx.out.position[0] === 1 && vctx.out.position[1] === 2 && vctx.out.position[2] === 3,
+      `(a) vertex reads struct members (got [${Array.from(vctx.out.position).join(', ')}])`);
+  }
+
+  // (b) EXACT crash scenario: array of structs in an instance-less block.
+  const vsb = compile(
+    `#version 300 es
+     in vec4 aPos;
+     void main(){ gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fsb = compile(
+    `#version 300 es
+     precision highp float;
+     out vec4 o;
+     struct light_t { vec4 intensity; };
+     layout(std140) uniform lightData { light_t lights[2]; };
+     void main(){ o = lights[0].intensity + lights[1].intensity; }`,
+    'FRAGMENT',
+    300,
+  );
+  const lb = linkProgram(vsb, fsb);
+  check(lb.ok, `(b) array-of-structs block links (${lb.ok ? '' : lb.log})`);
+  if (lb.ok) {
+    const p = lb.program;
+    check(p.uniformBlocks.length === 1 && p.uniformBlocks[0].name === 'lightData' && p.uniformBlocks[0].size === 32,
+      `(b) block 'lightData' size 32 (got ${JSON.stringify(p.uniformBlocks)})`);
+    const m = new Map(p.uniformBlocks[0].activeUniforms.map((u) => [u.name, u]));
+    check(
+      m.get('lights[0].intensity')?.offset === 0 && m.get('lights[0].intensity')?.type === FLOAT_VEC4 &&
+        m.get('lights[0].intensity')?.size === 1 && m.get('lights[0].intensity')?.arrayStride === 0 &&
+        m.get('lights[1].intensity')?.offset === 16 && m.get('lights[1].intensity')?.type === FLOAT_VEC4 &&
+        m.get('lights[1].intensity')?.size === 1 && m.get('lights[1].intensity')?.arrayStride === 0,
+      `(b) per-element leaves lights[0].intensity@0 / lights[1].intensity@16 size 1 (got ${JSON.stringify([...m].map(([k, v]) => [k, v.offset, v.type, v.size, v.arrayStride]))})`,
+    );
+    const um = p.uniforms.filter((u) => u.blockIndex === 0);
+    check(
+      um.length === 2 && um.every((u) => u.location === -1) &&
+        um.map((u) => u.name).join(',') === 'lights[0].intensity,lights[1].intensity',
+      `(b) Program.uniforms block members (got ${JSON.stringify(um)})`,
+    );
+    const store = new Float32Array(8); // 32 bytes
+    store[0] = 1; store[1] = 2; store[2] = 3; store[3] = 4; // lights[0].intensity
+    store[4] = 10; store[5] = 20; store[6] = 30; store[7] = 40; // lights[1].intensity
+    const fctx = fragmentCtx(p, [], { blockStores: [store] });
+    p.fragment.run(fctx);
+    const c = fctx.out.color[0];
+    check(c[0] === 11 && c[1] === 22 && c[2] === 33 && c[3] === 44,
+      `(b) fragment reads both elements: [11,22,33,44] (got [${Array.from(c).join(', ')}])`);
+  }
+
+  // (c) array of structs containing ARRAYS: nested member arrays recurse.
+  const vsc = compile(
+    `#version 300 es
+     in vec4 aPos;
+     void main(){ gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fsc = compile(
+    `#version 300 es
+     precision highp float;
+     out vec4 o;
+     struct light_t { vec4 intensity[3]; };
+     layout(std140) uniform lightData { light_t lights[2]; };
+     void main(){ o = lights[0].intensity[1] + lights[1].intensity[2]; }`,
+    'FRAGMENT',
+    300,
+  );
+  const lc = linkProgram(vsc, fsc);
+  check(lc.ok, `(c) structs-containing-arrays block links (${lc.ok ? '' : lc.log})`);
+  if (lc.ok) {
+    const p = lc.program;
+    check(p.uniformBlocks.length === 1 && p.uniformBlocks[0].size === 96,
+      `(c) block size 96 (got ${JSON.stringify(p.uniformBlocks.map((b) => b.size))})`);
+    const m = new Map(p.uniformBlocks[0].activeUniforms.map((u) => [u.name, u]));
+    check(
+      m.get('lights[0].intensity[0]')?.offset === 0 && m.get('lights[0].intensity[0]')?.size === 3 &&
+        m.get('lights[0].intensity[0]')?.arrayStride === 16 && m.get('lights[0].intensity[0]')?.type === FLOAT_VEC4 &&
+        m.get('lights[1].intensity[0]')?.offset === 48 && m.get('lights[1].intensity[0]')?.size === 3 &&
+        m.get('lights[1].intensity[0]')?.arrayStride === 16 && m.get('lights[1].intensity[0]')?.type === FLOAT_VEC4,
+      `(c) nested leaves lights[0].intensity[0]@0 / lights[1].intensity[0]@48 size 3 stride 16 (got ${JSON.stringify([...m].map(([k, v]) => [k, v.offset, v.size, v.arrayStride]))})`,
+    );
+    const store = new Float32Array(24); // 96 bytes
+    store[4] = 1; // lights[0].intensity[1] (offset 16)
+    store[20] = 2; // lights[1].intensity[2] (offset 80)
+    const fctx = fragmentCtx(p, [], { blockStores: [store] });
+    p.fragment.run(fctx);
+    const c = fctx.out.color[0];
+    check(c[0] === 3 && c[1] === 0 && c[2] === 0 && c[3] === 0,
+      `(c) const-indexed reads: [3,0,0,0] (got [${Array.from(c).join(', ')}])`);
+  }
+
+  // (d) ARRAYED block containing an array of structs: per-element groups.
+  const vsd = compile(
+    `#version 300 es
+     in vec4 aPos;
+     void main(){ gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fsd = compile(
+    `#version 300 es
+     precision highp float;
+     out vec4 o;
+     struct light_t { vec4 intensity; };
+     uniform lightData { light_t lights[2]; } ld[2];
+     void main(){ o = ld[0].lights[1].intensity + ld[1].lights[0].intensity; }`,
+    'FRAGMENT',
+    300,
+  );
+  const ldd = linkProgram(vsd, fsd);
+  check(ldd.ok, `(d) arrayed block links (${ldd.ok ? '' : ldd.log})`);
+  if (ldd.ok) {
+    const p = ldd.program;
+    check(
+      p.uniformBlocks.length === 2 && p.uniformBlocks[0].name === 'ld[0]' && p.uniformBlocks[1].name === 'ld[1]' &&
+        p.uniformBlocks[0].index === 0 && p.uniformBlocks[1].index === 0 && p.uniformBlocks[0].size === 32,
+      `(d) 'ld[0]','ld[1]' shared index 0 size 32 (got ${JSON.stringify(p.uniformBlocks)})`,
+    );
+    const m0 = new Map(p.uniformBlocks[0].activeUniforms.map((u) => [u.name, u]));
+    const m1 = new Map(p.uniformBlocks[1].activeUniforms.map((u) => [u.name, u]));
+    check(
+      m0.get('ld[0].lights[0].intensity')?.offset === 0 && m0.get('ld[0].lights[1].intensity')?.offset === 16 &&
+        m1.get('ld[1].lights[0].intensity')?.offset === 32 && m1.get('ld[1].lights[1].intensity')?.offset === 48,
+      `(d) per-element leaves @0/16/32/48 (got ${JSON.stringify([...m0, ...m1].map(([k, v]) => [k, v.offset]))})`,
+    );
+    const um = p.uniforms.filter((u) => u.blockIndex === 0);
+    check(
+      um.length === 4 && um.map((u) => u.name).join(',') ===
+        'ld[0].lights[0].intensity,ld[0].lights[1].intensity,ld[1].lights[0].intensity,ld[1].lights[1].intensity',
+      `(d) Program.uniforms block members (got ${JSON.stringify(um.map((u) => u.name))})`,
     );
   }
 }

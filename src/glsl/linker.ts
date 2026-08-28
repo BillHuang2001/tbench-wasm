@@ -742,7 +742,26 @@ interface BlockLeaf {
   size: number;
 }
 
-/** Collect the flattened leaves of member type `t` at `path`/`byteOffset`. */
+/** Descend the members of struct `t` at `path`/`byteOffset` (member offsets
+ *  come from the std140 walk). Never emits a leaf for the struct itself. */
+function descendStructLeaves(
+  path: string,
+  t: Extract<GLSLType, { kind: 'struct' }>,
+  byteOffset: number,
+  out: BlockLeaf[],
+): void {
+  let off = 0;
+  for (const m of t.members) {
+    off = roundUp(off, std140Align(m.type));
+    collectBlockLeaves(`${path}.${m.name}`, m.type, byteOffset + off, out);
+    off += std140Size(m.type);
+  }
+}
+
+/** Collect the flattened leaves of member type `t` at `path`/`byteOffset`.
+ *  INVARIANT: no leaf ever carries a struct type — arrays of structs expand
+ *  EVERY element into per-member leaves ('lights[0].intensity', ...), so
+ *  toGLenum/typeComponents/isIntegral/typeName never see a struct. */
 function collectBlockLeaves(
   path: string,
   t: GLSLType,
@@ -750,15 +769,22 @@ function collectBlockLeaves(
   out: BlockLeaf[],
 ): void {
   if (t.kind === 'struct') {
-    let off = 0;
-    for (const m of t.members) {
-      off = roundUp(off, std140Align(m.type));
-      collectBlockLeaves(`${path}.${m.name}`, m.type, byteOffset + off, out);
-      off += std140Size(m.type);
-    }
+    descendStructLeaves(path, t, byteOffset, out);
     return;
   }
   if (t.kind === 'array') {
+    if (t.element.kind === 'struct') {
+      // Array of structs: one leaf group PER ELEMENT at path `${path}[k]`
+      // (getActiveUniform convention — a struct has no GLenum, so a single
+      // '[0]' entry cannot represent it). Nested array members recurse and
+      // keep their own '[0]' leaf with size = array length.
+      const n = t.size ?? 0;
+      const stride = std140ArrayStride(t.element);
+      for (let k = 0; k < n; k++) {
+        descendStructLeaves(`${path}[${k}]`, t.element, byteOffset + k * stride, out);
+      }
+      return;
+    }
     out.push({
       path: `${path}[0]`,
       type: t.element,

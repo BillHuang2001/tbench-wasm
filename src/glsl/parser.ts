@@ -661,9 +661,11 @@ function setStorage(p: Parser, t: Token, q: TypeQualifiers, storage: StorageClas
 
 /**
  * `layout ( id [= const-expr] [, ...] )` — `location`/`binding` are captured
- * (literal values only; semantics resolves non-literal constants); unknown
- * ids (`std140`, `column_major`, ...) are accepted and ignored (the CTS uses
- * them in valid WebGL2 shaders).
+ * (literal values only; semantics resolves non-literal constants); the
+ * uniform-block layout ids `std140`/`shared`/`packed` are captured into
+ * `blockLayout` (semantics rejects `shared`/`packed` — WebGL2 supports only
+ * std140); other unknown ids (`column_major`, ...) are accepted and ignored
+ * (the CTS uses them in valid WebGL2 shaders).
  */
 function parseLayoutQualifiers(p: Parser): LayoutQualifiers {
   const layout: LayoutQualifiers = {};
@@ -678,6 +680,8 @@ function parseLayoutQualifiers(p: Parser): LayoutQualifiers {
         const v = parseAssignmentExpr(p);
         if (idT.name === 'location') layout.location = intValueOf(v);
         else if (idT.name === 'binding') layout.binding = intValueOf(v);
+      } else if (idT.name === 'std140' || idT.name === 'shared' || idT.name === 'packed') {
+        layout.blockLayout = idT.name;
       }
     } else {
       p.error(idT.line, `expected layout qualifier identifier, found ${describeToken(idT)}`);

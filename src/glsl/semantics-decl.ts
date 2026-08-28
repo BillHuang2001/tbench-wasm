@@ -592,6 +592,14 @@ function analyzeInterfaceBlock(d: InterfaceBlockDecl, ctx: SemContext, info: Sha
   if (!isVaryingBlock) {
     // Uniform blocks (or unsupported combos — recorded nowhere, linker rejects).
     if (storage === 'uniform' || storage === undefined) {
+      const blockLayout = q.layout?.blockLayout;
+      // WebGL2 supports only std140 uniform block layouts (default when no
+      // layout qualifier is present). `shared`/`packed` must fail compilation
+      // (spec: "fail either the compilation or linking stages"; the CTS
+      // uniform-block-layouts page requires a compile failure).
+      if (blockLayout === 'shared' || blockLayout === 'packed') {
+        ctx.error(d.loc.line, `'layout(${blockLayout})' : only 'std140' uniform block layouts are supported in WebGL`);
+      }
       const blk: UniformBlockDecl = {
         name: d.blockName,
         instanceName: d.instanceName,
