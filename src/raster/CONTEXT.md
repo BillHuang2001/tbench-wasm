@@ -67,7 +67,7 @@ Pure-JS software rasterization for WebGL 1.0/2.0 (no GPU, zero deps, no per-frag
 - `types.ts` → shared types: DrawCall, record layout + helpers, FragmentExecCtx, TextureEnv, Surface/FramebufferTarget, draw-state interfaces, RasterState, impl limits
 - `gl-enums.ts` → GL constants raster interprets
 - `formats.ts` → pixel-format registry + upload/readPixels converters + half/sRGB helpers
-- `sampler.ts` → texture sampling core + createTextureEnv (codegen-facing)
+- `sampler.ts` → texture sampling core (LOD, filters, projectToFace) + createTextureEnv; split across `sampler-raw.ts` (raw texel taps) and `sampler-env.ts` (codegen-facing env)
 - `surface.ts` → surface creation/view resolution
 - `fragment-ops.ts` → FragmentOps (scissor/coverage/stencil/depth/blend/dither/sRGB/mask), runQuad quad driver, clear + blit helpers
 - `clip.ts` → homogeneous clipping + viewport transform
