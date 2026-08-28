@@ -26,7 +26,13 @@
  * WebGL2 extension): buf < MAX_DRAW_BUFFERS → INVALID_VALUE; blend factors from
  * the WebGL2 factor set (SRC_ALPHA_SATURATE legal on the dst side in WebGL2)
  * plus SRC1_* when WEBGL_blend_func_extended is enabled; equations FUNC_ADD/
- * FUNC_SUBTRACT/FUNC_REVERSE_SUBTRACT/MIN/MAX.
+ * FUNC_SUBTRACT/FUNC_REVERSE_SUBTRACT/MIN/MAX. The core WebGL blend-factors
+ * limitation (WebGL 1.0 spec §6.15 — CONSTANT_COLOR/ONE_MINUS_CONSTANT_COLOR
+ * may not be paired with CONSTANT_ALPHA/ONE_MINUS_CONSTANT_ALPHA) is applied
+ * per the extension addendum: (src, dst) for blendFunciOES and
+ * (srcRGB, dstRGB) + (srcAlpha, dstAlpha) for blendFuncSeparateiOES →
+ * INVALID_OPERATION (constFactorPairInvalid, same rule api/state.ts uses for
+ * the non-indexed setters).
  */
 
 import type { WebGLRenderingContext } from '../webgl1';
@@ -132,6 +138,31 @@ function factorOk(ctx: WebGLRenderingContext, f: number): boolean {
   return false;
 }
 
+/** CONSTANT_COLOR / ONE_MINUS_CONSTANT_COLOR factor check. */
+function isConstColorFactor(f: number): boolean {
+  return f === CONSTANT_COLOR || f === ONE_MINUS_CONSTANT_COLOR;
+}
+
+/** CONSTANT_ALPHA / ONE_MINUS_CONSTANT_ALPHA factor check. */
+function isConstAlphaFactor(f: number): boolean {
+  return f === CONSTANT_ALPHA || f === ONE_MINUS_CONSTANT_ALPHA;
+}
+
+/**
+ * WebGL 1.0 spec §6.15 ("Blending With Constant Color") / GLES3 §4.1.7: a
+ * CONSTANT_COLOR/ONE_MINUS_CONSTANT_COLOR factor may not be paired with a
+ * CONSTANT_ALPHA/ONE_MINUS_CONSTANT_ALPHA factor across a blend (a, b) pair →
+ * INVALID_OPERATION. The OES_draw_buffers_indexed spec addendum applies the
+ * core WebGL blend-factors limitation to the new entrypoints; api/state.ts
+ * enforces the same rule for the non-indexed setters.
+ */
+function constFactorPairInvalid(a: number, b: number): boolean {
+  return (
+    (isConstColorFactor(a) && isConstAlphaFactor(b)) ||
+    (isConstAlphaFactor(a) && isConstColorFactor(b))
+  );
+}
+
 /** OES_draw_buffers_indexed factory (WebGL2 — registry versions: [2]). */
 export function createOESDrawBuffersIndexed(ctx: WebGLRenderingContext): object {
   // Prime the per-drawbuffer blend-enable map so ctx._state.blendEnablePerDrawBuffer
@@ -207,6 +238,10 @@ export function createOESDrawBuffersIndexed(ctx: WebGLRenderingContext): object 
         gl._errors.push(C1.INVALID_ENUM);
         return;
       }
+      if (constFactorPairInvalid(src, dst)) {
+        gl._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
       const e = blendEntry(gl, b);
       e.srcRGB = src;
       e.dstRGB = dst;
@@ -221,6 +256,10 @@ export function createOESDrawBuffersIndexed(ctx: WebGLRenderingContext): object 
       if (b < 0) return;
       if (!factorOk(gl, srcRGB) || !factorOk(gl, dstRGB) || !factorOk(gl, srcAlpha) || !factorOk(gl, dstAlpha)) {
         gl._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (constFactorPairInvalid(srcRGB, dstRGB) || constFactorPairInvalid(srcAlpha, dstAlpha)) {
+        gl._errors.push(C1.INVALID_OPERATION);
         return;
       }
       const e = blendEntry(gl, b);

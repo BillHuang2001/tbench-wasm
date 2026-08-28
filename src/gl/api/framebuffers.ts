@@ -63,8 +63,11 @@
  *  - drawBuffers (W2): WebIDL sequence<GLenum> conversion — ToUint32 per element
  *    (NaN/Infinity → 0, -1 → 0xFFFFFFFF, 1.5 → 1; TypeError only when the
  *    argument is not a sequence, e.g. null/undefined or a Symbol element);
- *    length > MAX_DRAW_BUFFERS → INVALID_VALUE; length 0 → INVALID_OPERATION;
- *    default FB: exactly [BACK] or [NONE] else INVALID_OPERATION; FBO: entries
+ *    length > MAX_DRAW_BUFFERS → INVALID_VALUE; length 0 → LEGAL (empty draw
+ *    buffer list — GLES 3.0 §4.2.1: the framebuffer has no color buffers, draws
+ *    produce no color output and no error; CTS oes-draw-buffers-indexed.html);
+ *    default FB: exactly [BACK] or [NONE] (or empty) else INVALID_OPERATION;
+ *    FBO: entries
  *    NONE or strictly-increasing COLOR_ATTACHMENTi < MAX_COLOR_ATTACHMENTS
  *    (BACK → INVALID_OPERATION, out-of-range → INVALID_ENUM, out-of-order →
  *    INVALID_OPERATION). Draw-buffer state is FRAMEBUFFER OBJECT state (GLES3
@@ -1292,13 +1295,15 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_VALUE);
         return;
       }
-      if (arr.length === 0) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
+      // An EMPTY buffers list is legal (GLES 3.0 §4.2.1 — WebGL2 defers to it):
+      // the framebuffer then has NO color buffers, so subsequent draws produce
+      // no color output and generate no error. CTS oes-draw-buffers-indexed.html
+      // calls drawBuffers([]) and requires NO_ERROR. Both paths below accept the
+      // empty list (default-FB path: no entries → no color buffers; FBO path:
+      // the strictly-increasing loop over [] writes the empty per-FBO state).
       if (s.drawFramebuffer === null) {
-        // Default framebuffer: exactly [BACK] or [NONE].
-        if (arr.length !== 1 || (arr[0] !== BACK && arr[0] !== NONE)) {
+        // Default framebuffer: empty (no color buffers) or exactly [BACK]/[NONE].
+        if (arr.length > 1 || (arr.length === 1 && arr[0] !== BACK && arr[0] !== NONE)) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
