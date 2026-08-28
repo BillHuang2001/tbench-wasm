@@ -1644,13 +1644,24 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
   if (sc.scratch.length < scratchSize) sc.scratch = new Float32Array(Math.max(scratchSize, 64));
   if (sc.intScratch.length < intScratchSize) sc.intScratch = new Int32Array(Math.max(intScratchSize, 64));
 
-  // Uniform-block stores (per block INDEX, from the bound UBO at the block's binding).
+  // Uniform-block stores (per block INDEX, from the bound UBO at the block's
+  // binding). The blockIndex → binding-point map is per-program state set by
+  // uniformBlockBinding() and stored in api/programs.ts's private WeakMap —
+  // read it back through the public API (the program is linked here, so the
+  // query cannot fail or push errors). Previously this code read a
+  // `prog._uniformBlockBindings` property that nothing ever wrote, so every
+  // block fell back to binding 0 and UBO-backed draws read zeros.
   const blocks = pm.uniformBlocks ?? [];
   const blockStores: Float32Array[] = new Array(blocks.length);
   const blockIntStores: Int32Array[] = new Array(blocks.length);
-  const bindingsMap = (prog as unknown as { _uniformBlockBindings?: Map<number, number> })._uniformBlockBindings;
+  const gl2 = ctx as unknown as {
+    getActiveUniformBlockParameter?: (program: WebGLProgram, uniformBlockIndex: GLuint, pname: GLenum) => unknown;
+  };
   for (let bi = 0; bi < blocks.length; bi++) {
-    const binding = bindingsMap ? (bindingsMap.get(blocks[bi].index) ?? 0) : 0;
+    const binding =
+      gl2.getActiveUniformBlockParameter !== undefined
+        ? ((gl2.getActiveUniformBlockParameter(prog, blocks[bi].index, C2.UNIFORM_BLOCK_BINDING) as number) || 0)
+        : 0;
     const buf = binding < s.uniformBuffers.length ? s.uniformBuffers[binding] : null;
     const range = binding < s.uniformBufferRanges.length ? s.uniformBufferRanges[binding] : { offset: 0, size: 0 };
     if (buf && buf._data && range.size > 0) {
