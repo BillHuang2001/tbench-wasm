@@ -328,8 +328,10 @@ function resolveAttachmentSurface(entry: FramebufferAttachment): Surface | null 
   if (!image || entry.level < 0) return null;
   const lvl = image.levels[entry.level];
   if (!lvl) return null;
-  const faceIndex = isCubeFace(entry.face) ? cubeFaceIndex(entry.face) : 0;
-  const data = lvl.data[faceIndex];
+  // 3D/2D_ARRAY attachments (framebufferTextureLayer) address a specific
+  // slice: lvl.data is per-layer (data[z]). Cube faces index the 6 face views.
+  const idx = isCubeFace(entry.face) ? cubeFaceIndex(entry.face) : entry.layer;
+  const data = lvl.data[idx];
   if (!data) return null;
   const info: PixelFormatInfo | null = image.info ?? getFormat(image.internalFormat);
   if (!info) return null;
