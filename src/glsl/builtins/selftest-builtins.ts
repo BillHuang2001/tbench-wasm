@@ -328,15 +328,23 @@ check(builtinVariables300.find((v) => v.name === 'gl_FragDepth')?.writable === t
 check(builtinVariables300.find((v) => v.name === 'gl_VertexID')?.writable === false, 'gl_VertexID must be read-only');
 checkDepthRangeVariable(builtinVariables300, '300');
 
-// 3.00 constants: exact WebGL minimums.
+// 3.00 constants: synced to gl/ getParameter limits (src/gl/state.ts
+// defaultLimits — the same Limits object for WebGL1 and WebGL2 contexts).
+// gl_MaxVertexOutputVectors = MAX_VERTEX_OUTPUT_COMPONENTS(128)/4 = 32;
+// gl_MaxFragmentInputVectors = MAX_FRAGMENT_INPUT_COMPONENTS(128)/4 = 32;
+// gl_MaxDrawBuffers = MAX_DRAW_BUFFERS 8; gl_MaxUniformBufferBindings 72;
+// gl_MaxUniformBlockSize 65536; gl_MaxCombinedUniformBlocks 36.
+// gl_MaxImageUnits / gl_MaxCombinedShaderOutputResources have NO gl/
+// getParameter and stay at the GLES 3.00 minimums; gl_MaxClipDistances = the
+// WEBGL_clip_cull_distance MAX_CLIP_DISTANCES_WEBGL value (8).
 const EXPECTED_300: Record<string, number> = {
-  gl_MaxVertexAttribs: 16, gl_MaxVertexUniformVectors: 256, gl_MaxVertexOutputVectors: 16,
-  gl_MaxVertexTextureImageUnits: 16, gl_MaxFragmentUniformVectors: 224, gl_MaxFragmentInputVectors: 15,
-  gl_MaxTextureImageUnits: 16, gl_MaxCombinedTextureImageUnits: 32, gl_MaxDrawBuffers: 4,
+  gl_MaxVertexAttribs: 16, gl_MaxVertexUniformVectors: 4096, gl_MaxVertexOutputVectors: 32,
+  gl_MaxVertexTextureImageUnits: 16, gl_MaxFragmentUniformVectors: 4096, gl_MaxFragmentInputVectors: 32,
+  gl_MaxTextureImageUnits: 16, gl_MaxCombinedTextureImageUnits: 32, gl_MaxDrawBuffers: 8,
   gl_MaxClipDistances: 8, gl_MaxTransformFeedbackSeparateAttribs: 4,
   gl_MaxTransformFeedbackInterleavedComponents: 64, gl_MaxTransformFeedbackSeparateComponents: 4,
-  gl_MaxUniformBufferBindings: 24, gl_MaxUniformBlockSize: 16384, gl_MaxVertexUniformBlocks: 12,
-  gl_MaxFragmentUniformBlocks: 12, gl_MaxCombinedUniformBlocks: 24, gl_MaxImageUnits: 4,
+  gl_MaxUniformBufferBindings: 72, gl_MaxUniformBlockSize: 65536, gl_MaxVertexUniformBlocks: 12,
+  gl_MaxFragmentUniformBlocks: 12, gl_MaxCombinedUniformBlocks: 36, gl_MaxImageUnits: 4,
   gl_MaxCombinedShaderOutputResources: 4,
 };
 check(builtinConstants300.length === Object.keys(EXPECTED_300).length, `300: expected ${Object.keys(EXPECTED_300).length} constants, got ${builtinConstants300.length}`);
@@ -345,10 +353,16 @@ for (const [name, value] of Object.entries(EXPECTED_300)) {
   check(c !== undefined && c.value === value, `300: ${name} must be ${value}`);
 }
 
+// 1.00 constants: synced to gl/ getParameter limits (src/gl/state.ts
+// defaultLimits: MAX_VERTEX_UNIFORM_VECTORS 4096, MAX_VARYING_VECTORS 64,
+// MAX_COMBINED_TEXTURE_IMAGE_UNITS 32, MAX_TEXTURE_IMAGE_UNITS 16,
+// MAX_FRAGMENT_UNIFORM_VECTORS 4096). gl_MaxDrawBuffers stays 1 (WebGL1 core
+// without WEBGL_draw_buffers). CTS conformance/glsl/variables/glsl-built-ins.html
+// requires each constant to EQUAL gl.getParameter's value.
 const EXPECTED_100: Record<string, number> = {
-  gl_MaxVertexAttribs: 16, gl_MaxVertexUniformVectors: 128, gl_MaxVaryingVectors: 8,
-  gl_MaxVertexTextureImageUnits: 16, gl_MaxCombinedTextureImageUnits: 8,
-  gl_MaxTextureImageUnits: 8, gl_MaxFragmentUniformVectors: 16, gl_MaxDrawBuffers: 1,
+  gl_MaxVertexAttribs: 16, gl_MaxVertexUniformVectors: 4096, gl_MaxVaryingVectors: 64,
+  gl_MaxVertexTextureImageUnits: 16, gl_MaxCombinedTextureImageUnits: 32,
+  gl_MaxTextureImageUnits: 16, gl_MaxFragmentUniformVectors: 4096, gl_MaxDrawBuffers: 1,
 };
 check(builtinConstants100.length === Object.keys(EXPECTED_100).length, `100: expected ${Object.keys(EXPECTED_100).length} constants, got ${builtinConstants100.length}`);
 for (const [name, value] of Object.entries(EXPECTED_100)) {
