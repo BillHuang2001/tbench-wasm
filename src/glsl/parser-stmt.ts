@@ -4,8 +4,12 @@
  * Statements: compound, declaration (local), expression (incl. empty `;`),
  * if/else, for (declaration or expression init), while, do-while, switch
  * (ES 3.00 — case/default labels inside the compound body), break/continue/
- * return/discard. Case labels are parsed wherever they appear (semantics
- * validates they are inside a switch).
+ * return/discard, and precision statements (legal declaration statements per
+ * the ESSL Appendix A grammar — ANGLE accepts them inside function bodies;
+ * the parsed PrecisionDecl is hoisted to global scope before the enclosing
+ * function definition so it takes effect, see Parser.fnPrecisionDecls).
+ * Case labels are parsed wherever they appear (semantics validates they are
+ * inside a switch).
  *
  * Version rules:
  * - `switch`/`case`/`default`/`flat`/`sampler3D`/`sampler2DShadow`/
@@ -29,7 +33,9 @@ import {
   parseExpression, parseAssignmentExpr,
   DECL_KEYWORDS, RESERVED_100, TYPE_KEYWORDS, locOf,
 } from './parser-expr.js';
-import { parseTypeSpec, parseDeclarators, skipBalanced } from './parser.js';
+import {
+  parseTypeSpec, parseDeclarators, parsePrecisionDecl, nameAnonymousStruct, skipBalanced,
+} from './parser.js';
 
 /** Parse one statement (always returns a node; errors are collected). */
 export function parseStatement(p: Parser): Stmt {
@@ -75,6 +81,19 @@ export function parseStatement(p: Parser): Stmt {
         return { kind: 'discard', loc: locOf(t) };
       case 'return':
         return parseReturnStmt(p);
+      case 'precision': {
+        // Precision statements are legal declaration statements in ESSL
+        // (Appendix A `declaration`: ... | PRECISION precision_qualifier
+        // type_specifier_no_prec SEMICOLON) — ANGLE accepts them inside
+        // function bodies (conformance/glsl/misc/
+        // ternary-operators-in-initializers.html). The statement itself is
+        // parsed as a PrecisionDecl that is HOISTED to just before the
+        // enclosing function definition (see Parser.fnPrecisionDecls); the
+        // statement slot is an `empty` node (semantics + codegen no-op).
+        const decl = parsePrecisionDecl(p);
+        if (p.currentFn !== null) p.fnPrecisionDecls.push({ fn: p.currentFn, decl });
+        return { kind: 'empty', loc: decl.loc };
+      }
       case 'case':
         if (p.version === 100) {
           p.error(t.line, "'case' is reserved in GLSL ES 1.00");
@@ -225,9 +244,20 @@ function parseReturnStmt(p: Parser): ReturnStmt {
 function parseDeclStmt(p: Parser): DeclStmt {
   const start = p.peek();
   const type = parseTypeSpec(p, { param: false, member: false });
-  if (type.base.kind === 'struct-definition' && p.atOp(';')) {
-    p.next();
-    return { kind: 'decl-stmt', type, declarators: [], loc: locOf(start) };
+  if (type.base.kind === 'struct-definition') {
+    if (type.base.name === null) {
+      // Anonymous struct: legal only WITH a declarator (`struct { ... } s;` —
+      // GLSL ES grammar; ANGLE accepts). A bare `struct { ... };` is rejected.
+      if (p.atOp(';')) {
+        p.error(start.line, 'anonymous structs are not allowed in GLSL ES');
+      } else {
+        type.base.name = nameAnonymousStruct(p);
+      }
+    }
+    if (p.atOp(';')) {
+      p.next();
+      return { kind: 'decl-stmt', type, declarators: [], loc: locOf(start) };
+    }
   }
   const declarators = parseDeclarators(p, false);
   p.expectOp(';', "expected ';' after declaration");

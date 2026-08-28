@@ -1637,6 +1637,128 @@ function compoundOp(op: string, target: string, rhs: string, base: string): stri
   }
 }
 
+/**
+ * Matrix × matrix compound '*=' codegen (`m *= n` ≡ `m = m * n` — a MATRIX
+ * PRODUCT, NOT the component-wise Hadamard product the generic compound
+ * emitters produce for scalar/vector targets; CTS
+ * conformance/glsl/matrices/matrix-compound-multiply.html). Mirrors the
+ * emitArith mat×mat branch: output flat component k = c*aRows + r (column
+ * major) = Σ_s lhs[s*aRows + r] * rhs[c*bRows + s], with aRows/aCols from
+ * lhsType and bRows/bCols from rhsType. EVERY output column reads ALL LHS
+ * columns, so a sequential per-component write would corrupt later reads —
+ * the whole LHS is SNAPSHOTTED into temps before any write. The RHS is also
+ * materialized into temps: (a) so its side-effect pres run exactly once
+ * (deduped by pre-array identity — multi-component results share one chain;
+ * without materialization the pres would re-run per output term) and (b)
+ * because the RHS may ALIAS the LHS (`a *= a`) — raw strings would read
+ * already-clobbered slots inside the write expressions. Dual mode: the
+ * snapshot captures the v/dx/dy planes; each output term folds via
+ * arithDual's product rule + foldAdd; the write updates all three planes
+ * through env.dualWrite.
+ * `rhs` must be the RAW emitExpr result at rhsType's own width (NOT
+ * convertValue'd to the lvalue width — the RHS is read at its native stride
+ * c*bRows+s, which differs from the lvalue layout for non-square shapes).
+ * Returns `pre` (pure statements to run once, in order, AFTER the lvalue
+ * prelude) and `writes` (one self-contained assignment expression per flat
+ * component, in lvalue order — valid as statements or comma terms).
+ */
+export function matrixCompoundMul(
+  env: CodegenEnv,
+  targets: string[],
+  dualTargets: ([string, string] | null)[] | undefined,
+  lhsType: GLSLType,
+  rhs: Value[],
+  rhsType: GLSLType,
+): { pre: string[]; writes: string[] } {
+  const aCols = lhsType.kind === 'matrix' ? lhsType.cols : 0;
+  const aRows = lhsType.kind === 'matrix' ? lhsType.rows : 0;
+  const bCols = rhsType.kind === 'matrix' ? rhsType.cols : 0;
+  const bRows = rhsType.kind === 'matrix' ? rhsType.rows : 0;
+  const n = targets.length;
+  const dual = env.dual && dualTargets !== undefined;
+  const pre: string[] = [];
+  // LHS snapshot: every flat component (v + dual planes) into temps BEFORE
+  // any write — a naive sequential write corrupts later reads.
+  const sV: string[] = [];
+  const sDx: (string | null)[] = [];
+  const sDy: (string | null)[] = [];
+  for (let j = 0; j < n; j++) {
+    const t = env.allocTemp();
+    sV.push(t);
+    pre.push(`${t} = ${targets[j]}`);
+    const dj = dualTargets && dualTargets[j];
+    if (dual && dj) {
+      const tx = env.allocTemp();
+      const ty = env.allocTemp();
+      sDx.push(tx);
+      sDy.push(ty);
+      pre.push(`${tx} = ${dj[0]}`, `${ty} = ${dj[1]}`);
+    } else {
+      sDx.push(null);
+      sDy.push(null);
+    }
+  }
+  // RHS materialization: fold pres into the v temp (a shared pre chain runs
+  // once, with the first component that carries it); dx/dy captured too —
+  // they may reference the LHS, which the writes clobber.
+  const rV: string[] = [];
+  const rDx: (string | null)[] = [];
+  const rDy: (string | null)[] = [];
+  const preSeen = new Set<string[]>();
+  for (let j = 0; j < rhs.length; j++) {
+    const r = rhs[j];
+    const t = env.allocTemp();
+    if (r.pre && r.pre.length > 0 && !preSeen.has(r.pre)) {
+      preSeen.add(r.pre);
+      pre.push(`${t} = ${foldPre(r.pre, r.v)}`);
+    } else {
+      pre.push(`${t} = ${r.v}`);
+    }
+    rV.push(t);
+    if (dual && r.dx !== undefined) {
+      const tx = env.allocTemp();
+      const ty = env.allocTemp();
+      rDx.push(tx);
+      rDy.push(ty);
+      pre.push(`${tx} = ${r.dx}`, `${ty} = ${r.dy ?? '0'}`);
+    } else {
+      rDx.push(null);
+      rDy.push(null);
+    }
+  }
+  const writes: string[] = [];
+  for (let c = 0; c < bCols; c++) {
+    for (let r = 0; r < aRows; r++) {
+      const k = c * aRows + r;
+      if (dual) {
+        const terms: Value[] = [];
+        for (let s = 0; s < aCols; s++) {
+          const l: Value = { v: sV[s * aRows + r] };
+          if (sDx[s * aRows + r] !== null) {
+            l.dx = sDx[s * aRows + r]!;
+            l.dy = sDy[s * aRows + r]!;
+          }
+          const rr: Value = { v: rV[c * bRows + s] };
+          if (rDx[c * bRows + s] !== null) {
+            rr.dx = rDx[c * bRows + s]!;
+            rr.dy = rDy[c * bRows + s]!;
+          }
+          terms.push(arithDual('*', l, rr, env));
+        }
+        const res = terms.length === 1 ? terms[0] : foldAdd(terms, env);
+        writes.push(env.dualWrite(targets[k], dualTargets[k], res));
+      } else {
+        const parts: string[] = [];
+        for (let s = 0; s < aCols; s++) {
+          parts.push(`(${sV[s * aRows + r]} * (${rV[c * bRows + s]}))`);
+        }
+        writes.push(`(${targets[k]} = ${parts.join(' + ')})`);
+      }
+    }
+  }
+  return { pre, writes };
+}
+
 function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Value[] {
   const lv = emitLValue(e.target, env);
   const rhs = emitExpr(e.value, env);
@@ -1725,6 +1847,44 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
   // compound: target op= rhs  (read target once — targets are pure paths)
   const base = scalarBaseOf(t);
   if (!base) throw new Error('codegen: cannot compound-assign a non-scalar-shaped value');
+  const cop = e.op.slice(0, -1); // parser emits '*=' — compoundOp switches on '*'
+  // mat×mat '*=' is a MATRIX PRODUCT, not the component-wise lowering below
+  // (regression: matrix-compound-multiply CTS page rendered black). Emit via
+  // matrixCompoundMul (LHS snapshot + RHS materialization, dual aware) with
+  // the RAW RHS at its own width — never convertValue'd/broadcast.
+  if (cop === '*' && t.kind === 'matrix' && e.value.resolvedType!.kind === 'matrix') {
+    const mm = matrixCompoundMul(env, lv.targets, lv.dualTargets, t, rhs, e.value.resolvedType!);
+    if (env.dual && lv.dualTargets) {
+      // Dual mode mirrors the generic dual compound path below: the snapshot,
+      // materialization and write composites share ONE pre array (consumers
+      // may read only the dx/dy planes, so every component must trigger the
+      // writes); the assignment's value reads the slots back.
+      const pre: string[] = [];
+      if (preludes.length > 0) pre.push(...preludes);
+      if (broadcastPre.length > 0) pre.push(...broadcastPre);
+      pre.push(...mm.pre, ...mm.writes);
+      if (post) pre.push(...post.split(', '));
+      for (let c = 0; c < n; c++) {
+        const d = lv.dualTargets[c];
+        out.push({ v: lv.targets[c], dx: d ? d[0] : '0', dy: d ? d[1] : '0', pre });
+      }
+      return out;
+    }
+    // Non-dual: comp0 carries preludes + broadcast hoist + snapshot/
+    // materialization; the writes fold into v per component (same shape as
+    // the generic compound path below — comp0's pre runs first, the writes
+    // read the snapshot temps).
+    const pre: string[] = [...preludes, ...broadcastPre, ...mm.pre];
+    for (let c = 0; c < n; c++) {
+      let v = mm.writes[c];
+      if (post) {
+        const t2 = env.allocTemp();
+        v = `(${t2} = ${v}, ${post}, ${t2})`;
+      }
+      out.push(c === 0 && pre.length > 0 ? { v, pre } : { v });
+    }
+    return out;
+  }
   let conv = convertValue(rhsSrc, e.value.resolvedType!, t);
   // convertValue DROPS Value.pre when it converts scalar bases — re-attach
   // (mirrors statements.ts convertPreserving) so RHS pres survive. Iterate
@@ -1738,7 +1898,7 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
       conv = conv.map((v, i) => (i === c ? { ...v, pre: src.pre } : v));
     }
   }
-  const cop = e.op.slice(0, -1); // parser emits '+=' — compoundOp switches on '+'
+  // (cop computed above — parser emits '*='; compoundOp switches on '*')
   if (env.dual && lv.dualTargets && base === 'float') {
     // Dual mode, float target: the compound composite (updates all three
     // planes — dualWrite) is the shared `pre`; the expression's value reads

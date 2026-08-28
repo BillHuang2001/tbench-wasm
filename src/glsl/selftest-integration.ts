@@ -30,6 +30,10 @@
  *   9. scalar-RHS broadcast on vector/matrix lvalues: +=/-=/*=//= (and ES3
  *      %= on ivec4) with a scalar RHS — statement, expression and for-update
  *      contexts, matrix lvalues, ES 1.00 + ES 3.00, and dual mode.
+ *  10. mat×mat compound '*=' is a MATRIX PRODUCT (CTS
+ *      matrix-compound-multiply regression): CTS pattern (mat2/3/4),
+ *      distinct-values statement, aliasing `a *= a`, expression-value,
+ *      for-update, and dual mode.
  *
  * Run: npx tsx src/glsl/selftest-integration.ts
  * Prints "OK" and exits 0 on success; non-zero exit on failure.
@@ -1158,6 +1162,201 @@ let uboDual: Program | null = null;
       const o = fctx.out.color[0];
       [3, 3, 3, 3].forEach((e, c) => near(o[c], e, `(v += (x *= 2.0)).x → out[${c}]`));
     }
+  }
+}
+
+/* ================================================================== */
+/* 10. mat×mat compound '*=' lowers to a MATRIX PRODUCT                */
+/* ================================================================== */
+/* Regression: CTS conformance/glsl/matrices/matrix-compound-multiply.html
+ * rendered black (3 fails — mat2/mat3/mat4 "should be green"). `a *= b` on
+ * matrices is a MATRIX PRODUCT (`a = a * b`) per GLSL, but all four
+ * compound-assign emitters lowered it COMPONENT-WISE (Hadamard): for the CTS
+ * values (a[1][1]=3, b[0][1]=2) the product is (0,6,0,0) while component-wise
+ * gives (0,0,0,0) — diff 6 → black. The fix emits the emitArith mat×mat
+ * expansion with the LHS SNAPSHOTTED into temps before any write (every
+ * output column reads ALL LHS columns — a sequential write corrupts later
+ * reads) and the RHS materialized into temps (it may ALIAS the LHS). These
+ * pins cover statement / expression / for-update contexts, aliasing, and dual
+ * mode. */
+
+{
+  // 10a. The exact CTS pattern for all three sizes: `a *= b` must equal `a * b`
+  // (green iff |a−c| < 0.01); a[0][1] pins the product value 6.
+  for (const type of ['mat2', 'mat3', 'mat4'] as const) {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       void main() {
+         ${type} a = ${type}(0.0);
+         ${type} b = ${type}(0.0);
+         a[1][1] = 3.0;
+         b[0][1] = 2.0;
+         ${type} c = a * b;
+         a *= b;
+         ${type} d = a - c;
+         float diff = length(d[0]) + length(d[1]);
+         gl_FragColor = vec4(a[0][1], diff < 0.01 ? 1.0 : 0.0, 0.0, 1.0);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `${type} *= (CTS pattern) links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      near(o[0], 6, `${type} *= → a[0][1] == 6 (matrix product)`);
+      check(o[1] === 1, `${type} *= == a * b → diff < 0.01 (green; got ${o[1]})`);
+    }
+  }
+}
+
+{
+  // 10b. Distinct full matrices, statement context — pins the ABSOLUTE product
+  // (a naive both-wrong implementation would pass a pure diff check).
+  // a = cols (1,2,3),(4,5,6),(7,8,9); b = cols (9,8,7),(6,5,4),(3,2,1);
+  // a*b = cols (90,114,138),(54,69,84),(18,24,30) — flat [90,114,138, 54,69,84, 18,24,30].
+  const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+  const fs = compile(
+    `precision mediump float;
+     void main() {
+       mat3 a = mat3(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0);
+       mat3 b = mat3(9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0);
+       mat3 c = a * b;
+       a *= b;
+       mat3 d = a - c;
+       float diff = length(d[0]) + length(d[1]) + length(d[2]);
+       gl_FragColor = vec4(a[0][0], a[1][0], a[0][1], a[1][1]) + vec4(diff);
+     }`,
+    'FRAGMENT',
+    100,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `mat3 *= distinct matrices links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const fctx = fragmentCtx(l.program);
+    l.program.fragment.run(fctx);
+    const o = fctx.out.color[0];
+    [90, 54, 114, 69].forEach((e, c) => near(o[c], e, `mat3 *= product → out[${c}]`));
+  }
+}
+
+{
+  // 10c. Aliasing: `a *= a` — the RHS IS the LHS; without RHS materialization
+  // the write expressions would read already-clobbered slots.
+  // a = cols (1,2),(3,4); a*a = cols (7,10),(15,22) — flat [7,10,15,22].
+  const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+  const fs = compile(
+    `precision mediump float;
+     void main() {
+       mat2 a = mat2(1.0, 2.0, 3.0, 4.0);
+       a *= a;
+       gl_FragColor = vec4(a[0][0], a[0][1], a[1][0], a[1][1]);
+     }`,
+    'FRAGMENT',
+    100,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `mat2 *= self (a *= a) links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const fctx = fragmentCtx(l.program);
+    l.program.fragment.run(fctx);
+    const o = fctx.out.color[0];
+    [7, 10, 15, 22].forEach((e, c) => near(o[c], e, `a *= a → out[${c}]`));
+  }
+}
+
+{
+  // 10d. Expression context (emitAssign path — the assignment's VALUE is
+  // consumed: `(a *= b)[1][1]`). a = cols (1,2),(3,4); b = swap cols (0,1),(1,0);
+  // a*b = cols (3,4),(1,2) → (a *= b)[1][1] == 2.
+  const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+  const fs = compile(
+    `precision mediump float;
+     void main() {
+       mat2 a = mat2(1.0, 2.0, 3.0, 4.0);
+       mat2 b = mat2(0.0, 1.0, 1.0, 0.0);
+       float r = (a *= b)[1][1];
+       gl_FragColor = vec4(r, a[0][0], a[0][1], a[1][0]);
+     }`,
+    'FRAGMENT',
+    100,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `mat2 *= in expression links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const fctx = fragmentCtx(l.program);
+    l.program.fragment.run(fctx);
+    const o = fctx.out.color[0];
+    [2, 3, 4, 1].forEach((e, c) => near(o[c], e, `(a *= b)[1][1] → out[${c}]`));
+  }
+}
+
+{
+  // 10e. For-update slot (updateString path): two swap-multiplies return the
+  // original matrix (1,2,3,4); the old component-wise path gave (0,4,9,0).
+  const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+  const fs = compile(
+    `precision mediump float;
+     void main() {
+       mat2 a = mat2(1.0, 2.0, 3.0, 4.0);
+       mat2 b = mat2(0.0, 1.0, 1.0, 0.0);
+       for (int i = 0; i < 2; a *= b) { i++; }
+       gl_FragColor = vec4(a[0][0], a[0][1], a[1][0], a[1][1]);
+     }`,
+    'FRAGMENT',
+    100,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `mat2 *= in for-update links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const fctx = fragmentCtx(l.program);
+    l.program.fragment.run(fctx);
+    const o = fctx.out.color[0];
+    [1, 2, 3, 4].forEach((e, c) => near(o[c], e, `a *= b ×2 in for-update → out[${c}]`));
+  }
+}
+
+{
+  // 10f. Dual mode (fragment derivatives): mat2 *= mat2 updates all three
+  // planes via the product rule. x = cols (1,2),(3,4) ddx (5,6),(7,8);
+  // y = cols (9,10),(11,12) ddx (13,14),(15,16).
+  // a = x*y = flat [39,58,47,70]; d(a) per output:
+  //   d[0] = 5*9+1*13+7*10+3*14 = 170; d[1] = 6*9+2*13+8*10+4*14 = 216;
+  //   d[3] = 6*11+2*15+8*12+4*16 = 256.
+  const vs = compile(
+    `attribute vec4 aPos;
+     varying mat2 x; varying mat2 y;
+     void main() { x = mat2(1.0); y = mat2(2.0); gl_Position = aPos; }`,
+    'VERTEX',
+    100,
+  );
+  const fs = compile(
+    `#extension GL_OES_standard_derivatives : enable
+     precision mediump float;
+     varying mat2 x; varying mat2 y;
+     void main() {
+       mat2 a = x;
+       a *= y;
+       gl_FragColor = vec4(dFdx(a[0][0]), dFdx(a[0][1]), a[1][1], dFdx(a[1][1]));
+     }`,
+    'FRAGMENT',
+    100,
+    ['GL_OES_standard_derivatives'],
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `dual mat2 *= links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    check(l.program.fragment.usesDerivatives === true, `dual mat2 *= usesDerivatives true`);
+    const fctx = fragmentCtx(l.program, [
+      { v: new Float32Array([1, 2, 3, 4]), ddx: new Float32Array([5, 6, 7, 8]), ddy: new Float32Array([0, 0, 0, 0]) },
+      { v: new Float32Array([9, 10, 11, 12]), ddx: new Float32Array([13, 14, 15, 16]), ddy: new Float32Array([0, 0, 0, 0]) },
+    ]);
+    l.program.fragment.run(fctx);
+    const o = fctx.out.color[0];
+    [170, 216, 70, 256].forEach((e, c) => near(o[c], e, `dual mat2 *= → out[${c}]`));
   }
 }
 

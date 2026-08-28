@@ -534,6 +534,120 @@ void main() { gl_Position = vec4(0.0); }
 }
 
 /* ------------------------------------------------------------------ */
+/* Empty declarators (conformance/glsl/misc/empty-declaration.html)     */
+/* ------------------------------------------------------------------ */
+
+{
+  // OLD BEHAVIOR (bug): `float;` was rejected with "expected identifier,
+  // found ';'". Per the ESSL Appendix A grammar `single_declaration` =
+  // `fully_specified_type`, an empty declarator is legal (a side effect of
+  // how the grammar for structs is defined). It declares NOTHING: no
+  // VarDeclarator node is produced.
+  const ast = parseOk('float;\n', 100);
+  check(ast.declarations.length === 1, `empty-decl count: ${ast.declarations.length}`);
+  const g = gvar(ast.declarations[0]);
+  check(g.declarators.length === 0, 'float; → zero declarators');
+}
+
+{
+  // OLD BEHAVIOR (bug): `float, a = 0.0;` was rejected — the empty FIRST
+  // declarator is legal (`init_declarator_list COMMA init_declarator` with
+  // `single_declaration` = just the type). Only the first slot may be empty.
+  const ast = parseOk('float, a = 0.0;\n', 100);
+  const g = gvar(ast.declarations[0]);
+  check(g.declarators.length === 1, `float, a = 0.0 → one declarator (got ${g.declarators.length})`);
+  check(g.declarators[0].name === 'a', 'empty-first declarator name a');
+  lit(g.declarators[0].init, 0.0, 'float');
+}
+
+{
+  // OLD BEHAVIOR (bug): `struct S {...}, a;` was rejected at the `,`.
+  const ast = parseOk('struct S { float member; }, a;\n', 100);
+  const g = gvar(ast.declarations[0]);
+  check(g.type.base.kind === 'struct-definition', 'struct empty-first is a global-var-decl');
+  check(g.declarators.length === 1 && g.declarators[0].name === 'a', 'struct empty-first declarator a');
+}
+
+{
+  // The same empty-first form is legal INSIDE function bodies (declaration
+  // statement → decl-stmt with zero declarators).
+  const ast = parseOk('void main() { float; gl_Position = vec4(0.0); }\n', 100);
+  const fn = fdef(ast.declarations[0]);
+  const st = fn.body.body[0] as DeclStmt;
+  check(st.kind === 'decl-stmt', 'in-body float; is a decl-stmt');
+  check(st.declarators.length === 0, 'in-body float; → zero declarators');
+}
+
+{
+  // In-struct declarations use struct_declarator_list (a NAME is required) —
+  // empty declarators there must STILL fail (the 2 in-struct subtests of
+  // empty-declaration.html expect failure; do not loosen).
+  const errs1 = parseFail('struct S { float; float a; };\n', 100);
+  check(errs1.length >= 1, `in-struct float; fails: ${errs1.length} error(s)`);
+  check(errs1[0].message.includes("expected identifier, found ';'"), `in-struct float; msg: ${errs1[0].message}`);
+  const errs2 = parseFail('struct S { float, a; float b; };\n', 100);
+  check(errs2.length >= 1, `in-struct float, a fails: ${errs2.length} error(s)`);
+}
+
+{
+  // The empty slot is only legal in FIRST position: `float a, ;` still fails
+  // (grammar: init_declarator_list COMMA init_declarator — after a comma a
+  // real declarator is required).
+  const errs = parseFail('void main() { float a, ; }\n', 100);
+  check(errs.length >= 1, `trailing comma fails: ${errs.length} error(s)`);
+  check(errs[0].message.includes("expected identifier, found ';'"), `trailing comma msg: ${errs[0].message}`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Precision statements inside function bodies                         */
+/* (conformance/glsl/misc/ternary-operators-in-initializers.html)       */
+/* ------------------------------------------------------------------ */
+
+{
+  // OLD BEHAVIOR (bug): `precision mediump float;` as the first statement in
+  // main() was rejected with "syntax error, unexpected 'precision'". It is a
+  // legal declaration statement (ESSL Appendix A) — ANGLE accepts it. The
+  // statement slot parses as an `empty` node and the PrecisionDecl is
+  // HOISTED to just before the enclosing function definition in the global
+  // declaration list (so the semantics pre-pass processes it before the
+  // body; fragment float declarations then see the default precision).
+  const ast = parseOk('void main() { precision mediump float; float i = 2.0; gl_FragColor = vec4(0.0, i, 0.0, 1.0); }\n', 100);
+  check(ast.declarations.length === 2, `hoisted precision-decl + fn (got ${ast.declarations.length})`);
+  check(ast.declarations[0].kind === 'precision-decl', 'hoisted decl precedes the function definition');
+  const p = pdecl(ast.declarations[0]);
+  check(p.precision === 'mediump' && p.base === 'float', 'hoisted precision mediump float');
+  const fn = fdef(ast.declarations[1]);
+  const st = fn.body.body[0];
+  check(st.kind === 'empty', `in-body precision statement slot is empty (got ${st.kind})`);
+}
+
+{
+  // Multiple in-body precision statements keep source order, both hoisted
+  // before the function definition.
+  const ast = parseOk('void main() { precision mediump float; precision lowp int; }\n', 100);
+  check(ast.declarations.length === 3, `two hoisted + fn (got ${ast.declarations.length})`);
+  const p1 = pdecl(ast.declarations[0]);
+  const p2 = pdecl(ast.declarations[1]);
+  check(p1.base === 'float' && p1.precision === 'mediump', 'first hoisted = mediump float');
+  check(p2.base === 'int' && p2.precision === 'lowp', 'second hoisted = lowp int');
+}
+
+{
+  // The same form works in ES 3.00 and in vertex shaders.
+  const ast300 = parseOk('#version 300 es\nvoid main() { precision highp float; vec2 i = vec2(1.0); }\n', 300);
+  check(ast300.declarations[0].kind === 'precision-decl', '300 in-body precision hoisted');
+  const astV = parseOk('void main() { precision lowp float; }\n', 100);
+  check(astV.declarations[0].kind === 'precision-decl', 'vertex in-body precision hoisted');
+}
+
+{
+  // Invalid precision statements inside bodies still error (bad base type).
+  const errs = parseFail('void main() { precision highp vec3; }\n', 100);
+  check(errs.length >= 1, `in-body precision vec3 fails: ${errs.length} error(s)`);
+  check(errs[0].message.includes('invalid base type in precision declaration'), `in-body precision vec3 msg: ${errs[0].message}`);
+}
+
+/* ------------------------------------------------------------------ */
 /* Error cases with exact line numbers (ES 1.00)                       */
 /* ------------------------------------------------------------------ */
 
