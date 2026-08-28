@@ -92,6 +92,22 @@ function analyzeDeclarations(ast: TranslationUnit, ctx: SemContext): ShaderInfo 
       case 'global-var-decl':
         analyzeGlobalDecl(d, ctx, info);
         break;
+      case 'layout-decl': {
+        // Standalone layout declaration (ES 3.00 §4.4): sets the DEFAULT
+        // layout for subsequent declarations. The uniform-block layout
+        // (std140/shared/packed) and row_major/column_major thread into
+        // later interface blocks declared without an explicit layout(...) —
+        // so a bare `uniform B {...};` after `layout(packed) uniform;` still
+        // fails the std140-only check (analyzeInterfaceBlock reads
+        // ctx.defaultLayout). `layout(location=N) in/out;` location defaults
+        // are NOT threaded (no CTS page grades it — deliberate).
+        const lq = d.qualifiers.layout;
+        if (lq !== undefined) {
+          if (lq.blockLayout !== undefined) ctx.defaultLayout.blockLayout = lq.blockLayout;
+          if (lq.rowMajor !== undefined) ctx.defaultLayout.rowMajor = lq.rowMajor;
+        }
+        break;
+      }
       case 'interface-block':
         analyzeInterfaceBlock(d, ctx, info);
         break;
@@ -626,7 +642,11 @@ function analyzeInterfaceBlock(d: InterfaceBlockDecl, ctx: SemContext, info: Sha
   if (!isVaryingBlock) {
     // Uniform blocks (or unsupported combos — recorded nowhere, linker rejects).
     if (storage === 'uniform' || storage === undefined) {
-      const blockLayout = q.layout?.blockLayout;
+      // The block's own layout(...) qualifier wins; otherwise the DEFAULT set
+      // by a preceding standalone `layout(...) uniform;` declaration (ES 3.00
+      // §4.4) applies — so `layout(packed) uniform;` followed by a bare
+      // `uniform B {...};` still fails the std140-only check below.
+      const blockLayout = q.layout?.blockLayout ?? ctx.defaultLayout.blockLayout;
       // WebGL2 supports only std140 uniform block layouts (default when no
       // layout qualifier is present). `shared`/`packed` must fail compilation
       // (spec: "fail either the compilation or linking stages"; the CTS
@@ -644,7 +664,9 @@ function analyzeInterfaceBlock(d: InterfaceBlockDecl, ctx: SemContext, info: Sha
         instanceArray: d.instanceName !== null && d.instanceName !== '' && d.arrayDims.length > 0,
         // Block-level layout(row_major) (ES 3.00 §4.3.9) applies to every
         // matrix member unless the member carries its own row_major/column_major.
-        rowMajor: q.layout?.rowMajor ?? false,
+        // A standalone-decl default (ES 3.00 §4.4) fills in when the block has
+        // no explicit layout(...).
+        rowMajor: q.layout?.rowMajor ?? ctx.defaultLayout.rowMajor ?? false,
         binding: q.layout?.binding ?? null,
         members: members.map((m) => ({
           name: m.name,

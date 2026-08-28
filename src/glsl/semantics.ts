@@ -78,6 +78,18 @@ export class SemContext {
    */
   defaultPrecisions: Map<string, Precision> = new Map();
 
+  /**
+   * Default layout state set by standalone `layout(...) uniform;` declarations
+   * (GLSL ES 3.00 §4.4 `type_qualifier SEMICOLON`): block layout
+   * (std140/shared/packed) + row_major/column_major apply to subsequent
+   * uniform-block declarations that carry no explicit layout(...) qualifier.
+   * Consumed by analyzeInterfaceBlock (semantics-decl.ts); updated by the
+   * layout-decl case in the ShaderInfo declaration pass (source order).
+   * `layout(location=N) in/out;` standalone forms are accepted but their
+   * location default is deliberately NOT threaded (no CTS page grades it).
+   */
+  defaultLayout: { blockLayout?: string; rowMajor?: boolean } = {};
+
   /** Internal: nested loop depth (continue legality). */
   loopDepth = 0;
   /** Internal: nested loop+switch depth (break legality). */
@@ -1049,6 +1061,12 @@ export function analyzeProgram(ast: TranslationUnit, ctx: SemContext): void {
       }
       case 'interface-block':
         registerInterfaceBlock(d, global, ctx);
+        break;
+      case 'layout-decl':
+        // Standalone layout declaration (ES 3.00 §4.4): no symbols, no core
+        // checks — the default-layout threading happens in the ShaderInfo
+        // pass (analyzeDeclarations → analyzeInterfaceBlock), which iterates
+        // in the same source order on the same SemContext.
         break;
       case 'precision-decl':
         // Default precision statements take effect from their point onward.

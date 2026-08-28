@@ -2914,6 +2914,117 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
 }
 
 /* ------------------------------------------------------------------ */
+/* 23. Standalone layout declarations (ES 3.00 §4.4 `type_qualifier    */
+/*     SEMICOLON`): `layout(std140,column_major) uniform;` before bare */
+/*     UBO blocks — the Babylon standard-material pattern. The          */
+/*     standalone's block layout + row/column-major thread into        */
+/*     subsequent blocks declared WITHOUT an explicit layout(...).     */
+/* ------------------------------------------------------------------ */
+
+{
+  const FLOAT_MAT4x3 = 0x8b6a; // 35690
+
+  // The exact Babylon standard-material UBO pattern: two standalone
+  // `layout(std140,column_major) uniform;` decls, each followed by a bare
+  // instance-less block. Compiles AND links; the blocks land in
+  // uniformBlocks with std140 metadata.
+  const vs = compile(
+    `#version 300 es
+     layout(std140,column_major) uniform;
+     uniform Material {
+       vec4 diffuseColor;
+       mat4 viewProjection;
+     };
+     layout(std140,column_major) uniform;
+     uniform Scene {
+       mat4 view;
+     };
+     void main() { gl_Position = viewProjection * vec4(0.0, 0.0, 0.0, 1.0); }`,
+    'VERTEX', 300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision mediump float;
+     out vec4 o;
+     void main() { o = vec4(0.0, 1.0, 0.0, 1.0); }`,
+    'FRAGMENT', 300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `(a) babylon standalone-layout pattern links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    const blocks = p.uniformBlocks;
+    check(
+      blocks.length === 2 && blocks[0].name === 'Material' && blocks[1].name === 'Scene',
+      `(a) both bare blocks in uniformBlocks (got ${JSON.stringify(blocks.map((b) => b.name))})`,
+    );
+    // std140 sizes: vec4@0 + mat4@16 → 80; mat4 → 64.
+    check(
+      blocks[0].size === 80 && blocks[1].size === 64,
+      `(a) std140 sizes 80/64 (got ${JSON.stringify(blocks.map((b) => b.size))})`,
+    );
+    // The standalone `column_major` default flows into the bare blocks:
+    // mat4 member m matrixStride 16, rowMajor false.
+    const vp = blocks[0].activeUniforms.find((u) => u.name === 'viewProjection');
+    check(
+      vp !== undefined && vp.offset === 16 && vp.matrixStride === 16 && vp.rowMajor === false,
+      `(a) column_major default → 'viewProjection' @16 matrixStride 16 rowMajor false (got ${JSON.stringify(vp)})`,
+    );
+  }
+
+  // Standalone `layout(std140, row_major) uniform;` threads row_major into a
+  // bare block: mat4x3 member gets matrixStride 16 (row stride) + rowMajor
+  // true (matrix-row-major.html semantics).
+  const vs2 = compile(
+    `#version 300 es
+     layout(std140, row_major) uniform;
+     uniform b { mat4x3 m; };
+     void main() { gl_Position = vec4(0,0,0,1); }`,
+    'VERTEX', 300,
+  );
+  const l2 = linkProgram(vs2, fs);
+  check(l2.ok, `(b) row_major standalone default links (${l2.ok ? '' : l2.log})`);
+  if (l2.ok) {
+    const m = l2.program.uniformBlocks[0].activeUniforms[0];
+    check(
+      m.name === 'm' && m.offset === 0 && m.type === FLOAT_MAT4x3 &&
+        m.matrixStride === 16 && m.rowMajor === true,
+      `(b) row_major default → mat4x3 matrixStride 16 rowMajor true (got ${JSON.stringify(m)})`,
+    );
+  }
+
+  // `layout(shared) uniform;` standalone default must make a following bare
+  // `uniform B {...};` a COMPILE error (WebGL2 std140-only rule) — the error
+  // must point at the BLOCK line (the default threading), not the standalone.
+  const shared = compileShader(
+    `#version 300 es
+     layout(shared) uniform;
+     uniform B { vec4 x; };
+     void main() { gl_Position = vec4(0.0); }`,
+    { type: 'VERTEX', version: 300 },
+  );
+  check(
+    !shared.ok && shared.errors.some((e) => e.line === 3 && e.message.includes("only 'std140'")),
+    `(c) shared standalone default → bare block compile error at line 3 (${shared.ok ? 'COMPILED' : JSON.stringify(shared.errors)})`,
+  );
+
+  // `layout(packed) uniform;` fails at the LEXER (`packed` is a reserved
+  // word) — still a compile error, so the packed default never reaches a
+  // block (same behavior as `layout(packed) uniform B {...};`).
+  const packed = compileShader(
+    `#version 300 es
+     layout(packed) uniform;
+     uniform B { vec4 x; };
+     void main() { gl_Position = vec4(0.0); }`,
+    { type: 'VERTEX', version: 300 },
+  );
+  check(
+    !packed.ok,
+    `(d) packed standalone default still fails compilation (${packed.ok ? 'COMPILED' : JSON.stringify(packed.errors)})`,
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
 
