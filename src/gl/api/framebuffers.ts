@@ -56,13 +56,23 @@
  *  - renderbufferStorageMultisample: samples < 0 → INVALID_VALUE; samples >
  *    MAX_SAMPLES → INVALID_OPERATION; storage stays single-sampled (software
  *    resolve happens at blit); record rb._samples.
- *  - drawBuffers (W2): sequence<GLenum> conversion (TypeError for non-finite);
+ *  - drawBuffers (W2): WebIDL sequence<GLenum> conversion — ToUint32 per element
+ *    (NaN/Infinity → 0, -1 → 0xFFFFFFFF, 1.5 → 1; TypeError only when the
+ *    argument is not a sequence, e.g. null/undefined or a Symbol element);
  *    length > MAX_DRAW_BUFFERS → INVALID_VALUE; length 0 → INVALID_OPERATION;
  *    default FB: exactly [BACK] or [NONE] else INVALID_OPERATION; FBO: entries
  *    NONE or strictly-increasing COLOR_ATTACHMENTi < MAX_COLOR_ATTACHMENTS
  *    (BACK → INVALID_OPERATION, out-of-range → INVALID_ENUM, out-of-order →
- *    INVALID_OPERATION). Stores state.drawBuffers (same field WEBGL_draw_buffers
- *    writes). WebGL1 gets drawBuffersWEBGL from the extension instead.
+ *    INVALID_OPERATION). Draw-buffer state is FRAMEBUFFER OBJECT state (GLES3
+ *    §4.1.2 / WebGL2 §5.5.5), NOT context state: each FBO owns its list (module-
+ *    level WeakMap, lazily defaulted to [COLOR_ATTACHMENT0, NONE × 7] on first
+ *    bind); drawBuffers() writes the BOUND DRAW framebuffer's list, and
+ *    bindFramebuffer/deleteFramebuffer sync state.drawBuffers (read by
+ *    getters.ts DRAW_BUFFERi) to the newly-bound draw framebuffer's list
+ *    (default framebuffer → [COLOR_ATTACHMENT0] in attachment-index form —
+ *    getters.ts reports it as BACK; draw.ts consumes it as an attachment index).
+ *    WebGL1 gets drawBuffersWEBGL from the extension instead (context state,
+ *    untouched here).
  *  - readBuffer (W2): default FB {NONE, BACK} else INVALID_OPERATION; FBO
  *    {NONE, COLOR_ATTACHMENT0..<max} else INVALID_OPERATION; src below
  *    COLOR_ATTACHMENT0 (non-NONE) → INVALID_ENUM.
@@ -682,7 +692,14 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
     framebuffer._deleted = true;
     // Deleting a bound FBO resets the binding(s) to the default framebuffer.
     const s = ctx._state;
-    if (s.drawFramebuffer === framebuffer) s.drawFramebuffer = null;
+    if (s.drawFramebuffer === framebuffer) {
+      s.drawFramebuffer = null;
+      // W2: draw-buffer state is framebuffer-object state — the default
+      // framebuffer's list is [COLOR_ATTACHMENT0] (attachment-index form;
+      // getters.ts reports it as BACK). WebGL1's WEBGL_draw_buffers extension
+      // owns s.drawBuffers — never touched here.
+      if (ctx._version === 2) s.drawBuffers = getDrawBufferList(ctx, null);
+    }
     if (s.readFramebuffer === framebuffer) s.readFramebuffer = null;
     ctx._resources.untrack(framebuffer);
   };
@@ -722,6 +739,13 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       // FRAMEBUFFER, WebGL2 keeps the ES3 both-slot behavior).
       s.drawFramebuffer = fbo;
       if (target === C1.FRAMEBUFFER) s.readFramebuffer = fbo;
+      // W2: draw-buffer state is framebuffer-object state (GLES3 §4.1.2) — sync
+      // the context-visible list (s.drawBuffers, read by getters.ts DRAW_BUFFERi)
+      // to the newly-bound draw framebuffer's OWN list ([COLOR_ATTACHMENT0] for
+      // the default framebuffer — attachment-index form; getters.ts reports it
+      // as BACK). WebGL1's WEBGL_draw_buffers extension owns s.drawBuffers as
+      // context state — never touched here.
+      if (ctx._version === 2) s.drawBuffers = getDrawBufferList(ctx, fbo);
     }
     if (fbo) {
       fbo._isBound = true;
@@ -1227,14 +1251,14 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       const ctx = this;
       if (isLost(ctx)) return;
       const s = ctx._state;
-      // WebIDL sequence<GLenum> conversion (mirrors the WEBGL_draw_buffers factory).
+      // WebIDL sequence<GLenum> conversion: ToUint32 per element (NaN/Infinity →
+      // 0, -1 → 0xFFFFFFFF, 1.5 → 1 — CTS blitframebuffer-test.html passes a
+      // NaN element and expects it to convert to COLOR_ATTACHMENT0). TypeError
+      // only when the argument is not a sequence (Array.from on null/undefined,
+      // or a Symbol element, throws).
       let arr: number[];
       try {
-        arr = Array.from(buffers as unknown as ArrayLike<unknown>, (v) => {
-          const n = Number(v);
-          if (!Number.isFinite(n)) throw new TypeError('drawBuffers: invalid GLenum in sequence');
-          return n >>> 0;
-        });
+        arr = Array.from(buffers as unknown as ArrayLike<unknown>, (v) => Number(v) >>> 0);
       } catch {
         throw new TypeError('drawBuffers: buffers is not a sequence<GLenum>');
       }
@@ -1255,6 +1279,7 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         s.drawBuffers = arr;
         return;
       }
+      const fbo = s.drawFramebuffer;
       // FBO: NONE or strictly-increasing COLOR_ATTACHMENTi < MAX_COLOR_ATTACHMENTS.
       let last = -1;
       for (const b of arr) {
@@ -1274,6 +1299,9 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         }
         last = idx;
       }
+      // Draw-buffer state is framebuffer-object state: store on the bound DRAW
+      // framebuffer AND mirror into s.drawBuffers (read by getters.ts DRAW_BUFFERi).
+      perFboDrawBuffers.set(fbo, arr);
       s.drawBuffers = arr;
     };
   }
@@ -1392,7 +1420,9 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       if ((mask & C1.COLOR_BUFFER_BIT) !== 0) {
         const readKey = attachmentImageKey(ctx, readFbo, readFbo === null ? BACK : s.readBuffer);
         if (readKey !== null) {
-          const dbList = drawFbo === null ? [BACK] : s.drawBuffers;
+          // Draw-buffer list comes from the DRAW framebuffer's OWN state
+          // (per-FBO; attachmentImageKey maps COLOR_ATTACHMENT0 → default FB).
+          const dbList = getDrawBufferList(ctx, drawFbo);
           for (const db of dbList) {
             if (db === NONE) continue;
             if (sameImage(readKey, attachmentImageKey(ctx, drawFbo, db))) {
@@ -1438,6 +1468,39 @@ const everBoundRenderbuffers = new WeakSet<WebGLRenderbuffer>();
 
 /** isFramebuffer "has been bound at least once" marker (spec + CTS misc/is-object.html). */
 const everBoundFramebuffers = new WeakSet<WebGLFramebuffer>();
+
+/**
+ * W2 draw-buffer state is FRAMEBUFFER OBJECT state (GLES3 §4.1.2 / WebGL2
+ * §5.5.5), not context state. Lazily initialized on first bind to the spec
+ * default [COLOR_ATTACHMENT0, NONE × (MAX_DRAW_BUFFERS-1)].
+ */
+const perFboDrawBuffers = new WeakMap<WebGLFramebuffer, GLenum[]>();
+
+/**
+ * The draw-buffer list of the given DRAW framebuffer (null = default
+ * framebuffer → [COLOR_ATTACHMENT0]). Custom FBOs are lazily initialized to the
+ * spec default on first access. Used by bindFramebuffer/deleteFramebuffer (to
+ * keep s.drawBuffers synced to the bound draw framebuffer) and by
+ * blitFramebuffer's identical-image check.
+ *
+ * NOTE on the default-framebuffer representation: the spec value is BACK, but
+ * s.drawBuffers is consumed by draw.ts as ATTACHMENT INDICES (db - COLOR_ATTACHMENT0
+ * → surface index; draw.ts buildOutputMaps/executeClear/executeBlitFramebuffer/
+ * executeClearBuffer) — a BACK entry would compute a negative index and silently
+ * drop the write. getters.ts maps any non-NONE first element to BACK for the
+ * default framebuffer, so [COLOR_ATTACHMENT0] is observably identical
+ * (getParameter(DRAW_BUFFER0) → BACK).
+ */
+function getDrawBufferList(ctx: WebGLRenderingContext, fbo: WebGLFramebuffer | null): GLenum[] {
+  if (fbo === null) return [COLOR_ATTACHMENT0];
+  let list = perFboDrawBuffers.get(fbo);
+  if (list === undefined) {
+    list = new Array<GLenum>(ctx._state.limits.MAX_DRAW_BUFFERS).fill(NONE);
+    list[0] = COLOR_ATTACHMENT0;
+    perFboDrawBuffers.set(fbo, list);
+  }
+  return list;
+}
 
 /** W2 default-framebuffer attachment parameter values. */
 function defaultFbAttachmentParameter(ctx: WebGLRenderingContext, pname: GLenum): any {
