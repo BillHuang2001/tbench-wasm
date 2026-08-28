@@ -357,8 +357,18 @@ export class FragmentOpsImpl implements FragmentOps {
    * (RGB only) → colorMask → surface write. (DITHER is a no-op — see header.)
    */
   private writeColor(L: number, x: number, y: number, colors: readonly Float32Array[]): void {
-    const attach = this.drawBuffers[L];
-    if (attach < 0) return; // DRAW_BUFFERi = NONE
+    const db = this.drawBuffers[L];
+    if (db === -1) return; // DRAW_BUFFERi = NONE
+    // Defensive normalization for legacy/raw draw-buffer enums: gl.drawBuffers([BACK])
+    // on the default framebuffer historically stored BACK (0x0405) verbatim, so the
+    // draw path's `db - COLOR_ATTACHMENT0` normalization produced a large NEGATIVE
+    // index, and any raw positive enum (e.g. 0x0405 = 1029) leaks through as
+    // out-of-range. Both silently dropped ALL color writes here. Treat any such
+    // value as attachment 0 (the default framebuffer's single color target); the
+    // semantic fix (BACK → COLOR_ATTACHMENT0 normalization) lives gl-side in
+    // src/gl/api/framebuffers.ts.
+    let attach = db;
+    if ((attach < 0 && attach !== -1) || attach >= this.fbColors.length) attach = 0;
     const tgt = this.fbColors[attach];
     if (!tgt) return;
     const src = colors[L];
