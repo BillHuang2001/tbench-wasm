@@ -233,6 +233,30 @@ expectErr('#version 100\n#version 100\nfoo', 'duplicate #version');
 expectErr('#version 100\n#version 300 es\nfoo', 'duplicate #version', { version: 300 });
 // Comments/whitespace before #version are fine.
 expect('// comment\n/* block */\n#version 100\nfoo', ['foo']);
+// ESSL 3.00 §3.3: `#version 300 es` must be on the very FIRST line — a
+// newline or comment before it is a compile error (CTS:
+// conformance2/glsl3/misplaced-version-directive.html). ESSL 1.00 stays
+// permissive (`#version 100` after comments/whitespace, pinned above).
+expectErr('\n#version 300 es\nfoo', 'must appear on the first line', { version: 300 });
+expectErr('// comment\n#version 300 es\nfoo', 'must appear on the first line', { version: 300 });
+expectErr('/* block */\n#version 300 es\nfoo', 'must appear on the first line', { version: 300 });
+expect('#version 300 es\nfoo', ['foo'], { version: 300 }); // first line: legal
+// A duplicate `#version 300 es` is still reported as a duplicate (the
+// versionSeen check runs before the first-line check).
+expectErr('#version 300 es\n#version 300 es\nfoo', 'duplicate #version', { version: 300 });
+
+/* ------------------------------------------------------------------ */
+/* Identifier length limit (ESSL 3.00 §3.6: max 1024 chars)            */
+/* ------------------------------------------------------------------ */
+
+// A >1024-char identifier TOKEN is a compile error — including a token that
+// only appears inside a `#define` body and is never expanded (CTS:
+// shader-with-1025-character-define.html), which never reaches the lexer.
+expectErr('#define LEN_1025_BAD ' + 'X'.repeat(1025) + '\nfoo', 'longer than 1024');
+expectErr('uniform float ' + 'a'.repeat(1025) + ';\nfoo', 'longer than 1024');
+// Exactly 1024 characters stays legal (attrib-location-length-limits.html).
+expect('uniform float ' + 'a'.repeat(1024) + ';\n' + 'a'.repeat(1024),
+  ['uniform', 'float', 'a'.repeat(1024), ';', 'a'.repeat(1024)]);
 
 /* ------------------------------------------------------------------ */
 /* #extension                                                          */

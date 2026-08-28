@@ -251,6 +251,15 @@ expect(['my_Vec4'], 100, ['id:my_Vec4']);
 expect(['a', '_b', 'c1'], 300, ['id:a', 'id:_b', 'id:c1']);
 expect(['x', '1', 'y'], 100, ['id:x', 'int:1', 'id:y']);
 
+// ESSL 3.00 §3.6: identifiers are limited to 1024 characters. The
+// preprocessor rejects source tokens at this length, so these pin the lexer's
+// own check directly (it catches tokens that bypass the preprocessor, e.g.
+// `##` paste results). Exactly 1024 characters stays legal
+// (attrib-location-length-limits.html compiles a 1024-char attribute name).
+lexErr(['a'.repeat(1025)], 300, 'longer than 1024');
+lexErr(['a'.repeat(1025)], 100, 'longer than 1024');
+expect(['a'.repeat(1024)], 300, ['id:' + 'a'.repeat(1024)]);
+
 /* ------------------------------------------------------------------ */
 /* Reserved identifiers (WebGL §6.2 / ANGLE)                           */
 /* ------------------------------------------------------------------ */
