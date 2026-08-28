@@ -890,7 +890,7 @@ function samplerTargetKey(type: number): 'texture2D' | 'textureCube' | 'texture3
   switch (type) {
     case C2.SAMPLER_3D: case C2.INT_SAMPLER_3D: case C2.UNSIGNED_INT_SAMPLER_3D:
       return 'texture3D';
-    case C2.SAMPLER_2D_ARRAY: case C2.SAMPLER_2D_ARRAY_SHADOW:
+    case C2.SAMPLER_2D_ARRAY: case C2.SAMPLER_2D_ARRAY_SHADOW: case 0x8dc4:
     case C2.INT_SAMPLER_2D_ARRAY: case C2.UNSIGNED_INT_SAMPLER_2D_ARRAY:
       return 'texture2DArray';
     case C1.SAMPLER_CUBE: case C2.SAMPLER_CUBE_SHADOW:
@@ -898,6 +898,30 @@ function samplerTargetKey(type: number): 'texture2D' | 'textureCube' | 'texture3
       return 'textureCube';
     default:
       return 'texture2D';
+  }
+}
+
+/**
+ * Sampler-uniform GLenum → class (WebGL2 spec "A sampler type must match the
+ * internal texture format"; GLES 3.0 §3.8.19). Values per the WebGL 2.0 IDL —
+ * NOTE: SAMPLER_2D_ARRAY_SHADOW is 0x8dc4 in WebGL (the spec deviates from
+ * GLES 3.0's 0x8dc3; src/glsl/types.ts emits the WebGL value). Returns null
+ * for unknown types (WebGL1-only samplers are float-class and are covered by
+ * the SAMPLER_2D/SAMPLER_CUBE cases).
+ */
+function samplerUniformClass(type: GLenum): 'float' | 'signed' | 'unsigned' | 'shadow' | null {
+  switch (type) {
+    case C1.SAMPLER_2D: case C2.SAMPLER_3D: case C1.SAMPLER_CUBE: case C2.SAMPLER_2D_ARRAY:
+      return 'float';
+    case C2.SAMPLER_2D_SHADOW: case C2.SAMPLER_CUBE_SHADOW: case 0x8dc4: // SAMPLER_2D_ARRAY_SHADOW (WebGL value)
+      return 'shadow';
+    case C2.INT_SAMPLER_2D: case C2.INT_SAMPLER_3D: case C2.INT_SAMPLER_CUBE: case C2.INT_SAMPLER_2D_ARRAY:
+      return 'signed';
+    case C2.UNSIGNED_INT_SAMPLER_2D: case C2.UNSIGNED_INT_SAMPLER_3D:
+    case C2.UNSIGNED_INT_SAMPLER_CUBE: case C2.UNSIGNED_INT_SAMPLER_2D_ARRAY:
+      return 'unsigned';
+    default:
+      return null;
   }
 }
 
@@ -982,6 +1006,13 @@ function buildTextureEnv(
  * textures are ignored (sampling returns (0,0,0,1) — the same page's
  * "incomplete texture" case). Only units the program actually samples matter
  * (a texture bound to an inactive unit is fine — CTS feedback-loop.html).
+ *
+ * WebGL2 refines the rule to the ATTACHED LEVEL (GLES 3.0 §4.4.3): the draw
+ * is invalid only when the attached level falls inside the sampled level
+ * window — [level_base, q] for mipmap MIN_FILTERs, [level_base, level_base]
+ * for NEAREST/LINEAR — of a complete texture (level window computed per
+ * GLES 3.0 §3.8.10 p150, immutable textures clamping into their stored
+ * range). CTS conformance2/textures/misc/immutable-tex-render-feedback.html.
  */
 function textureFeedbackLoop(ctx: WebGLRenderingContext, pm: ProgramModel): boolean {
   const s = ctx._state;
@@ -991,6 +1022,12 @@ function textureFeedbackLoop(ctx: WebGLRenderingContext, pm: ProgramModel): bool
   const intStore = (pm as unknown as { intStore?: Int32Array | null }).intStore;
   const uniforms = pm.uniforms ?? [];
   if (!intStore) return false;
+  // Collect texture attachments once (per-draw; small).
+  const textureAtts: { texture: WebGLTexture; level: number }[] = [];
+  for (const att of fbo._attachments.values()) {
+    if (att.type === 'texture') textureAtts.push({ texture: att.texture, level: att.level });
+  }
+  if (textureAtts.length === 0) return false;
   for (const u of uniforms) {
     if (!u.sampler) continue;
     // Sampler arrays: elements packed contiguously at intStore[u.location + e]
@@ -1003,15 +1040,125 @@ function textureFeedbackLoop(ctx: WebGLRenderingContext, pm: ProgramModel): bool
       const unitState = s.textureUnits[unit];
       const tex = unitState[key] as unknown as WebGLTexture | null;
       if (!tex || !tex._image) continue;
-      // Completeness at draw time (MIN_FILTER/level chain — same recompute as
-      // buildTextureEnv; cheap per draw).
-      updateCompleteness(tex, ctx._version);
+      if (s.version === 1) {
+        // WebGL1: any attached level of a complete texture is a loop (no
+        // level-window concept — CTS feedback-loop.html). Completeness at
+        // draw time (MIN_FILTER/level chain — cheap per draw).
+        updateCompleteness(tex, 1);
+        if (!tex._image.complete) continue;
+      }
+      for (let i = 0; i < textureAtts.length; i++) {
+        const att = textureAtts[i];
+        if (att.texture !== tex) continue;
+        if (s.version === 1) return true;
+        // WebGL2: only when the attached level is within the sampled window
+        // (samplerFeedbackAtLevel applies the §3.8.10 completeness model with
+        // the IMMUTABLE-clamped level window — img.complete uses the raw
+        // TEXTURE_MAX_LEVEL and would wrongly gate out clamped-immutable
+        // cases, CTS immutable-tex-render-feedback.html).
+        if (samplerFeedbackAtLevel(tex, tex._image, att.level, effectiveSamplerState(tex, unitState.sampler))) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * GLES 3.0 §4.4.3 feedback rule, WebGL2: true when a COMPLETE texture sampled
+ * at `dstLevel` (the FBO-attached level) is within the level range the sampler
+ * actually reads. Mirrors the model CTS
+ * immutable-tex-render-feedback.html computes (level_base/level_max per
+ * §3.8.10 p150, q = min(floor(log2(maxSize)) + level_base, level_max), and
+ * NEAREST/LINEAR MIN_FILTERs sampling only the base level).
+ */
+function samplerFeedbackAtLevel(tex: WebGLTexture, img: TextureImage, dstLevel: number, st: SamplerState): boolean {
+  // Highest stored level (q_tex; holes in `levels` don't count).
+  let storedMax = -1;
+  for (let l = img.levels.length - 1; l >= 0; l--) {
+    if (img.levels[l]) { storedMax = l; break; }
+  }
+  if (storedMax < 0) return false;
+  const rawBase = Math.max(0, tex._params[0x813c] | 0); // TEXTURE_BASE_LEVEL
+  const rawMax = Math.max(0, tex._params[0x813d] | 0); // TEXTURE_MAX_LEVEL
+  let levelBase = rawBase;
+  let levelMax = rawMax;
+  if (tex._immutable) {
+    // Immutable textures: the effective window clamps into the stored range
+    // (GLES 3.0 §3.8.10 p150 — level_base ∈ [0, q], level_max ∈ [level_base, q]).
+    levelBase = Math.min(rawBase, storedMax);
+    levelMax = Math.min(Math.max(levelBase, rawMax), storedMax);
+  }
+  if (levelBase > levelMax) return false;
+  // Deepest level a full mip chain reaches: floor(log2(maxSize)) + level_base
+  // (maxSize excludes 2D_ARRAY layers and cube faces — GLES 3.0 p150).
+  const maxSize = Math.max(img.width, img.height, img.target === C2.TEXTURE_3D ? img.depth : 1);
+  const q = Math.min(Math.floor(Math.log2(maxSize)) + levelBase, levelMax);
+  const minFilter = st.minFilter;
+  const useMips = minFilter !== C1.NEAREST && minFilter !== C1.LINEAR;
+  const srcMax = useMips ? q : levelBase; // highest level the sampler reads
+  // Incomplete textures are safe (sampling yields (0,0,0,1), no feedback).
+  if (srcMax > storedMax) return false;
+  return levelBase <= dstLevel && dstLevel <= srcMax;
+}
+
+/**
+ * WebGL2 sampler-type × texture-internal-format compatibility (GLES 3.0
+ * §3.8.19 / WebGL2 spec "A sampler type must match the internal texture
+ * format"): float samplers accept float + normalized (+ depth with
+ * COMPARE_MODE NONE) formats; isampler / usampler only signed/unsigned
+ * integer formats; shadow samplers only depth formats with COMPARE_MODE
+ * COMPARE_REF_TO_TEXTURE. Returns true when sampling would be incompatible.
+ * Only called for COMPLETE textures (incomplete ones sample as (0,0,0,1)
+ * without error). CTS uniforms/incompatible-texture-type-for-sampler.html.
+ */
+function samplerTextureIncompatible(img: TextureImage, samplerClass: 'float' | 'signed' | 'unsigned' | 'shadow', compareMode: number): boolean {
+  const info = img.info;
+  if (!info) return false; // unknown format class — never block
+  if (info.isDepth) {
+    // Depth textures: shadow samplers require COMPARE_REF_TO_TEXTURE; float
+    // samplers require COMPARE_MODE NONE (the effective mode — sampler object
+    // overrides the texture's, per effectiveSamplerState).
+    return compareMode === 0x884e /* COMPARE_REF_TO_TEXTURE */
+      ? samplerClass !== 'shadow'
+      : samplerClass !== 'float';
+  }
+  if (info.isInteger) {
+    return info.isSigned ? samplerClass !== 'signed' : samplerClass !== 'unsigned';
+  }
+  // Float / normalized (incl. sRGB) formats: float samplers only.
+  return samplerClass !== 'float';
+}
+
+/** Draw-time driver for samplerTextureIncompatible: true when any ACTIVE
+ *  sampler uniform's bound complete texture is format-incompatible. WebGL2
+ *  only (WebGL1 has no integer/shadow samplers). */
+function incompatibleSamplerTexture(ctx: WebGLRenderingContext, pm: ProgramModel): boolean {
+  const s = ctx._state;
+  if (s.version !== 2) return false;
+  const numUnits = s.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS;
+  const intStore = (pm as unknown as { intStore?: Int32Array | null }).intStore;
+  const uniforms = pm.uniforms ?? [];
+  if (!intStore) return false;
+  for (const u of uniforms) {
+    if (!u.sampler) continue;
+    const samplerClass = samplerUniformClass(u.type);
+    if (!samplerClass) continue;
+    const size = u.size ?? 1;
+    for (let e = 0; e < size; e++) {
+      const unit = intStore[u.location + e] ?? 0;
+      if (unit < 0 || unit >= numUnits) continue;
+      const key = samplerTargetKey(u.type);
+      const unitState = s.textureUnits[unit];
+      const tex = unitState[key] as unknown as WebGLTexture | null;
+      if (!tex || !tex._image) continue;
+      // Incomplete textures are legal (sampling returns (0,0,0,1) — no error).
+      updateCompleteness(tex, 2);
       if (!tex._image.complete) continue;
-      // The sampled texture is complete: a feedback loop exists iff the SAME
-      // texture object is attached to the bound draw framebuffer (any
-      // attachment point in WebGL1 — CTS feedback-loop.html).
-      for (const att of fbo._attachments.values()) {
-        if (att.type === 'texture' && att.texture === tex) return true;
+      const st = effectiveSamplerState(tex, unitState.sampler);
+      if (samplerTextureIncompatible(tex._image as TextureImage, samplerClass, st.compareMode)) {
+        return true;
       }
     }
   }
@@ -1434,6 +1581,17 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
   // rendering/rendering-sampling-feedback-loop.html). Runs here so it covers
   // arrays/elements/instanced/multi-draw; aborts before vertex evaluation.
   if (textureFeedbackLoop(ctx, pm)) {
+    pushError(ctx, C1.INVALID_OPERATION);
+    return;
+  }
+
+  // WebGL2 sampler-type × texture-format compatibility (GLES 3.0 §3.8.19):
+  // an active sampler uniform whose bound COMPLETE texture has an
+  // incompatible internal format makes the draw invalid (CTS
+  // uniforms/incompatible-texture-type-for-sampler.html). Same placement as
+  // the feedback check — covers arrays/elements/instanced/multi-draw before
+  // any vertex evaluation.
+  if (incompatibleSamplerTexture(ctx, pm)) {
     pushError(ctx, C1.INVALID_OPERATION);
     return;
   }
