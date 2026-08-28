@@ -921,8 +921,12 @@ export function updateCompleteness(texture: WebGLTexture, version: 1 | 2): void 
     const shift = l - base;
     const expW = Math.max(1, baseLevel.width >> shift);
     const expH = Math.max(1, baseLevel.height >> shift);
+    // Cube levels have NO depth dimension (the 6 faces are separate views in
+    // `data[]`); the level's `depth` field is a creation-site artifact (6 from
+    // texStorage2D/compressedTexImage, 1 from texImage2D/generateMipmap) and
+    // must not gate completeness — only 3D/2D_ARRAY depths are compared.
     const expD = isArray ? baseLevel.depth : is3D ? Math.max(1, baseLevel.depth >> shift) : 1;
-    if (lv.width !== expW || lv.height !== expH || lv.depth !== expD) { ok = false; break; }
+    if (lv.width !== expW || lv.height !== expH || (!isCube && lv.depth !== expD)) { ok = false; break; }
     if (isCube && lv.data.length < 6) { ok = false; break; }
     if (isCube) {
       for (let f = 0; f < 6; f++) {
