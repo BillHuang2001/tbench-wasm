@@ -203,6 +203,21 @@ function leafRead(p: P, env: CodegenEnv, c: number): string {
         // Builtin struct uniform gl_DepthRange: members near/far/diff are
         // flat offsets 0/1/2 → ctx.depthRange = [near, far, far−near].
         return `ctx.depthRange[${i}]`;
+      case 'gl_ClipDistance':
+      case 'gl_CullDistance': {
+        if (env.stage === 'FRAGMENT') {
+          // Interpolated clip/cull distances on the FragmentExecCtx
+          // (ctx.clipDistance[8]/ctx.cullDistance[8]) are a gl/raster task —
+          // reads default to 0 until the transport lands.
+          return '0';
+        }
+        // VERTEX: the scratch write-back (self-reads like
+        // `gl_ClipDistance[4] = gl_ClipDistance[0]` must round-trip). Single
+        // plane: vertex shaders never run dual mode.
+        const base = env.ensureClipScratch(p.builtin);
+        const dyn = p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.stride}` : '';
+        return `ctx.scratch[${base} + ${i}${dyn}]`;
+      }
       default:
         throw new Error(`codegen: unsupported builtin '${p.builtin}'`);
     }
@@ -279,6 +294,11 @@ function leafDual(p: P, env: CodegenEnv, c: number): [string, string] | null {
       case 'gl_FragDepth':
       case 'gl_FragDepthEXT':
         return ['0', '0'];
+      case 'gl_ClipDistance':
+      case 'gl_CullDistance':
+        // Fragment reads default to 0 (no transport yet); vertex never runs
+        // dual mode. Constant duals are exact either way.
+        return ['0', '0'];
       case 'gl_DepthRange':
         // Builtin uniform state — no screen-space derivative (constant duals).
         return ['0', '0'];
@@ -336,6 +356,17 @@ function leafWrite(p: P, env: CodegenEnv, c: number): string {
         // lvalue:false in the builtin table (semantics rejects writes); the
         // explicit case is defensive — never reachable.
         throw new Error('codegen: gl_DepthRange is read-only');
+      case 'gl_ClipDistance':
+      case 'gl_CullDistance': {
+        if (env.stage !== 'VERTEX') {
+          // The builtin table marks them writable (they ARE, in the vertex
+          // stage); a fragment write fails here → link error.
+          throw new Error(`codegen: '${p.builtin}' is read-only in fragment shaders`);
+        }
+        const base = env.ensureClipScratch(p.builtin);
+        const dyn = p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.stride}` : '';
+        return `ctx.scratch[${base} + ${i}${dyn}]`;
+      }
       default:
         throw new Error(`codegen: '${p.builtin}' is read-only`);
     }
@@ -390,6 +421,12 @@ function leafDualWrite(p: P, env: CodegenEnv, c: number): [string, string] | nul
       case 'gl_FragDepthEXT':
       case 'gl_FragColor':
         return null; // no dual planes
+      case 'gl_ClipDistance':
+      case 'gl_CullDistance':
+        if (env.stage !== 'VERTEX') {
+          throw new Error(`codegen: '${p.builtin}' is read-only in fragment shaders`);
+        }
+        return null; // vertex stage never runs dual mode
       default:
         throw new Error(`codegen: '${p.builtin}' is read-only`);
     }
@@ -548,6 +585,13 @@ function subPIdx(p: P, k: number, etype: GLSLType, env: CodegenEnv): P {
         break;
     }
   } else if (q.builtin) {
+    if (q.builtin === 'gl_ClipDistance' || q.builtin === 'gl_CullDistance') {
+      // float[8] builtin arrays: a const element index is a flat offset of
+      // 1 component (leafRead/leafWrite lower the VERTEX scratch access; the
+      // dyn term on the path handles dynamic indices).
+      q.flatOff += k;
+      return q;
+    }
     // Whole-array builtin values (gl_FragData) — identifier-level only; error otherwise.
     throw new Error(`codegen: cannot index builtin '${q.builtin}' as a whole-array value`);
   }
@@ -719,6 +763,10 @@ function walk(e: Expr, env: CodegenEnv): P {
               p.dyn = { temp: t, stride: 1, elemSlots: 0 };
               break;
           }
+        } else if (p.builtin === 'gl_ClipDistance' || p.builtin === 'gl_CullDistance') {
+          // float[8] builtin arrays (GL_ANGLE_clip_cull_distance): the VERTEX
+          // scratch store strides 1 component per element.
+          p.dyn = { temp: t, stride: 1, elemSlots: 0 };
         }
         return p;
       }
