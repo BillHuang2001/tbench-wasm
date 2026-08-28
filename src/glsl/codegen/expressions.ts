@@ -994,6 +994,66 @@ export function materialize(vals: Value[], env: CodegenEnv): Value[] {
   });
 }
 
+/**
+ * Does the expression subtree fold GLSL side effects (assignments, ++/--)
+ * into its codegen v strings? User-function calls put their whole inline in
+ * Value.pre instead (detected separately there) — but when a call is nested
+ * inside arithmetic/comparison combinators, its pre folds INTO the result's
+ * v, so calls must be flagged here too. Builtin/constructor calls are pure
+ * (only their ARGS can carry side effects) — they cannot be distinguished
+ * from user calls at the AST level, so any non-constructor identifier call is
+ * conservatively flagged (temping a pure builtin is redundant but correct).
+ */
+function astHasSideEffects(e: Expr): boolean {
+  switch (e.kind) {
+    case 'assign':
+      return true;
+    case 'unary':
+      return e.op === '++' || e.op === '--' || astHasSideEffects(e.operand);
+    case 'binary':
+      return astHasSideEffects(e.left) || astHasSideEffects(e.right);
+    case 'ternary':
+      return astHasSideEffects(e.cond) || astHasSideEffects(e.whenTrue) || astHasSideEffects(e.whenFalse);
+    case 'comma':
+      return e.exprs.some((x) => astHasSideEffects(x));
+    case 'call':
+      if (e.args.some((a) => astHasSideEffects(a))) return true;
+      return e.callee.kind !== 'identifier' || !TYPE_NAMES.has(e.callee.name);
+    case 'index':
+      return astHasSideEffects(e.object) || astHasSideEffects(e.index);
+    case 'member':
+      return astHasSideEffects(e.object);
+    default:
+      return false; // identifier / literal — pure reads
+  }
+}
+
+/**
+ * Broadcast-safe scalar operand (BUG: vector-scalar-arithmetic-inside-loop).
+ * Broadcasting a SCALAR to a vector/matrix duplicates its v string per
+ * component — if the scalar embeds GLSL side effects (assignments / ++-- in
+ * v per astHasSideEffects, or a pre: user-call IIFEs / texture samples), the
+ * effect would re-run per component, mutating the target between components.
+ * Such scalars are materialized ONCE into a temp; the temp assignment is
+ * appended to `sharedPre` (emitted once, before the component loop). Pure
+ * scalars (empty pre, no side effects) pass through unchanged — the existing
+ * fast path. Dual mode: the v/dx/dy planes become pure temp reads after the
+ * single hoist.
+ */
+function broadcastScalar(v: Value, src: Expr, env: CodegenEnv, sharedPre: string[]): Value {
+  const sideEffects = (v.pre !== undefined && v.pre.length > 0) || astHasSideEffects(src);
+  if (!sideEffects) return v;
+  const t = env.allocTemp();
+  sharedPre.push(`${t} = ${foldPre(v.pre ?? [], v.v)}`);
+  if (env.dual && v.dx !== undefined) {
+    const tx = env.allocTemp();
+    const ty = env.allocTemp();
+    sharedPre.push(`${tx} = ${v.dx}`, `${ty} = ${v.dy}`);
+    return { v: t, dx: tx, dy: ty };
+  }
+  return { v: t };
+}
+
 /* ------------------------------------------------------------------ */
 /* Unary / binary / ternary / comma / assign                           */
 /* ------------------------------------------------------------------ */
@@ -1488,9 +1548,17 @@ function emitArith(
   const bv = emitExpr(e.right, env);
   const n = flatComponents(t);
   const out: Value[] = [];
+  // BUG (vector-scalar-arithmetic-inside-loop): a SCALAR operand's string is
+  // duplicated per component (n > 1) — a side-effectful scalar (compound
+  // assign, ++/--, call) is materialized ONCE into a temp (assignment in
+  // sharedPre, attached to every result component below so it runs exactly
+  // once). Scalar×scalar (n === 1) uses each operand once — no hoist.
+  const sharedPre: string[] = [];
+  const aScalar = lt.kind === 'scalar' && n > 1 ? broadcastScalar(av[0], e.left, env, sharedPre) : null;
+  const bScalar = rt.kind === 'scalar' && n > 1 ? broadcastScalar(bv[0], e.right, env, sharedPre) : null;
   for (let c = 0; c < n; c++) {
-    const a = av[lt.kind === 'scalar' ? 0 : c];
-    const b = bv[rt.kind === 'scalar' ? 0 : c];
+    const a = aScalar ?? av[c];
+    const b = bScalar ?? bv[c];
     if (dual) {
       out.push(arithDual(op, a, b, env));
       continue;
@@ -1521,6 +1589,18 @@ function emitArith(
         throw new Error(`codegen: bad arithmetic op '${op}'`);
     }
     out.push({ v: s });
+  }
+  if (sharedPre.length > 0) {
+    // Attach the hoist ONLY to component 0 (the FIRST emitted/consumed
+    // component): statement emitters dedupe pres by array identity and
+    // expression-context consumers (walkObject, ternary, comparisons,
+    // bitwise, comma) fold each component's pre INLINE in 0..n-1 order —
+    // comp0's pre runs first and sets the hoist temp, later components just
+    // read it. A shared array on EVERY component would re-run the side
+    // effect per component in expression contexts (each folds the same
+    // hoist inline). comp0 keeps any pre it already has (dual arithDual
+    // results) with the hoist terms prepended.
+    out[0].pre = out[0].pre ? [...sharedPre, ...out[0].pre] : sharedPre;
   }
   return out;
 }
@@ -1565,8 +1645,19 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
   const post = copyBackComma(lv.copyBack);
   const n = lv.targets.length;
   const out: Value[] = [];
+  // BUG (vector-scalar-arithmetic-inside-loop): a SCALAR RHS broadcast to a
+  // vector/matrix lvalue duplicates the RHS string per component — a
+  // side-effectful RHS (compound assign, ++/--, call) is materialized ONCE
+  // into a temp first (assignment in broadcastPre, emitted after the lvalue
+  // preludes and before the writes — GLSL evaluates the lvalue before the
+  // RHS).
+  const broadcastPre: string[] = [];
+  let rhsSrc = rhs;
+  if (rhs.length === 1 && n > 1) {
+    rhsSrc = [broadcastScalar(rhs[0], e.value, env, broadcastPre)];
+  }
   if (e.op === '=') {
-    let conv = convertValue(rhs, e.value.resolvedType!, t);
+    let conv = convertValue(rhsSrc, e.value.resolvedType!, t);
     // convertValue DROPS Value.pre when it converts scalar bases — re-attach
     // (mirrors statements.ts convertPreserving) so RHS pres survive. Iterate
     // the SOURCE length: a broadcast RHS (scalar → vector/matrix) is shorter
@@ -1589,6 +1680,7 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
       // (pure — they reference temps the composites' folded pres set).
       const pre: string[] = [];
       if (preludes.length > 0) pre.push(...preludes);
+      if (broadcastPre.length > 0) pre.push(...broadcastPre);
       for (let c = 0; c < n; c++) {
         const cp = conv[c].pre;
         const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
@@ -1600,6 +1692,15 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
       }
       return out;
     }
+    // Per-component pre for the non-dual '=' path: comp0 carries the lvalue
+    // preludes PLUS the scalar-broadcast hoist; comps1+ carry only the
+    // (idempotent) preludes. NOT a single shared array — expression-context
+    // consumers (walkObject, ternary, comparisons) fold each component's pre
+    // inline in 0..n-1 order, so comp0's hoist must run first and the later
+    // components must NOT re-run it. Statement emitters dedupe by identity:
+    // comp0's array runs the hoist exactly once, comps1+'s shared preludes
+    // array re-emits only the idempotent preludes.
+    const comp0Pre = broadcastPre.length > 0 ? [...preludes, ...broadcastPre] : preludes;
     for (let c = 0; c < n; c++) {
       const cp = conv[c].pre;
       const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
@@ -1617,14 +1718,14 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
         const t = env.allocTemp();
         v = `(${t} = ${v}, ${post}, ${t})`;
       }
-      out.push(preludes.length > 0 ? { v, pre: preludes } : { v });
+      out.push(c === 0 && comp0Pre.length > 0 ? { v, pre: comp0Pre } : { v });
     }
     return out;
   }
   // compound: target op= rhs  (read target once — targets are pure paths)
   const base = scalarBaseOf(t);
   if (!base) throw new Error('codegen: cannot compound-assign a non-scalar-shaped value');
-  let conv = convertValue(rhs, e.value.resolvedType!, t);
+  let conv = convertValue(rhsSrc, e.value.resolvedType!, t);
   // convertValue DROPS Value.pre when it converts scalar bases — re-attach
   // (mirrors statements.ts convertPreserving) so RHS pres survive. Iterate
   // the SOURCE length: a broadcast RHS (scalar → vector/matrix — `v += s`,
@@ -1645,6 +1746,7 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
     // after the composite ran). Prelude/copyBack order as in the '=' path.
     const pre: string[] = [];
     if (preludes.length > 0) pre.push(...preludes);
+    if (broadcastPre.length > 0) pre.push(...broadcastPre);
     for (let c = 0; c < n; c++) {
       const cp = conv[c].pre;
       const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
@@ -1661,6 +1763,13 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
     }
     return out;
   }
+  // Per-component pre for the non-dual compound path: comp0 carries the
+  // lvalue preludes PLUS the scalar-broadcast hoist; comps1+ carry only the
+  // (idempotent) preludes. NOT a single shared array — expression-context
+  // consumers fold each component's pre inline in 0..n-1 order, so comp0's
+  // hoist must run first and later components must NOT re-run it (see the
+  // '=' path above).
+  const comp0Pre = broadcastPre.length > 0 ? [...preludes, ...broadcastPre] : preludes;
   for (let c = 0; c < n; c++) {
     const cp = conv[c].pre;
     const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
@@ -1676,53 +1785,73 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
       const t = env.allocTemp();
       v = `(${t} = ${v}, ${post}, ${t})`;
     }
-    out.push(preludes.length > 0 ? { v, pre: preludes } : { v });
+    out.push(c === 0 && comp0Pre.length > 0 ? { v, pre: comp0Pre } : { v });
   }
   return out;
 }
 
 function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Value[] {
   const cond = materialize(emitExpr(e.cond, env), env)[0];
-  const a = materialize(emitExpr(e.whenTrue, env), env);
-  const b = materialize(emitExpr(e.whenFalse, env), env);
+  const a = emitExpr(e.whenTrue, env);
+  const b = emitExpr(e.whenFalse, env);
   const n = flatComponents(e.resolvedType!);
   const out: Value[] = [];
-  // Dual mode, float-typed ternary: BOTH arms carry triples — materialize
-  // (which temps all three planes of pre-carrying values) hoists their pres,
-  // then each plane is a plain `cond ? a : b` select. The cond is bool
+  // Dual mode, float-typed ternary: BOTH arms carry triples; the cond is bool
   // (v-only); its pres join the result's pre so materialized cond temps are
   // set even when only the dx/dy planes are consumed (dFdx(cond ? a : b)).
   const dual = env.dual && hasFloatLeaves(e.resolvedType!);
   for (let c = 0; c < n; c++) {
-    if (dual) {
-      const pre: string[] = [];
-      const cp = cond.pre;
-      if (cp) pre.push(...cp);
-      const ap = a[c].pre;
-      if (ap) pre.push(...ap);
-      const bp = b[c].pre;
-      if (bp && bp !== ap) pre.push(...bp);
-      const val: Value = {
-        v: `(${cond.v} ? (${a[c].v}) : (${b[c].v}))`,
-        dx: `(${cond.v} ? (${a[c].dx ?? '0'}) : (${b[c].dx ?? '0'}))`,
-        dy: `(${cond.v} ? (${a[c].dy ?? '0'}) : (${b[c].dy ?? '0'}))`,
-      };
+    const ac = a[c];
+    const bc = b[c];
+    const ap = ac.pre && ac.pre.length > 0 ? ac.pre : null;
+    const bp = bc.pre && bc.pre.length > 0 ? bc.pre : null;
+    const pre: string[] = [];
+    const cp = cond.pre;
+    if (cp) pre.push(...cp);
+    if (ap === null && bp === null) {
+      // FAST PATH (no arm materializes — pres are the only reason
+      // materialize would hoist): the select folds the raw arm strings, which
+      // JS evaluates lazily (side effects in v, e.g. `cond ? (x = 1.0) :
+      // (y = 2.0)`, only run for the taken arm).
+      const val: Value =
+        dual
+          ? {
+              v: `(${cond.v} ? (${ac.v}) : (${bc.v}))`,
+              dx: `(${cond.v} ? (${ac.dx ?? '0'}) : (${bc.dx ?? '0'}))`,
+              dy: `(${cond.v} ? (${ac.dy ?? '0'}) : (${bc.dy ?? '0'}))`,
+            }
+          : { v: `(${cond.v} ? (${ac.v}) : (${bc.v}))` };
       if (pre.length > 0) val.pre = pre;
       out.push(val);
-    } else {
-      // Non-dual: cond/a/b were materialized at the top — carry their pres
-      // (the temp assignments) so the select reads assigned temps.
-      const pre: string[] = [];
-      const cp = cond.pre;
-      if (cp) pre.push(...cp);
-      const ap = a[c].pre;
-      if (ap) pre.push(...ap);
-      const bp = b[c].pre;
-      if (bp && bp !== ap) pre.push(...bp);
-      const val: Value = { v: `(${cond.v} ? (${a[c].v}) : (${b[c].v}))` };
-      if (pre.length > 0) val.pre = pre;
-      out.push(val);
+      continue;
     }
+    // LAZY PATH (BUG: sequence-operator-evaluation-order): an arm whose pre
+    // carries side effects (user-call IIFEs, texture samples) must NOT run
+    // when the condition takes the OTHER arm — GLSL sequence semantics:
+    // only the selected operand evaluates. Guard each arm's hoist with the
+    // condition — `tA = (cond ? (preA, vA) : tA)` — a JS ternary evaluates
+    // only the taken branch, so the untaken arm's pre never runs. The final
+    // select reads the temps; an untaken arm's temp stays undefined and is
+    // never read. Dual mode: the arm pres also feed the dx/dy planes — they
+    // run once via the guarded v hoist, and the plane selects are lazy too,
+    // reading the taken arm's dual strings (which reference temps its pre
+    // set).
+    const ta = ap !== null ? env.allocTemp() : null;
+    const tb = bp !== null ? env.allocTemp() : null;
+    if (ta) pre.push(`${ta} = (${cond.v} ? (${foldPre(ap!, ac.v)}) : ${ta})`);
+    if (tb) pre.push(`${tb} = (${cond.v} ? ${tb} : (${foldPre(bp!, bc.v)}))`);
+    const av = ta ?? ac.v;
+    const bv = tb ?? bc.v;
+    const val: Value =
+      dual
+        ? {
+            v: `(${cond.v} ? (${av}) : (${bv}))`,
+            dx: `(${cond.v} ? (${ac.dx ?? '0'}) : (${bc.dx ?? '0'}))`,
+            dy: `(${cond.v} ? (${ac.dy ?? '0'}) : (${bc.dy ?? '0'}))`,
+          }
+        : { v: `(${cond.v} ? (${av}) : (${bv}))` };
+    if (pre.length > 0) val.pre = pre;
+    out.push(val);
   }
   return out;
 }
@@ -1733,9 +1862,19 @@ function emitComma(e: Extract<Expr, { kind: 'comma' }>, env: CodegenEnv): Value[
   const last = emitExpr(e.exprs[n - 1], env);
   const pre: string[] = [];
   for (let i = 0; i < n - 1; i++) {
-    const v = emitExpr(e.exprs[i], env)[0];
+    // BUG (expression-list-in-declarator-initializer): emit EVERY flat
+    // component of an intermediate expression — a vector/matrix operand's
+    // side effects span all components (`b = vec2(0.0, 1.0)` writes b.x AND
+    // b.y; taking only [0] left b.y unassigned → the final value read NaN).
+    // The intermediate result is discarded, so each component's pres fold
+    // inline and the whole sequence lands in one temp as a comma term.
+    const vals = emitExpr(e.exprs[i], env);
     const t = env.allocTemp();
-    pre.push(`${t} = ${v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v}`);
+    const terms: string[] = [];
+    for (const v of vals) {
+      terms.push(v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v);
+    }
+    pre.push(`${t} = (${terms.join(', ')})`);
   }
   if (pre.length === 0) return last;
   const prelude = `(${pre.join(', ')}, `;

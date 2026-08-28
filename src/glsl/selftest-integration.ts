@@ -969,7 +969,195 @@ let uboDual: Program | null = null;
   }
 }
 
-/* 11. Dynamic uniform-array element reads carry the FULL vecN (BUG d)*/
+/* 11. Side-effect order regressions (CTS glsl/bugs + misc pages)       */
+/* ================================================================== */
+/* - comma (sequence) expressions in declarator initializers: EVERY flat
+ *   component of an intermediate vector operand's assignment must run
+ *   (`b = vec2(0.0, 1.0)` writes b.x AND b.y — emitComma emitted only [0]
+ *   before the fix, leaving b.y unassigned → the final value read NaN).
+ *   Page: conformance/glsl/misc/expression-list-in-declarator-initializer.
+ * - ternary: the NOT-taken arm's side effects must NOT run — before the fix
+ *   emitTernary materialized both arms eagerly, so `wrong()` in the untaken
+ *   arm of `a > 0.0 ? 1.0 : wrong()` set a global bool → black frame.
+ *   Page: conformance/glsl/bugs/sequence-operator-evaluation-order.
+ * - scalar broadcast of a COMPOUND-ASSIGNMENT subexpression: the RHS must be
+ *   evaluated ONCE — before the fix `v + (x *= 2.0)` duplicated the compound
+ *   per component, re-mutating x between components ((2, 4, 8, 16)).
+ *   Page: conformance/glsl/bugs/vector-scalar-arithmetic-inside-loop.       */
+
+{
+  // BUG 1a: comma initializer with a vec2 intermediate (a.y must be set).
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       void main() {
+         vec2 b = vec2(0.0, 0.0);
+         vec2 a = vec2(0.0, 0.0);
+         vec2 c = (b = vec2(0.0, 1.0), a = b);
+         gl_FragColor = vec4(a.x, a.y, c.x, c.y);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `comma-initializer vec2 links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [0, 1, 0, 1].forEach((e, c) => near(o[c], e, `comma-init vec2 → out[${c}]`));
+    }
+  }
+
+  // BUG 1b: same with an ivec2 intermediate (integral components).
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       void main() {
+         ivec2 b = ivec2(0, 0);
+         ivec2 a = ivec2(0, 0);
+         ivec2 c = (b = ivec2(0, 2), a = b);
+         gl_FragColor = vec4(vec2(a) / 2.0, vec2(c) / 2.0);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `comma-initializer ivec2 links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [0, 1, 0, 1].forEach((e, c) => near(o[c], e, `comma-init ivec2 → out[${c}]`));
+    }
+  }
+
+  // BUG 2a: ternary — untaken TRUE arm's side effect must not run.
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       bool correct = true;
+       float wrong() { correct = false; return 0.0; }
+       void main() {
+         float a = -0.5;
+         float green = (a++, a > 0.0 ? 1.0 : wrong());
+         gl_FragColor = vec4(0.0, correct ? green : 0.0, 0.0, 1.0);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `ternary lazy-true-arm links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [0, 1, 0, 1].forEach((e, c) => near(o[c], e, `ternary lazy true-arm → out[${c}]`));
+    }
+  }
+
+  // BUG 2b: ternary — untaken FALSE arm's side effect must not run.
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       bool correct = true;
+       float wrong() { correct = false; return 0.0; }
+       void main() {
+         float a = -0.5;
+         float green = (a++, a > 1.0 ? wrong() : 1.0);
+         gl_FragColor = vec4(0.0, correct ? green : 0.0, 0.0, 1.0);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `ternary lazy-false-arm links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [0, 1, 0, 1].forEach((e, c) => near(o[c], e, `ternary lazy false-arm → out[${c}]`));
+    }
+  }
+
+  // BUG 3a: `v + (x *= 2.0)` — compound RHS evaluated once, broadcast.
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       void main() {
+         vec4 v = vec4(0.0);
+         float x = 1.0;
+         gl_FragColor = v + (x *= 2.0);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `vector + (x *= 2.0) links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [2, 2, 2, 2].forEach((e, c) => near(o[c], e, `v + (x *= 2.0) → out[${c}]`));
+    }
+  }
+
+  // BUG 3b: `v + (x /= 2.0)` — halving variant (CTS page's 2nd fail).
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       void main() {
+         vec4 v = vec4(0.0);
+         float x = 1.0;
+         gl_FragColor = v + (x /= 2.0);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `vector + (x /= 2.0) links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [0.5, 0.5, 0.5, 0.5].forEach((e, c) => near(o[c], e, `v + (x /= 2.0) → out[${c}]`));
+    }
+  }
+
+  // BUG 3c: compound-assign broadcast of a compound RHS in EXPRESSION context
+  // (`(v += (x *= 2.0)).x` — statement-context compound assigns lower via
+  // statements.ts's own protocol, which is out of scope here).
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       void main() {
+         vec4 v = vec4(1.0);
+         float x = 1.0;
+         float r = (v += (x *= 2.0)).x;
+         gl_FragColor = vec4(r, v.y, v.z, v.w);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `(v += (x *= 2.0)).x links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [3, 3, 3, 3].forEach((e, c) => near(o[c], e, `(v += (x *= 2.0)).x → out[${c}]`));
+    }
+  }
+}
+
+/* 12. Dynamic uniform-array element reads carry the FULL vecN (BUG d)*/
 /* ================================================================== */
 /* Regression: the linker's '[0]' dynamic-index prefix entry was
  * overwritten by the element-0 leaf entry (stride 0), so EVERY
