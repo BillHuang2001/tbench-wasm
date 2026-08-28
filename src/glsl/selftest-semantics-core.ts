@@ -318,8 +318,21 @@ expectErr('void main() { bool b = 1 == true; }', 100, 'VERTEX'); // int vs bool
 expectErr('#version 300 es\nvoid main() { float z = ~1.0; }', 300, 'VERTEX'); // ~ on float
 expectOk('#version 300 es\nvoid main() { int x = 5 % 2; uint u = 5u % 2u; int s = 1 << 2; }', 300, 'VERTEX');
 expectOk('void main() { int x = 5 % 2; }', 100, 'VERTEX'); // % is 1.00-legal for ints
-expectErr('float x; void main() { float x; }', 100, 'VERTEX', undefined, /redefinition/);
-expectErr('void main() { float x; { float x; } }', 100, 'VERTEX', undefined, /redefinition/);
+// CROSS-SCOPE SHADOWING IS LEGAL (scope-model rework: Scope.declare rejects
+// only same-scope redefinition) — CTS shader-struct-scope.html,
+// struct-nesting-of-variable-names.html, local-variable-shadowing-outer-
+// function.html, in-parameter-passed-as-inout-argument-and-global.html,
+// ogles build CorrectFull_vert/CorrectPreprocess5. OLD BEHAVIOR (bug): these
+// were rejected as redefinitions.
+expectOk('float x; void main() { float x; }', 100, 'VERTEX'); // local shadows GLOBAL var
+expectOk('void main() { float x; { float x; } }', 100, 'VERTEX'); // block shadows enclosing-block var
+expectOk('float f(float x) { return x; } void main() { float f = f(1.0); }', 100, 'VERTEX'); // local var shadows GLOBAL FUNCTION; init still resolves to the fn (declaration-time scoping)
+expectOk('vec3 p; void F(in vec3 p) { p.x = 1.0; } void main() { }', 100, 'VERTEX'); // param shadows global var
+expectOk('struct S { float a; }; void main() { S S; S.a = 1.0; }', 100, 'VERTEX'); // var shadows struct TYPE (struct-nesting)
+expectOk('void main() { if (true) int g = 1; else int g = 2; }', 100, 'FRAGMENT'); // if/else substatements: separate scopes
+// SAME-SCOPE redefinition still errors (GLSL ES single namespace).
+expectErr('void main() { float x; float x; }', 100, 'VERTEX', undefined, /redefinition/);
+expectErr('struct S { float a; }; struct S { float b; }; void main() { }', 100, 'VERTEX', undefined, /redefinition/);
 expectOk('float f(float x); float f(float y) { return y; }', 100, 'VERTEX');
 expectOk('float f(float x); float f(float y) { return y; } float g() { return f(1.0); }', 100, 'VERTEX');
 expectErr('void f() { } void main() { float x = f(); }', 100, 'VERTEX'); // void call as value
@@ -380,7 +393,12 @@ expectOk('void main() { struct S { float x; }; S s = S(1.0); float a = s.x; }', 
 expectOk('void main() { struct B { float x; }; struct A { B b; }; A a; float y = a.b.x; }', 100, 'VERTEX'); // nested
 expectOk('void main() { struct B { float x; }; struct A { B b; }; A a = A(B(1.0)); float y = a.b.x; }', 100, 'VERTEX'); // nested ctor
 expectOk('void main() { { struct S { float x; }; S s; float a = s.x; } }', 100, 'VERTEX'); // block-scoped struct
-expectErr('void main() { struct S { float x; }; { struct S { float y; }; } }', 100, 'VERTEX', undefined, /redefinition/); // GLSL: no shadowing
+// OLD BEHAVIOR (bug): a block struct shadowing an enclosing-scope struct was
+// rejected — cross-scope shadowing is legal (CTS shader-struct-scope.html).
+expectOk('void main() { struct S { float x; }; { struct S { float y; }; } }', 100, 'VERTEX');
+// Same-scope struct redefinition still errors (CTS shader-struct-scope
+// shader-vs-bad).
+expectErr('void main() { struct S { float x; }; struct S { float y; }; }', 100, 'VERTEX', undefined, /redefinition/);
 // BUG 4 + BUG 6 combined: local struct with a builtin function name.
 expectOk('void main() { struct sign { float x; }; sign s; s.x = 1.0; }', 100, 'VERTEX');
 

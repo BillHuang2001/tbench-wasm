@@ -5,9 +5,10 @@
  * Responsibilities (CORE, Phase 2a — the follow-up task adds declaration
  * qualifier/stage/precision rules + ShaderInfo assembly on top of this):
  * - symbol tables (`Scope`): ONE namespace for variables/functions/structs
- *   (GLSL ES §4.2), GLSL shadowing rules (declaring a name that exists in ANY
- *   enclosing scope is an error), builtin registration (functions, variables,
- *   gl_Max* constants — gated by the shader's enabled extensions).
+ *   (GLSL ES §4.2), GLSL shadowing rules (same-scope redefinition is an
+ *   error; CROSS-scope shadowing is legal — builtin variables/constants stay
+ *   shadow-proof), builtin registration (functions, variables, gl_Max*
+ *   constants — gated by the shader's enabled extensions).
  * - a global PRE-PASS over `TranslationUnit.declarations` registering
  *   structs, global variables and function signatures (with overloads) in
  *   source order, then per-function BODY analysis (params + statements) and
@@ -223,9 +224,13 @@ export type Symbol = VarSymbol | FnSymbol | StructSymbol | BuiltinVarSymbol | Bu
  * - `lookup(name): Symbol | undefined` — nearest declaration, walking up.
  * - `lookupLocal(name): Symbol | undefined` — this scope only.
  * - `declare(sym, ctx, line): boolean` — register with GLSL shadowing rules:
- *   a name already declared in THIS scope or ANY enclosing scope is an error
- *   (GLSL ES forbids shadowing — single namespace) and nothing is
- *   registered. Returns false on failure.
+ *   a name already declared in THIS scope is an error (same-scope
+ *   redefinition — single namespace) and nothing is registered; a name that
+ *   only exists in an ENCLOSING scope may be shadowed (CTS: shader-struct-
+ *   scope, struct-nesting-of-variable-names, local-variable-shadowing-outer-
+ *   function, conditional scoping, ogles build*). Builtin VARIABLES (gl_*)
+ *   and gl_Max* constants stay shadow-proof from any scope. Returns false on
+ *   failure.
  * - `forceDeclare(sym)` — register without checks (builtin pre-pass).
  */
 export class Scope {
@@ -251,24 +256,41 @@ export class Scope {
   }
 
   /**
-   * Declare `sym`. GLSL ES forbids shadowing: if the name exists in this
-   * scope or any enclosing scope → error `'name' : redefinition` and the
-   * symbol is NOT registered. Returns true on success.
+   * Declare `sym`. Same-scope redefinition is an error (`'name' :
+   * redefinition`) and the symbol is NOT registered; a name that exists only
+   * in an ENCLOSING scope MAY be shadowed (cross-scope shadowing is legal
+   * GLSL ES — CTS shader-struct-scope, struct-nesting-of-variable-names,
+   * local-variable-shadowing-outer-function, in-parameter-passed-as-inout-
+   * argument-and-global, ogles build CorrectFull_vert/CorrectPreprocess5),
+   * with ONE exception: builtin VARIABLES (gl_*) and gl_Max* constants
+   * (kind 'builtin-var'/'builtin-const') remain shadow-proof from any scope
+   * (GLSL ES: builtin names cannot be redeclared). Function overloads are
+   * handled by registerPrototype/registerDefinition (lookupLocal), never
+   * here. Returns true on success.
    *
    * Exception (GLSL ES single namespace): a builtin FUNCTION name that no
    * user code has claimed yet (the pre-pass placeholder FnSymbol with no user
-   * overloads attached) does not reserve the name — user variables/structs
-   * may reuse it. The placeholder is replaced in this scope's map (a later
-   * function decl with the same name then hits the variable and errors
-   * 'redefinition', which is the correct GLSL behavior). Once a user
-   * function overload claims the name, or the existing symbol is a builtin
-   * VARIABLE (gl_*) or gl_Max* constant, the name is NOT free.
+   * overloads attached) does not reserve the name in THIS scope — user
+   * variables/structs may reuse it. The placeholder is replaced in this
+   * scope's map (a later function decl with the same name then hits the
+   * variable and errors 'redefinition', which is the correct GLSL behavior).
+   * Once a user function overload claims the name, or the existing symbol is
+   * a builtin VARIABLE (gl_*) or gl_Max* constant, the name is NOT free.
    */
   declare(sym: Symbol, ctx: SemContext, line: number): boolean {
-    const existing = this.lookup(sym.name);
+    const existing = this.lookupLocal(sym.name);
     if (existing !== undefined && !isFreeBuiltinFnName(existing)) {
       ctx.error(line, `'${sym.name}' : redefinition`);
       return false;
+    }
+    // Cross-scope shadowing is legal for every symbol kind, except builtin
+    // variables/constants (kept shadow-proof — see header comment).
+    for (let s: Scope | null = this.parent; s !== null; s = s.parent) {
+      const outer = s.lookupLocal(sym.name);
+      if (outer !== undefined && (outer.kind === 'builtin-var' || outer.kind === 'builtin-const')) {
+        ctx.error(line, `'${sym.name}' : redefinition`);
+        return false;
+      }
     }
     this.symbols.set(sym.name, sym);
     return true;

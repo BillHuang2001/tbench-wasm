@@ -704,6 +704,30 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
     }
   };
 
+  /**
+   * Scope replay for shadow detection (cross-scope shadowing is now legal in
+   * the CORE — Scope.declare). The scan must mark a fragment varying USED
+   * only when the identifier load actually RESOLVES to the varying (a
+   * shadowing local/param/struct with the same name must not mark it). We
+   * mirror the CORE's scope structure exactly: compound/if-substatement/for
+   * scopes, params, and per-declarator declaration AFTER its initializer
+   * (declaration-time scoping). The replay is exact for CLEAN shaders (every
+   * declaration succeeded, so every registered name really shadows); for
+   * shaders with compile errors the used-flag is unobservable (link is never
+   * attempted).
+   */
+  const shadowStack: Set<string>[] = [];
+  const pushScope = (): void => {
+    shadowStack.push(new Set());
+  };
+  const popScope = (): void => {
+    shadowStack.pop();
+  };
+  const isShadowed = (name: string): boolean => shadowStack.some((s) => s.has(name));
+  const declareLocal = (name: string): void => {
+    if (name !== '') shadowStack[shadowStack.length - 1].add(name);
+  };
+
   const recordRead = (id: IdentifierExpr): void => {
     if (id.resolvedType === undefined) return;
     switch (id.name) {
@@ -737,10 +761,10 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
     }
     // A fragment-varying value load marks the varying USED (the linker only
     // matches used fragment varyings against vertex outputs — native
-    // behavior). GLSL ES forbids shadowing (Scope.declare rejects redefinition
-    // in any enclosing scope), so a successfully resolved identifier with a
-    // varying's name IS that varying — name lookup is exact.
-    markVaryingUsed(id.name);
+    // behavior), but only when the load resolves to the varying: a local /
+    // param / inner struct with the same name shadows it (Scope.declare now
+    // allows cross-scope shadowing), so such loads must NOT mark it.
+    if (!isShadowed(id.name)) markVaryingUsed(id.name);
   };
 
   /** Mark the fragment varying with ShaderInfo key `key` as READ. Keys: plain
@@ -819,11 +843,13 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
         // Varying-interface-block member access: entries are keyed
         // '<instance>.<member>' — reconstruct the key from the object chain
         // and mark the varying used, UNLESS the whole chain is a pure
-        // `=`-write target (base identifier in `written`). The base-identifier
-        // visit below already covers plain varyings (incl. swizzles) and
+        // `=`-write target (base identifier in `written`) or the base is
+        // shadowed by a local (a local struct instance named like the block
+        // instance must not mark the varying). The base-identifier visit
+        // below already covers plain varyings (incl. swizzles) and
         // instance-less block members (bare names).
         const base = baseIdentifier(e.object);
-        if (base !== null && !written.has(base)) {
+        if (base !== null && !written.has(base) && !isShadowed(base.name)) {
           markVaryingUsed(`${base.name}.${e.name}`);
         }
         visit(e.object);
@@ -838,12 +864,23 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
   const walkStmt = (s: Stmt): void => {
     switch (s.kind) {
       case 'compound':
+        // Braced block: fresh scope (mirrors analyzeCompound).
+        pushScope();
         for (const st of s.body) walkStmt(st);
+        popScope();
         return;
       case 'decl-stmt':
+        // Mirror the CORE's declaration order (semantics-stmt decl-stmt +
+        // declareVariables): the struct TYPE is registered before the
+        // declarators, and each declarator's name AFTER its dims+initializer
+        // (declaration-time scoping — `float v = v;` reads the OUTER v).
+        if (s.type.base.kind === 'struct-definition' && s.type.base.name !== null) {
+          declareLocal(s.type.base.name);
+        }
         for (const d of s.declarators) {
           for (const dim of d.arrayDims) visit(dim);
           if (d.init !== null) visit(d.init);
+          declareLocal(d.name);
         }
         return;
       case 'expr-stmt':
@@ -851,14 +888,26 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
         return;
       case 'if':
         visit(s.cond);
+        // Selection substatements each get their own scope (mirrors
+        // analyzeIf — shader-with-conditional-scoping.html).
+        pushScope();
         walkStmt(s.then);
-        if (s.else !== null) walkStmt(s.else);
+        popScope();
+        if (s.else !== null) {
+          pushScope();
+          walkStmt(s.else);
+          popScope();
+        }
         return;
       case 'for':
+        // The for-init/cond/update/body share the for's own scope (mirrors
+        // semantics-stmt analyzeStatement 'for').
+        pushScope();
         if (s.init !== null) walkStmt(s.init);
         if (s.cond !== null) visit(s.cond);
         if (s.update !== null) visit(s.update);
         walkStmt(s.body);
+        popScope();
         return;
       case 'while':
         visit(s.cond);
@@ -895,7 +944,13 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
         }
         break;
       case 'function-definition':
+        // Function scope: params shadow global names (mirrors
+        // analyzeFunctionBody — in-parameter-passed-as-inout-argument-and-
+        // global.html, ogles build CorrectFull_vert).
+        pushScope();
+        for (const p of d.prototype.params) declareLocal(p.name);
         walkStmt(d.body);
+        popScope();
         break;
       default:
         break;

@@ -269,8 +269,18 @@ function analyzeCompound(s: CompoundStmt, scope: Scope, ctx: SemContext, fn: { r
 function analyzeIf(s: IfStmt, scope: Scope, ctx: SemContext, fn: { returnType: GLSLType }): void {
   analyzeExpr(s.cond, scope, ctx);
   requireBool(s.cond, ctx, `'if' : condition must be a boolean expression`);
-  analyzeStatement(s.then, scope, ctx, fn);
-  if (s.else !== null) analyzeStatement(s.else, scope, ctx, fn);
+  // GLSL ES Appendix A: selection-statement SUBSTATEMENTS each get their own
+  // scope — `if (true) int g = 4;` scopes g to the substatement, so a second
+  // `if (true) int g = 4;` does not collide and references after the
+  // statement cannot see g/q (CTS shader-with-conditional-scoping.html and
+  // its -negative twin). Braced substatements push one more scope inside
+  // (analyzeCompound) — harmless nesting.
+  const thenScope = scope.push();
+  analyzeStatement(s.then, thenScope, ctx, fn);
+  if (s.else !== null) {
+    const elseScope = scope.push();
+    analyzeStatement(s.else, elseScope, ctx, fn);
+  }
 }
 
 // Type-only re-export so statement/expression analysis share one entry point.
