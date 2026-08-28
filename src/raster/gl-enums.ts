@@ -75,6 +75,12 @@ export const CONSTANT_COLOR = 0x8001;
 export const ONE_MINUS_CONSTANT_COLOR = 0x8002;
 export const CONSTANT_ALPHA = 0x8003;
 export const ONE_MINUS_CONSTANT_ALPHA = 0x8004;
+// Dual-source blending (WEBGL_blend_func_extended, GLES 3.0 table 4.2): the
+// SRC1_* factors read the SECONDARY fragment color (output index 1).
+export const SRC1_COLOR = 0x88f9;
+export const ONE_MINUS_SRC1_COLOR = 0x88fa;
+export const SRC1_ALPHA = 0x8589;
+export const ONE_MINUS_SRC1_ALPHA = 0x88fb;
 
 /* ------------------------------------------------------------------ */
 /* Blend equations                                                     */

@@ -136,6 +136,15 @@ export interface FragmentExecCtx {
   out: {
     /** Per output-location scratch; codegen writes `ctx.out.color[loc][i]`. */
     color: Float32Array[];
+    /**
+     * Per output-location SECONDARY color scratch (dual-source blending,
+     * WEBGL_blend_func_extended): codegen writes `ctx.out.secondary[loc][i]`
+     * for fragment outputs with blend index 1 (gl_SecondaryFragColorEXT /
+     * layout(index=1)). Raster resets it per invocation like `color` and the
+     * blend stage reads it as the SRC1_* factor source. Absent only in
+     * hand-built test ctxs whose programs have no index-1 outputs.
+     */
+    secondary?: Float32Array[];
     /** Written by the shader when program.fragment.usesFragDepth. */
     fragDepth: number;
   };
@@ -510,6 +519,7 @@ export interface FragmentOps {
   finalize(
     x: number, y: number, frontFacing: boolean, depth: number,
     colors: readonly Float32Array[],
+    secondary?: readonly Float32Array[],
   ): void;
 }
 
