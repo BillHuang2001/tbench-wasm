@@ -26,7 +26,7 @@ linkProgram:    uniform merge → attrib locations → varying match/pack → un
 - `preprocessor.ts` (1186 lines — over the 1000 guideline, deliberately not split; see Known Issues) → `lexer.ts` → `parser.ts`/`parser-stmt.ts`/`parser-expr.ts` → `semantics.ts`/`semantics-expr.ts`/`semantics-stmt.ts`/`semantics-decl.ts` (type checking, symbol tables, overload resolution, const folding, precision rules, extension gating, ShaderInfo) → `linker.ts`.
 - `builtins/` — builtin SIGNATURE tables + VARIABLES + gl_Max* constants: `100.ts` (216 sigs, 7 vars, 8 constants), `300.ts` (625 sigs, 8 vars, 20 constants), `extensions.ts` (OES_standard_derivatives, EXT_shader_texture_lod (fragment-only), EXT_frag_depth, EXT_draw_buffers), `index.ts`.
 - `codegen/` — `env.ts` (CodegenEnv: storage access, scratch/temp allocation, dualWrite hook), `expressions.ts` (+`expr-builtins.ts`, `expr-ctor.ts`; non-dual + dual-number lowering), `statements.ts` (control flow, discard), `functions.ts` (user-function inliner), `vertex.ts`/`fragment.ts` (stage assembly), `runtime.ts` (shared `R` helper object: math/pack/bitfield/texture wrappers), `index.ts` (CodegenLayout seam + stage entry + Value).
-- `selftest-*.ts` — 24 committed tsx scripts (see Test Strategy; `codegen/selftest-predrop.ts` is the Value.pre-drop regression suite).
+- `selftest-*.ts` — 23 committed count-reporting tsx suites (see Test Strategy; `codegen/selftest-predrop.ts` is the Value.pre-drop regression suite).
 
 ## Design Decisions (implemented; deviations from the original plan are noted)
 
@@ -114,7 +114,7 @@ linkProgram:    uniform merge → attrib locations → varying match/pack → un
 - `semantics.ts` → scopes, type checking, overload resolution, const folding; `semantics-expr.ts` → expressions; `semantics-stmt.ts` → statements; `semantics-decl.ts` → declarations, precision/extension rules, interface blocks, ShaderInfo
 - `builtins/` → builtin signature/variable/constant tables: `100.ts`, `300.ts`, `extensions.ts`, `index.ts`
 - `codegen/` → `index.ts` (CodegenLayout seam, Value, stage entry), `env.ts` (CodegenEnv, dualWrite), `expressions.ts` (+`expr-builtins.ts`, `expr-ctor.ts`), `statements.ts`, `functions.ts` (inliner), `vertex.ts`, `fragment.ts`, `runtime.ts` (R helpers; imports raster/texture-sampler.ts), `selftest-predrop.ts` (Value.pre-drop regressions)
-- `selftest-*.ts` → the 15 committed tsx validation scripts (see Test Strategy)
+- `selftest-*.ts` → the committed tsx validation suites (23 count-reporting — see Test Strategy)
 - `../raster/texture-sampler.ts` → texture sampling runtime + TextureImage/SamplerState types (sibling — READ-ONLY from here; writes escalate to `../`)
 - `../gl/` → consumer of Program/Shader (sibling — read-only)
 
