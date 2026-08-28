@@ -953,6 +953,18 @@ function copyPixelsIntoLevel(
         // (The CTS tags each bitmap with its creation option; native ImageBitmap
         // objects without the tag default to premultiplied storage.)
         const isImageBitmap = typeof (source as { close?: unknown }).close === 'function';
+        const flipY = isImageBitmap ? false : ctx._state.pixelStore.unpack.flipY;
+        // WebGL2 source-rectangle selection (WebGL2 spec §3.7.2 "Pixel store
+        // parameters for uploads from TexImageSource"): UNPACK_SKIP_PIXELS and
+        // UNPACK_SKIP_ROWS determine the origin of the subrect; the width and
+        // height arguments determine its size. UNPACK_FLIP_Y_WEBGL flips the
+        // ENTIRE source before the crop (CTS sub-rectangle cases). copyRows
+        // flips within the copied rect, so express the crop origin in
+        // pre-flip source rows: a crop of `height` rows at flipped row
+        // `skipRows` starts at original row (im.height - skipRows - height).
+        const s = ctx._state.pixelStore.unpack;
+        const skipPixels = s.skipPixels | 0;
+        const skipRows = s.skipRows | 0;
         // Packed `type` args (4444/5551/565) must drop the low bits exactly
         // like the buffer path does — round-trip through the packed encode.
         const packedType =
@@ -974,23 +986,28 @@ function copyPixelsIntoLevel(
         const p: CopyParams = {
           src: dv,
           srcRowBytes: im.width * 4,
-          srcSkipPixels: 0,
+          srcSkipPixels: skipPixels,
           srcBpp: 4,
           srcFormat: C.RGBA,
           srcType: C.UNSIGNED_BYTE,
-          domain: spec.isInteger ? 2 : spec.isFloat && !spec.isDepth ? 1 : 0,
-          flipY: isImageBitmap ? false : ctx._state.pixelStore.unpack.flipY,
+          // The DOM source is ALWAYS normalized UNSIGNED_BYTE RGBA (decoded by
+          // present/image), regardless of the destination internalformat. So
+          // domain must be 0 (normalized: u8 values divided by 255) even for
+          // FLOAT/HALF_FLOAT destinations — domain 1 (raw) would store e.g.
+          // 127 as 127.0 instead of 127/255. Integer destinations keep domain 2.
+          domain: spec.isInteger ? 2 : 0,
+          flipY,
           premultiply: isImageBitmap
             ? (source as { premultiply?: unknown }).premultiply === false ? false : true
-            : ctx._state.pixelStore.unpack.premultiplyAlpha,
+            : s.premultiplyAlpha,
           write: packedWrite,
           dstBpp,
           dstStencil: levelData.stencilData,
         };
-        // DOM sources ignore ROW_LENGTH/SKIP_* (WebGL2 spec §3.7); the decoded
-        // image is tightly packed RGBA8. depth is always 1 here (the API layer
-        // rejects DOM sources for 3D/2D_ARRAY targets).
-        copyRows(p, views[0], levelData.width, xoffset, yoffset, width, height, 0, 0);
+        // DOM sources ignore ROW_LENGTH/SKIP_IMAGES (WebGL2 spec §3.7); the
+        // decoded image is tightly packed RGBA8. depth is always 1 here (the
+        // API layer rejects DOM sources for 3D/2D_ARRAY targets).
+        copyRows(p, views[0], levelData.width, xoffset, yoffset, width, height, flipY ? im.height - skipRows - height : skipRows, 0);
         updateCompleteness(texture, ctx._version);
         return;
       }
