@@ -209,10 +209,20 @@ function readComboOK(
       return format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5);
     case C1.RGB: case C2.RGB8:
       if (floatStorage) return floatStorageReadOK(ctx, format, type);
-      return format === C1.RGB && type === C1.UNSIGNED_BYTE;
+      // WebGL 1.0 §5.14.12: RGBA/UNSIGNED_BYTE (+ RGBA pack types) must be
+      // accepted for ANY complete framebuffer — RGB attachments expand to
+      // RGBA on read ((R,G,B,1)). RGB/UNSIGNED_BYTE and RGB/565 remain valid
+      // for RGB attachments.
+      return (format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5)) ||
+        (format === C1.RGBA &&
+          (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4 || type === C1.UNSIGNED_SHORT_5_5_5_1));
     case C1.LUMINANCE: case C1.LUMINANCE_ALPHA: case C1.ALPHA:
       if (floatStorage) return floatStorageReadOK(ctx, format, type);
-      return false;
+      // WebGL 1.0 §5.14.12: RGBA/UNSIGNED_BYTE (+ RGBA pack types) must be
+      // accepted for ANY complete framebuffer — LUMINANCE/LA/ALPHA attachments
+      // expand to RGBA on read (L→(L,L,L,1), A→(0,0,0,A)).
+      return format === C1.RGBA &&
+        (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4 || type === C1.UNSIGNED_SHORT_5_5_5_1);
     case C2.R8: return format === C2.RED && type === C1.UNSIGNED_BYTE;
     case C2.RG8: return format === C2.RG && type === C1.UNSIGNED_BYTE;
     case C2.RGB10_A2: return format === C1.RGBA && type === C2.UNSIGNED_INT_2_10_10_10_REV;
@@ -306,7 +316,8 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
   proto.drawArrays = function (this: WebGLRenderingContext, mode: GLenum, first: GLint, count: GLsizei): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    const req = validateDrawArrays(ctx, mode, first, count, 1);
+    // WebIDL: GLint/GLsizei convert via ToInt32 (0xffffffff → -1 → INVALID_VALUE).
+    const req = validateDrawArrays(ctx, mode, first | 0, count | 0, 1);
     if (!req) return;
     try { executeDraw(ctx, req); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
   };
@@ -314,7 +325,8 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
   proto.drawElements = function (this: WebGLRenderingContext, mode: GLenum, count: GLsizei, type: GLenum, offset: GLintptr): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    const req = validateDrawElements(ctx, mode, count, type, offset);
+    // count is GLsizei (ToInt32); offset is GLintptr (64-bit, left untouched).
+    const req = validateDrawElements(ctx, mode, count | 0, type, offset);
     if (!req) return;
     try { executeDraw(ctx, req); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
   };
@@ -442,7 +454,8 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
     p2.drawArraysInstanced = function (this: WebGL2RenderingContext, mode: GLenum, first: GLint, count: GLsizei, instanceCount: GLsizei): void {
       const ctx = this;
       if (isLost(ctx)) return;
-      const req = validateDrawArrays(ctx, mode, first, count, instanceCount);
+      // WebIDL: GLint/GLsizei convert via ToInt32.
+      const req = validateDrawArrays(ctx, mode, first | 0, count | 0, instanceCount | 0);
       if (!req) return;
       try { executeDraw(ctx, req); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
@@ -452,7 +465,8 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
     p2.drawElementsInstanced = function (this: WebGL2RenderingContext, mode: GLenum, count: GLsizei, type: GLenum, offset: GLintptr, instanceCount: GLsizei): void {
       const ctx = this;
       if (isLost(ctx)) return;
-      const req = validateDrawElements(ctx, mode, count, type, offset, { instanceCount });
+      // count/instanceCount are GLsizei (ToInt32); offset is GLintptr (untouched).
+      const req = validateDrawElements(ctx, mode, count | 0, type, offset, { instanceCount: instanceCount | 0 });
       if (!req) return;
       try { executeDraw(ctx, req); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
@@ -462,7 +476,8 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
     p2.drawRangeElements = function (this: WebGL2RenderingContext, mode: GLenum, start: GLuint, end: GLuint, count: GLsizei, type: GLenum, offset: GLintptr): void {
       const ctx = this;
       if (isLost(ctx)) return;
-      const req = validateDrawElements(ctx, mode, count, type, offset, { range: [start, end] });
+      // start/end are GLuint (ToUint32); count is GLsizei (ToInt32); offset untouched.
+      const req = validateDrawElements(ctx, mode, count | 0, type, offset, { range: [start >>> 0, end >>> 0] });
       if (!req) return;
       try { executeDraw(ctx, req); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
@@ -530,14 +545,23 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
   //
   // Extension methods are not part of the core class declaration — widen the
   // prototype for installation (same pattern as the `p2` WebGL2 cast above).
+  // They are installed NON-ENUMERABLE: per WebGL, extension methods are exposed
+  // ONLY via getExtension(), and CTS offscreencanvas/methods.html enumerates
+  // `for (var i in gl)` and fails on any enumerable function property outside
+  // the spec method list. Non-enumerable own properties are still found by
+  // ordinary property lookup, so the extension object's delegation
+  // (extensions/misc.ts callInstalled) keeps working unchanged.
   const mdProto = proto as unknown as {
     multiDrawArraysWEBGL(mode: GLenum, firsts: Int32List, firstsOffset: GLuint, counts: Int32List, countsOffset: GLuint, drawcount: GLsizei): void;
     multiDrawElementsWEBGL(mode: GLenum, counts: Int32List, countsOffset: GLuint, type: GLenum, offsets: Int32List, offsetsOffset: GLuint, drawcount: GLsizei): void;
     multiDrawArraysInstancedWEBGL(mode: GLenum, firsts: Int32List, firstsOffset: GLuint, counts: Int32List, countsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei): void;
     multiDrawElementsInstancedWEBGL(mode: GLenum, counts: Int32List, countsOffset: GLuint, type: GLenum, offsets: Int32List, offsetsOffset: GLuint, instanceCounts: Int32List, instanceCountsOffset: GLuint, drawcount: GLsizei): void;
   };
+  function installExtensionMethod(proto: object, name: string, fn: (...args: never[]) => void): void {
+    Object.defineProperty(proto, name, { value: fn, writable: true, configurable: true, enumerable: false });
+  }
 
-  mdProto.multiDrawArraysWEBGL = function (
+  installExtensionMethod(mdProto, 'multiDrawArraysWEBGL', function (
     this: WebGLRenderingContext,
     mode: GLenum, firsts: Int32List, firstsOffset: GLuint,
     counts: Int32List, countsOffset: GLuint, drawcount: GLsizei,
@@ -557,9 +581,9 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
     }
     try { executeMultiDrawArrays(ctx, mode, firstsArr, fo, countsArr, co, dc); }
     catch { ctx._errors.push(C1.INVALID_OPERATION); }
-  };
+  });
 
-  mdProto.multiDrawElementsWEBGL = function (
+  installExtensionMethod(mdProto, 'multiDrawElementsWEBGL', function (
     this: WebGLRenderingContext,
     mode: GLenum, counts: Int32List, countsOffset: GLuint,
     type: GLenum, offsets: Int32List, offsetsOffset: GLuint, drawcount: GLsizei,
@@ -579,9 +603,9 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
     }
     try { executeMultiDrawElements(ctx, mode, countsArr, co, type, offsetsArr, oo, dc); }
     catch { ctx._errors.push(C1.INVALID_OPERATION); }
-  };
+  });
 
-  mdProto.multiDrawArraysInstancedWEBGL = function (
+  installExtensionMethod(mdProto, 'multiDrawArraysInstancedWEBGL', function (
     this: WebGLRenderingContext,
     mode: GLenum, firsts: Int32List, firstsOffset: GLuint,
     counts: Int32List, countsOffset: GLuint,
@@ -604,9 +628,9 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
     }
     try { executeMultiDrawArraysInstanced(ctx, mode, firstsArr, fo, countsArr, co, instArr, io, dc); }
     catch { ctx._errors.push(C1.INVALID_OPERATION); }
-  };
+  });
 
-  mdProto.multiDrawElementsInstancedWEBGL = function (
+  installExtensionMethod(mdProto, 'multiDrawElementsInstancedWEBGL', function (
     this: WebGLRenderingContext,
     mode: GLenum, counts: Int32List, countsOffset: GLuint,
     type: GLenum, offsets: Int32List, offsetsOffset: GLuint,
@@ -629,5 +653,5 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
     }
     try { executeMultiDrawElementsInstanced(ctx, mode, countsArr, co, type, offsetsArr, oo, instArr, io, dc); }
     catch { ctx._errors.push(C1.INVALID_OPERATION); }
-  };
+  });
 }

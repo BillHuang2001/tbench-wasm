@@ -208,13 +208,16 @@ function sameAttachmentObject(a: FramebufferAttachment, b: FramebufferAttachment
  * the record is returned only when the depth and stencil attachment points
  * hold the same attachment OBJECT (see sameAttachmentObject); a mismatch
  * (different objects, or one point empty) is reported via `conflict` and the
- * caller generates INVALID_OPERATION.
+ * caller generates INVALID_OPERATION. On WebGL1 DEPTH_STENCIL_ATTACHMENT is a
+ * DISTINCT attachment point from DEPTH/STENCIL — the record stored under key
+ * 0x821a is returned directly (misc/expando-loss.html).
  */
 function resolveAttachmentRecord(
+  ctx: WebGLRenderingContext,
   fbo: WebGLFramebuffer,
   attachment: GLenum,
 ): { rec: FramebufferAttachment | null; conflict: boolean } {
-  if (attachment === DEPTH_STENCIL_ATTACHMENT && fbo._attachments.has(DEPTH_ATTACHMENT)) {
+  if (ctx._version === 2 && attachment === DEPTH_STENCIL_ATTACHMENT && fbo._attachments.has(DEPTH_ATTACHMENT)) {
     const d = fbo._attachments.get(DEPTH_ATTACHMENT) ?? null;
     const s = fbo._attachments.get(STENCIL_ATTACHMENT) ?? null;
     if (d === null || s === null) return { rec: null, conflict: true };
@@ -474,6 +477,13 @@ function allocateRenderbufferSurface(ctx: WebGLRenderingContext, rb: WebGLRender
     surf = s;
   }
   rb._surface = surf;
+  // Spec: the initial contents of a renderbuffer's depth plane are 1.0
+  // (the stencil plane of DEPTH*_STENCIL* stays 0). Only RENDERBUFFERS get
+  // this — depth TEXTURE initial contents are legitimately undefined, and this
+  // helper is renderbuffer-only (raster createSurface stays zero-filled).
+  if (surf.info.isDepth) {
+    (surf.data as Float32Array).fill(1.0);
+  }
   void ctx;
 }
 
@@ -590,7 +600,7 @@ type ImageKey =
   | { kind: 'default' };
 
 /** Identity key of the image attached at `attachment` (null when nothing attached). */
-function attachmentImageKey(fbo: WebGLFramebuffer | null, attachment: GLenum): ImageKey | null {
+function attachmentImageKey(ctx: WebGLRenderingContext, fbo: WebGLFramebuffer | null, attachment: GLenum): ImageKey | null {
   if (fbo === null) {
     // Default framebuffer: color image only (BACK / COLOR_ATTACHMENT0 on W2);
     // depth/stencil of the default FB can never collide with an FBO attachment.
@@ -599,7 +609,7 @@ function attachmentImageKey(fbo: WebGLFramebuffer | null, attachment: GLenum): I
     }
     return null;
   }
-  const { rec, conflict } = resolveAttachmentRecord(fbo, attachment);
+  const { rec, conflict } = resolveAttachmentRecord(ctx, fbo, attachment);
   if (conflict || rec === null) return null;
   if (rec.type === 'renderbuffer') return { kind: 'rb', rb: rec.renderbuffer };
   return { kind: 'tex', texture: rec.texture, level: rec.level, face: rec.face, layer: rec.layer };
@@ -851,7 +861,7 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_ENUM);
       return null;
     }
-    const { rec, conflict } = resolveAttachmentRecord(fbo, attachment);
+    const { rec, conflict } = resolveAttachmentRecord(ctx, fbo, attachment);
     if (conflict) {
       // W2: different images on DEPTH and STENCIL → INVALID_OPERATION.
       ctx._errors.push(C1.INVALID_OPERATION);
@@ -1336,12 +1346,12 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       // (CTS blitframebuffer-test.html: same texture level/face/layer or same
       // renderbuffer; color also requires the image to be among the draw buffers).
       if ((mask & C1.COLOR_BUFFER_BIT) !== 0) {
-        const readKey = attachmentImageKey(readFbo, readFbo === null ? BACK : s.readBuffer);
+        const readKey = attachmentImageKey(ctx, readFbo, readFbo === null ? BACK : s.readBuffer);
         if (readKey !== null) {
           const dbList = drawFbo === null ? [BACK] : s.drawBuffers;
           for (const db of dbList) {
             if (db === NONE) continue;
-            if (sameImage(readKey, attachmentImageKey(drawFbo, db))) {
+            if (sameImage(readKey, attachmentImageKey(ctx, drawFbo, db))) {
               ctx._errors.push(C1.INVALID_OPERATION);
               return;
             }
@@ -1349,12 +1359,12 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         }
       }
       if ((mask & C1.DEPTH_BUFFER_BIT) !== 0 &&
-          sameImage(attachmentImageKey(readFbo, DEPTH_ATTACHMENT), attachmentImageKey(drawFbo, DEPTH_ATTACHMENT))) {
+          sameImage(attachmentImageKey(ctx, readFbo, DEPTH_ATTACHMENT), attachmentImageKey(ctx, drawFbo, DEPTH_ATTACHMENT))) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
       if ((mask & C1.STENCIL_BUFFER_BIT) !== 0 &&
-          sameImage(attachmentImageKey(readFbo, STENCIL_ATTACHMENT), attachmentImageKey(drawFbo, STENCIL_ATTACHMENT))) {
+          sameImage(attachmentImageKey(ctx, readFbo, STENCIL_ATTACHMENT), attachmentImageKey(ctx, drawFbo, STENCIL_ATTACHMENT))) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }

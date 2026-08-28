@@ -312,6 +312,15 @@ function makeColorSurface(ctx: ContextLike, w: number, h: number): Surface {
     }
   }
   if (!pixels || pixels.length < w * h * 4) pixels = new Uint8Array(w * h * 4);
+  if (ctx._attrs.alpha === false) {
+    // alpha:false drawing buffers have NO alpha channel — the stored alpha
+    // byte must read back as opaque. A fresh buffer is zeroed (alpha byte 0),
+    // and readPixels uses the raster pack converter (RAW bytes, bypassing the
+    // info.decode a=1 wrapper below), so fill the alpha bytes here (initial
+    // allocation; the resize path re-clears via clearDefaultFramebuffer). CTS
+    // scissor-rect-repeated-rendering.html frame 1 expects (0,0,0,255).
+    for (let i = 3; i < w * h * 4; i += 4) pixels[i] = 255;
+  }
   const surf = makeSurface(RGBA8, w, h, pixels);
   if (ctx._attrs.alpha === false) {
     const base = surf.info;
@@ -459,8 +468,15 @@ function clamp255(v: number): number {
 }
 
 /** Contents of a freshly resized drawing buffer are undefined → clear per spec. */
-function clearDefaultFramebuffer(fb: DefaultFramebuffer): void {
+function clearDefaultFramebuffer(ctx: ContextLike, fb: DefaultFramebuffer): void {
   (fb.color.data as Uint8Array).fill(0);
+  if (ctx._attrs.alpha === false) {
+    // alpha:false buffers have no alpha channel — the cleared state is opaque
+    // black (mirrors draw.ts clearDefaultFramebufferForPreserve; readPixels
+    // reads the raw bytes).
+    const d = fb.color.data as Uint8Array;
+    for (let i = 3; i < d.length; i += 4) d[i] = 255;
+  }
   if (fb.depth) (fb.depth.data as Float32Array).fill(1.0);
   if (fb.stencil) (fb.stencil.data as Uint8Array).fill(0);
 }
@@ -508,7 +524,7 @@ export function handleCanvasResize(ctx: ContextLike): void {
   }
   const fb = allocateDefaultFramebuffer(ctx, w, h);
   if (fb) {
-    clearDefaultFramebuffer(fb);
+    clearDefaultFramebuffer(ctx, fb);
     ctx._defaultFB = fb;
     if (surf) {
       try {

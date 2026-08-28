@@ -15,9 +15,8 @@
  *
  * Completeness (`checkFramebufferStatus`) implements every rule of the WebGL
  * spec (attachment presence, format/attachment-point compatibility, dimension
- * consistency, cube completeness, sample-count consistency, draw-buffer
- * coverage) and is consulted both by the API and by the draw pipeline
- * (INVALID_FRAMEBUFFER_OPERATION).
+ * consistency, cube completeness, sample-count consistency) and is consulted
+ * both by the API and by the draw pipeline (INVALID_FRAMEBUFFER_OPERATION).
  *
  * Completeness check order (GLES 3.0 §4.4.5, adapted to WebGL1/2):
  *   1. no attachments                    → FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT
@@ -33,8 +32,7 @@
  *      (undefined texture level, cube map not cube-complete, zero-sized
  *       renderbuffer, unallocated renderbuffer storage, and the attached
  *       image's internal format not renderable at its attachment point)
- *   6. draw-buffer coverage              → FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER
- *   7. layered-attachment consistency    → FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS
+ *   6. layered-attachment consistency    → FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS
  *
  * Renderability tables (documented decisions — CTS is the primary gate):
  *  - Format/attachment-point mismatch (e.g. DEPTH_COMPONENT16 at
@@ -45,10 +43,12 @@
  *    there, so that wins. The ONE exception: RGB8 attached as color in WebGL2
  *    returns FRAMEBUFFER_UNSUPPORTED (objective-mandated; CTS is tolerant —
  *    read-pixels-from-fbo-test.html skips when the FBO is incomplete).
- *  - WebGL1 color-renderable: RGBA4, RGB565, RGB5_A1, RGBA8, RGB8,
- *    LUMINANCE, LUMINANCE_ALPHA, ALPHA (any color texture format is
- *    renderable per WebGL1), + RGBA16F (EXT_color_buffer_half_float),
- *    + SRGB8_ALPHA8 (EXT_sRGB). WebGL1 depth/stencil points are STRICT per the
+ *  - WebGL1 color-renderable: RGBA4, RGB565, RGB5_A1, RGBA8 (+ unsized RGBA/RGB,
+ *    which resolve to the default sized renderable formats), + RGBA16F
+ *    (EXT_color_buffer_half_float), + SRGB8_ALPHA8 (EXT_sRGB). LUMINANCE,
+ *    LUMINANCE_ALPHA, ALPHA and sized RGB8 are NOT renderable
+ *    (format-filterable-renderable.html, copy-tex-image-2d-formats.html hard
+ *    expectations). WebGL1 depth/stencil points are STRICT per the
  *    WebGL1 spec: DEPTH_ATTACHMENT accepts only DEPTH_COMPONENT16 /
  *    DEPTH_COMPONENT (WEBGL_depth_texture texture), STENCIL_ATTACHMENT only
  *    STENCIL_INDEX8, DEPTH_STENCIL_ATTACHMENT only DEPTH_STENCIL /
@@ -72,11 +72,13 @@
  *    WEBGL_multisampled_render_to_texture is available (its factory is the
  *    only setter); renderbuffers report rb._samples. All attachments must
  *    agree, else FRAMEBUFFER_INCOMPLETE_MULTISAMPLE.
- *  - Draw-buffer coverage applies when the framebuffer has at least one color
- *    attachment AND (WebGL2 or WEBGL_draw_buffers available). The "no color
- *    attachments → skip" carve-out is REQUIRED by the WebGL2 CTS
- *    (framebuffer-texture-layer.html expects FRAMEBUFFER_COMPLETE for a
- *    depth-stencil-only FBO with default drawBuffers=[COLOR_ATTACHMENT0]).
+ *  - There is NO draw-buffer coverage rule: per GLES3, fragments to draw
+ *    buffers naming an unattached attachment point are discarded, and
+ *    FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER applies only to the DEFAULT
+ *    framebuffer. FBOs must be COMPLETE even when drawBuffers names a missing
+ *    attachment (rendering-sampling-feedback-loop.html expects COMPLETE with
+ *    drawBuffers=[ATT0,ATT1] and only ATT0 attached; no CTS page references
+ *    INCOMPLETE_DRAW_BUFFER).
  *  - Layered rule (WebGL2): WebGL2 exposes no whole-level attachment API
  *    (framebufferTextureLayer attaches a single layer; framebufferTexture3D
  *    does not exist), so every attachment is non-layered and the rule is
@@ -96,9 +98,6 @@ import { C, C1, C2 } from './constants';
 /* Constants                                                           */
 /* ================================================================== */
 
-/** FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER (0x8CDB) — not in constants.ts (C1/C2 omit it). */
-const FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER = 0x8cdb;
-
 const COLOR_ATTACHMENT0 = 0x8ce0;
 const DEPTH_ATTACHMENT = 0x8d00;
 const STENCIL_ATTACHMENT = 0x8d20;
@@ -111,11 +110,16 @@ const CUBE_NEGATIVE_Z = 0x851a;
 /* Renderability tables (see header for the documented decisions)      */
 /* ------------------------------------------------------------------ */
 
-/** WebGL1 color-renderable formats (unsized keys included: teximage may keep them). */
+/** WebGL1 color-renderable formats. Sized: RGBA4/RGB565/RGB5_A1/RGBA8; the
+ *  unsized RGBA/RGB keys are kept because they resolve to the default sized
+ *  renderable formats (RGBA4/RGB565) and CTS attaches such textures expecting
+ *  FRAMEBUFFER_COMPLETE (texture-attachment-formats.html, copy-tex-image-2d-formats.html).
+ *  LUMINANCE/LUMINANCE_ALPHA/ALPHA and sized RGB8 are NOT renderable
+ *  (format-filterable-renderable.html, copy-tex-image-2d-formats.html).
+ *  Extension formats are additionally gated in isColorRenderable. */
 const W1_COLOR_RENDERABLE = new Set<GLenum>([
   0x8056 /* RGBA4 */, 0x8d62 /* RGB565 */, 0x8057 /* RGB5_A1 */,
-  0x8058 /* RGBA8 */, 0x8051 /* RGB8 */, 0x1908 /* RGBA */, 0x1907 /* RGB */,
-  0x1909 /* LUMINANCE */, 0x190a /* LUMINANCE_ALPHA */, 0x1906 /* ALPHA */,
+  0x8058 /* RGBA8 */, 0x1908 /* RGBA (unsized → RGBA4/RGBA8) */, 0x1907 /* RGB (unsized → RGB565) */,
   0x8c43 /* SRGB8_ALPHA8 (EXT_sRGB) */, 0x881a /* RGBA16F (EXT_color_buffer_half_float) */,
 ]);
 
@@ -504,23 +508,7 @@ export function checkFramebufferStatus(ctx: WebGLRenderingContext, fbo: WebGLFra
     }
   }
 
-  // ---- 6. draw-buffer coverage ----
-  // Applies when the FBO has ≥1 color attachment AND MRT semantics exist
-  // (WebGL2, or WebGL1 with WEBGL_draw_buffers). Depth/stencil-only FBOs are
-  // complete (WebGL2 CTS framebuffer-texture-layer.html hard requirement).
-  if (colorEntries.length > 0 && drawBuffersAvail) {
-    const drawBuffers = ctx._state.drawBuffers;
-    for (let i = 0; i < drawBuffers.length; i++) {
-      const db = drawBuffers[i];
-      if (db === NONE) continue;
-      const idx = db - COLOR_ATTACHMENT0;
-      if (idx < 0 || idx >= maxColor || !att.has(COLOR_ATTACHMENT0 + idx)) {
-        return FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER;
-      }
-    }
-  }
-
-  // ---- 7. layered-attachment consistency (WebGL2; vacuous — see header) ----
+  // ---- 6. layered-attachment consistency (WebGL2; vacuous — see header) ----
   if (version === 2) {
     let layered = -1;
     for (const entry of sampleEntries) {

@@ -223,6 +223,27 @@ function packed5551Pack(data: ArrayBufferView, off: number, r: number, g: number
   (data as unknown as { [i: number]: number })[off / 2] = v;
 }
 
+/**
+ * Wrap a destination pack with a round-trip through a packed source format
+ * (4444/5551/565): quantizes decoded texels exactly like the buffer-upload
+ * path (readSourceTexel → pack), so DOM uploads with a packed `type` argument
+ * drop the low bits per WebGL texel-conversion rules. Idempotent when the base
+ * pack is itself a packed encoder (sized internalformats).
+ */
+function quantizedPackedWrite(
+  packFn: (data: ArrayBufferView, off: number, r: number, g: number, b: number, a: number) => void,
+  unpackFn: (data: ArrayBufferView, off: number, out: Float32Array) => void,
+  base: FormatSpec['pack'],
+): FormatSpec['pack'] {
+  const tmp = new Uint16Array(1);
+  const out = new Float32Array(4);
+  return (dst, off, r, g, b, a) => {
+    packFn(tmp, 0, r, g, b, a);
+    unpackFn(tmp, 0, out);
+    base(dst, off, out[0], out[1], out[2], out[3]);
+  };
+}
+
 /** u32 packed RGB10_A2 (normalized). */
 function packedRGB10A2Unpack(data: ArrayBufferView, off: number, out: Float32Array): void {
   const v = (data as unknown as { [i: number]: number })[off / 4];
@@ -565,8 +586,9 @@ function srcBytesPerTexel(format: GLenum, type: GLenum): number {
   switch (type) {
     case C.UNSIGNED_BYTE: case C.BYTE: return comps;
     case C.UNSIGNED_SHORT: case C.SHORT: case C.HALF_FLOAT: case CExt.HALF_FLOAT_OES:
-    case C.UNSIGNED_SHORT_5_6_5: case C.UNSIGNED_SHORT_4_4_4_4: case C.UNSIGNED_SHORT_5_5_5_1:
       return comps * 2;
+    case C.UNSIGNED_SHORT_5_6_5: case C.UNSIGNED_SHORT_4_4_4_4: case C.UNSIGNED_SHORT_5_5_5_1:
+      return 2; // packed types: 2 bytes/texel TOTAL regardless of component count
     default: // UNSIGNED_INT, INT, UNSIGNED_INT_24_8, 2_10_10_10_REV, 10F_11F_11F_REV, 5_9_9_9_REV, FLOAT, FLOAT_32_UNSIGNED_INT_24_8_REV
       return 4;
   }
@@ -713,8 +735,6 @@ function srgbToDisplayP3(data: Uint8ClampedArray): void {
 // ---------------------------------------------------------------------------
 // Row/slice copy
 // ---------------------------------------------------------------------------
-
-const align4 = (v: number): number => (v + 3) & ~3;
 
 interface CopyParams {
   src: DataView;
@@ -913,7 +933,7 @@ function copyPixelsIntoLevel(
   if (pixels === null || pixels === undefined) return; // zero-filled allocation
   if (typeof pixels !== 'number' && !ArrayBuffer.isView(pixels) && source !== undefined) {
     try {
-      const res = decodeImageSource(source as never) as { ok: boolean; image?: { width: number; height: number; data: Uint8ClampedArray } };
+      const res = decodeImageSource(source as never) as { ok: boolean; image?: { width: number; height: number; data: Uint8ClampedArray }; reason?: string };
       if (res && res.ok && res.image) {
         const im = res.image;
         // unpackColorSpace = 'display-p3': convert the decoded (sRGB) pixels to
@@ -923,6 +943,34 @@ function copyPixelsIntoLevel(
           srgbToDisplayP3(im.data);
         }
         const dv = new DataView(im.data.buffer, im.data.byteOffset, im.data.byteLength);
+        // ImageBitmap sources: UNPACK_FLIP_Y_WEBGL is ignored per WebGL spec.
+        // UNPACK_PREMULTIPLY_ALPHA_WEBGL is ALSO ignored — the bitmap's OWN
+        // storage mode governs. The decode round trip (drawImage + getImageData)
+        // always yields straight-alpha RGBA, so when the bitmap's storage is
+        // premultiplied (default, or premultiplyAlpha:'premultiply') the data
+        // must be premultiplied here; bitmaps created with
+        // premultiplyAlpha:'none' expose premultiply:false and stay straight.
+        // (The CTS tags each bitmap with its creation option; native ImageBitmap
+        // objects without the tag default to premultiplied storage.)
+        const isImageBitmap = typeof (source as { close?: unknown }).close === 'function';
+        // Packed `type` args (4444/5551/565) must drop the low bits exactly
+        // like the buffer path does — round-trip through the packed encode.
+        const packedType =
+          type === C.UNSIGNED_SHORT_4_4_4_4 ? packed4444Pack
+          : type === C.UNSIGNED_SHORT_5_5_5_1 ? packed5551Pack
+          : type === C.UNSIGNED_SHORT_5_6_5 ? packed565Pack
+          : null;
+        const packedWrite = packedType
+          ? quantizedPackedWrite(
+              packedType,
+              packedType === packed4444Pack
+                ? packed4444Unpack
+                : packedType === packed5551Pack
+                  ? packed5551Unpack
+                  : packed565Unpack,
+              spec.pack,
+            )
+          : spec.pack;
         const p: CopyParams = {
           src: dv,
           srcRowBytes: im.width * 4,
@@ -931,9 +979,11 @@ function copyPixelsIntoLevel(
           srcFormat: C.RGBA,
           srcType: C.UNSIGNED_BYTE,
           domain: spec.isInteger ? 2 : spec.isFloat && !spec.isDepth ? 1 : 0,
-          flipY: ctx._state.pixelStore.unpack.flipY,
-          premultiply: ctx._state.pixelStore.unpack.premultiplyAlpha,
-          write: spec.pack,
+          flipY: isImageBitmap ? false : ctx._state.pixelStore.unpack.flipY,
+          premultiply: isImageBitmap
+            ? (source as { premultiply?: unknown }).premultiply === false ? false : true
+            : ctx._state.pixelStore.unpack.premultiplyAlpha,
+          write: packedWrite,
           dstBpp,
           dstStencil: levelData.stencilData,
         };
@@ -944,8 +994,21 @@ function copyPixelsIntoLevel(
         updateCompleteness(texture, ctx._version);
         return;
       }
-    } catch {
-      // present/ decode is a stub → zero-filled allocation (documented gap).
+      // Decode failed. A tainted/cross-origin source MUST throw a SecurityError
+      // DOMException per the WebGL origin-clean rule (CTS
+      // origin-clean-conformance.html); other decode failures (incomplete
+      // images, unsupported sources) keep the zero-filled fallback below.
+      if (res && !res.ok && res.reason && /security|taint|insecure/i.test(res.reason)) {
+        if (typeof DOMException !== 'undefined') {
+          throw new DOMException(res.reason, 'SecurityError');
+        }
+        throw Object.assign(new Error(res.reason), { name: 'SecurityError' });
+      }
+    } catch (e) {
+      // Origin-clean rule: a SecurityError (tainted source) must reach the
+      // page — rethrow it. Other decode failures keep the zero-filled
+      // fallback (documented gap).
+      if (e && typeof e === 'object' && (e as { name?: unknown }).name === 'SecurityError') throw e;
     }
     return;
   }
@@ -965,7 +1028,8 @@ function copyPixelsIntoLevel(
   const s = ctx._state.pixelStore.unpack;
   const srcBpp = srcBytesPerTexel(format, type);
   const srcRowLength = s.rowLength > 0 ? s.rowLength : width;
-  const srcRowBytes = align4(srcRowLength * srcBpp);
+  // UNPACK_ALIGNMENT (1/2/4/8, powers of two) governs source row padding.
+  const srcRowBytes = (srcRowLength * srcBpp + s.alignment - 1) & ~(s.alignment - 1);
   const domain: 0 | 1 | 2 = spec.isInteger ? 2 : spec.isFloat && !spec.isDepth ? 1 : 0;
   const dv = new DataView(srcView.buffer, srcView.byteOffset + baseOffset, srcView.byteLength - baseOffset);
   const p: CopyParams = {
@@ -977,7 +1041,7 @@ function copyPixelsIntoLevel(
     srcType: type,
     domain,
     flipY: s.flipY,
-    premultiply: false, // client arrays are not premultiplied by the API
+    premultiply: s.premultiplyAlpha,
     write: spec.pack,
     dstBpp,
     dstStencil: levelData.stencilData,
