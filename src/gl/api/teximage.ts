@@ -817,6 +817,13 @@ const W2_DOM: Record<number, { format: number; types: number[] }> = {
   [C2.RGBA16F]: { format: C1.RGBA, types: [C2.HALF_FLOAT, C1.FLOAT] },
   [C2.RGBA32F]: { format: C1.RGBA, types: [C1.FLOAT] },
   [C2.RGBA8UI]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_BYTE] },
+  // Unsized internal formats are legal for TexImageSource uploads (WebGL2 spec
+  // §3.7.2): format must equal internalformat and type must be UNSIGNED_BYTE.
+  [C1.RGBA]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE] },
+  [C1.RGB]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE] },
+  [C1.LUMINANCE_ALPHA]: { format: C1.LUMINANCE_ALPHA, types: [C1.UNSIGNED_BYTE] },
+  [C1.LUMINANCE]: { format: C1.LUMINANCE, types: [C1.UNSIGNED_BYTE] },
+  [C1.ALPHA]: { format: C1.ALPHA, types: [C1.UNSIGNED_BYTE] },
 };
 
 /** 9/10-arg buffer path: (target, level, internalformat, w, h, border, format, type, pixels). */
