@@ -11,8 +11,11 @@
 </head>
 <body>
 <div id="wrapper"><canvas id="babylon-canvas"></canvas></div>
-<!-- Vendor UMD bundles served by server.ts from vendor/babylon-cdn/. Order matters:
-     core first, then the libraries that extend the BABYLON global. -->
+<!-- Vendor UMD bundles served by server.ts from vendor/babylon-cdn/. Order matters
+     (mirrors upstream empty.html): earcut (Babylon core's default triangulator —
+     the global `earcut` is referenced at load) FIRST, then core, then the
+     libraries that extend the BABYLON global. -->
+<script src="/vendor/earcut.min.js"></script>
 <script src="/vendor/babylon.js"></script>
 <script src="/vendor/babylon.gui.min.js"></script>
 <script src="/vendor/babylonjs.materials.min.js"></script>

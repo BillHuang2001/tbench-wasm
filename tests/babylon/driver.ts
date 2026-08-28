@@ -166,14 +166,27 @@ export function runScene(
         const engineInit = await page.evaluate(
           (useLargeWorldRendering: boolean) => {
             try {
-              const canvas = document.getElementById("babylon-canvas") as HTMLCanvasElement;
+              // Mirror upstream exactly (visualizationPlaywright.utils.ts:
+              // `window.canvas = document.getElementById("babylon-canvas")`).
+              // Cached scene scripts (e.g. shadows.js, gui.js) reference the
+              // bare global `canvas` (e.g. `camera.attachControl(canvas, true)`)
+              // — the page's scripts are sloppy mode, so the bare identifier
+              // resolves to window.canvas. Must be set BEFORE engine creation.
               const w = window as any;
-              w.engine = new BABYLON.Engine(canvas, false, {
+              w.canvas = document.getElementById("babylon-canvas");
+              w.engine = new BABYLON.Engine(w.canvas, false, {
                 useHighPrecisionFloats: true,
                 disableWebGL2Support: false,
                 forceSRGBBufferSupportState: true,
                 powerPreference: "high-performance",
                 useLargeWorldRendering: useLargeWorldRendering,
+                // REQUIRED: preserveDrawingBuffer: true. The software
+                // renderer's present layer (CTS-compliant, src/gl/draw.ts
+                // schedulePreserveClear) schedules a rAF that clears and
+                // re-presents the BLACK wiped buffer after the render loop
+                // stops (preserveDrawingBuffer:false default) — that wipe
+                // must not be captured by the screenshot.
+                preserveDrawingBuffer: true,
                 // DEVIATION (documented): failIfMajorPerformanceCaveat is
                 // omitted — a software renderer would trip it.
               });

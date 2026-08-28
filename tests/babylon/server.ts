@@ -33,6 +33,7 @@ export type ServerHandle = { port: number; url: string; close: () => Promise<voi
 
 /** Whitelisted vendor bundles (babylonjs.serializers.min.js on disk is NOT whitelisted). */
 const VENDOR_WHITELIST = new Set([
+  "earcut.min.js",
   "babylon.js",
   "babylon.gui.min.js",
   "babylonjs.materials.min.js",
