@@ -181,13 +181,19 @@ validateConstants(extensionConstants, 'ext');
 for (const s of builtinFunctions100) check(s.extension === undefined, `100: core signature ${sigKey(s)} has extension tag`);
 for (const s of builtinFunctions300) check(s.extension === undefined, `300: core signature ${sigKey(s)} has extension tag`);
 for (const v of [...builtinVariables100, ...builtinVariables300]) {
-  // gl_DrawID is the SOLE extension-tagged core-table entry — it must be
-  // extension-gated in ES 3.00 too (GL_ANGLE_multi_draw), unlike the other
+  // gl_DrawID (GL_ANGLE_multi_draw) and gl_ClipDistance/gl_CullDistance
+  // (GL_ANGLE_clip_cull_distance) are the SOLE extension-tagged core-table
+  // variables — they must be extension-gated in ES 3.00 too, unlike the other
   // core variables (checked below).
-  if (v.name === 'gl_DrawID') continue;
+  if (v.name === 'gl_DrawID' || v.name === 'gl_ClipDistance' || v.name === 'gl_CullDistance') continue;
   check(v.extension === undefined, `core variable ${v.name} has extension tag`);
 }
-for (const c of [...builtinConstants100, ...builtinConstants300]) check(c.extension === undefined, `core constant ${c.name} has extension tag`);
+for (const c of [...builtinConstants100, ...builtinConstants300]) {
+  // gl_MaxCullDistances / gl_MaxCombinedClipAndCullDistances are the SOLE
+  // extension-tagged core constants (GL_ANGLE_clip_cull_distance).
+  if (c.name === 'gl_MaxCullDistances' || c.name === 'gl_MaxCombinedClipAndCullDistances') continue;
+  check(c.extension === undefined, `core constant ${c.name} has extension tag`);
+}
 
 /* Every extension-gated entry carries an `extension` tag. */
 for (const s of extensionFunctions) check(s.extension !== undefined, `ext: ${sigKey(s)} missing extension tag`);
@@ -332,6 +338,16 @@ check(bitCountU !== undefined && canon(bitCountU.ret) === 'ivec2', 'bitCount(uve
 for (const name of ['gl_Position', 'gl_PointSize', 'gl_FragCoord', 'gl_FrontFacing', 'gl_PointCoord', 'gl_VertexID', 'gl_InstanceID', 'gl_FragDepth']) {
   check(builtinVariables300.some((v) => v.name === name), `300: missing variable ${name}`);
 }
+// gl_ClipDistance/gl_CullDistance: float[8] arrays, BOTH-stage, writable,
+// gated on GL_ANGLE_clip_cull_distance (mirror of the gl_DrawID gating shape).
+for (const name of ['gl_ClipDistance', 'gl_CullDistance']) {
+  const v = builtinVariables300.find((vv) => vv.name === name);
+  check(
+    v !== undefined && v.type.kind === 'array' && v.type.size === 8 && canon(v.type.element) === 'float' &&
+      v.stage === 'BOTH' && v.writable && v.extension === 'GL_ANGLE_clip_cull_distance',
+    `300: ${name} must be writable float[8] BOTH-stage GL_ANGLE_clip_cull_distance`,
+  );
+}
 check(!builtinVariables300.some((v) => v.name === 'gl_FragColor'), '300: gl_FragColor must not exist');
 check(!builtinVariables300.some((v) => v.name === 'gl_FragData'), '300: gl_FragData must not exist');
 check(builtinVariables300.find((v) => v.name === 'gl_FragDepth')?.writable === true, 'gl_FragDepth must be writable');
@@ -346,12 +362,16 @@ checkDepthRangeVariable(builtinVariables300, '300');
 // gl_MaxUniformBlockSize 65536; gl_MaxCombinedUniformBlocks 36.
 // gl_MaxImageUnits / gl_MaxCombinedShaderOutputResources have NO gl/
 // getParameter and stay at the GLES 3.00 minimums; gl_MaxClipDistances = the
-// WEBGL_clip_cull_distance MAX_CLIP_DISTANCES_WEBGL value (8).
+// WEBGL_clip_cull_distance MAX_CLIP_DISTANCES_WEBGL value (8);
+// gl_MaxCullDistances / gl_MaxCombinedClipAndCullDistances are extension-gated
+// (GL_ANGLE_clip_cull_distance) with the extension's MAX_CULL_DISTANCES_WEBGL /
+// MAX_COMBINED_CLIP_AND_CULL_DISTANCES_WEBGL values (8 / 16).
 const EXPECTED_300: Record<string, number> = {
   gl_MaxVertexAttribs: 16, gl_MaxVertexUniformVectors: 4096, gl_MaxVertexOutputVectors: 32,
   gl_MaxVertexTextureImageUnits: 16, gl_MaxFragmentUniformVectors: 4096, gl_MaxFragmentInputVectors: 32,
   gl_MaxTextureImageUnits: 16, gl_MaxCombinedTextureImageUnits: 32, gl_MaxDrawBuffers: 8,
-  gl_MaxClipDistances: 8, gl_MaxTransformFeedbackSeparateAttribs: 4,
+  gl_MaxClipDistances: 8, gl_MaxCullDistances: 8, gl_MaxCombinedClipAndCullDistances: 16,
+  gl_MaxTransformFeedbackSeparateAttribs: 4,
   gl_MaxTransformFeedbackInterleavedComponents: 64, gl_MaxTransformFeedbackSeparateComponents: 4,
   gl_MaxUniformBufferBindings: 72, gl_MaxUniformBlockSize: 65536, gl_MaxVertexUniformBlocks: 12,
   gl_MaxFragmentUniformBlocks: 12, gl_MaxCombinedUniformBlocks: 36, gl_MaxImageUnits: 4,

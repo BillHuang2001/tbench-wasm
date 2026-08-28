@@ -146,7 +146,10 @@ function builtinNameSet(ctx: SemContext): Set<string> {
   for (const v of extensionVariables) {
     if (v.extension === undefined || ctx.enabledExtensions.has(v.extension)) names.add(v.name);
   }
-  for (const c of builtinConstants(ctx.version)) names.add(c.name);
+  for (const c of builtinConstants(ctx.version)) {
+    if (c.extension !== undefined && !ctx.enabledExtensions.has(c.extension)) continue;
+    names.add(c.name);
+  }
   for (const c of extensionConstants) {
     if (c.extension === undefined || ctx.enabledExtensions.has(c.extension)) names.add(c.name);
   }

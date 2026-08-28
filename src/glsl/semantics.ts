@@ -649,7 +649,14 @@ function registerBuiltins(scope: Scope, ctx: SemContext): void {
   }
 
   const consts = new Map<string, number>();
-  for (const c of builtinConstants(ctx.version)) consts.set(c.name, c.value);
+  for (const c of builtinConstants(ctx.version)) {
+    // Core-table entries may carry an `extension` tag (gl_MaxCullDistances /
+    // gl_MaxCombinedClipAndCullDistances → GL_ANGLE_clip_cull_distance); they
+    // are only visible when the shader enables the extension, mirroring the
+    // variable gating above.
+    if (c.extension !== undefined && !ctx.enabledExtensions.has(c.extension)) continue;
+    consts.set(c.name, c.value);
+  }
   for (const c of extensionConstants) {
     if (c.extension !== undefined && ctx.enabledExtensions.has(c.extension)) consts.set(c.name, c.value);
   }

@@ -27,13 +27,16 @@
  *   trunc/round/roundEven are genType only.
  * - bitCount/findLSB/findMSB return genIType even for genUType inputs.
  * - NOT included (deliberately): textureGather, textureQueryLod,
- *   textureQueryLevels (not in ES 3.00), fma (not in ES 3.00), and
- *   gl_ClipDistance (core GLSL ES 3.00 has it, but WebGL 2.0's CTS only
- *   exercises it through the WEBGL_clip_cull_distance extension, which is
- *   not part of the core table — add it if that extension is implemented).
+ *   textureQueryLevels (not in ES 3.00), fma (not in ES 3.00).
+ * - gl_ClipDistance / gl_CullDistance (float[8]) and gl_MaxCullDistances /
+ *   gl_MaxCombinedClipAndCullDistances ARE in the 3.00 table as
+ *   GL_ANGLE_clip_cull_distance-gated entries (WebGL 2.0's CTS exercises
+ *   them only through the WEBGL_clip_cull_distance extension) — visible
+ *   only when the shader enables that extension, mirroring gl_DrawID's
+ *   extension-gating shape.
  *
  * Counts (verified by selftest-builtins.ts): 625 function signatures,
- * 9 variables, 20 constants.
+ * 12 variables, 22 constants.
  */
 import { builtinFunctions100 } from './100.js';
 import {
@@ -42,6 +45,7 @@ import {
   I,
   U,
   VOID,
+  arr,
   bvec,
   gen,
   gen2,
@@ -391,6 +395,20 @@ export const builtinVariables300: BuiltinVariable[] = [
     writable: false,
     extension: 'GL_ANGLE_multi_draw',
   },
+  {
+    name: 'gl_ClipDistance',
+    type: arr(F, 8),
+    stage: 'BOTH',
+    writable: true,
+    extension: 'GL_ANGLE_clip_cull_distance',
+  },
+  {
+    name: 'gl_CullDistance',
+    type: arr(F, 8),
+    stage: 'BOTH',
+    writable: true,
+    extension: 'GL_ANGLE_clip_cull_distance',
+  },
   { name: 'gl_FragDepth', type: F, stage: 'FRAGMENT', writable: true },
   // GLSL ES 3.00 §7.7 built-in uniform state (usable in BOTH stages):
   // `uniform gl_DepthRangeParameters { float near; float far; float diff; }
@@ -413,7 +431,11 @@ export const builtinVariables300: BuiltinVariable[] = [
  * getParameter(MAX_DRAW_BUFFERS)). gl_MaxImageUnits and
  * gl_MaxCombinedShaderOutputResources have NO getParameter in gl/ and stay at
  * the GLES 3.00 minimums; gl_MaxClipDistances matches the
- * WEBGL_clip_cull_distance MAX_CLIP_DISTANCES_WEBGL value (8).
+ * WEBGL_clip_cull_distance MAX_CLIP_DISTANCES_WEBGL value (8). The two
+ * extension-gated constants (gl_MaxCullDistances 8, gl_MaxCombinedClipAndCullDistances 16)
+ * are visible only when GL_ANGLE_clip_cull_distance is enabled and match the
+ * extension's MAX_CULL_DISTANCES_WEBGL / MAX_COMBINED_CLIP_AND_CULL_DISTANCES_WEBGL
+ * getParameter values (src/gl/state.ts).
  */
 export const builtinConstants300: BuiltinConstant[] = [
   { name: 'gl_MaxVertexAttribs', value: 16 },
@@ -426,6 +448,8 @@ export const builtinConstants300: BuiltinConstant[] = [
   { name: 'gl_MaxCombinedTextureImageUnits', value: 32 },
   { name: 'gl_MaxDrawBuffers', value: 8 },
   { name: 'gl_MaxClipDistances', value: 8 },
+  { name: 'gl_MaxCullDistances', value: 8, extension: 'GL_ANGLE_clip_cull_distance' },
+  { name: 'gl_MaxCombinedClipAndCullDistances', value: 16, extension: 'GL_ANGLE_clip_cull_distance' },
   { name: 'gl_MaxTransformFeedbackSeparateAttribs', value: 4 },
   { name: 'gl_MaxTransformFeedbackInterleavedComponents', value: 64 },
   { name: 'gl_MaxTransformFeedbackSeparateComponents', value: 4 },
