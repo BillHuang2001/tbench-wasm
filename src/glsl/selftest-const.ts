@@ -20,6 +20,20 @@
  *    bool (GLSL ES 1.00 §5.9 / ES 3.00) — link+run value checks; non-const
  *    struct operands ACCEPTED at compile level; wrong struct types and array
  *    operands still rejected; both 100 and 300.
+ *  - BUILTIN VECTOR/MATRIX FOLDING: every MATH builtin from CTS
+ *    const-variable-initialization.html folds in const initializers over
+ *    VECTOR/MATRIX args (GLSL ES §5.10 — "a built-in function call whose
+ *    arguments are all constant expressions, with the exception of the texture
+ *    lookup functions"): unary elementwise (radians..fract), binary elementwise
+ *    (atan(y,x)/pow/mod/min/max/step), vec→bvec predicates (lessThan..notEqual),
+ *    geometric (length/distance/dot/cross/normalize/faceforward/reflect/refract)
+ *    and matrixCompMult. Texture lookups and derivatives still reject. Link+run
+ *    proves folded vector consts reach codegen with correct values.
+ *  - GLOBAL INITIALIZERS: ANGLE ValidateGlobalInitializer parity (CTS
+ *    global-variable-init.html) — WebGL1 allows const/plain-global/uniform/
+ *    math-builtin initializers (legacy), but texture lookups, attribute/varying
+ *    reads, l-value ops (`c = 0.0`, `c++`) and builtin non-constants
+ *    (gl_FragCoord) are compile errors; ESSL 3.00 allows only const symbols.
  *
  * Run: npx tsx src/glsl/selftest-const.ts   (prints "OK", exit 0)
  */
@@ -333,6 +347,207 @@ const VERT_SIMPLE = 'attribute vec4 a_position;\nvoid main() { gl_Position = a_p
   check(hasErr(e1, 3, "'==' : operands of type 'A' and 'B' cannot be compared"), 'struct == of different struct types → error');
   const e2 = errs('#version 300 es\nvoid main() { float a[2] = float[2](1.0, 2.0); float b[2] = float[2](1.0, 2.0); bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
   check(hasErr(e2, 2, "'==' : operands of type 'float[2]' and 'float[2]' cannot be compared"), 'array == → error (arrays not comparable)');
+}
+
+/* ------------------------------------------------------------------ */
+/* 6. Builtin const folding over VECTOR/MATRIX args & results          */
+/*    (CTS const-variable-initialization.html — the 120 formerly-      */
+/*    rejected 'not a constant expression' subtests)                   */
+/* ------------------------------------------------------------------ */
+
+{
+  // Unary elementwise builtins, vec4 form (CTS builtInsGenTypeToGenType).
+  // Previously REJECTED ('not a constant expression'); now folded by
+  // evalBuiltinConstFold (semantics-const.ts). Vertex + fragment, mirroring
+  // the CTS page's compile-status checks.
+  const unary = [
+    'radians', 'degrees', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
+    'exp', 'log', 'exp2', 'log2', 'sqrt', 'inversesqrt',
+    'abs', 'sign', 'floor', 'ceil', 'fract',
+  ];
+  for (const b of unary) {
+    const fsrc = `precision mediump float;\nconst vec4 c = ${b}(vec4(0.5));\nvoid main() { gl_FragColor = c; }`;
+    check(okShader(fsrc, 100, 'FRAGMENT') !== null, `const vec4 c = ${b}(vec4(0.5)) (fragment)`);
+    const vsrc = `precision mediump float;\nconst vec4 c = ${b}(vec4(0.5));\nvoid main() { gl_Position = c; }`;
+    check(okShader(vsrc, 100, 'VERTEX') !== null, `const vec4 c = ${b}(vec4(0.5)) (vertex)`);
+  }
+
+  // vec→bvec comparison predicates (CTS builtIns2VecToBvec): bool-vector
+  // RESULTS from vector args fold per component.
+  const preds = ['lessThan', 'lessThanEqual', 'greaterThan', 'greaterThanEqual', 'equal', 'notEqual'];
+  for (const b of preds) {
+    const fsrc = `precision mediump float;\nconst bvec4 c = ${b}(vec4(0.2), vec4(0.5));\nvoid main() { gl_FragColor = vec4(float(c.x)); }`;
+    check(okShader(fsrc, 100, 'FRAGMENT') !== null, `const bvec4 c = ${b}(vec4(0.2), vec4(0.5)) (fragment)`);
+    const vsrc = `precision mediump float;\nconst bvec4 c = ${b}(vec4(0.2), vec4(0.5));\nvoid main() { gl_Position = vec4(float(c.x)); }`;
+    check(okShader(vsrc, 100, 'VERTEX') !== null, `const bvec4 c = ${b}(vec4(0.2), vec4(0.5)) (vertex)`);
+  }
+
+  // Two-arg elementwise builtins, vec4 form (CTS builtIns2GenTypeToGenType;
+  // atan here is the atan(y, x) two-arg overload).
+  const bin2 = ['atan', 'pow', 'mod', 'min', 'max', 'step'];
+  for (const b of bin2) {
+    const fsrc = `precision mediump float;\nconst vec4 c = ${b}(vec4(0.2), vec4(0.5));\nvoid main() { gl_FragColor = c; }`;
+    check(okShader(fsrc, 100, 'FRAGMENT') !== null, `const vec4 c = ${b}(vec4(0.2), vec4(0.5)) (fragment)`);
+    const vsrc = `precision mediump float;\nconst vec4 c = ${b}(vec4(0.2), vec4(0.5));\nvoid main() { gl_Position = c; }`;
+    check(okShader(vsrc, 100, 'VERTEX') !== null, `const vec4 c = ${b}(vec4(0.2), vec4(0.5)) (vertex)`);
+  }
+
+  // Geometric builtins (scalar or vector results) + matrixCompMult — the
+  // page's one-of-a-kind cases, exact CTS expression list.
+  const geo: [string, string, string][] = [
+    ['float l', 'length(vec4(0.5))', 'vec4(l)'],
+    ['float d', 'distance(vec4(0.5), vec4(0.2))', 'vec4(d)'],
+    ['float dt', 'dot(vec4(0.5), vec4(0.2))', 'vec4(dt)'],
+    ['vec3 cr', 'cross(vec3(0.5), vec3(0.2))', 'vec4(cr, 1.0)'],
+    ['vec4 n', 'normalize(vec4(0.5))', 'n'],
+    ['vec4 ff', 'faceforward(vec4(0.2), vec4(0.3), vec4(0.4))', 'ff'],
+    ['vec4 r', 'reflect(vec4(0.2), vec4(0.5))', 'r'],
+    ['vec4 rr', 'refract(vec4(0.2), vec4(0.3), 0.4)', 'rr'],
+    ['mat4 m', 'matrixCompMult(mat4(0.2), mat4(0.5))', 'm[0]'],
+  ];
+  for (const [decl, init, use] of geo) {
+    const fsrc = `precision mediump float;\nconst ${decl} = ${init};\nvoid main() { gl_FragColor = ${use}; }`;
+    check(okShader(fsrc, 100, 'FRAGMENT') !== null, `const ${decl} = ${init} (fragment)`);
+    const vsrc = `precision mediump float;\nconst ${decl} = ${init};\nvoid main() { gl_Position = ${use}; }`;
+    check(okShader(vsrc, 100, 'VERTEX') !== null, `const ${decl} = ${init} (vertex)`);
+  }
+
+  // Scalar forms keep folding via the analysis-time path (regression guard —
+  // these passed before the vector work; must not regress).
+  for (const init of ['clamp(0.2, 0.3, 0.4)', 'mix(0.2, 0.3, 0.4)', 'smoothstep(0.2, 0.3, 0.4)', 'sin(0.5)']) {
+    const fsrc = `precision mediump float;\nconst float c = ${init};\nvoid main() { gl_FragColor = vec4(c); }`;
+    check(okShader(fsrc, 100, 'FRAGMENT') !== null, `const float c = ${init} (scalar still folds)`);
+  }
+
+  // §5.10 exception: texture lookup functions are NEVER constant expressions,
+  // even with fully-const arguments (vector or not).
+  const t1 = errs('precision mediump float;\nuniform sampler2D s;\nconst float x = texture2D(s, vec2(0.5)).x;\nvoid main() { gl_FragColor = vec4(x); }', 100, 'FRAGMENT');
+  check(hasErr(t1, 3, "'x' : initializer of const variable must be a constant expression"), 'texture2D in const init → still rejected (§5.10 exception)');
+  const t2 = errs('#extension GL_OES_standard_derivatives : enable\nprecision mediump float;\nconst float d = dFdx(0.5);\nvoid main() { gl_FragColor = vec4(d); }', 100, 'FRAGMENT', ['GL_OES_standard_derivatives']);
+  check(hasErr(t2, 3, "'d' : initializer of const variable must be a constant expression"), 'dFdx in const init → still rejected (derivative, non-math builtin)');
+
+  // RUNTIME: folded vector consts must flow to codegen with correct values
+  // (global const → reads mutate into annotated ctor calls; codegen bakes).
+  const r1 = runFragment(VERT_SIMPLE, 'precision mediump float;\nconst vec4 n = normalize(vec4(1.0, 0.0, 0.0, 0.0));\nvoid main() { gl_FragColor = n; }');
+  check(close4(r1, [1, 0, 0, 0]), `runtime: const vec4 n = normalize(vec4(1,0,0,0)) → [1,0,0,0] (got ${JSON.stringify(r1 ? Array.from(r1) : null)})`);
+
+  const r2 = runFragment(VERT_SIMPLE, 'precision mediump float;\nconst vec4 m = min(vec4(0.7, 0.2, 0.9, 0.4), vec4(0.5));\nvoid main() { gl_FragColor = m; }');
+  check(close4(r2, [0.5, 0.2, 0.5, 0.4]), `runtime: const vec4 m = min(...) → [0.5,0.2,0.5,0.4] (got ${JSON.stringify(r2 ? Array.from(r2) : null)})`);
+
+  const r3 = runFragment(VERT_SIMPLE, 'precision mediump float;\nconst vec3 c = cross(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0));\nvoid main() { gl_FragColor = vec4(c, 1.0); }');
+  check(close4(r3, [0, 0, 1, 1]), `runtime: const vec3 c = cross(x̂, ŷ) → [0,0,1,1] (got ${JSON.stringify(r3 ? Array.from(r3) : null)})`);
+
+  const r4 = runFragment(VERT_SIMPLE, 'precision mediump float;\nconst bvec4 p = lessThan(vec4(0.2), vec4(0.5));\nvoid main() { gl_FragColor = vec4(float(p.x), float(p.y), float(p.z), float(p.w)); }');
+  check(close4(r4, [1, 1, 1, 1]), `runtime: const bvec4 p = lessThan(...) → [1,1,1,1] (got ${JSON.stringify(r4 ? Array.from(r4) : null)})`);
+
+  // mat2(0.5) is a DIAGONAL matrix (scalar splat), so matrixCompMult with it
+  // zeroes the off-diagonal; use an explicit 4-arg ctor for a full pin.
+  const r5 = runFragment(VERT_SIMPLE, 'precision mediump float;\nconst mat2 m = matrixCompMult(mat2(2.0, 3.0, 4.0, 5.0), mat2(0.5, 0.5, 0.5, 0.5));\nvoid main() { gl_FragColor = vec4(m[0], m[1]); }');
+  check(close4(r5, [1, 1.5, 2, 2.5]), `runtime: const mat2 m = matrixCompMult(...) → [1,1.5,2,2.5] (got ${JSON.stringify(r5 ? Array.from(r5) : null)})`);
+
+  const r6 = runFragment(VERT_SIMPLE, 'precision mediump float;\nconst vec4 ff = faceforward(vec4(0.2), vec4(0.3), vec4(0.4));\nvoid main() { gl_FragColor = ff; }');
+  check(close4(r6, [-0.2, -0.2, -0.2, -0.2]), `runtime: const vec4 ff = faceforward(...) → [-0.2×4] (got ${JSON.stringify(r6 ? Array.from(r6) : null)})`);
+
+  const r7 = runFragment(VERT_SIMPLE, 'precision mediump float;\nconst vec4 r = reflect(vec4(0.2), vec4(0.5));\nvoid main() { gl_FragColor = r; }');
+  check(close4(r7, [-0.2, -0.2, -0.2, -0.2]), `runtime: const vec4 r = reflect(...) → [-0.2×4] (got ${JSON.stringify(r7 ? Array.from(r7) : null)})`);
+
+  const r8 = runFragment(VERT_SIMPLE, 'precision mediump float;\nconst vec4 rr = refract(vec4(0.2), vec4(0.3), 0.4);\nvoid main() { gl_FragColor = rr; }');
+  const eta = 0.4;
+  const d = 4 * 0.3 * 0.2; // dot(N, I)
+  const k = 1 - eta * eta * (1 - d * d);
+  const c = eta * d + Math.sqrt(k);
+  const expect = eta * 0.2 - c * 0.3;
+  check(close4(r8, [expect, expect, expect, expect]), `runtime: const vec4 rr = refract(...) → [${expect}×4] (got ${JSON.stringify(r8 ? Array.from(r8) : null)})`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 7. Global variable initializer validation                           */
+/*    (CTS global-variable-init.html — the 6 formerly-accepted         */
+/*    subtests; exact page shader sources)                             */
+/* ------------------------------------------------------------------ */
+
+{
+  // REJECTED — the six page-2 cases, exact CTS sources. Error message and
+  // line mirror ANGLE ValidateGlobalInitializer ("global variable
+  // initializers must be constant expressions").
+  const e1 = errs(
+    'precision mediump float;\nattribute vec4 aPosition;\nvarying float v;\nuniform sampler2D s;\nfloat f = texture2DLod(s, vec2(0.5, 0.5), 0.0).x;\nvoid main() {\n    v = f;\n    gl_Position = aPosition;\n}',
+    100, 'VERTEX');
+  check(hasErr(e1, 5, "'=' : global variable initializers must be constant expressions"), 'texture lookup function in global init → error (line 5)');
+
+  const e2 = errs(
+    'precision mediump float;\nattribute vec4 aPosition;\nvarying float v;\nfloat f = aPosition.x;\nvoid main() {\n    v = f;\n    gl_Position = aPosition;\n}',
+    100, 'VERTEX');
+  check(hasErr(e2, 4, "'=' : global variable initializers must be constant expressions"), 'attribute read in global init → error (line 4)');
+
+  const e3 = errs(
+    'precision mediump float;\nvarying float v;\nfloat f = v;\nvoid main() {\n    gl_FragColor = vec4(f);\n}',
+    100, 'FRAGMENT');
+  check(hasErr(e3, 3, "'=' : global variable initializers must be constant expressions"), 'varying read in global init → error (line 3)');
+
+  const e4 = errs(
+    'precision mediump float;\nattribute vec4 aPosition;\nvarying float v;\nfloat c = 1.0;\nfloat f = (c = 0.0);\nvoid main() {\n    v = f;\n    gl_Position = aPosition;\n}',
+    100, 'VERTEX');
+  check(hasErr(e4, 5, "'=' : global variable initializers must be constant expressions"), 'global as l-value (c = 0.0) in global init → error (line 5)');
+
+  const e5 = errs(
+    'precision mediump float;\nattribute vec4 aPosition;\nvarying float v;\nfloat c = 1.0;\nfloat f = (c++);\nvoid main() {\n    v = f;\n    gl_Position = aPosition;\n}',
+    100, 'VERTEX');
+  check(hasErr(e5, 5, "'=' : global variable initializers must be constant expressions"), 'global as l-value (c++) in global init → error (line 5)');
+
+  const e6 = errs(
+    'precision mediump float;\nattribute vec4 aPosition;\nvarying float v;\nfloat foo() {\n    return 1.0;\n}\nfloat f = foo();\nvoid main() {\n    v = f;\n    gl_Position = aPosition;\n}',
+    100, 'VERTEX');
+  check(hasErr(e6, 7, "'=' : global variable initializers must be constant expressions"), 'user function call in global init → error (line 7)');
+
+  const e7 = errs(
+    'precision mediump float;\nvec4 v = gl_FragCoord;\nvoid main() {\n    gl_FragColor = v;\n}',
+    100, 'FRAGMENT');
+  check(hasErr(e7, 2, "'=' : global variable initializers must be constant expressions"), 'builtin non-constant (gl_FragCoord) in global init → error (line 2)');
+
+  // ESSL 3.00: only const symbols allowed (ANGLE: EvqGlobal/Uniform OK only
+  // when version < 300) — a uniform initializer that WebGL1 accepts is an
+  // error here.
+  const e8 = errs(
+    '#version 300 es\nprecision mediump float;\nuniform float u;\nfloat f = u;\nout vec4 o;\nvoid main() { o = vec4(f); }',
+    300, 'FRAGMENT');
+  check(hasErr(e8, 4, "'=' : global variable initializers must be constant expressions"), 'ESSL 3.00 uniform in global init → error (line 4)');
+
+  // ACCEPTED — the page-2 passing subtests (WebGL1 legacy compatibility:
+  // initializers need NOT be constant expressions, just per-invocation-state
+  // free). Exact CTS sources.
+  const a1 = okShader(
+    'precision mediump float;\nattribute vec4 aPosition;\nvarying float v;\nconst float c = 1.0;\nfloat f = c;\nvoid main() {\n    v = f;\n    gl_Position = aPosition;\n}',
+    100, 'VERTEX');
+  check(a1 !== null, 'const global in global init → accepted');
+  const a2 = okShader(
+    'precision mediump float;\nattribute vec4 aPosition;\nvarying float v;\nfloat c = 1.0;\nfloat f = c;\nvoid main() {\n    v = f;\n    gl_Position = aPosition;\n}',
+    100, 'VERTEX');
+  check(a2 !== null, 'plain global in global init → accepted (WebGL1 legacy)');
+  const a3 = okShader(
+    'precision mediump float;\nattribute vec4 aPosition;\nvarying float v;\nuniform float u;\nfloat f = u;\nvoid main() {\n    v = f;\n    gl_Position = aPosition;\n}',
+    100, 'VERTEX');
+  check(a3 !== null, 'uniform in global init → accepted (WebGL1 legacy)');
+  const a4 = okShader(
+    'precision mediump float;\nattribute vec4 aPosition;\nvarying float v;\nfloat c = 1.0;\nfloat f = sin(c);\nvoid main() {\n    v = f;\n    gl_Position = aPosition;\n}',
+    100, 'VERTEX');
+  check(a4 !== null, 'math builtin in global init → accepted');
+  const a5 = okShader(
+    'precision mediump float;\nfloat green = 1.0;\nfloat black = 0.0;\nfloat f = true ? green : black;\nvoid main() {\n    gl_FragColor = vec4(0.0, f, 0.0, 1.0);\n}',
+    100, 'FRAGMENT');
+  check(a5 !== null, 'non-const globals in ternary global init → accepted');
+  const a6 = okShader(
+    'precision mediump float;\nuniform float u_zero;\nfloat green = 1.0 + u_zero;\nfloat f = true ? green : u_zero;\nvoid main() {\n    gl_FragColor = vec4(0.0, f, 0.0, 1.0);\n}',
+    100, 'FRAGMENT');
+  check(a6 !== null, 'uniform in ternary global init → accepted');
+  const a7 = okShader(
+    'precision mediump float;\nstruct S {\n    float zero;\n    int one;\n};\nuniform S us;\nS s = us;\nvoid main() {\n    float green = (s.one == 1) ? 1.0 : 0.0;\n    gl_FragColor = vec4(0.0, green, 0.0, 1.0);\n}',
+    100, 'FRAGMENT');
+  check(a7 !== null, 'global struct initialized with uniform struct → accepted');
+  const a8 = okShader(
+    'precision mediump float;\nint i = gl_MaxFragmentUniformVectors;\nvoid main() {\n    float green = (i > 0) ? 1.0 : 0.0;\n    gl_FragColor = vec4(0.0, green, 0.0, 1.0);\n}',
+    100, 'FRAGMENT');
+  check(a8 !== null, 'builtin constant (gl_Max*) in global init → accepted');
 }
 
 /* ------------------------------------------------------------------ */

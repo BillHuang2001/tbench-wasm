@@ -30,7 +30,7 @@ import type {
 import type { GLSLType, Precision, SamplerKind, StorageClass, StructMember } from './types.js';
 import { isFloat, typeEquals, typeName } from './types.js';
 import { analyzeExpr, convertible } from './semantics-expr.js';
-import { evalConstExpr } from './semantics-const.js';
+import { evalConstExpr, validateGlobalInit } from './semantics-const.js';
 import { analyzeStatement } from './semantics-stmt.js';
 import {
   builtinConstants, builtinSignatures, builtinVariables,
@@ -538,6 +538,14 @@ export function declareVariables(
           constValue = constData[0];
         }
       }
+    } else if (scope.parent === null && d.init !== null) {
+      // GLOBAL (non-const) initializers: ANGLE ValidateGlobalInitializer
+      // parity (WebGL CTS global-variable-init.html) — uniforms and other
+      // globals are allowed in WebGL1 (legacy compatibility), but texture
+      // lookups, attributes/varyings/builtin non-constants, user function
+      // calls and lvalue operations are compile errors. Const globals are
+      // already covered by the evalConstExpr check above.
+      validateGlobalInit(d.init, scope, ctx);
     }
     scope.declare({ kind: 'var', name: d.name, type, storage: spec.qualifiers.storage, constValue, constData }, ctx, d.loc.line);
   }
