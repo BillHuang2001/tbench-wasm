@@ -30,7 +30,7 @@ Exact names (gl/ and entry.ts import from `./present`):
 
 ## Design Decisions
 - **Native 2D blit**: `canvas.getContext('2d')` + `putImageData`. The test-harness getContext override falls through to the native 2D context for `'2d'`, so a plain call works. Playwright `page.screenshot`/`toHaveScreenshot` and `canvas.toDataURL` composite the 2D canvas bitmap.
-- **present() per draw**: gl/ calls `present()` after every draw/clear so the canvas bitmap is always current (no explicit flush needed before screenshots). putImageData is a memcpy — acceptable for a software renderer.
+- **present() per draw**: gl/ calls `present()` after every draw/clear so the canvas bitmap is current at draw time (no explicit flush needed before screenshots taken in the same task). Caveat: for `preserveDrawingBuffer:false` contexts the next frame boundary re-presents the wiped (black) buffer — see Known Issues.
 - **Buffer owned by the surface, gl/ renders in place**: the surface allocates `Uint8Array(w*h*4)` on resize; gl/ wraps `getPixels()` as the drawing-buffer color storage (RGBA8). `present()` auto-resizes to `canvas.width/height` if they differ (safety net for page-driven canvas resizes between draws).
 - **ImageData reuse**: `new ImageData(view, w, h)` built once per resize from a view over the same buffer (constructor does not copy — use a `Uint8ClampedArray` view); putImageData copies only at blit time.
 - **Uniform scratch-canvas decode**: all DOM sources decode through one lazily created scratch canvas (`drawImage` + `getImageData`). The scratch is a module-level singleton shared across ALL decodes and contexts, so `decodeViaScratch` resets the transform and clears it to transparent before every `drawImage` (a same-size decode would otherwise composite source-over the previous decode's pixels and corrupt straight-alpha readback). A canvas painted by our own 2D blit reads back correctly (the native 2D context holds the pixels). `SecurityError` (tainted source) and incomplete sources return `{ok:false}` — gl/ maps to INVALID_VALUE per spec.
@@ -51,7 +51,7 @@ Exact names (gl/ and entry.ts import from `./present`):
 - Browser paths are verified by the CTS (`conformance/textures/`, `canvas/` tests) and the three.js/Babylon screenshot suites (frames visible to `toHaveScreenshot`).
 
 ## Status
-Implementation complete: `canvas.ts` (BrowserCanvasSurface/NodeCanvasSurface/createCanvasSurface) and `image.ts` (decodeImageSource/decodeImageData/isDecodableImageSource) implemented per the design above; validated with `npx tsc --noEmit` (zero errors in src/present) and Node smoke checks. Browser 2D-blit path awaits end-to-end validation by the CTS/screenshot suites.
+Implementation complete: `canvas.ts` (BrowserCanvasSurface/NodeCanvasSurface/createCanvasSurface) and `image.ts` (decodeImageSource/decodeImageData/isDecodableImageSource) implemented per the design above; validated with `npx tsc --noEmit` (zero errors in src/present) and Node smoke checks. Browser 2D-blit path works but is overridden by gl's deferred preserve-clear re-present for `preserveDrawingBuffer:false` contexts (see Known Issues) — visual suites must use `preserveDrawingBuffer:true`.
 
 ## Routing Table
 - No child directories (leaf node).
