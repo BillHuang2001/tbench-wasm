@@ -40,7 +40,7 @@ function mustCompile(src: string, type: 'VERTEX' | 'FRAGMENT', version: 100 | 30
 function mustFail(src: string, type: 'VERTEX' | 'FRAGMENT', version: 100 | 300, what: string, extensions?: Set<string>) {
   const r = tryCompile(src, type, version, extensions);
   check(!r.ok, `${what} must FAIL to compile`);
-  return r;
+  return r as { ok: false; errors: { line: number; message: string }[] };
 }
 
 function fragmentCtx(prog: Program, extra: Record<string, unknown> = {}): any {
