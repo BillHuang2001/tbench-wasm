@@ -541,6 +541,13 @@ function projectToFace(face: number, rx: number, ry: number, rz: number, dst: Fl
     case 4: sc = rx; tc = -ry; ma = rz; break;    // +Z
     default: sc = -rx; tc = -ry; ma = -rz; break; // −Z
   }
+  if (ma === 0) {
+    // Degenerate direction (e.g. vec3(0,0,0)): no dominant axis — fall back to
+    // the face-center texel (0/0 would produce NaN, poisoning every compare).
+    dst[0] = 0.5;
+    dst[1] = 0.5;
+    return;
+  }
   dst[0] = (sc / ma + 1) / 2;
   dst[1] = (tc / ma + 1) / 2;
 }
