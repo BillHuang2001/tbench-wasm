@@ -97,6 +97,7 @@ import {
 import type { WebGLObject } from '../objects';
 import { validateObject, validateNonNullableObject } from '../validation';
 import { ensureProgramLinked } from './programs';
+import { syncCurrentAttribs } from './vertex-attrib';
 import { defaultVAOState } from '../state';
 import type { VAOState } from '../state';
 import { executeClearBuffer } from '../draw';
@@ -885,6 +886,10 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         // (CTS vertex-array-object.html).
         ctx._state.vaoBinding = null;
         ctx._state.vao = defaultVAO(ctx);
+        // CURRENT_VERTEX_ATTRIB is context-global: the fresh default VAO's
+        // attrib mirrors must carry the global generic values so draws keep
+        // using them ("should be green" after deleteVertexArray).
+        syncCurrentAttribs(ctx, ctx._state.vao);
       }
       vertexArray._deleted = true;
       ctx._resources.untrack(vertexArray);
@@ -913,12 +918,17 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       if (array === null || array === undefined) {
         s.vaoBinding = null;
         s.vao = defaultVAO(ctx);
+        // CURRENT_VERTEX_ATTRIB is context-global, not VAO state: the newly
+        // bound VAO's attrib mirrors must carry the global generic values
+        // (CTS vertex-array-object.html runAttributeValueTests).
+        syncCurrentAttribs(ctx, s.vao);
         return;
       }
       const vao = validateObject<WebGLVertexArrayObject>(ctx, array, Vao.any);
       if (vao === null) return; // cross-context/deleted → INVALID_OPERATION pushed
       s.vaoBinding = vao;
       s.vao = vao._vao;
+      syncCurrentAttribs(ctx, s.vao);
       everBoundVAOs.add(vao);
     };
   }
