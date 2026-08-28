@@ -20,19 +20,28 @@
  *  - Transform feedback active: draw mode must equal the beginTransformFeedback
  *    mode (INVALID_OPERATION); TF draws bypass the rasterizer (engine handles).
  *  - clear: mask bits ⊆ {COLOR, DEPTH, STENCIL}_BUFFER_BIT (INVALID_VALUE).
- *  - clearBuffer*: buffer ∈ {COLOR, COLOR_INT, COLOR_UINT, DEPTH, STENCIL,
- *    DEPTH_STENCIL} (INVALID_ENUM); drawbuffer < MAX_DRAW_BUFFERS (INVALID_VALUE);
- *    per-function buffer match (INVALID_OPERATION); values length ≥ 4 for color
- *    / ≥ 1 for depth-stencil (INVALID_VALUE); clearBufferfi → DEPTH_STENCIL +
+ *  - clearBuffer*: buffer ∈ {COLOR, DEPTH, STENCIL, DEPTH_STENCIL} (INVALID_ENUM
+ *    for anything else — GL_COLOR_INT/GL_COLOR_UINT are not WebGL enums);
+ *    drawbuffer < MAX_DRAW_BUFFERS (INVALID_VALUE); DEPTH/STENCIL/DEPTH_STENCIL
+ *    only target drawbuffer 0 (INVALID_OPERATION); per-function buffer match
+ *    (INVALID_OPERATION); for COLOR the function must match the attachment
+ *    class (float/fixed → fv, signed int → iv, unsigned int → uiv —
+ *    INVALID_OPERATION on mismatch, nothing cleared; missing attachment or
+ *    drawBuffers[i] === NONE → no-op NO_ERROR); values length ≥ 4 for color /
+ *    ≥ 1 for depth-stencil (INVALID_VALUE); clearBufferfi → DEPTH_STENCIL +
  *    drawbuffer 0.
- *  - readPixels: pixels null → INVALID_VALUE (TypeError for non-views);
- *    width/height ≥ 0 (INVALID_VALUE); format/type enum validity (INVALID_ENUM);
- *    format/type compatibility with the read buffer (INVALID_OPERATION — default
- *    framebuffer accepts only RGBA/UNSIGNED_BYTE); view class must match type
- *    (INVALID_OPERATION); pixel-store constraints + destination size
- *    (INVALID_OPERATION); PIXEL_PACK_BUFFER bound → the ArrayBufferView
- *    overload is INVALID_OPERATION (WebGL2 spec; the PBO offset overload is a
- *    separate W2 signature not declared in webgl2.ts).
+ *  - readPixels: pixels null → INVALID_VALUE (TypeError for non-view
+ *    non-number args); width/height ≥ 0 (INVALID_VALUE); format/type enum
+ *    validity (INVALID_ENUM — WebGL1 via format/type sets, WebGL2 via the
+ *    GLES3 (format,type) PAIR table); format/type compatibility with the read
+ *    buffer (INVALID_OPERATION — default framebuffer accepts only
+ *    RGBA/UNSIGNED_BYTE); view class must match type (INVALID_OPERATION);
+ *    pixel-store constraints + destination size (INVALID_OPERATION);
+ *    PIXEL_PACK_BUFFER bound → the ArrayBufferView overload is
+ *    INVALID_OPERATION (WebGL2 spec), the GLintptr-offset overload is
+ *    INVALID_OPERATION with NO PIXEL_PACK_BUFFER bound, INVALID_VALUE for
+ *    offset < 0, INVALID_OPERATION when the data store is absent or too small
+ *    (remainder check per spec) — same enum/combo validation as the view path.
  *  - flush/finish: no-ops (synchronous renderer).
  */
 
@@ -137,11 +146,41 @@ const RP_TYPES_1 = new Set<number>([
   C1.FLOAT, C1.UNSIGNED_SHORT_5_6_5, C1.UNSIGNED_SHORT_4_4_4_4, C1.UNSIGNED_SHORT_5_5_5_1,
   0x140b /* HALF_FLOAT */, 0x8d61 /* HALF_FLOAT_OES */,
 ]);
-/** Types accepted as readPixels `type` (WebGL2 additions). */
-const RP_TYPES_2 = new Set<number>([
-  ...RP_TYPES_1, C2.UNSIGNED_INT_2_10_10_10_REV, C2.UNSIGNED_INT_24_8,
-  C2.FLOAT_32_UNSIGNED_INT_24_8_REV,
-]);
+
+/**
+ * WebGL2 readPixels (format, type) PAIR table — the GLES3 ReadPixels table
+ * (ES 3.0 §4.3.2). Any pair NOT listed → INVALID_ENUM (this replaces the
+ * WebGL1-style independent format/type sets for WebGL2; e.g. LUMINANCE as a
+ * format, RGBA4 as a format, or RGBA/UNSIGNED_INT_24_8 are all INVALID_ENUM —
+ * CTS read-pixels-into-pixel-pack-buffer.html checkFormatAndType).
+ */
+const RP_PAIRS_2 = new Set<number>();
+{
+  const P = (format: number, ...types: number[]): void => {
+    for (const t of types) RP_PAIRS_2.add((format << 16) | t);
+  };
+  P(C1.RGBA, C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_5_5_1, C1.UNSIGNED_SHORT_4_4_4_4,
+    C2.HALF_FLOAT, C1.FLOAT, C2.UNSIGNED_INT_2_10_10_10_REV);
+  P(C2.RGBA_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
+  P(C1.RGB, C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_6_5,
+    C2.HALF_FLOAT, C1.FLOAT, C2.UNSIGNED_INT_2_10_10_10_REV);
+  P(C2.RGB_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
+  P(C2.RG, C1.UNSIGNED_BYTE, C2.HALF_FLOAT, C1.FLOAT);
+  P(C2.RG_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
+  P(C2.RED, C1.UNSIGNED_BYTE, C2.HALF_FLOAT, C1.FLOAT);
+  P(C2.RED_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
+  P(C1.DEPTH_COMPONENT, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT);
+  P(C2.DEPTH_STENCIL, C2.UNSIGNED_INT_24_8, C2.FLOAT_32_UNSIGNED_INT_24_8_REV);
+  // ALPHA is a WebGL1-inherited format (WebGL2 spec: "Only differences from
+  // WebGL 1.0 are described here"); the CTS expects ALPHA/UNSIGNED_BYTE to be
+  // enum-valid and to fail only the read-buffer compatibility gate
+  // (INVALID_OPERATION — read-pixels-into-pixel-pack-buffer.html).
+  P(C1.ALPHA, C1.UNSIGNED_BYTE);
+}
+
+function rpPairKey(format: GLenum, type: GLenum): number {
+  return (format << 16) | type;
+}
 
 /** The ArrayBufferView class required by a readPixels `type` ('u8' = Uint8Array|Uint8ClampedArray). */
 function expectedViewForType(type: GLenum): (new (n: number) => ArrayBufferView) | 'u8' | null {
@@ -306,6 +345,50 @@ function alignUp(n: number, align: number): number {
   return Math.ceil(n / align) * align;
 }
 
+/**
+ * Format/type compatibility with the READ buffer (INVALID_OPERATION when
+ * false). Default framebuffer: only RGBA/UNSIGNED_BYTE (WebGL1+2). FBO: the
+ * attachment's internal format decides via readComboOK (missing color
+ * attachment → false).
+ */
+function readPixelsComboOK(ctx: WebGLRenderingContext, format: GLenum, type: GLenum): boolean {
+  const s = ctx._state;
+  const fbo = s.readFramebuffer;
+  if (fbo === null) {
+    return format === C1.RGBA && type === C1.UNSIGNED_BYTE;
+  }
+  const rb = s.version === 2 ? s.readBuffer : C1.COLOR_ATTACHMENT0;
+  const att = fbo._attachments.get(rb);
+  if (!att) return false; // missing color attachment
+  const internalFormat = att.type === 'renderbuffer'
+    ? att.renderbuffer._internalformat
+    : (att.texture._image?.internalFormat ?? 0);
+  // W1 unsized float-storage levels (RGBA/RGB/... + FLOAT/HALF_FLOAT_OES)
+  // report their storage class via the attached surface info.
+  const floatStorage = att.type === 'renderbuffer'
+    ? !!(att.renderbuffer._surface?.info?.isFloat)
+    : !!(att.texture._image?.info?.isFloat);
+  return readComboOK(ctx, internalFormat, format, type, floatStorage);
+}
+
+/**
+ * Pixel-store constraints + destination size (INVALID_OPERATION). Returns the
+ * number of packed bytes needed, or -1 after pushing the error.
+ */
+function readPixelsNeeded(ctx: WebGLRenderingContext, format: GLenum, type: GLenum, width: GLsizei, height: GLsizei): number {
+  const s = ctx._state;
+  const bpp = packBytesPerPixel(format, type);
+  const pack = s.pixelStore.pack;
+  const rowLen = pack.rowLength || width;
+  if (s.version === 2 && pack.skipPixels + width > rowLen) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return -1;
+  }
+  const rowStride = alignUp(rowLen * bpp, pack.alignment);
+  return pack.skipRows * rowStride + pack.skipPixels * bpp +
+    (height > 0 ? rowStride * (height - 1) + width * bpp : 0);
+}
+
 // ---------------------------------------------------------------------------
 // installDrawApi
 // ---------------------------------------------------------------------------
@@ -354,7 +437,7 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
   proto.readPixels = function (
     this: WebGLRenderingContext,
     x: GLint, y: GLint, width: GLsizei, height: GLsizei,
-    format: GLenum, type: GLenum, pixels: ArrayBufferView | null,
+    format: GLenum, type: GLenum, pixels: ArrayBufferView | number | null,
   ): void {
     const ctx = this;
     if (isLost(ctx)) return;
@@ -362,51 +445,77 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_VALUE); // nullable per WebIDL; null → INVALID_VALUE
       return;
     }
-    if (!ArrayBuffer.isView(pixels)) {
-      throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
-    }
     const s = ctx._state;
     if (width < 0 || height < 0) {
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
+    // WebGL2: the 7th arg is either an ArrayBufferView (client-memory read) or
+    // a GLintptr byte offset into the PIXEL_PACK_BUFFER data store.
+    if (typeof pixels === 'number') {
+      // ---- PIXEL_PACK_BUFFER offset overload ----
+      if (s.version !== 2 || !s.pixelPackBuffer) {
+        // No PIXEL_PACK_BUFFER bound (or WebGL1 — no such target): the number
+        // overload is illegal → INVALID_OPERATION (CTS asserts this, NOT a
+        // TypeError).
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (pixels < 0) {
+        ctx._errors.push(C1.INVALID_VALUE); // offset < 0 (spec)
+        return;
+      }
+      const packBuf = s.pixelPackBuffer;
+      if (!packBuf._data) {
+        ctx._errors.push(C1.INVALID_OPERATION); // no data store
+        return;
+      }
+      // 1. Enum validity: WebGL2 uses the GLES3 (format,type) PAIR table.
+      if (!RP_PAIRS_2.has(rpPairKey(format, type))) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      // 2. Format/type compatibility with the read buffer (INVALID_OPERATION).
+      if (!readPixelsComboOK(ctx, format, type)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      // 3. Pixel-store constraints + remainder of the data store
+      //    (INVALID_OPERATION).
+      const needed = readPixelsNeeded(ctx, format, type, width, height);
+      if (needed < 0) return;
+      if (pixels + needed > packBuf._data.byteLength) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      // 4. Execute — the engine writes into the PBO at `offset` + pack skips.
+      try {
+        executeReadPixels(ctx, x, y, width, height, format, type, pixels as unknown as ArrayBufferView);
+      } catch { ctx._errors.push(C1.INVALID_OPERATION); }
+      return;
+    }
+    if (!ArrayBuffer.isView(pixels)) {
+      throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
+    }
+    // ---- ArrayBufferView overload ----
     // 1. Enum validity (INVALID_ENUM for values that are never readPixels enums).
-    const formats = s.version === 2 ? RP_FORMATS_2 : RP_FORMATS_1;
-    const types = s.version === 2 ? RP_TYPES_2 : RP_TYPES_1;
-    if (!formats.has(format)) { ctx._errors.push(C1.INVALID_ENUM); return; }
-    if (!types.has(type)) { ctx._errors.push(C1.INVALID_ENUM); return; }
-    // 2. WebGL2: the ArrayBufferView overload is invalid while a PIXEL_PACK_BUFFER is bound.
-    if (s.pixelPackBuffer && s.pixelPackBuffer._data) {
+    if (s.version === 2) {
+      if (!RP_PAIRS_2.has(rpPairKey(format, type))) { ctx._errors.push(C1.INVALID_ENUM); return; }
+    } else {
+      if (!RP_FORMATS_1.has(format)) { ctx._errors.push(C1.INVALID_ENUM); return; }
+      if (!RP_TYPES_1.has(type)) { ctx._errors.push(C1.INVALID_ENUM); return; }
+    }
+    // 2. WebGL2: the ArrayBufferView overload is invalid while a
+    //    PIXEL_PACK_BUFFER is bound (spec; any bound buffer, with or without a
+    //    data store).
+    if (s.pixelPackBuffer) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
     // 3. Format/type compatibility with the read buffer (INVALID_OPERATION).
-    const fbo = s.readFramebuffer;
-    if (fbo === null) {
-      // Default framebuffer: only RGBA/UNSIGNED_BYTE is legal (WebGL1+2).
-      if (format !== C1.RGBA || type !== C1.UNSIGNED_BYTE) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-    } else {
-      const rb = s.version === 2 ? s.readBuffer : C1.COLOR_ATTACHMENT0;
-      const att = fbo._attachments.get(rb);
-      if (!att) {
-        ctx._errors.push(C1.INVALID_OPERATION); // missing color attachment
-        return;
-      }
-      const internalFormat = att.type === 'renderbuffer'
-        ? att.renderbuffer._internalformat
-        : (att.texture._image?.internalFormat ?? 0);
-      // W1 unsized float-storage levels (RGBA/RGB/... + FLOAT/HALF_FLOAT_OES)
-      // report their storage class via the attached surface info.
-      const floatStorage = att.type === 'renderbuffer'
-        ? !!(att.renderbuffer._surface?.info?.isFloat)
-        : !!(att.texture._image?.info?.isFloat);
-      if (!readComboOK(ctx, internalFormat, format, type, floatStorage)) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
+    if (!readPixelsComboOK(ctx, format, type)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
     }
     // 4. The view's class must match `type` (INVALID_OPERATION, per spec).
     const want = expectedViewForType(type);
@@ -416,16 +525,8 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       : pixels instanceof want;
     if (!viewOK) { ctx._errors.push(C1.INVALID_OPERATION); return; }
     // 5. Pixel-store constraints + destination size (INVALID_OPERATION).
-    const bpp = packBytesPerPixel(format, type);
-    const pack = s.pixelStore.pack;
-    const rowLen = pack.rowLength || width;
-    if (s.version === 2 && pack.skipPixels + width > rowLen) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return;
-    }
-    const rowStride = alignUp(rowLen * bpp, pack.alignment);
-    const needed = pack.skipRows * rowStride + pack.skipPixels * bpp +
-      (height > 0 ? rowStride * (height - 1) + width * bpp : 0);
+    const needed = readPixelsNeeded(ctx, format, type, width, height);
+    if (needed < 0) return;
     if (pixels.byteLength - pixels.byteOffset < needed) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
