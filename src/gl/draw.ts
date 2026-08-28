@@ -79,6 +79,7 @@ import {
   getPackConverter,
   getFormat,
   floatToHalf,
+  linearToSRGB,
 } from '../raster';
 import type {
   DrawCall, FramebufferTarget, SamplerState, Surface, TextureImage, TextureUnitBinding, TextureEnv,
@@ -91,6 +92,19 @@ import type { ProgramModel } from './objects';
 import type { WebGLBuffer, WebGLQuery, WebGLTexture, WebGLTransformFeedback } from './objects';
 import { ensureProgramLinked } from './api/programs';
 import { SRC1_BLEND_FACTORS } from './api/state';
+
+/**
+ * WebIDL `unsigned long long` conversion (readPixels dstOffset, clearBuffer*
+ * srcOffset — the wasm readpixels CTS pages pass offsets > 2^32, so NO
+ * `>>> 0`). NaN/Infinity → 0; negatives wrap modulo 2^64 (a huge value that
+ * fails every bounds check, per WebIDL semantics). Shared by api/draw.ts and
+ * api/webgl2.ts.
+ */
+export function toU64(v: unknown): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return n < 0 ? n + 2 ** 64 : n;
+}
 
 /** A fully validated, assembled draw request (before rasterizer call). */
 export interface DrawRequest {
@@ -1728,6 +1742,26 @@ function drawBufferAttachmentIs(ctx: WebGLRenderingContext, index: number, fmt: 
 }
 
 /**
+ * Base type family of a fragment output GLenum (ProgramModel.fragment.outputs
+ * [].type): 0 = float/normalized, 1 = signed integer, 2 = unsigned integer.
+ * GLES 3.0 §4.2.1 — an output may only target a color buffer of the SAME
+ * family (int → signed-integer attachment, uint → unsigned, float → any
+ * float/normalized buffer).
+ */
+function outputTypeFamily(type: number): number {
+  switch (type) {
+    case 0x1404 /* GL_INT */: case 0x8b53 /* GL_INT_VEC2 */:
+    case 0x8b54 /* GL_INT_VEC3 */: case 0x8b55 /* GL_INT_VEC4 */:
+      return 1;
+    case 0x1405 /* GL_UNSIGNED_INT */: case 0x8b5c /* GL_UNSIGNED_INT_VEC2 */:
+    case 0x8b5d /* GL_UNSIGNED_INT_VEC3 */: case 0x8b5e /* GL_UNSIGNED_INT_VEC4 */:
+      return 2;
+    default:
+      return 0;
+  }
+}
+
+/**
  * Execute an assembled draw request: attribute fetch → vertex evaluation →
  * record packing → TF capture → rasterizer.draw (steps above).
  * @internal engine — called by api/draw.ts after validation.
@@ -1878,6 +1912,35 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
       if (m[0] || m[1] || m[2] || m[3]) {
         pushError(ctx, C1.INVALID_OPERATION);
         return;
+      }
+    }
+  }
+  // GLES 3.0 §4.2.1 (CTS conformance2/rendering/fs-color-type-mismatch-color-
+  // buffer-type.html): a draw is INVALID_OPERATION when the base type of a
+  // DECLARED fragment shader output does not match the type of the color
+  // buffer it writes — float/normalized outputs to integer attachments or
+  // integer outputs to float/normalized attachments, including signed-vs-
+  // unsigned (an int output to an unsigned attachment mismatches and vice
+  // versa). Attachments with no image are skipped (nothing is written); NONE
+  // draw buffers are skipped; WebGL1 has no integer color buffers. Placed
+  // with the other pre-vertex checks (runs after the count>0 gate above).
+  if (s.version === 2) {
+    const outs = pm.fragment?.outputs;
+    if (outs && outs.length > 0) {
+      for (const o of outs) {
+        const l = o.location;
+        if (l < 0 || l >= s.drawBuffers.length) continue;
+        const db = s.drawBuffers[l];
+        if (db === C1.NONE) continue;
+        const dbIdx = db - C1.COLOR_ATTACHMENT0;
+        if (dbIdx < 0 || dbIdx >= fb.color.length || !fb.color[dbIdx]) continue;
+        const info = fb.color[dbIdx]!.info;
+        // Attachment family: 0 = float/normalized, 1 = signed int, 2 = uint.
+        const surfFam = info && info.isInteger ? (info.isSigned ? 1 : 2) : 0;
+        if (outputTypeFamily(o.type) !== surfFam) {
+          pushError(ctx, C1.INVALID_OPERATION);
+          return;
+        }
       }
     }
   }
@@ -2205,7 +2268,14 @@ export function executeClear(ctx: WebGLRenderingContext, mask: GLuint): void {
         return;
       }
       if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) continue;
-      const [r, g, b, a] = s.clearColor;
+      let [r, g, b, a] = s.clearColor;
+      // The clear color is LINEAR; sRGB color buffers store the ENCODED value
+      // (RGB only — GLES 3.0 §4.1.8; CTS clear-srgb-color-buffer.html and
+      // read-pixels-from-fbo-test.html assert the encoded bytes). Raster's
+      // clearColorSurface stores linear as-is, so encode here.
+      if (surf.info.isSRGB) {
+        r = linearToSRGB(r); g = linearToSRGB(g); b = linearToSRGB(b);
+      }
       try {
         clearColorSurface(surf, r, g, b, a, scissor, cm);
       } catch {
@@ -2420,6 +2490,7 @@ export function executeReadPixels(
   ctx: WebGLRenderingContext,
   x: GLint, y: GLint, width: GLsizei, height: GLsizei,
   format: GLenum, type: GLenum, pixels: ArrayBufferView,
+  dstOffset = 0,
 ): void {
   const s = ctx._state;
   if (width === 0 || height === 0) return;
@@ -2473,6 +2544,8 @@ export function executeReadPixels(
   const sbpp = surfaceBytesPerPixel(surf);
 
   // Destination: client ArrayBufferView, or PIXEL_PACK_BUFFER when bound.
+  // `dstOffset` (WebGL2 readPixels 8th arg, element offset into the view) is
+  // validated api-side; here it just shifts the write base.
   let dstBase: number;
   let dstView: ArrayBufferView;
   const packBuf = s.pixelPackBuffer;
@@ -2481,7 +2554,9 @@ export function executeReadPixels(
     dstBase = (pixels as unknown as number) + pack.skipRows * rowStride + pack.skipPixels * bpp;
   } else {
     dstView = pixels;
-    dstBase = pixels.byteOffset + pack.skipRows * rowStride + pack.skipPixels * bpp;
+    dstBase = pixels.byteOffset +
+      dstOffset * (pixels as unknown as { BYTES_PER_ELEMENT: number }).BYTES_PER_ELEMENT +
+      pack.skipRows * rowStride + pack.skipPixels * bpp;
   }
 
   for (let row = 0; row < height; row++) {
@@ -2674,6 +2749,7 @@ function clearColorIntLocal(
 export function executeClearBuffer(
   ctx: WebGLRenderingContext,
   buffer: GLenum, drawbuffer: GLint, values: Float32Array | Int32Array | Uint32Array | null,
+  srcOffset = 0,
   depth?: number, stencil?: number,
 ): void {
   const s = ctx._state;
@@ -2707,13 +2783,22 @@ export function executeClearBuffer(
     }
     if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) return;
     if (values instanceof Int32Array || values instanceof Uint32Array) {
-      clearColorIntLocal(surf, values, cm, scissor);
+      clearColorIntLocal(surf, values.subarray(srcOffset), cm, scissor);
     } else {
       const v = values as Float32Array;
+      // The clear color is LINEAR; sRGB color buffers store the ENCODED value
+      // (GLES 3.0 §4.1.8 — RGB only, alpha untouched; CTS clear-srgb-color-
+      // buffer.html + read-pixels-from-fbo-test.html). Raster's
+      // clearColorSurface stores linear as-is, so encode here.
+      let r = v[srcOffset] ?? 0, g = v[srcOffset + 1] ?? 0;
+      let b = v[srcOffset + 2] ?? 0, a = v[srcOffset + 3] ?? 1;
+      if (surf.info.isSRGB) {
+        r = linearToSRGB(r); g = linearToSRGB(g); b = linearToSRGB(b);
+      }
       try {
-        clearColorSurface(surf, v[0] ?? 0, v[1] ?? 0, v[2] ?? 0, v[3] ?? 1, scissor, cm);
+        clearColorSurface(surf, r, g, b, a, scissor, cm);
       } catch {
-        clearColorLocal(surf, v[0] ?? 0, v[1] ?? 0, v[2] ?? 0, v[3] ?? 1, scissor, cm);
+        clearColorLocal(surf, r, g, b, a, scissor, cm);
       }
     }
   } else if (buffer === C2.DEPTH) {
@@ -2723,9 +2808,9 @@ export function executeClearBuffer(
     }
     if (!s.depth.mask || !values) return;
     try {
-      clearDepthSurface(fb.depth, values[0] ?? 0, scissor, true);
+      clearDepthSurface(fb.depth, values[srcOffset] ?? 0, scissor, true);
     } catch {
-      clearDepthLocal(fb.depth, values[0] ?? 0, scissor);
+      clearDepthLocal(fb.depth, values[srcOffset] ?? 0, scissor);
     }
   } else if (buffer === C2.STENCIL) {
     const stencilSurf = fb.stencil ?? (fb.depth && fb.depth.stencilData ? fb.depth : null);
@@ -2737,9 +2822,9 @@ export function executeClearBuffer(
     const writeMask = (s.stencil.front.writeMask & s.stencil.back.writeMask) & 0xff;
     if (writeMask === 0) return;
     try {
-      clearStencilSurface(stencilSurf, values[0] ?? 0, scissor, writeMask);
+      clearStencilSurface(stencilSurf, values[srcOffset] ?? 0, scissor, writeMask);
     } catch {
-      clearStencilLocal(stencilSurf, values[0] ?? 0, scissor, writeMask);
+      clearStencilLocal(stencilSurf, values[srcOffset] ?? 0, scissor, writeMask);
     }
   } else { // DEPTH_STENCIL (clearBufferfi only)
     if (!fb.depth || !fb.depth.stencilData) {
