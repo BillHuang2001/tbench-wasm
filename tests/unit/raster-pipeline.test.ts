@@ -456,16 +456,26 @@ describe("line rasterization (diamond-exit)", () => {
     }
   });
 
-  it("covers nothing for the tangent segment y = 1.0", () => {
+  it("covers row y−1 for the tangent segment y = 1.0 (D3D half-open diamond-exit)", () => {
     const s = createSurface(GL.RGBA8, 4, 4);
     draw(dc({
       mode: GL.LINES, count: 2,
       vertices: verts(winVert(0, 1), winVert(4, 1)),
       program: p, fb: fb(s),
     }));
-    // y = 1.0 only touches the diamonds' bottom/top vertices (tangent):
-    // f(t) = |u|+|v| ≥ 0.5 everywhere → no fragment.
-    expectAllPx(s, [0, 0, 0, 0]);
+    // y = 1.0 lies EXACTLY on the integer boundary between rows 0 and 1.
+    // The D3D half-open diamond-exit convention covers the row on the TOP
+    // side of the boundary: the segment passes through the top vertices of
+    // the row-0 diamonds, and the half-open [0,4) x-range covers x ∈ [0,4),
+    // so all four row-0 pixels are lit.
+    for (let x = 0; x < 4; x++) {
+      expect(px(s, x, 0), `pixel (${x},0)`).toEqual([255, 255, 255, 255]);
+    }
+    for (let y = 1; y < 4; y++) {
+      for (let x = 0; x < 4; x++) {
+        expect(px(s, x, y), `pixel (${x},${y})`).toEqual([0, 0, 0, 0]);
+      }
+    }
   });
 });
 
