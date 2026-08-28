@@ -167,6 +167,25 @@ const blockReferenced = new WeakMap<WebGLProgram, Uint32Array>();
 const fragDataMaps = new WeakMap<WebGLProgram, Map<string, number>>();
 
 /**
+ * Block-name-qualified name aliases per program (named-instance uniform
+ * blocks), built at link time:
+ *  - `blocks`: canonical API block names → block index. The glsl linker names
+ *    non-arrayed block infos by the BLOCK name ('UBOData') but ARRAYED block
+ *    infos by the INSTANCE element ('UBOA[0]'); the GLES 3.0 API contract
+ *    resolves the block name ('UBOData[0]') — CTS uniform-buffers.html queries
+ *    'UBOData[0]'/'UBOData[1]'.
+ *  - `members`: block-name-qualified member paths → uniform index. The linker
+ *    qualifies named-instance block members with the INSTANCE name
+ *    ('UBOA.Red', 'UBOA[0].Red'); the API contract resolves the BLOCK name
+ *    ('UBOData.Red') — CTS uniform-buffers.html getUniformIndices. Built from
+ *    the shader decls (decl.name = block name, decl.instanceName = instance)
+ *    because Program.uniformBlocks carries no block-name↔instance mapping.
+ * Used by getUniformBlockIndex + getUniformIndices; getActiveUniform keeps
+ * returning the ENUMERATED (instance-qualified) names per spec.
+ */
+const uniformAliases = new WeakMap<WebGLProgram, { blocks: Map<string, number>; members: Map<string, number> }>();
+
+/**
  * Context-loss guard: no-op while lost WITHOUT generating an error (CTS
  * context-lost.html asserts NO_ERROR after every void call while lost — the
  * single CONTEXT_LOST_WEBGL is delivered via getError's lost-epoch, lost.ts).
@@ -581,6 +600,7 @@ function failLink(p: WebGLProgram, log: string): void {
   p._uniformStore = null;
   p._blockStores = [];
   programModels.delete(p);
+  uniformAliases.delete(p);
 }
 
 /** Snapshot of link inputs at linkProgram call time (deferred link). */
@@ -598,10 +618,85 @@ function linkOptsFrom(ctx: WebGLRenderingContext, snap: LinkSnapshot): LinkOptio
 }
 
 /**
+ * Link-time transform-feedback spec for a program, or undefined when there is
+ * nothing to capture. An EMPTY varyings list is dropped (undefined): capturing
+ * nothing is observationally identical for GLSL ES 3.00 shaders (the linker's
+ * layoutTransformFeedback returns [] for an absent spec), and it keeps the
+ * link legal for GLSL ES 1.00 shaders — CTS runNoOutputsTest links
+ * wtu.simpleVertexShader (ES 1.00) with transformFeedbackVaryings([], mode)
+ * and expects the program to link (the "no varyings" INVALID_OPERATION is
+ * beginTransformFeedback's job, not the linker's). A NON-empty list on an
+ * ES 1.00 shader still hits the linker's ES 3.00 gate (glsl cluster's fix).
+ */
+function tfLinkSpec(p: WebGLProgram): LinkOptions['transformFeedback'] {
+  if (p._transformFeedbackVaryings === null || p._transformFeedbackVaryings.length === 0) return undefined;
+  return {
+    varyings: [...p._transformFeedbackVaryings],
+    bufferMode: p._tfBufferMode === C2.SEPARATE_ATTRIBS ? 'SEPARATE_ATTRIBS' : 'INTERLEAVED_ATTRIBS',
+  };
+}
+
+/**
  * Shared link success finalize — replicates doLinkProgram's success writes
  * exactly (both the sync path and the deferred link step call this, so their
  * observable results are identical).
  */
+/**
+ * Build the block-name-qualified alias table (see `uniformAliases`). Iterates
+ * the shader decls (block name + instance name) and matches them to the
+ * linked pm.uniformBlocks infos; the same-named block declared in both stages
+ * shares one index, so stage iteration is idempotent.
+ */
+function buildUniformAliases(p: WebGLProgram, pm: GlslProgram, vsR: GlslShader, fsR: GlslShader): void {
+  const blocks = new Map<string, number>();
+  const members = new Map<string, number>();
+  const addStage = (shader: GlslShader): void => {
+    for (const d of shader.info.uniformBlocks) {
+      if (d.arraySize > 1) {
+        // Arrayed named blocks: linker infos are 'instance[k]'; the API block
+        // name is 'blockName[k]' and members resolve via 'blockName.member'
+        // (element 0) and 'blockName[k].member' (CTS uniform-buffers.html).
+        if (d.instanceName === null) continue; // block arrays require an instance (GLSL ES 3.00 §4.3.7)
+        for (let k = 0; k < d.arraySize; k++) {
+          const info = pm.uniformBlocks.find((b) => b.name === `${d.instanceName}[${k}]`);
+          if (info === undefined) continue;
+          blocks.set(`${d.name}[${k}]`, info.index);
+          for (const m of info.activeUniforms) {
+            const i = pm.uniforms.findIndex((u) => u.name === m.name);
+            if (i < 0) continue;
+            const dot = m.name.indexOf('.');
+            if (dot < 0) continue;
+            const base = m.name.slice(dot + 1);
+            members.set(`${d.name}[${k}].${base}`, i);
+            if (k === 0) members.set(`${d.name}.${base}`, i);
+          }
+        }
+      } else {
+        const info = pm.uniformBlocks.find((b) => b.name === d.name);
+        if (info === undefined) continue;
+        blocks.set(d.name, info.index); // exact match would find it too; kept for uniformity
+        if (d.instanceName !== null) {
+          // Named non-arrayed block: linker members are 'instance.member'; the
+          // API contract resolves 'blockName.member' (CTS uniform-buffers.html
+          // runNamedDrawTest).
+          for (const m of info.activeUniforms) {
+            const i = pm.uniforms.findIndex((u) => u.name === m.name);
+            if (i < 0) continue;
+            const dot = m.name.indexOf('.');
+            if (dot < 0) continue;
+            members.set(`${d.name}.${m.name.slice(dot + 1)}`, i);
+          }
+        }
+        // Instance-less blocks: member paths are already bare ('UBORed') —
+        // exact-name matching covers them; no aliases needed.
+      }
+    }
+  };
+  addStage(vsR);
+  addStage(fsR);
+  uniformAliases.set(p, { blocks, members });
+}
+
 function finalizeLinkSuccess(p: WebGLProgram, vsR: GlslShader, fsR: GlslShader, result: { ok: true; program: GlslProgram }): void {
   const pm = result.program;
   p._program = pm as unknown as ProgramModel;
@@ -612,6 +707,7 @@ function finalizeLinkSuccess(p: WebGLProgram, vsR: GlslShader, fsR: GlslShader, 
   p._blockStores = pm.uniformBlocks.map((b) => new DataView(new ArrayBuffer(Math.max(b.size, 16))));
   if (p._tfBufferMode === 0) p._tfBufferMode = C2.INTERLEAVED_ATTRIBS; // spec default
   programModels.set(p, pm);
+  buildUniformAliases(p, pm, vsR, fsR);
   uniformBlockBindings.set(p, new Uint32Array(pm.uniformBlocks.length));
   const refs = new Uint32Array(pm.uniformBlocks.length);
   if (vsR) markBlockRefs(refs, vsR.info.uniformBlocks, 1, pm);
@@ -656,12 +752,7 @@ function doLinkProgram(ctx: WebGLRenderingContext, p: WebGLProgram): void {
   executeLink(ctx, p, {
     shaders: [...p._attachedShaders],
     attribBindings: new Map(p._bindAttribLocations),
-    transformFeedback: p._transformFeedbackVaryings !== null
-      ? {
-          varyings: p._transformFeedbackVaryings,
-          bufferMode: p._tfBufferMode === C2.SEPARATE_ATTRIBS ? 'SEPARATE_ATTRIBS' : 'INTERLEAVED_ATTRIBS',
-        }
-      : undefined,
+    transformFeedback: tfLinkSpec(p),
   });
 }
 
@@ -670,12 +761,7 @@ function enqueueLink(ctx: WebGLRenderingContext, p: WebGLProgram): void {
   const snap: LinkSnapshot = {
     shaders: [...p._attachedShaders],
     attribBindings: new Map(p._bindAttribLocations),
-    transformFeedback: p._transformFeedbackVaryings !== null
-      ? {
-          varyings: [...p._transformFeedbackVaryings],
-          bufferMode: p._tfBufferMode === C2.SEPARATE_ATTRIBS ? 'SEPARATE_ATTRIBS' : 'INTERLEAVED_ATTRIBS',
-        }
-      : undefined,
+    transformFeedback: tfLinkSpec(p),
   };
   enqueueProgramLink(
     ctx,
@@ -813,6 +899,47 @@ function readUniform(pm: GlslProgram, uniform: GlslProgram['uniforms'][number], 
 // installProgramsApi
 // ---------------------------------------------------------------------------
 
+/**
+ * GLES 3.0 §7.6 glGetUniformIndices name resolution. Only these forms resolve
+ * to an active uniform index (everything else → GL_INVALID_INDEX, no error):
+ *  1. the exact ENUMERATED name (getActiveUniform spelling — covers scalars,
+ *     struct paths 'u.m', per-element block-member arrays 'UBOA.Colors[0]');
+ *  2. block-name-qualified aliases for named-instance blocks ('UBOData.Red' →
+ *     instance-qualified 'UBOA.Red', 'UBOData[0].Red' → 'UBOA[0].Red', and the
+ *     bare 'UBOData.Red' form for arrayed blocks → element 0) — CTS
+ *     uniform-buffers.html queries these;
+ *  3. a bare ARRAY name → the first element ('u' → 'u[0]', spec);
+ *  4. the '[0]' element form of an ARRAY only ('u[0]' → base index). Scalar
+ *     element forms ('scalar[0]') and any other element index ('u[1]') are
+ *     INVALID_INDEX even when that element is referenced in the shader (CTS
+ *     get-uniform-indices.html).
+ */
+function resolveUniformIndex(pm: GlslProgram, aliases: { members: Map<string, number> } | undefined, n: string): number {
+  let idx = pm.uniforms.findIndex((un) => un.name === n);
+  if (idx >= 0) return idx;
+  if (aliases !== undefined) {
+    const a = aliases.members.get(n);
+    if (a !== undefined) return a;
+  }
+  if (n.indexOf('[') === -1) {
+    // Bare array name (default-block or block-member array) → first element.
+    const arr = `${n}[0]`;
+    idx = pm.uniforms.findIndex((un) => un.name === arr);
+    if (idx >= 0) return idx;
+    if (aliases !== undefined) {
+      const a = aliases.members.get(arr);
+      if (a !== undefined) return a;
+    }
+    return C2.INVALID_INDEX;
+  }
+  const m = /^(.*)\[0\]$/.exec(n);
+  if (m !== null) {
+    idx = pm.uniforms.findIndex((un) => un.name === `${m[1]}[0]`);
+    if (idx >= 0 && pm.uniforms[idx].size > 1) return idx;
+  }
+  return C2.INVALID_INDEX;
+}
+
 export function installProgramsApi(proto: WebGLRenderingContext): void {
   // ---- Shaders ----
   proto.createShader = function (this: WebGLRenderingContext, type: GLenum): WebGLShader | null {
@@ -871,7 +998,13 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     const src = requireString(source, 'source'); // WebIDL DOMString (TypeError for null/undefined)
     cancelPendingShader(ctx, s); // drop any in-flight deferred compile (new source)
     s._source = src;
-    resetShaderCompileState(s);
+    // NOTE: shaderSource does NOT reset the compile status / info log /
+    // compiled result / translated source. WebGL compilation is deferred: the
+    // previous successful compile stays valid until compileShader is called
+    // again, so a link after shaderSource uses the OLD compile result (CTS
+    // programs/gl-shader-test.html "should be green") and WEBGL_debug_shaders
+    // getTranslatedShaderSource keeps returning the previous translation
+    // (extensions/webgl-debug-shaders.html "the source should NOT change").
   };
 
   proto.compileShader = function (this: WebGLRenderingContext, shader: WebGLShader): void {
@@ -1039,6 +1172,20 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
   proto.useProgram = function (this: WebGLRenderingContext, program: WebGLProgram | null): void {
     const ctx = this;
     if (isLost(ctx)) return;
+    // GLES 3.0 §7.3 / WebGL2: UseProgram generates INVALID_OPERATION while
+    // transform feedback is ACTIVE AND NOT PAUSED (switching programs is legal
+    // while TF is paused — CTS transform_feedback.html "Switching program while
+    // transform feedback is active and paused should succeed" / switching-
+    // programs.html). The BOUND TF object is authoritative (the default-TF leg
+    // is unreachable from this module, same as getters.ts). Checked before the
+    // null branch so useProgram(null) is rejected too (spec: the error applies
+    // to the command, and CTS runNoOutputsTest confirms NO_ERROR only when TF
+    // is inactive).
+    const tf = ctx._state.transformFeedback;
+    if (tf !== null && tf._active && !tf._paused) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     if (program === null || program === undefined) {
       if (ctx._state.currentProgram !== null) {
         const prev = ctx._state.currentProgram;
@@ -1121,6 +1268,14 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
     // program is still current must be NO_ERROR).
     const p = validateProgramQuery(ctx, program);
     if (p === null) return;
+    // GLES 3.0 §7.3 / CTS switching-programs.html: LinkProgram generates
+    // INVALID_OPERATION while transform feedback is active (and not paused —
+    // same bound-TF leg as useProgram above).
+    const tf = ctx._state.transformFeedback;
+    if (tf !== null && tf._active && !tf._paused) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     if (khrEnabled(ctx)) {
       enqueueLink(ctx, p); // deferred: 1 chunk, COMPLETION_STATUS_KHR stays false meanwhile
     } else {
@@ -1412,6 +1567,11 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       const pm = programModels.get(p);
       if (pm === undefined) return C2.INVALID_INDEX;
       // Array blocks are indexed per element: 'UBOData[0]' (CTS uniform-buffers.html).
+      // The alias table additionally resolves the BLOCK-name form for arrayed
+      // named-instance blocks (linker info names are instance-qualified).
+      const aliases = uniformAliases.get(p);
+      const aliasIdx = aliases !== undefined ? aliases.blocks.get(nm) : undefined;
+      if (aliasIdx !== undefined) return aliasIdx;
       const b = pm.uniformBlocks.find((blk) => blk.name === nm);
       return b === undefined ? C2.INVALID_INDEX : b.index;
     };
@@ -1507,19 +1667,12 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       }
       // GLES 3.0 glGetUniformIndices: not-found names yield GL_INVALID_INDEX
       // (0xFFFFFFFF), no error (CTS uniform-buffers.html checks INVALID_INDEX).
-      // Resolve BY NAME (uniformMap holds fresh leaf instances — identity
-      // with Program.uniforms entries is not guaranteed).
+      // Resolution: exact enumerated names, block-name-qualified aliases, bare
+      // array names and '[0]' element forms only (get-uniform-indices.html).
+      const aliases = uniformAliases.get(p);
       const out: number[] = [];
       for (const n of names) {
-        let u = pm.uniformMap.get(n);
-        if (u !== undefined) {
-          const entry = pm.uniforms.find((x) => x.name === u!.name) ??
-            pm.uniforms.find((x) => x.name === u!.name.replace(/\[\d+\]/, '[0]'));
-          if (entry !== undefined) u = entry;
-          else u = undefined;
-        }
-        if (u === undefined) u = pm.uniforms.find((un) => un.name === n);
-        out.push(u === undefined ? C2.INVALID_INDEX : pm.uniforms.indexOf(u));
+        out.push(resolveUniformIndex(pm, aliases, n));
       }
       return out;
     };
