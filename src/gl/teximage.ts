@@ -223,6 +223,27 @@ function packed5551Pack(data: ArrayBufferView, off: number, r: number, g: number
   (data as unknown as { [i: number]: number })[off / 2] = v;
 }
 
+/**
+ * Wrap a destination pack with a round-trip through a packed source format
+ * (4444/5551/565): quantizes decoded texels exactly like the buffer-upload
+ * path (readSourceTexel → pack), so DOM uploads with a packed `type` argument
+ * drop the low bits per WebGL texel-conversion rules. Idempotent when the base
+ * pack is itself a packed encoder (sized internalformats).
+ */
+function quantizedPackedWrite(
+  packFn: (data: ArrayBufferView, off: number, r: number, g: number, b: number, a: number) => void,
+  unpackFn: (data: ArrayBufferView, off: number, out: Float32Array) => void,
+  base: FormatSpec['pack'],
+): FormatSpec['pack'] {
+  const tmp = new Uint16Array(1);
+  const out = new Float32Array(4);
+  return (dst, off, r, g, b, a) => {
+    packFn(tmp, 0, r, g, b, a);
+    unpackFn(tmp, 0, out);
+    base(dst, off, out[0], out[1], out[2], out[3]);
+  };
+}
+
 /** u32 packed RGB10_A2 (normalized). */
 function packedRGB10A2Unpack(data: ArrayBufferView, off: number, out: Float32Array): void {
   const v = (data as unknown as { [i: number]: number })[off / 4];
@@ -923,6 +944,28 @@ function copyPixelsIntoLevel(
           srgbToDisplayP3(im.data);
         }
         const dv = new DataView(im.data.buffer, im.data.byteOffset, im.data.byteLength);
+        // ImageBitmap sources are copied RAW: UNPACK_PREMULTIPLY_ALPHA_WEBGL
+        // and UNPACK_FLIP_Y_WEBGL are ignored per WebGL spec (the bitmap's own
+        // creation options govern).
+        const isImageBitmap = typeof (source as { close?: unknown }).close === 'function';
+        // Packed `type` args (4444/5551/565) must drop the low bits exactly
+        // like the buffer path does — round-trip through the packed encode.
+        const packedType =
+          type === C.UNSIGNED_SHORT_4_4_4_4 ? packed4444Pack
+          : type === C.UNSIGNED_SHORT_5_5_5_1 ? packed5551Pack
+          : type === C.UNSIGNED_SHORT_5_6_5 ? packed565Pack
+          : null;
+        const packedWrite = packedType
+          ? quantizedPackedWrite(
+              packedType,
+              packedType === packed4444Pack
+                ? packed4444Unpack
+                : packedType === packed5551Pack
+                  ? packed5551Unpack
+                  : packed565Unpack,
+              spec.pack,
+            )
+          : spec.pack;
         const p: CopyParams = {
           src: dv,
           srcRowBytes: im.width * 4,
@@ -931,9 +974,9 @@ function copyPixelsIntoLevel(
           srcFormat: C.RGBA,
           srcType: C.UNSIGNED_BYTE,
           domain: spec.isInteger ? 2 : spec.isFloat && !spec.isDepth ? 1 : 0,
-          flipY: ctx._state.pixelStore.unpack.flipY,
-          premultiply: ctx._state.pixelStore.unpack.premultiplyAlpha,
-          write: spec.pack,
+          flipY: isImageBitmap ? false : ctx._state.pixelStore.unpack.flipY,
+          premultiply: isImageBitmap ? false : ctx._state.pixelStore.unpack.premultiplyAlpha,
+          write: packedWrite,
           dstBpp,
           dstStencil: levelData.stencilData,
         };
@@ -977,7 +1020,7 @@ function copyPixelsIntoLevel(
     srcType: type,
     domain,
     flipY: s.flipY,
-    premultiply: false, // client arrays are not premultiplied by the API
+    premultiply: s.premultiplyAlpha,
     write: spec.pack,
     dstBpp,
     dstStencil: levelData.stencilData,
