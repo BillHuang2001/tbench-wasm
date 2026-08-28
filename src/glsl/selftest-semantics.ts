@@ -163,10 +163,15 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   checkType(info.varyings[1].type, V3, 'varying v element type');
   check(info.varyings[2].name === 'w' && info.varyings[2].arraySize === 1, 'varying w scalar');
 
+  // `noperspective` is gated on GL_NV_shader_noperspective_interpolation being
+  // enabled via a supported `#extension` directive (CTS
+  // nv-shader-noperspective-interpolation.html) — so this shader needs both
+  // the pragma AND the context extension (opts.extensions).
   const info2 = okInfo(
-    '#version 300 es\ncentroid out vec2 cv;\nnoperspective out vec3 nv;\nflat out ivec3 fid;\ninvariant out vec4 iv;\nvoid main() { cv = vec2(1.0); nv = vec3(1.0); fid = ivec3(1); iv = vec4(1.0); }',
+    '#version 300 es\n#extension GL_NV_shader_noperspective_interpolation : enable\ncentroid out vec2 cv;\nnoperspective out vec3 nv;\nflat out ivec3 fid;\ninvariant out vec4 iv;\nvoid main() { cv = vec2(1.0); nv = vec3(1.0); fid = ivec3(1); iv = vec4(1.0); }',
     300,
     'VERTEX',
+    ['GL_NV_shader_noperspective_interpolation'],
   );
   check(info2.varyings.length === 4, '3.00: four out-varyings in order');
   check(info2.varyings[0].name === 'cv' && info2.varyings[0].centroid === true, 'centroid recorded');
@@ -174,6 +179,42 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   check(info2.varyings[2].name === 'fid' && info2.varyings[2].flat === true, 'flat out ivec3 → flat true');
   checkType(info2.varyings[2].type, IV3, 'flat out ivec3 element type');
   check(info2.varyings[3].name === 'iv' && info2.varyings[3].invariant === true, 'invariant out recorded');
+
+  // nv-shader-noperspective-interpolation.html: `noperspective` WITHOUT the
+  // `#extension` pragma must fail to compile, whether or not the context
+  // supports the extension (the pragma-less shader with the extension in
+  // opts.extensions but no pragma must also fail — the enabledExtensions set
+  // only receives names enabled by a source directive).
+  const e4 = errs('#version 300 es\nnoperspective out vec3 nv;\nvoid main() { nv = vec3(1.0); }', 300, 'VERTEX');
+  check(hasErr(e4, 2, "'noperspective' : requires extension 'GL_NV_shader_noperspective_interpolation' which is not enabled"), '3.00 noperspective without #extension → error line 2');
+  const e4b = errs('#version 300 es\nnoperspective out vec3 nv;\nvoid main() { nv = vec3(1.0); }', 300, 'VERTEX', ['GL_NV_shader_noperspective_interpolation']);
+  check(hasErr(e4b, 2, "'noperspective' : requires extension 'GL_NV_shader_noperspective_interpolation' which is not enabled"), 'opts.extensions alone (no pragma) → still error line 2');
+  const e5 = errs('#version 300 es\n#extension GL_NV_shader_noperspective_interpolation : enable\nnoperspective out vec3 nv;\nvoid main() { nv = vec3(1.0); }', 300, 'VERTEX');
+  check(hasErr(e5, 2, "extension 'GL_NV_shader_noperspective_interpolation' is not supported"), 'enable of known-unavailable extension → preprocessor error line 2');
+  const e6 = errs('#version 300 es\nprecision mediump float;\nnoperspective in float x;\nout vec4 c;\nvoid main() { c = vec4(x); }', 300, 'FRAGMENT');
+  check(hasErr(e6, 3, "'noperspective' : requires extension 'GL_NV_shader_noperspective_interpolation' which is not enabled"), '3.00 fragment noperspective in without #extension → error line 3');
+  // Interface blocks: member-level and block-level `noperspective` are gated too.
+  const e7 = errs('#version 300 es\nprecision mediump float;\nin B { noperspective float x; } b;\nout vec4 c;\nvoid main() { c = vec4(b.x); }', 300, 'FRAGMENT');
+  check(hasErr(e7, 3, "'noperspective' : requires extension 'GL_NV_shader_noperspective_interpolation' which is not enabled"), '3.00 block member noperspective without #extension → error line 3');
+  const e8 = errs('#version 300 es\nnoperspective out B { float x; } b;\nvoid main() { b.x = 1.0; }', 300, 'VERTEX');
+  check(hasErr(e8, 2, "'noperspective' : requires extension 'GL_NV_shader_noperspective_interpolation' which is not enabled"), '3.00 block-level noperspective without #extension → error line 2');
+  // Supported `#extension ... : enable` (extension in opts.extensions) makes the
+  // qualifier compile — plumbing: preprocessor extState → pp.extensions →
+  // semantics enabledExtensions.
+  const okNv = okInfo(
+    '#version 300 es\n#extension GL_NV_shader_noperspective_interpolation : enable\nnoperspective out vec3 nv;\nvoid main() { nv = vec3(1.0); }',
+    300,
+    'VERTEX',
+    ['GL_NV_shader_noperspective_interpolation'],
+  );
+  check(okNv.varyings.length === 1 && okNv.varyings[0].noperspective === true, 'noperspective with supported #extension enable → compiles, flag recorded');
+  const okNv2 = okInfo(
+    '#version 300 es\n#extension GL_NV_shader_noperspective_interpolation : enable\nout B { noperspective float x; } b;\nvoid main() { b.x = 1.0; }',
+    300,
+    'VERTEX',
+    ['GL_NV_shader_noperspective_interpolation'],
+  );
+  check(okNv2.varyings.length === 1 && okNv2.varyings[0].noperspective === true, 'block member noperspective with supported #extension enable → compiles');
 
   // Fragment side: varying/in declarations are the fragment's interface inputs.
   const info3 = okInfo('precision mediump float;\nvarying vec2 uv;\nuniform sampler2D s;\nvoid main() { gl_FragColor = texture2D(s, uv); }', 100, 'FRAGMENT');

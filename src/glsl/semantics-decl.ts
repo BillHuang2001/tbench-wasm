@@ -356,6 +356,22 @@ function checkFlatIntegral(ctx: SemContext, name: string, element: GLSLType, q: 
   }
 }
 
+/** `noperspective` interpolation is gated on GL_NV_shader_noperspective_interpolation
+ * being ENABLED via a supported `#extension` directive. The qualifier is core
+ * ESSL 3.00, but the CTS page nv-shader-noperspective-interpolation.html
+ * mandates the gate: shaders using it without the pragma must fail to compile
+ * (whether or not the context supports the extension), and the extension is
+ * never supported by gl/ (status 'null'). `flat`/`smooth`/`centroid` stay
+ * ungated. Version 100 never reaches this check — `noperspective` lexes as an
+ * IDENTIFIER there (shader-with-non-reserved-words.js), so a 1.00 declaration
+ * using it is already a parse error and identifier uses must keep compiling. */
+function checkNoperspectiveGate(ctx: SemContext, q: TypeQualifiers, line: number): void {
+  if (ctx.version === 100) return;
+  if (q.interpolation === 'noperspective' && !ctx.enabledExtensions.has('GL_NV_shader_noperspective_interpolation')) {
+    ctx.error(line, "'noperspective' : requires extension 'GL_NV_shader_noperspective_interpolation' which is not enabled");
+  }
+}
+
 function attrOf(name: string, element: GLSLType, arraySize: number, q: TypeQualifiers): AttributeDecl {
   return {
     name,
@@ -453,6 +469,9 @@ function analyzeGlobalDecl(d: GlobalVarDecl, ctx: SemContext, info: ShaderInfo):
       ctx.error(d.loc.line, `'struct' : structure nesting exceeds the maximum of 4 levels`);
     }
   }
+  // `noperspective` interpolation requires GL_NV_shader_noperspective_interpolation
+  // to be enabled via a supported `#extension` directive (checkNoperspectiveGate).
+  checkNoperspectiveGate(ctx, q, d.loc.line);
   for (const decl of d.declarators) {
     if (decl.name === '') continue; // parser error-recovery placeholder
     const { element, arraySize } = declaratorInfo(base, decl);
@@ -612,6 +631,9 @@ function analyzeInterfaceBlock(d: InterfaceBlockDecl, ctx: SemContext, info: Sha
     return;
   }
   // Varying block: per-member varying entries (integral members must be flat).
+  // A block-level `noperspective` qualifier is gated the same way as a plain
+  // declarator's (checkNoperspectiveGate).
+  checkNoperspectiveGate(ctx, q, d.loc.line);
   const prefix = d.instanceName !== null && d.instanceName !== '' ? `${d.instanceName}.` : '';
   for (const m of members) {
     let element = m.type;
@@ -621,6 +643,7 @@ function analyzeInterfaceBlock(d: InterfaceBlockDecl, ctx: SemContext, info: Sha
       element = element.element;
     }
     const mq = m.qualifiers;
+    checkNoperspectiveGate(ctx, mq, m.line);
     checkFlatIntegral(ctx, m.name, element, mq, m.line);
     info.varyings.push({
       name: prefix + m.name,
@@ -1025,5 +1048,34 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
     if (fragOut.fragColorWritten) {
       info.outputs.push({ name: 'gl_FragColor', index: null, location: null, type: VEC4_FLOAT, arraySize: 1 });
     }
+  }
+
+  // WebGL2 spec (active-built-in-attribs.html): USED built-in vertex inputs
+  // (gl_VertexID / gl_InstanceID / gl_DrawID) are ACTIVE attributes —
+  // ACTIVE_ATTRIBUTES counts them, getActiveAttrib reports type INT / size 1,
+  // getAttribLocation returns -1. Append them AFTER user attributes; the
+  // linker assigns location -1 and keeps them out of attribLocations (codegen
+  // reads ctx.vertexId/instanceId/drawId, never ctx.attribs[loc]). Version
+  // 300 only (WebGL1 has no gl_VertexID/gl_InstanceID/gl_DrawID builtins).
+  // The uses.* flags can only be set when the identifier RESOLVED (recordRead
+  // early-returns on unresolved identifiers), and gl_DrawID only resolves
+  // when GL_ANGLE_multi_draw is enabled (registerBuiltins gates extension-
+  // tagged entries) — so a bare gl_DrawID use without the extension stays a
+  // compile error exactly as before (selftest-semantics pins it).
+  if (ctx.version === 300 && ctx.stage === 'VERTEX') {
+    const builtinInt: GLSLType = { kind: 'scalar', base: 'int' };
+    const pushBuiltinAttrib = (name: string): void => {
+      info.attributes.push({
+        name,
+        type: builtinInt,
+        arraySize: 1,
+        location: null,
+        used: true,
+        builtin: true,
+      });
+    };
+    if (uses.vertexId) pushBuiltinAttrib('gl_VertexID');
+    if (uses.instanceId) pushBuiltinAttrib('gl_InstanceID');
+    if (uses.drawId) pushBuiltinAttrib('gl_DrawID');
   }
 }
