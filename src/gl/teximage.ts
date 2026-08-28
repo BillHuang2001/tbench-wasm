@@ -1190,8 +1190,11 @@ function copyPixelsIntoLevel(
         }
         // unpackColorSpace = 'display-p3': convert the decoded (sRGB) pixels to
         // display-p3 before upload (WebGL color-space rules; CSS Color 4
-        // matrices). Integer formats store raw channel values and are exempt.
-        if (!spec.isInteger && ctx.unpackColorSpace === 'display-p3') {
+        // matrices). The conversion happens in the SOURCE domain (u8 RGBA8),
+        // so it applies to integer destinations too — their raw channel values
+        // are the converted u8s (CTS tex-2d-*8ui video pages expect display-p3
+        // values from sRGB sources).
+        if (ctx.unpackColorSpace === 'display-p3') {
           srgbToDisplayP3(im.data);
         }
         const dv = new DataView(im.data.buffer, im.data.byteOffset, im.data.byteLength);
