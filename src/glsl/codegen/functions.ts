@@ -139,10 +139,15 @@ export function installUserFunctions(ast: TranslationUnit, env: CodegenEnv): voi
     }
     const key = best.key;
     const fn = fns.get(key)!;
-    if (stack.includes(name)) {
+    // Signature-aware recursion backstop: the stack holds the signature KEYS
+    // of in-progress inlinings, so an overload call (`process(S1)` calling
+    // `process(S2)` — different key) is NOT flagged; only a true same-signature
+    // self-call or a call cycle through signatures is (semantics rejects those
+    // at compile time — this guard is defensive).
+    if (stack.includes(key)) {
       throw new Error(`codegen: recursive call to '${name}' (semantics should reject recursion)`);
     }
-    stack.push(name);
+    stack.push(key);
     try {
       return inlineCall(fn, args, argTypes, rawArgs ?? [], env, fnLocalNames.get(key) ?? new Set(), {
         label: () => `EP_${nextLabel++}`,

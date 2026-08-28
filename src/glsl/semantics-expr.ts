@@ -1244,7 +1244,11 @@ function analyzeUserCall(e: CallExpr, sym: FnSymbol, ctx: SemContext): void {
     }
   }
   e.resolvedType = best.ret;
-  ctx.currentFunction?.calls.add(sym.name); // recursion-detection edge
+  // Recursion-detection edge keyed by the RESOLVED callee signature: calling a
+  // DIFFERENT overload of the same name is legal (`process(S1)` calling
+  // `process(S2)` — ogles CorrectFuncOverload); only a same-signature self-call
+  // (or a call cycle through distinct signatures) is recursion.
+  ctx.currentFunction?.calls.add(sym.siblings[sigs.indexOf(best)]);
 }
 
 function analyzeBuiltinCall(e: CallExpr, name: string, ctx: SemContext): void {
@@ -1343,7 +1347,10 @@ function analyzeHybridCall(e: CallExpr, sym: FnSymbol, ctx: SemContext): void {
   }
   e.resolvedType = best.ret;
   if (best.user) {
-    ctx.currentFunction?.calls.add(name); // recursion-detection edge
+    // Recursion-detection edge keyed by the RESOLVED user overload (a call to
+    // a different overload of the same name is not a self-edge).
+    const userSigs = sym.siblings.filter((s) => !s.builtin);
+    ctx.currentFunction?.calls.add(userSigs[userCands.indexOf(best)]);
   } else {
     e.constValue = foldBuiltin(name, best.ret, e.args);
   }

@@ -212,7 +212,11 @@ let uboDual: Program | null = null;
   );
   const fs = compile(
     `#version 300 es
-     precision mediump float;
+     // PIN: highp must match the vertex stage's default (the VS declares no
+     // precision statement, so its default is highp). A mediump default here
+     // makes the shared struct uniform 'u' mismatch (highp vs mediump) — a
+     // link error per CTS shader-with-global-variable-precision-mismatch.html.
+     precision highp float;
      struct S { vec2 a; float b[2]; };
      in VS_OUT { vec4 c; float d; } fs;
      in float vPlain;
@@ -532,6 +536,33 @@ let uboDual: Program | null = null;
     `recursion → compile error (got ${JSON.stringify(rRec.ok ? 'ok' : rRec.errors)})`,
   );
 
+  // (b2) calling a DIFFERENT overload of the same name is NOT recursion (ogles
+  // CorrectFuncOverload_vert: `process(S1)` calls `process(S2)`). Compiles,
+  // LINKS and runs through codegen — the inliner's recursion backstop must be
+  // signature-aware too, or link would fail with "codegen: recursive call".
+  {
+    const vsOvl = compile(
+      `struct S2 { float f; };
+       struct S1 { float f; S2 s2; };
+       float process(S1 s1) { return s1.f + process(s1.s2); }
+       float process(S2 s2) { return s2.f; }
+       void main() {
+         S1 s1 = S1(1.0, S2(1.0));
+         gl_Position = vec4(process(s1), 0.0, 0.0, 1.0);
+       }`,
+      'VERTEX',
+      100,
+    );
+    const lOvl = linkProgram(vsOvl, fs);
+    check(lOvl.ok, `overload cross-call links (${lOvl.ok ? '' : lOvl.log})`);
+    if (lOvl.ok) {
+      const vctx = vertexCtx(lOvl.program);
+      lOvl.program.vertex.run(vctx);
+      // process(S1(1.0, S2(1.0))) = 1.0 + process(S2(1.0)) = 2.0 (inlined).
+      near(vctx.out.position[0], 2, `overload cross-call vertex result x (inlined process(S1)→process(S2))`);
+      near(vctx.out.position[1], 0, `overload cross-call vertex result y`);
+    }
+  }
   // (c) gl_FragColor + gl_FragData both written → COMPILE error
   const rBoth = compileErr(
     `#extension GL_EXT_draw_buffers : require

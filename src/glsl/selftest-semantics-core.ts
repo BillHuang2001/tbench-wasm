@@ -220,10 +220,41 @@ expectErr('void main() { vec2 v; vec3 w = v.xy; }', 100, 'VERTEX'); // vec2 → 
 /* 10. Recursion detection                                             */
 /* ------------------------------------------------------------------ */
 
+// Same-signature self-call → recursion (still an error with the
+// signature-aware call graph: `f(int)` reaches itself).
 expectErr('int f(int x) { return f(x); }', 100, 'VERTEX', undefined, /recursion/);
+// Mutual recursion through DISTINCT functions → recursion (cycle across
+// different names is a cycle in the signature graph too).
 expectErr('int a(int x) { return b(x); } int b(int x) { return a(x); }', 100, 'VERTEX', undefined, /recursion/);
+// Prototype + definition mutual recursion → recursion (definition reuses the
+// prototype FnSymbol, so the cycle still closes on the same node).
 expectErr(
   'int a(int x); int b(int x) { return a(x); } int a(int x) { return b(x); }',
+  100,
+  'VERTEX',
+  undefined,
+  /recursion/,
+);
+// Calling a DIFFERENT overload of the same name is NOT recursion (ogles
+// CorrectFuncOverload_vert: `process(S1)` calls `process(S2)` — edges are
+// keyed by the resolved signature, so this is not a self-edge). Previously
+// pinned as a recursion ERROR by the name-only call graph.
+expectOk(
+  'struct S2 { float f; }; struct S1 { float f; S2 s2; };' +
+    'float process(S1 s1) { return s1.f + process(s1.s2); }' +
+    'float process(S2 s2) { return s2.f; }' +
+    'void main() { S1 s1 = S1(1.0, S2(1.0)); gl_Position = vec4(process(s1)); }',
+  100,
+  'VERTEX',
+);
+// A call CYCLE ACROSS overloads (`a(S1)` → `a(S2)` → `a(S1)`) is still
+// recursion: the signatures form a cycle in the resolved call graph, which
+// GLSL ES bans ("not even statically through nested function calls").
+expectErr(
+  'struct S1 { float f; }; struct S2 { float f; };' +
+    'float a(S1 x) { return a(S2(1.0)); }' +
+    'float a(S2 x) { return a(S1(1.0)); }' +
+    'void main() { }',
   100,
   'VERTEX',
   undefined,

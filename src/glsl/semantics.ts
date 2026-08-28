@@ -179,8 +179,14 @@ export interface FnSymbol extends BaseSymbol {
   /** declaration line (definition line when defined). */
   line: number;
   builtin: boolean;
-  /** user function NAMES this function's body calls (recursion detection). */
-  calls: Set<string>;
+  /**
+   * user function SIGNATURES this function's body calls (recursion detection).
+   * Edges are keyed by the RESOLVED callee FnSymbol, never the bare name: a
+   * call to a DIFFERENT overload of the same name (`process(S1)` calling
+   * `process(S2)`) is not a self-edge, while same-signature self-recursion and
+   * mutual-recursion cycles still form cycles in this graph.
+   */
+  calls: Set<FnSymbol>;
   /** all signatures of this name (overloads); includes self. */
   siblings: FnSymbol[];
 }
@@ -824,15 +830,27 @@ function registerInterfaceBlock(d: InterfaceBlockDecl, scope: Scope, ctx: SemCon
   }
   const blockType: GLSLType = { kind: 'struct', name: d.blockName, members };
   scope.declare({ kind: 'struct', name: d.blockName, type: blockType }, ctx, d.loc.line);
+  // The block instance (and bare members of instance-less blocks) carries the
+  // block's OWN storage qualifier (GLSL ES 3.00 §4.3.9): uniform blocks →
+  // 'uniform'; `out` (vertex) / `in` (fragment) varying blocks → 'out'/'in'.
+  // varIsWritable then allows writes to vertex `out` block members and
+  // rejects writes to fragment `in` (global input) and uniform block
+  // members. Absent storage is treated as uniform (matches
+  // analyzeInterfaceBlock's UBO path). Block members carry no storage of
+  // their own (parser rejects member storage qualifiers); member-access
+  // writability inherits from this instance symbol via analyzeMember.
+  const storage = d.qualifiers.storage === undefined ? 'uniform' : d.qualifiers.storage;
   if (d.instanceName !== null && d.instanceName !== '') {
     const t = wrapArrayDims(blockType, d.arrayDims, scope, ctx, false, d.loc.line);
-    scope.declare({ kind: 'var', name: d.instanceName, type: t, storage: 'uniform' }, ctx, d.loc.line);
+    scope.declare({ kind: 'var', name: d.instanceName, type: t, storage }, ctx, d.loc.line);
   } else {
     // Instance-less block: members are accessed by BARE name (GLSL ES 3.00
-    // §4.3.7) — register them as global read-only uniforms so expression
-    // analysis resolves them. The linker keeps them OUT of the default block.
+    // §4.3.7) — register them as global variables carrying the block's own
+    // storage qualifier ('uniform' read-only for uniform blocks; 'out'/'in'
+    // for instance-less varying blocks, which the linker supports). The
+    // linker keeps UBO members OUT of the default block.
     for (const m of members) {
-      scope.declare({ kind: 'var', name: m.name, type: m.type, storage: 'uniform' }, ctx, d.loc.line);
+      scope.declare({ kind: 'var', name: m.name, type: m.type, storage }, ctx, d.loc.line);
     }
   }
 }
@@ -868,40 +886,44 @@ function analyzeFunctionBody(d: FunctionDefinition, sig: FnSymbol, global: Scope
 /* ------------------------------------------------------------------ */
 
 /**
- * DFS over the user-function call graph (edges recorded by name during body
- * analysis). Direct and mutual recursion → one error per detected cycle:
+ * DFS over the user-function call graph. Nodes are the RESOLVED callee
+ * signatures recorded during body analysis (`FnSymbol.calls`) — overloads are
+ * DISTINCT nodes, so `process(S1)` calling `process(S2)` is legal (no cycle),
+ * while a function signature reaching itself — directly (same-signature
+ * self-call) or through a chain of other functions (mutual recursion, incl.
+ * cycles across overloads) — is a cycle → one error per detected cycle:
  * "'name' : recursion is not allowed" (both versions).
  */
 function detectRecursion(ctx: SemContext): void {
-  const adj = new Map<string, Set<string>>();
-  const lines = new Map<string, number>();
+  const adj = new Map<FnSymbol, Set<FnSymbol>>();
   for (const f of ctx.userFns) {
-    if (!adj.has(f.name)) {
-      adj.set(f.name, new Set());
-      lines.set(f.name, f.line);
+    let set = adj.get(f);
+    if (set === undefined) {
+      set = new Set();
+      adj.set(f, set);
     }
-    for (const callee of f.calls) adj.get(f.name)!.add(callee);
+    for (const callee of f.calls) set.add(callee);
   }
-  const colors = new Map<string, number>(); // 0 white, 1 gray, 2 black
-  const visit = (name: string): boolean => {
-    const c = colors.get(name) ?? 0;
+  const colors = new Map<FnSymbol, number>(); // 0 white, 1 gray, 2 black
+  const visit = (f: FnSymbol): boolean => {
+    const c = colors.get(f) ?? 0;
     if (c === 1) {
-      ctx.error(lines.get(name) ?? 1, `'${name}' : recursion is not allowed`);
+      ctx.error(f.line, `'${f.name}' : recursion is not allowed`);
       return true;
     }
     if (c === 2) return false;
-    colors.set(name, 1);
-    const callees = adj.get(name);
+    colors.set(f, 1);
+    const callees = adj.get(f);
     if (callees !== undefined) {
       for (const callee of callees) {
         if (visit(callee)) return true;
       }
     }
-    colors.set(name, 2);
+    colors.set(f, 2);
     return false;
   };
-  for (const name of adj.keys()) {
-    if (visit(name)) return; // one cycle error is enough
+  for (const f of adj.keys()) {
+    if (visit(f)) return; // one cycle error is enough
   }
 }
 
