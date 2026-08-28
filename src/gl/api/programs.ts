@@ -94,7 +94,7 @@ import {
 import type { ProgramModel } from '../objects';
 import { validateNonNullableObject, requireString } from '../validation';
 import { compileShader, linkProgram } from '../../glsl';
-import type { Shader as GlslShader, Program as GlslProgram, LinkOptions, CompileResult } from '../../glsl';
+import type { Shader as GlslShader, Program as GlslProgram, LinkOptions, CompileResult, ShaderInfo } from '../../glsl';
 import { preprocess } from '../../glsl/preprocessor';
 import type { PreprocessResult } from '../../glsl/preprocessor';
 import { tokenize } from '../../glsl/lexer';
@@ -592,6 +592,36 @@ function markBlockRefs(refs: Uint32Array, blocks: GlslShader['info']['uniformBlo
   }
 }
 
+/**
+ * GLSL ES 3.00 §12.46 residual (CTS gl-bindAttribLocation-aliasing-inactive.html):
+ * the link must FAIL when two DIFFERENT declared attribute names are bound to
+ * the same location — even when both attributes are entirely INACTIVE (never
+ * referenced). The glsl linker only lays out ACTIVE attributes (inactive ones
+ * consume no slots, see src/glsl/linker.ts layoutAttributes `if (!a.used)
+ * continue;`), so an all-inactive aliasing pair slips through as a successful
+ * link. This check re-runs the location-claim logic over ALL declared
+ * attributes (active or not) using their EFFECTIVE locations (an explicit
+ * layout(location=) wins over bindAttribLocation, matching the linker).
+ * Gated to version-300 vertex shaders: GLSL ES 1.00 / WebGL1 allows aliasing
+ * when at most one attribute is active, so inactive aliasing must keep
+ * linking there.
+ */
+function declaredAttribAliasingError(attrs: ShaderInfo['attributes'], bindings: Map<string, number>): string | null {
+  const occupied: { start: number; end: number; name: string }[] = [];
+  for (const a of attrs) {
+    if (a.builtin === true) continue; // gl_VertexID/gl_InstanceID/gl_DrawID: not bindable, location -1
+    const loc = a.location !== null ? a.location : bindings.get(a.name);
+    if (loc === undefined) continue; // no explicit location and no binding
+    const need = (a.type.kind === 'matrix' ? a.type.cols : 1) * a.arraySize;
+    for (const o of occupied) {
+      if (loc < o.end && o.start < loc + need) {
+        return `linker: attribute '${a.name}' location ${loc} conflicts with '${o.name}'`;
+      }
+    }
+    occupied.push({ start: loc, end: loc + need, name: a.name });
+  }
+  return null;
+}
 /** linkProgram core (both failure paths clear the executable). */
 function failLink(p: WebGLProgram, log: string): void {
   p._linkStatus = false;
@@ -742,6 +772,17 @@ function executeLink(ctx: WebGLRenderingContext, p: WebGLProgram, snap: LinkSnap
   if (!result.ok) {
     failLink(p, result.log);
     return;
+  }
+  // GLSL ES 3.00 §12.46: aliasing of two distinct declared attributes at the
+  // same location fails the link even when both are inactive (unused) — the
+  // glsl linker only detects conflicts among ACTIVE attributes (CTS
+  // gl-bindAttribLocation-aliasing-inactive.html, "entirely unused" shader).
+  if (vsR.version === 300 && p._bindAttribLocations.size > 0) {
+    const aliasErr = declaredAttribAliasingError(vsR.info.attributes, p._bindAttribLocations);
+    if (aliasErr !== null) {
+      failLink(p, aliasErr);
+      return;
+    }
   }
   finalizeLinkSuccess(p, vsR, fsR, result);
 }
