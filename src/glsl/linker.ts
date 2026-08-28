@@ -1288,15 +1288,22 @@ interface AttribLayoutResult {
   infos: AttribInfo[];
 }
 
-/** Assign attribute locations: explicit layout(location=) first, then
- *  bindAttribLocation (names WITHOUT explicit locations only), then first-free
- *  in declaration order. A matC attribute occupies C consecutive locations;
- *  an array of N elements occupies N × elemLocations. */
+/** Assign attribute locations per GLSL ES 3.00 §4.3.4 precedence: explicit
+ *  layout(location=) first (it overrides bindAttribLocation for the same
+ *  name), then bindAttribLocation, then first-free — the AUTOMATIC pass skips
+ *  locations already claimed by explicit qualifiers or bindings (three.js
+ *  binds 'position' to 0 via bindAttribLocation while `attribute mat4
+ *  instanceMatrix;` is declared first: the auto assignment must not collide
+ *  with the binding). A matC attribute occupies C consecutive locations; an
+ *  array of N elements occupies N × elemLocations. */
 function layoutAttributes(vs: Shader, opts: LinkOptions, limits: LinkLimits): AttribLayoutResult | { error: string } {
   const occupied: { start: number; end: number; name: string }[] = [];
   const map = new Map<string, number>();
   const infos: AttribInfo[] = [];
   const bindings = opts.attribBindings;
+  /** Decided location per user attribute name (filled by the three phases;
+   *  emitted into map/infos in declaration order afterwards). */
+  const locs = new Map<string, number>();
 
   const claim = (name: string, start: number, end: number): string | null => {
     for (const o of occupied) {
@@ -1321,7 +1328,58 @@ function layoutAttributes(vs: Shader, opts: LinkOptions, limits: LinkLimits): At
       if (ok) return loc;
     }
   };
+  const slots = (a: { type: GLSLType; arraySize: number }): number => {
+    const elemLocations = a.type.kind === 'matrix' ? a.type.cols : 1;
+    return elemLocations * a.arraySize;
+  };
+  const checkBounds = (name: string, loc: number, need: number): string | null => {
+    if (loc < 0) return `linker: attribute '${name}' has a negative location`;
+    if (loc + need > limits.maxVertexAttribs) {
+      return `linker: attribute '${name}' exceeds maxVertexAttribs (${limits.maxVertexAttribs})`;
+    }
+    return null;
+  };
+  const isUserAttrib = (a: (typeof vs.info.attributes)[number]): boolean => a.builtin !== true && a.used;
 
+  // Phase 1: explicit layout(location=) qualifiers (highest precedence —
+  // GLSL ES 3.00 §4.3.4: the layout location wins over bindAttribLocation).
+  for (const a of vs.info.attributes) {
+    if (!isUserAttrib(a) || a.location === null) continue;
+    const need = slots(a);
+    const e = checkBounds(a.name, a.location, need);
+    if (e !== null) return { error: e };
+    const err = claim(a.name, a.location, a.location + need);
+    if (err !== null) return { error: err };
+    locs.set(a.name, a.location);
+  }
+  // Phase 2: bindAttribLocation targets (attributes WITHOUT an explicit
+  // location only). Two different attributes bound to the same location is a
+  // link error (as is a binding overlapping an explicit layout location).
+  for (const a of vs.info.attributes) {
+    if (!isUserAttrib(a) || a.location !== null) continue;
+    if (bindings === undefined || !bindings.has(a.name)) continue;
+    const need = slots(a);
+    const loc = bindings.get(a.name)!;
+    const e = checkBounds(a.name, loc, need);
+    if (e !== null) return { error: e };
+    const err = claim(a.name, loc, loc + need);
+    if (err !== null) return { error: err };
+    locs.set(a.name, loc);
+  }
+  // Phase 3: first-free for the rest — skips every location reserved in
+  // phases 1-2 (native behavior: bound locations are never auto-assigned).
+  for (const a of vs.info.attributes) {
+    if (!isUserAttrib(a) || a.location !== null) continue;
+    if (bindings !== undefined && bindings.has(a.name)) continue;
+    const need = slots(a);
+    const loc = firstFree(need);
+    const e = checkBounds(a.name, loc, need);
+    if (e !== null) return { error: e };
+    const err = claim(a.name, loc, loc + need);
+    if (err !== null) return { error: err };
+    locs.set(a.name, loc);
+  }
+  // Emit in declaration order (getActiveAttrib order + draw validation).
   for (const a of vs.info.attributes) {
     if (a.builtin === true) {
       // Built-in vertex inputs (gl_VertexID / gl_InstanceID / gl_DrawID,
@@ -1349,18 +1407,7 @@ function layoutAttributes(vs: Shader, opts: LinkOptions, limits: LinkLimits): At
       continue;
     }
     if (!a.used) continue; // inactive attributes consume no generic slots (native behavior; getActiveAttrib omits them)
-    const elemLocations = a.type.kind === 'matrix' ? a.type.cols : 1;
-    const need = elemLocations * a.arraySize;
-    let loc: number;
-    if (a.location !== null) loc = a.location;
-    else if (bindings !== undefined && bindings.has(a.name)) loc = bindings.get(a.name)!;
-    else loc = firstFree(need);
-    if (loc < 0) return { error: `linker: attribute '${a.name}' has a negative location` };
-    if (loc + need > limits.maxVertexAttribs) {
-      return { error: `linker: attribute '${a.name}' exceeds maxVertexAttribs (${limits.maxVertexAttribs})` };
-    }
-    const err = claim(a.name, loc, loc + need);
-    if (err !== null) return { error: err };
+    const loc = locs.get(a.name)!;
     map.set(a.name, loc);
     infos.push({
       name: a.name,

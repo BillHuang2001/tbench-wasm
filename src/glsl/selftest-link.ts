@@ -71,6 +71,12 @@
  *      viewMatrix: highp VS default × mediump FS default, both directions);
  *      uniform TYPE conflicts (vec3 vs vec4) and struct member type/name
  *      mismatches stay link errors; struct member precision mismatch links.
+ *  22. bindAttribLocation is reserved BEFORE automatic assignment (three.js
+ *      `attribute mat4 instanceMatrix;` declared before `attribute vec3
+ *      position;` + bindAttribLocation('position', 0) must link with distinct
+ *      locations); layout(location=) beats the binding for the same name;
+ *      two attributes bound to one location / a binding overlapping a
+ *      different attribute's layout location stay link errors.
  *
  * Run: npx tsx src/glsl/selftest-link.ts
  * Prints "OK" and exits 0 on success.
@@ -2681,6 +2687,119 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
   const l5 = linkProgram(vs5, fs5);
   check(!l5.ok && l5.log.includes('member'),
     `(e) struct uniform member TYPE mismatch still fails (${l5.ok ? 'LINKED' : l5.log})`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 22. bindAttribLocation reserved before automatic assignment         */
+/*     (three.js instanceMatrix + bindAttribLocation('position', 0))   */
+/* ------------------------------------------------------------------ */
+
+{
+  // three.js r185's vertex prefix declares `attribute mat4 instanceMatrix;`
+  // BEFORE `attribute vec3 position;` and calls
+  // gl.bindAttribLocation(program, 0, 'position') before linking. The
+  // automatic assignment must SKIP the bound location — otherwise the link
+  // fails with "attribute 'position' location 0 conflicts with
+  // 'instanceMatrix'" (the exact error observed on the instancing_dynamic /
+  // instancing_raycast / ssao / fxaa three.js pages).
+  const vs = compile(
+    `attribute mat4 instanceMatrix;
+     attribute vec3 position;
+     attribute vec3 normal;
+     attribute vec2 uv;
+     void main(){
+       vec4 p = instanceMatrix * vec4(position, 1.0);
+       gl_Position = p;
+     }`,
+    'VERTEX', 100,
+  );
+  const fs = compile(
+    `precision mediump float; void main(){ gl_FragColor = vec4(1.0); }`,
+    'FRAGMENT', 100,
+  );
+  const l = linkProgram(vs, fs, { attribBindings: new Map([['position', 0]]) });
+  check(l.ok, `(a) instanceMatrix + bound position links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const pos = l.program.attributes.find((a) => a.name === 'position');
+    const inst = l.program.attributes.find((a) => a.name === 'instanceMatrix');
+    check(pos !== undefined && pos.location === 0, `(a) bound position → 0 (got ${pos === undefined ? 'missing' : pos.location})`);
+    check(
+      inst !== undefined && inst.location !== 0 && inst.location + 4 <= 8,
+      `(a) instanceMatrix auto-assigned away from the bound 0 (got ${inst === undefined ? 'missing' : inst.location})`,
+    );
+  }
+
+  // Same config WITHOUT the binding: first-free in declaration order.
+  const l2 = linkProgram(vs, fs);
+  check(l2.ok, `(b) unbound control links (${l2.ok ? '' : l2.log})`);
+  if (l2.ok) {
+    const inst = l2.program.attributes.find((a) => a.name === 'instanceMatrix');
+    check(inst !== undefined && inst.location === 0, `(b) unbound instanceMatrix → 0 (got ${inst === undefined ? 'missing' : inst.location})`);
+  }
+
+  // Explicit layout(location=) beats bindAttribLocation for the same name
+  // (GLSL ES 3.00 §4.3.4).
+  const vs3 = compile(
+    `#version 300 es
+     layout(location = 2) in vec3 position;
+     void main(){ gl_Position = vec4(position, 1.0); }`,
+    'VERTEX', 300,
+  );
+  const fs3 = compile(
+    `#version 300 es
+     precision mediump float;
+     out vec4 o; void main(){ o = vec4(1.0); }`,
+    'FRAGMENT', 300,
+  );
+  const l3 = linkProgram(vs3, fs3, { attribBindings: new Map([['position', 0]]) });
+  check(l3.ok, `(c) layout(location=2) + binding 0 links (${l3.ok ? '' : l3.log})`);
+  if (l3.ok) {
+    const pos = l3.program.attributes.find((a) => a.name === 'position');
+    check(pos !== undefined && pos.location === 2, `(c) layout location 2 wins over binding (got ${pos === undefined ? 'missing' : pos.location})`);
+  }
+
+  // ES 3.00 instancing pattern (the real three.js path is `#version 300 es`
+  // + `#define attribute in`).
+  const vs4 = compile(
+    `#version 300 es
+     in mat4 instanceMatrix;
+     in vec3 position;
+     void main(){
+       gl_Position = instanceMatrix * vec4(position, 1.0);
+     }`,
+    'VERTEX', 300,
+  );
+  const l4 = linkProgram(vs4, fs3, { attribBindings: new Map([['position', 0]]) });
+  check(l4.ok, `(d) v300 instanceMatrix + bound position links (${l4.ok ? '' : l4.log})`);
+  if (l4.ok) {
+    const pos = l4.program.attributes.find((a) => a.name === 'position');
+    const inst = l4.program.attributes.find((a) => a.name === 'instanceMatrix');
+    check(pos !== undefined && pos.location === 0, `(d) v300 bound position → 0 (got ${pos === undefined ? 'missing' : pos.location})`);
+    check(inst !== undefined && inst.location !== 0, `(d) v300 instanceMatrix away from 0 (got ${inst === undefined ? 'missing' : inst.location})`);
+  }
+
+  // Two DIFFERENT attributes bound to the same location stay a link error.
+  const vs5 = compile(
+    `attribute vec3 aPos; attribute vec3 aNrm;
+     void main(){ gl_Position = vec4(aPos + aNrm, 1.0); }`,
+    'VERTEX', 100,
+  );
+  const l5 = linkProgram(vs5, fs, { attribBindings: new Map([['aPos', 0], ['aNrm', 0]]) });
+  check(!l5.ok && l5.log.includes('conflicts with'),
+    `(e) two attributes bound to 0 still fail (${l5.ok ? 'LINKED' : l5.log})`);
+
+  // A bindAttribLocation overlapping an explicit layout location of a
+  // DIFFERENT attribute stays a link error.
+  const vs6 = compile(
+    `#version 300 es
+     layout(location = 0) in vec3 aPos;
+     in vec3 aNrm;
+     void main(){ gl_Position = vec4(aPos + aNrm, 1.0); }`,
+    'VERTEX', 300,
+  );
+  const l6 = linkProgram(vs6, fs3, { attribBindings: new Map([['aNrm', 0]]) });
+  check(!l6.ok && l6.log.includes('conflicts with'),
+    `(f) binding overlapping another attrib's layout location still fails (${l6.ok ? 'LINKED' : l6.log})`);
 }
 
 /* ------------------------------------------------------------------ */
