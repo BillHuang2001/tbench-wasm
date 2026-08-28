@@ -78,7 +78,14 @@ export function createWEBGLDrawBuffers(ctx: WebGLRenderingContext): object {
           gl._errors.push(C1.INVALID_OPERATION);
           return;
         }
-        s.drawBuffers = arr;
+        // Normalize BACK → COLOR_ATTACHMENT0 BEFORE storing: s.drawBuffers is
+        // consumed by draw.ts as ATTACHMENT INDICES (db - COLOR_ATTACHMENT0 →
+        // surface index); a raw BACK (0x0405) entry computes a negative index
+        // and silently drops color writes. getters.ts DRAW_BUFFERi reports the
+        // default framebuffer as BACK for any non-NONE first entry, so the
+        // normalized storage is observably identical (see api/framebuffers.ts
+        // drawBuffers for the same rule).
+        s.drawBuffers = arr[0] === BACK ? [COLOR_ATTACHMENT0] : arr;
         return;
       }
 
