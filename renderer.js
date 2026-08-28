@@ -287,7 +287,6 @@
     VERTEX_SHADER: 35633,
     FRAGMENT_SHADER: 35632,
     SHADER_TYPE: 35663,
-    SHADER_COMPILER: 36346,
     COMPILE_STATUS: 35713,
     DELETE_STATUS: 35712,
     LINK_STATUS: 35714,
@@ -295,8 +294,6 @@
     ATTACHED_SHADERS: 35717,
     ACTIVE_UNIFORMS: 35718,
     ACTIVE_ATTRIBUTES: 35721,
-    SHADER_BINARY_FORMATS: 36344,
-    NUM_SHADER_BINARY_FORMATS: 36345,
     MAX_VERTEX_ATTRIBS: 34921,
     MAX_VERTEX_UNIFORM_VECTORS: 36347,
     MAX_VARYING_VECTORS: 36348,
@@ -312,7 +309,6 @@
     RENDERER: 7937,
     VERSION: 7938,
     SHADING_LANGUAGE_VERSION: 35724,
-    EXTENSIONS: 7939,
     // ---- Vertex attrib arrays ----
     VERTEX_ATTRIB_ARRAY_ENABLED: 34338,
     VERTEX_ATTRIB_ARRAY_SIZE: 34339,
@@ -404,22 +400,6 @@
     COLOR_ATTACHMENT13: 36077,
     COLOR_ATTACHMENT14: 36078,
     COLOR_ATTACHMENT15: 36079,
-    COLOR_ATTACHMENT16: 36080,
-    COLOR_ATTACHMENT17: 36081,
-    COLOR_ATTACHMENT18: 36082,
-    COLOR_ATTACHMENT19: 36083,
-    COLOR_ATTACHMENT20: 36084,
-    COLOR_ATTACHMENT21: 36085,
-    COLOR_ATTACHMENT22: 36086,
-    COLOR_ATTACHMENT23: 36087,
-    COLOR_ATTACHMENT24: 36088,
-    COLOR_ATTACHMENT25: 36089,
-    COLOR_ATTACHMENT26: 36090,
-    COLOR_ATTACHMENT27: 36091,
-    COLOR_ATTACHMENT28: 36092,
-    COLOR_ATTACHMENT29: 36093,
-    COLOR_ATTACHMENT30: 36094,
-    COLOR_ATTACHMENT31: 36095,
     FRAMEBUFFER_INCOMPLETE_MULTISAMPLE: 36182,
     MAX_SAMPLES: 36183,
     HALF_FLOAT: 5131,
@@ -464,17 +444,10 @@
     TEXTURE_COMPARE_MODE: 34892,
     TEXTURE_COMPARE_FUNC: 34893,
     STENCIL_INDEX8: 36168,
-    STENCIL_INDEX: 6401,
     R11F_G11F_B10F: 35898,
     UNSIGNED_INT_10F_11F_11F_REV: 35899,
     RGB9_E5: 35901,
     UNSIGNED_INT_5_9_9_9_REV: 35902,
-    TEXTURE_2D_MULTISAMPLE: 37120,
-    TEXTURE_2D_MULTISAMPLE_ARRAY: 37122,
-    TEXTURE_BINDING_2D_MULTISAMPLE: 37124,
-    TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY: 37125,
-    TEXTURE_SAMPLES: 37126,
-    TEXTURE_FIXED_SAMPLE_LOCATIONS: 37127,
     SAMPLER_2D_ARRAY: 36289,
     SAMPLER_2D_ARRAY_SHADOW: 36292,
     SAMPLER_CUBE_SHADOW: 36293,
@@ -579,8 +552,6 @@
     FRAGMENT_SHADER_DERIVATIVE_HINT: 35723,
     VERTEX_ATTRIB_ARRAY_INTEGER: 35069,
     VERTEX_ATTRIB_ARRAY_DIVISOR: 35070,
-    MAX_VERTEX_ATTRIB_STRIDE: 33509,
-    MAX_VERTEX_ATTRIB_RELATIVE_OFFSET: 33497,
     MAX_VERTEX_OUTPUT_COMPONENTS: 37154,
     MAX_FRAGMENT_INPUT_COMPONENTS: 37157,
     MIN_PROGRAM_TEXEL_OFFSET: 35076,
@@ -610,7 +581,6 @@
     CURRENT_QUERY: 34917,
     ANY_SAMPLES_PASSED: 35887,
     ANY_SAMPLES_PASSED_CONSERVATIVE: 36202,
-    FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS: 36264,
     SAMPLER_BINDING: 35097,
     PIXEL_PACK_BUFFER: 35051,
     PIXEL_UNPACK_BUFFER: 35052,
@@ -622,6 +592,40 @@
     COPY_WRITE_BUFFER_BINDING: 36663,
     TEXTURE_IMMUTABLE_FORMAT: 37167,
     TEXTURE_IMMUTABLE_LEVELS: 33503
+  };
+  var CInternal = {
+    // Removed from the WebGL 1.0/2.0 spec
+    EXTENSIONS: 7939,
+    SHADER_COMPILER: 36346,
+    SHADER_BINARY_FORMATS: 36344,
+    NUM_SHADER_BINARY_FORMATS: 36345,
+    // WebGL2 additions post-dating CTS suite 2.0.1
+    STENCIL_INDEX: 6401,
+    COLOR_ATTACHMENT16: 36080,
+    COLOR_ATTACHMENT17: 36081,
+    COLOR_ATTACHMENT18: 36082,
+    COLOR_ATTACHMENT19: 36083,
+    COLOR_ATTACHMENT20: 36084,
+    COLOR_ATTACHMENT21: 36085,
+    COLOR_ATTACHMENT22: 36086,
+    COLOR_ATTACHMENT23: 36087,
+    COLOR_ATTACHMENT24: 36088,
+    COLOR_ATTACHMENT25: 36089,
+    COLOR_ATTACHMENT26: 36090,
+    COLOR_ATTACHMENT27: 36091,
+    COLOR_ATTACHMENT28: 36092,
+    COLOR_ATTACHMENT29: 36093,
+    COLOR_ATTACHMENT30: 36094,
+    COLOR_ATTACHMENT31: 36095,
+    TEXTURE_2D_MULTISAMPLE: 37120,
+    TEXTURE_2D_MULTISAMPLE_ARRAY: 37122,
+    TEXTURE_BINDING_2D_MULTISAMPLE: 37124,
+    TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY: 37125,
+    TEXTURE_SAMPLES: 37126,
+    TEXTURE_FIXED_SAMPLE_LOCATIONS: 37127,
+    MAX_VERTEX_ATTRIB_STRIDE: 33509,
+    MAX_VERTEX_ATTRIB_RELATIVE_OFFSET: 33497,
+    FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS: 36264
   };
   var CExt = {
     // OES_texture_half_float
@@ -807,7 +811,8 @@
   };
   var C = {
     ...C1,
-    ...C2
+    ...C2,
+    ...CInternal
   };
   function installConstants(proto, table) {
     for (const key of Object.keys(table)) {
@@ -821,24 +826,27 @@
   }
 
   // src/gl/errors.ts
-  var MAX_QUEUED_ERRORS = 256;
   var ErrorQueue = class {
     constructor() {
+      /** Distinct queued codes in ascending order (one flag per error code). */
       __publicField(this, "queue", []);
     }
-    /** Push an error if the queue isn't full. */
+    /** Push an error unless the same code is already queued (flag model). */
     push(error) {
-      if (this.queue.length < MAX_QUEUED_ERRORS) this.queue.push(error);
+      if (this.queue.includes(error)) return;
+      let i = 0;
+      while (i < this.queue.length && this.queue[i] < error) i++;
+      this.queue.splice(i, 0, error);
     }
-    /** Pop and return the oldest error, or NO_ERROR (0) if empty. */
+    /** Pop and return the oldest flag, or NO_ERROR (0) if none are set. */
     get() {
       return this.queue.length > 0 ? this.queue.shift() : 0;
     }
-    /** Return the oldest error WITHOUT removing it, or NO_ERROR. */
+    /** Return the oldest flag WITHOUT removing it, or NO_ERROR. */
     peek() {
       return this.queue.length > 0 ? this.queue[0] : 0;
     }
-    /** True when at least one error is queued. */
+    /** True when at least one error flag is set. */
     hasErrors() {
       return this.queue.length > 0;
     }
@@ -993,6 +1001,7 @@
           flipY: false,
           premultiplyAlpha: false,
           colorspaceConversion: 37444,
+          unpackColorSpace: "srgb",
           rowLength: 0,
           skipRows: 0,
           skipPixels: 0,
@@ -3299,104 +3308,15 @@
     }
   }
 
-  // src/raster/sampler.ts
+  // src/raster/sampler-raw.ts
   var _f322 = new Float32Array(1);
   var _i32 = new Int32Array(_f322.buffer);
   var _u322 = new Uint32Array(_f322.buffer);
-  var _tap = new Float32Array(4);
-  var _c0 = new Float32Array(3);
-  var _c1 = new Float32Array(3);
-  var _c2 = new Float32Array(3);
-  var _mipA = new Float32Array(4);
-  var _mipB = new Float32Array(4);
-  var _dir = new Float32Array(3);
-  var _uv = new Float32Array(2);
-  var _cornerSum = new Float32Array(4);
   function writeDefault(out, isInteger) {
     out[0] = 0;
     out[1] = 0;
     out[2] = 0;
     out[3] = isInteger ? 0 : 1;
-  }
-  function wrapIndex(c, wrap, size) {
-    switch (wrap) {
-      case REPEAT: {
-        const m = c % size;
-        return m < 0 ? m + size : m;
-      }
-      case MIRRORED_REPEAT: {
-        const m2 = c % (2 * size);
-        const r = m2 < 0 ? m2 + 2 * size : m2;
-        return r < size ? r : 2 * size - 1 - r;
-      }
-      case CLAMP_TO_EDGE:
-      default:
-        return c < 0 ? 0 : c >= size ? size - 1 : c;
-    }
-  }
-  function filterCoordRaw(u, size, dst) {
-    const up = u * size - 0.5;
-    const i0 = Math.floor(up);
-    dst[0] = i0;
-    dst[1] = up - i0;
-    dst[2] = i0 + 1;
-  }
-  function filterCoord(u, size, wrap, dst) {
-    filterCoordRaw(u, size, dst);
-    if (wrap !== CLAMP_TO_EDGE) {
-      dst[0] = wrapIndex(dst[0], wrap, size);
-      dst[2] = wrapIndex(dst[2], wrap, size);
-    } else {
-      let i = dst[0];
-      dst[0] = i < 0 ? 0 : i >= size ? size - 1 : i;
-      i = dst[2];
-      dst[2] = i < 0 ? 0 : i >= size ? size - 1 : i;
-    }
-  }
-  function nearestIndex(u, size, wrap) {
-    return wrapIndex(Math.floor(u * size), wrap, size);
-  }
-  function clampLevel(v2, base, hi) {
-    return v2 < base ? base : v2 > hi ? hi : v2;
-  }
-  function clampLayer(v2, depth) {
-    const l = Math.round(v2);
-    return l < 0 ? 0 : l >= depth ? depth - 1 : l;
-  }
-  function depthFuncPass(func, ref, d) {
-    switch (func) {
-      case NEVER:
-        return false;
-      case LESS:
-        return ref < d;
-      case EQUAL:
-        return ref === d;
-      case LEQUAL:
-        return ref <= d;
-      case GREATER:
-        return ref > d;
-      case NOTEQUAL:
-        return ref !== d;
-      case GEQUAL:
-        return ref >= d;
-      case ALWAYS:
-      default:
-        return true;
-    }
-  }
-  function quantizeShadowRef(ref, internalFormat) {
-    if (internalFormat === DEPTH_COMPONENT16) {
-      const r = ref < 0 ? 0 : ref > 1 ? 1 : ref;
-      return Math.round(r * 65535) / 65535;
-    }
-    if (internalFormat === DEPTH_COMPONENT24 || internalFormat === DEPTH24_STENCIL8) {
-      const r = ref < 0 ? 0 : ref > 1 ? 1 : ref;
-      return Math.round(r * 16777215) / 16777215;
-    }
-    return ref;
-  }
-  function isMipmapMinFilter(f) {
-    return f === NEAREST_MIPMAP_NEAREST || f === LINEAR_MIPMAP_NEAREST || f === NEAREST_MIPMAP_LINEAR || f === LINEAR_MIPMAP_LINEAR;
   }
   function compSize(storage) {
     switch (storage) {
@@ -3624,6 +3544,167 @@
     }
     readFromEntry(img.info, entry, (y * lv.width + x) * img.info.bytesPerPixel, false, out);
   }
+
+  // src/raster/sampler.ts
+  var _tap = new Float32Array(4);
+  var _c0 = new Float32Array(3);
+  var _c1 = new Float32Array(3);
+  var _c2 = new Float32Array(3);
+  var _mipA = new Float32Array(4);
+  var _mipB = new Float32Array(4);
+  var _dir = new Float32Array(3);
+  var _uv = new Float32Array(2);
+  var _cornerSum = new Float32Array(4);
+  function wrapIndex(c, wrap, size) {
+    switch (wrap) {
+      case REPEAT: {
+        const m = c % size;
+        return m < 0 ? m + size : m;
+      }
+      case MIRRORED_REPEAT: {
+        const m2 = c % (2 * size);
+        const r = m2 < 0 ? m2 + 2 * size : m2;
+        return r < size ? r : 2 * size - 1 - r;
+      }
+      case CLAMP_TO_EDGE:
+      default:
+        return c < 0 ? 0 : c >= size ? size - 1 : c;
+    }
+  }
+  function filterCoordRaw(u, size, dst) {
+    const up = u * size - 0.5;
+    const i0 = Math.floor(up);
+    dst[0] = i0;
+    dst[1] = up - i0;
+    dst[2] = i0 + 1;
+  }
+  function filterCoord(u, size, wrap, dst) {
+    filterCoordRaw(u, size, dst);
+    if (wrap !== CLAMP_TO_EDGE) {
+      dst[0] = wrapIndex(dst[0], wrap, size);
+      dst[2] = wrapIndex(dst[2], wrap, size);
+    } else {
+      let i = dst[0];
+      dst[0] = i < 0 ? 0 : i >= size ? size - 1 : i;
+      i = dst[2];
+      dst[2] = i < 0 ? 0 : i >= size ? size - 1 : i;
+    }
+  }
+  function nearestIndex(u, size, wrap) {
+    return wrapIndex(Math.floor(u * size), wrap, size);
+  }
+  function clampLevel(v2, base, hi) {
+    return v2 < base ? base : v2 > hi ? hi : v2;
+  }
+  function clampLayer(v2, depth) {
+    const l = Math.round(v2);
+    return l < 0 ? 0 : l >= depth ? depth - 1 : l;
+  }
+  function depthFuncPass(func, ref, d) {
+    switch (func) {
+      case NEVER:
+        return false;
+      case LESS:
+        return ref < d;
+      case EQUAL:
+        return ref === d;
+      case LEQUAL:
+        return ref <= d;
+      case GREATER:
+        return ref > d;
+      case NOTEQUAL:
+        return ref !== d;
+      case GEQUAL:
+        return ref >= d;
+      case ALWAYS:
+      default:
+        return true;
+    }
+  }
+  function quantizeShadowRef(ref, internalFormat) {
+    if (internalFormat === DEPTH_COMPONENT16) {
+      const r = ref < 0 ? 0 : ref > 1 ? 1 : ref;
+      return Math.round(r * 65535) / 65535;
+    }
+    if (internalFormat === DEPTH_COMPONENT24 || internalFormat === DEPTH24_STENCIL8) {
+      const r = ref < 0 ? 0 : ref > 1 ? 1 : ref;
+      return Math.round(r * 16777215) / 16777215;
+    }
+    return ref;
+  }
+  function isMipmapMinFilter(f) {
+    return f === NEAREST_MIPMAP_NEAREST || f === LINEAR_MIPMAP_NEAREST || f === NEAREST_MIPMAP_LINEAR || f === LINEAR_MIPMAP_LINEAR;
+  }
+  function fillPlan(img, state, p) {
+    let hi = img.maxLevel;
+    const maxAvail = img.levels.length - 1;
+    if (hi > maxAvail) hi = maxAvail;
+    let base = img.baseLevel;
+    if (hi < 0) hi = 0;
+    if (base > hi) base = hi;
+    const min = state.minFilter;
+    const info = img.info;
+    p.base = base;
+    p.hi = hi;
+    p.single = hi <= base;
+    p.posFilter = min === LINEAR || min === LINEAR_MIPMAP_NEAREST || min === LINEAR_MIPMAP_LINEAR ? LINEAR : NEAREST;
+    p.mipMin = min === NEAREST_MIPMAP_NEAREST || min === LINEAR_MIPMAP_NEAREST || min === NEAREST_MIPMAP_LINEAR || min === LINEAR_MIPMAP_LINEAR;
+    p.u8Fast = info.storage === "u8" && info.normalized && !info.isInteger && !info.isDepth && !info.isSRGB && info.components === 4;
+    const target = img.target;
+    p.oneTexel = p.single && target !== TEXTURE_CUBE_MAP && (() => {
+      const lv = img.levels[base];
+      if (lv.width !== 1 || lv.height !== 1) return false;
+      return target !== TEXTURE_3D || lv.depth === 1;
+    })();
+    return p;
+  }
+  var _plan = { base: 0, hi: 0, single: false, oneTexel: false, posFilter: 0, mipMin: false, u8Fast: false };
+  function lodGtZero(img, state, coord, bias) {
+    if (state.minLod > 0) return true;
+    if (state.maxLod <= 0) return false;
+    if (state.maxAnisotropy > 1 && img.target === TEXTURE_2D && isMipmapMinFilter(state.minFilter)) return null;
+    const dx = coord.dx;
+    const dy = coord.dy;
+    let rhoX = 0;
+    let rhoY = 0;
+    if (dx && dy) {
+      const target = img.target;
+      let sx, sy, sz;
+      if (target === TEXTURE_CUBE_MAP) {
+        sx = img.width;
+        sy = img.height;
+        sz = img.width;
+      } else if (target === TEXTURE_3D) {
+        sx = img.width;
+        sy = img.height;
+        sz = img.depth;
+      } else {
+        sx = img.width;
+        sy = img.height;
+        sz = 0;
+      }
+      rhoX = Math.abs(dx[0]) * sx;
+      const dyx = Math.abs(dx[1]) * sy;
+      if (dyx > rhoX) rhoX = dyx;
+      if (sz > 0 && dx.length > 2) {
+        const dzx = Math.abs(dx[2]) * sz;
+        if (dzx > rhoX) rhoX = dzx;
+      }
+      rhoY = Math.abs(dy[0]) * sx;
+      const dyy = Math.abs(dy[1]) * sy;
+      if (dyy > rhoY) rhoY = dyy;
+      if (sz > 0 && dy.length > 2) {
+        const dzy = Math.abs(dy[2]) * sz;
+        if (dzy > rhoY) rhoY = dzy;
+      }
+    }
+    if (rhoX === 0 && rhoY === 0) return false;
+    const b = bias < -2 ? -2 : bias > 2 ? 2 : bias;
+    const rel2 = (rhoX > rhoY ? rhoX : rhoY) / 2 ** -b;
+    if (rel2 > 1 + 1e-9) return true;
+    if (rel2 < 1 - 1e-9) return false;
+    return null;
+  }
   function computeLod(img, state, coord, bias) {
     const dx = coord.dx;
     const dy = coord.dy;
@@ -3690,7 +3771,28 @@
     out[2] += w * t[2];
     out[3] += w * t[3];
   }
-  function filter2D(img, state, filter, level, u, v2, layer, shadow, refQ, out) {
+  var U8_DIV = new Float64Array(256);
+  for (let i = 0; i < 256; i++) U8_DIV[i] = Math.fround(i / 255);
+  function filter2DU8Tap(lv, z, a, b, i0, i1, j0, j1, out) {
+    const data = lv.data[z];
+    const w = lv.width;
+    const o00 = (j0 * w + i0) * 4;
+    const o10 = (j0 * w + i1) * 4;
+    const o01 = (j1 * w + i0) * 4;
+    const o11 = (j1 * w + i1) * 4;
+    const w00 = (1 - a) * (1 - b);
+    const w10 = a * (1 - b);
+    const w01 = (1 - a) * b;
+    const w11 = a * b;
+    const div = U8_DIV;
+    for (let c = 0; c < 4; c++) {
+      out[c] = w00 * div[data[o00 + c]];
+      out[c] += w10 * div[data[o10 + c]];
+      out[c] += w01 * div[data[o01 + c]];
+      out[c] += w11 * div[data[o11 + c]];
+    }
+  }
+  function filter2D(img, state, plan, filter, level, u, v2, layer, shadow, refQ, out) {
     const lv = img.levels[level];
     const z = img.target === TEXTURE_2D_ARRAY ? clampLayer(layer, lv.depth) : 0;
     if (filter === NEAREST || img.info.isInteger) {
@@ -3716,6 +3818,10 @@
     const i1 = _c0[2];
     const j0 = _c1[0];
     const j1 = _c1[2];
+    if (plan.u8Fast && !shadow) {
+      filter2DU8Tap(lv, z, a, b, i0, i1, j0, j1, out);
+      return;
+    }
     out[0] = 0;
     out[1] = 0;
     out[2] = 0;
@@ -3948,12 +4054,7 @@
       out[3] += cornerW * (_cornerSum[3] / 3);
     }
   }
-  function sampleLevels(img, state, lambda, coord, shadow, refQ, out) {
-    const maxAvail = img.levels.length - 1;
-    let hi = img.maxLevel < maxAvail ? img.maxLevel : maxAvail;
-    let base = img.baseLevel;
-    if (hi < 0) hi = 0;
-    if (base > hi) base = hi;
+  function sampleLevels(img, state, plan, lambda, coord, shadow, refQ, out) {
     const isInteger = img.info.isInteger;
     let filter;
     let level0;
@@ -3961,31 +4062,35 @@
     let f = 0;
     if (isInteger) {
       filter = NEAREST;
-      if (lambda <= 0 || state.minFilter === NEAREST || state.minFilter === LINEAR) {
-        level0 = base;
-      } else {
-        level0 = clampLevel(Math.round(lambda), base, hi);
-      }
+      level0 = lambda <= 0 || !plan.mipMin ? plan.base : clampLevel(Math.round(lambda), plan.base, plan.hi);
     } else if (lambda <= 0) {
       filter = state.magFilter;
-      level0 = base;
-    } else if (state.minFilter === NEAREST || state.minFilter === LINEAR) {
-      filter = state.minFilter;
-      level0 = base;
+      level0 = plan.base;
+    } else if (!plan.mipMin) {
+      filter = plan.posFilter;
+      level0 = plan.base;
     } else if (state.minFilter === NEAREST_MIPMAP_NEAREST || state.minFilter === LINEAR_MIPMAP_NEAREST) {
-      filter = state.minFilter === LINEAR_MIPMAP_NEAREST ? LINEAR : NEAREST;
-      level0 = clampLevel(Math.round(lambda), base, hi);
+      filter = plan.posFilter;
+      level0 = clampLevel(Math.round(lambda), plan.base, plan.hi);
     } else {
-      filter = state.minFilter === LINEAR_MIPMAP_LINEAR ? LINEAR : NEAREST;
-      if (hi <= base) {
-        level0 = base;
+      filter = plan.posFilter;
+      if (plan.hi <= plan.base) {
+        level0 = plan.base;
       } else {
-        level0 = clampLevel(Math.floor(lambda), base, hi - 1);
+        level0 = clampLevel(Math.floor(lambda), plan.base, plan.hi - 1);
         level1 = level0 + 1;
         f = lambda - Math.floor(lambda);
       }
     }
     const target = img.target;
+    if (!shadow && level1 < 0 && target !== TEXTURE_CUBE_MAP) {
+      const l0 = img.levels[level0];
+      if (l0.width === 1 && l0.height === 1 && (target !== TEXTURE_3D || l0.depth === 1)) {
+        const z = target === TEXTURE_2D_ARRAY ? clampLayer(coord.v[2], l0.depth) : 0;
+        readTexel(img, level0, 0, 0, 0, z, out);
+        return;
+      }
+    }
     if (target === TEXTURE_CUBE_MAP) {
       if (level1 >= 0) {
         filterCube(img, state, filter, level0, coord.v, shadow, refQ, _mipA);
@@ -4011,44 +4116,116 @@
     } else {
       const layer = target === TEXTURE_2D_ARRAY ? coord.v[2] : 0;
       if (level1 >= 0) {
-        filter2D(img, state, filter, level0, coord.v[0], coord.v[1], layer, shadow, refQ, _mipA);
-        filter2D(img, state, filter, level1, coord.v[0], coord.v[1], layer, shadow, refQ, _mipB);
+        filter2D(img, state, plan, filter, level0, coord.v[0], coord.v[1], layer, shadow, refQ, _mipA);
+        filter2D(img, state, plan, filter, level1, coord.v[0], coord.v[1], layer, shadow, refQ, _mipB);
         out[0] = _mipA[0] * (1 - f) + _mipB[0] * f;
         out[1] = _mipA[1] * (1 - f) + _mipB[1] * f;
         out[2] = _mipA[2] * (1 - f) + _mipB[2] * f;
         out[3] = _mipA[3] * (1 - f) + _mipB[3] * f;
       } else {
-        filter2D(img, state, filter, level0, coord.v[0], coord.v[1], layer, shadow, refQ, out);
+        filter2D(img, state, plan, filter, level0, coord.v[0], coord.v[1], layer, shadow, refQ, out);
       }
     }
+  }
+  function readSingleTexel(img, plan, coord, out) {
+    const lv = img.levels[plan.base];
+    const z = img.target === TEXTURE_2D_ARRAY ? clampLayer(coord.v[2], lv.depth) : 0;
+    readTexel(img, plan.base, 0, 0, 0, z, out);
+  }
+  function sampleSingleLevel(img, state, plan, lambdaGT0, coord, shadow, refQ, out) {
+    if (!shadow && plan.oneTexel) {
+      readSingleTexel(img, plan, coord, out);
+      return;
+    }
+    const target = img.target;
+    const filter = img.info.isInteger ? NEAREST : lambdaGT0 ? plan.posFilter : state.magFilter;
+    if (target === TEXTURE_CUBE_MAP) {
+      filterCube(img, state, filter, plan.base, coord.v, shadow, refQ, out);
+    } else if (target === TEXTURE_3D) {
+      filter3D(img, state, filter, plan.base, coord.v[0], coord.v[1], coord.v[2], out);
+    } else {
+      const layer = target === TEXTURE_2D_ARRAY ? coord.v[2] : 0;
+      filter2D(img, state, plan, filter, plan.base, coord.v[0], coord.v[1], layer, shadow, refQ, out);
+    }
+  }
+  function sampleTextureP(img, state, plan, coord, bias, out) {
+    if (plan.single) {
+      if (plan.oneTexel) {
+        readSingleTexel(img, plan, coord, out);
+        return;
+      }
+      const gt0 = lodGtZero(img, state, coord, bias);
+      sampleSingleLevel(
+        img,
+        state,
+        plan,
+        gt0 === null ? computeLod(img, state, coord, bias) > 0 : gt0,
+        coord,
+        false,
+        0,
+        out
+      );
+      return;
+    }
+    const lambda = computeLod(img, state, coord, bias);
+    sampleLevels(img, state, plan, lambda, coord, false, 0, out);
+  }
+  function sampleTextureLodP(img, state, plan, coord, lod, out) {
+    let lambda = lod;
+    if (lambda < state.minLod) lambda = state.minLod;
+    else if (lambda > state.maxLod) lambda = state.maxLod;
+    if (plan.single) {
+      if (plan.oneTexel) {
+        readSingleTexel(img, plan, coord, out);
+        return;
+      }
+      sampleSingleLevel(img, state, plan, lambda > 0, coord, false, 0, out);
+      return;
+    }
+    sampleLevels(img, state, plan, lambda, coord, false, 0, out);
+  }
+  function sampleTextureShadowP(img, state, plan, coord, ref, bias, out) {
+    const refQ = quantizeShadowRef(ref, img.internalFormat);
+    if (plan.single) {
+      const gt0 = lodGtZero(img, state, coord, bias);
+      sampleSingleLevel(
+        img,
+        state,
+        plan,
+        gt0 === null ? computeLod(img, state, coord, bias) > 0 : gt0,
+        coord,
+        true,
+        refQ,
+        out
+      );
+      return;
+    }
+    const lambda = computeLod(img, state, coord, bias);
+    sampleLevels(img, state, plan, lambda, coord, true, refQ, out);
   }
   function sampleTexture(img, state, coord, bias, out) {
     if (!img.complete) {
       writeDefault(out, img.info.isInteger);
       return;
     }
-    const lambda = computeLod(img, state, coord, bias);
-    sampleLevels(img, state, lambda, coord, false, 0, out);
+    sampleTextureP(img, state, fillPlan(img, state, _plan), coord, bias, out);
   }
   function sampleTextureLod(img, state, coord, lod, out) {
     if (!img.complete) {
       writeDefault(out, img.info.isInteger);
       return;
     }
-    let lambda = lod;
-    if (lambda < state.minLod) lambda = state.minLod;
-    else if (lambda > state.maxLod) lambda = state.maxLod;
-    sampleLevels(img, state, lambda, coord, false, 0, out);
+    sampleTextureLodP(img, state, fillPlan(img, state, _plan), coord, lod, out);
   }
   function sampleTextureShadow(img, state, coord, ref, bias, out) {
     if (!img.complete) {
       writeDefault(out, false);
       return;
     }
-    const lambda = computeLod(img, state, coord, bias);
-    const refQ = quantizeShadowRef(ref, img.internalFormat);
-    sampleLevels(img, state, lambda, coord, true, refQ, out);
+    sampleTextureShadowP(img, state, fillPlan(img, state, _plan), coord, ref, bias, out);
   }
+
+  // src/raster/sampler-env.ts
   function createTextureEnv(units) {
     const out = new Float32Array(4);
     const outInt = new Int32Array(out.buffer);
@@ -4057,8 +4234,23 @@
     const dx = new Float32Array(4);
     const dy = new Float32Array(4);
     const coord = { v: v2, dx, dy };
+    const resolved = new Array(units.length);
+    for (let i = 0; i < units.length; i++) {
+      const b = units[i];
+      if (!b) {
+        resolved[i] = null;
+      } else if (!b.img.complete) {
+        resolved[i] = { img: b.img, state: b.state, plan: null };
+      } else {
+        resolved[i] = {
+          img: b.img,
+          state: b.state,
+          plan: fillPlan(b.img, b.state, { base: 0, hi: 0, single: false, oneTexel: false, posFilter: 0, mipMin: false, u8Fast: false })
+        };
+      }
+    }
     function resolve(unit) {
-      const b = units[unit];
+      const b = resolved[unit];
       if (!b) {
         out[0] = 0;
         out[1] = 0;
@@ -4066,14 +4258,14 @@
         out[3] = 1;
         return null;
       }
-      if (!b.img.complete) {
+      if (!b.plan) {
         out[0] = 0;
         out[1] = 0;
         out[2] = 0;
         out[3] = b.img.info.isInteger ? 0 : 1;
         return null;
       }
-      return { img: b.img, state: b.state };
+      return b;
     }
     return {
       units,
@@ -4092,7 +4284,7 @@
         dy[0] = duy;
         dy[1] = dvy;
         dy[2] = 0;
-        sampleTexture(b.img, b.state, coord, bias, out);
+        sampleTextureP(b.img, b.state, b.plan, coord, bias, out);
       },
       sample2DLod(unit, u, vv, lod) {
         const b = resolve(unit);
@@ -4100,7 +4292,7 @@
         v2[0] = u;
         v2[1] = vv;
         v2[2] = 0;
-        sampleTextureLod(b.img, b.state, coord, lod, out);
+        sampleTextureLodP(b.img, b.state, b.plan, coord, lod, out);
       },
       sample3D(unit, u, vv, w, dux, dvx, dwx, duy, dvy, dwy, bias) {
         const b = resolve(unit);
@@ -4114,7 +4306,7 @@
         dy[0] = duy;
         dy[1] = dvy;
         dy[2] = dwy;
-        sampleTexture(b.img, b.state, coord, bias, out);
+        sampleTextureP(b.img, b.state, b.plan, coord, bias, out);
       },
       sample3DLod(unit, u, vv, w, lod) {
         const b = resolve(unit);
@@ -4122,7 +4314,7 @@
         v2[0] = u;
         v2[1] = vv;
         v2[2] = w;
-        sampleTextureLod(b.img, b.state, coord, lod, out);
+        sampleTextureLodP(b.img, b.state, b.plan, coord, lod, out);
       },
       sampleCube(unit, u, vv, w, dux, dvx, dwx, duy, dvy, dwy, bias) {
         const b = resolve(unit);
@@ -4136,7 +4328,7 @@
         dy[0] = duy;
         dy[1] = dvy;
         dy[2] = dwy;
-        sampleTexture(b.img, b.state, coord, bias, out);
+        sampleTextureP(b.img, b.state, b.plan, coord, bias, out);
       },
       sampleCubeLod(unit, u, vv, w, lod) {
         const b = resolve(unit);
@@ -4144,7 +4336,7 @@
         v2[0] = u;
         v2[1] = vv;
         v2[2] = w;
-        sampleTextureLod(b.img, b.state, coord, lod, out);
+        sampleTextureLodP(b.img, b.state, b.plan, coord, lod, out);
       },
       sample2DArray(unit, u, vv, layer, dux, dvx, duy, dvy, bias) {
         const b = resolve(unit);
@@ -4158,7 +4350,7 @@
         dy[0] = duy;
         dy[1] = dvy;
         dy[2] = 0;
-        sampleTexture(b.img, b.state, coord, bias, out);
+        sampleTextureP(b.img, b.state, b.plan, coord, bias, out);
       },
       sample2DArrayLod(unit, u, vv, layer, lod) {
         const b = resolve(unit);
@@ -4166,7 +4358,7 @@
         v2[0] = u;
         v2[1] = vv;
         v2[2] = layer;
-        sampleTextureLod(b.img, b.state, coord, lod, out);
+        sampleTextureLodP(b.img, b.state, b.plan, coord, lod, out);
       },
       sample2DShadow(unit, u, vv, ref, dux, dvx, duy, dvy, bias) {
         const b = resolve(unit);
@@ -4180,7 +4372,7 @@
         dy[0] = duy;
         dy[1] = dvy;
         dy[2] = 0;
-        sampleTextureShadow(b.img, b.state, coord, ref, bias, out);
+        sampleTextureShadowP(b.img, b.state, b.plan, coord, ref, bias, out);
       },
       sampleCubeShadow(unit, u, vv, w, ref, dux, dvx, dwx, duy, dvy, dwy, bias) {
         const b = resolve(unit);
@@ -4194,7 +4386,7 @@
         dy[0] = duy;
         dy[1] = dvy;
         dy[2] = dwy;
-        sampleTextureShadow(b.img, b.state, coord, ref, bias, out);
+        sampleTextureShadowP(b.img, b.state, b.plan, coord, ref, bias, out);
       },
       sample2DArrayShadow(unit, u, vv, layer, ref, dux, dvx, duy, dvy, bias) {
         const b = resolve(unit);
@@ -4208,7 +4400,7 @@
         dy[0] = duy;
         dy[1] = dvy;
         dy[2] = 0;
-        sampleTextureShadow(b.img, b.state, coord, ref, bias, out);
+        sampleTextureShadowP(b.img, b.state, b.plan, coord, ref, bias, out);
       },
       texelFetch2D(unit, x, y, level) {
         const b = resolve(unit);
@@ -4870,7 +5062,7 @@
       for (const entry of sampleEntries) {
         const l = isLayeredAttachment(entry) ? 1 : 0;
         if (layered === -1) layered = l;
-        else if (layered !== l) return C2.FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS;
+        else if (layered !== l) return C.FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS;
       }
     }
     return C1.FRAMEBUFFER_COMPLETE;
@@ -5022,50 +5214,56 @@
      * Never touches _pixels (gl/ readPixels aliases it zero-copy).
      */
     buildPresentedCopy(premultipliedAlpha, alpha) {
-      const src = this._pixels;
-      const dst = this._scratch;
-      const w = this._width;
-      const h = this._height;
-      if (w === 0 || h === 0) {
-        return;
-      }
-      const rowBytes = w * 4;
-      if (!premultipliedAlpha && alpha) {
-        for (let i = 0; i < h; i++) {
-          const s = (h - 1 - i) * rowBytes;
-          const d = i * rowBytes;
-          for (let k = 0; k < rowBytes; k++) {
-            dst[d + k] = src[s + k];
-          }
-        }
-        return;
-      }
+      buildPresentedPixels(
+        this._pixels,
+        this._scratch,
+        this._width,
+        this._height,
+        premultipliedAlpha,
+        alpha
+      );
+    }
+  };
+  function buildPresentedPixels(src, dst, w, h, premultipliedAlpha, alpha) {
+    if (w === 0 || h === 0) {
+      return;
+    }
+    const rowBytes = w * 4;
+    if (!premultipliedAlpha && alpha) {
       for (let i = 0; i < h; i++) {
         const s = (h - 1 - i) * rowBytes;
         const d = i * rowBytes;
-        for (let j = 0; j < w; j++) {
-          const si = s + j * 4;
-          const di = d + j * 4;
-          let r = src[si];
-          let g2 = src[si + 1];
-          let b = src[si + 2];
-          const a = src[si + 3];
-          if (premultipliedAlpha && a > 0) {
-            r = (r * 255 + (a >> 1)) / a | 0;
-            g2 = (g2 * 255 + (a >> 1)) / a | 0;
-            b = (b * 255 + (a >> 1)) / a | 0;
-            if (r > 255) r = 255;
-            if (g2 > 255) g2 = 255;
-            if (b > 255) b = 255;
-          }
-          dst[di] = r;
-          dst[di + 1] = g2;
-          dst[di + 2] = b;
-          dst[di + 3] = alpha ? a : 255;
+        for (let k = 0; k < rowBytes; k++) {
+          dst[d + k] = src[s + k];
         }
       }
+      return;
     }
-  };
+    for (let i = 0; i < h; i++) {
+      const s = (h - 1 - i) * rowBytes;
+      const d = i * rowBytes;
+      for (let j = 0; j < w; j++) {
+        const si = s + j * 4;
+        const di = d + j * 4;
+        let r = src[si];
+        let g2 = src[si + 1];
+        let b = src[si + 2];
+        const a = src[si + 3];
+        if (premultipliedAlpha && a > 0) {
+          r = (r * 255 + (a >> 1)) / a | 0;
+          g2 = (g2 * 255 + (a >> 1)) / a | 0;
+          b = (b * 255 + (a >> 1)) / a | 0;
+          if (r > 255) r = 255;
+          if (g2 > 255) g2 = 255;
+          if (b > 255) b = 255;
+        }
+        dst[di] = r;
+        dst[di + 1] = g2;
+        dst[di + 2] = b;
+        dst[di + 3] = alpha ? a : 255;
+      }
+    }
+  }
   var NodeCanvasSurface = class {
     constructor() {
       __publicField(this, "_width", 0);
@@ -5254,7 +5452,7 @@
   }
   function initContextResources(ctx) {
     try {
-      ctx._presentSurface = createCanvasSurface(ctx._canvas);
+      ctx._presentSurface = createCanvasSurface(ctx._canvas, ctx._attrs);
     } catch {
       ctx._presentSurface = null;
     }
@@ -6221,14 +6419,18 @@
         out[2] = out[0];
         out[3] = 1;
         break;
+      // LUMINANCE_ALPHA stores [L, A]; encoders read L from out[0] and A from
+      // out[3] (raster registry) or out[1] (local spec) — keep both slots = A.
       case C.LUMINANCE_ALPHA:
-        out[1] = out[0];
         out[2] = out[0];
+        out[3] = out[1];
         break;
+      // ALPHA stores A; encoders read it from out[0] (local spec) or out[3]
+      // (raster registry) — keep both slots = A.
       case C.ALPHA:
-        out[0] = 0;
         out[1] = 0;
         out[2] = 0;
+        out[3] = out[0];
         break;
       case C.RED:
       case C.RED_INTEGER:
@@ -6242,15 +6444,39 @@
     }
     void raw;
   }
+  function srgbToLinear(v2) {
+    return v2 <= 0.04045 ? v2 / 12.92 : Math.pow((v2 + 0.055) / 1.055, 2.4);
+  }
+  function linearToSrgb(v2) {
+    if (v2 <= 0) return 0;
+    if (v2 >= 1) return 1;
+    return v2 <= 31308e-7 ? v2 * 12.92 : Math.pow(v2, 1 / 2.4) * 1.055 - 0.055;
+  }
+  function srgbToDisplayP3(data) {
+    for (let i = 0; i < data.length; i += 4) {
+      const r = srgbToLinear(data[i] / 255);
+      const g2 = srgbToLinear(data[i + 1] / 255);
+      const b = srgbToLinear(data[i + 2] / 255);
+      const rp = 0.8224621 * r + 0.177538 * g2;
+      const gp = 0.0331941 * r + 0.9668058 * g2;
+      const bp = 0.0170827 * r + 0.0723974 * g2 + 0.9104399 * b;
+      data[i] = Math.round(linearToSrgb(rp) * 255);
+      data[i + 1] = Math.round(linearToSrgb(gp) * 255);
+      data[i + 2] = Math.round(linearToSrgb(bp) * 255);
+    }
+  }
   var align4 = (v2) => v2 + 3 & ~3;
   function copyRows(p, dst, dstW, xoff, yoff, width, height, srcRow0, dstZOffset) {
     const out = new Float32Array(4);
+    const srcBytes = p.src.byteLength;
     for (let r = 0; r < height; r++) {
       const srcRow = srcRow0 + (p.flipY ? height - 1 - r : r);
       const dstY = yoff + r;
       const srcBase = srcRow * p.srcRowBytes + p.srcSkipPixels * p.srcBpp;
+      if (srcBase < 0 || srcBase >= srcBytes) continue;
+      const maxX = Math.min(width, Math.floor((srcBytes - srcBase) / p.srcBpp));
       const dstBase = (dstZOffset + dstY * dstW + xoff) * p.dstBpp;
-      for (let x = 0; x < width; x++) {
+      for (let x = 0; x < maxX; x++) {
         readSourceTexel(p.src, srcBase + x * p.srcBpp, p.srcFormat, p.srcType, p.domain, out);
         if (p.premultiply) {
           out[0] *= out[3];
@@ -6383,6 +6609,9 @@
         const res = decodeImageSource(source);
         if (res && res.ok && res.image) {
           const im = res.image;
+          if (!spec.isInteger && ctx.unpackColorSpace === "display-p3") {
+            srgbToDisplayP3(im.data);
+          }
           const dv2 = new DataView(im.data.buffer, im.data.byteOffset, im.data.byteLength);
           const p2 = {
             src: dv2,
@@ -6455,12 +6684,19 @@
     if (!spec) return;
     const img = ensureImage(texture, target);
     const isCube = img.target === C.TEXTURE_CUBE_MAP;
-    const levelData = allocLevel(spec, width, height, depth, isCube);
+    const prev = isCube ? img.levels[level] : void 0;
+    const reuse = !!(prev && prev.width === width && prev.height === height && img.internalFormat === internalformat);
+    const levelData = reuse ? prev : allocLevel(spec, width, height, depth, isCube);
     if (isCube) {
       const face = cubeFaceIndex2(target);
-      for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = void 0;
+      if (!reuse) {
+        for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = void 0;
+      } else if (levelData.data[face] === void 0) {
+        const perFace = width * height;
+        levelData.data[face] = new spec.ctor(perFace * spec.bytesPerPixel / spec.bytesPerElement);
+      }
     }
-    img.levels[level] = levelData;
+    if (!reuse) img.levels[level] = levelData;
     texture._internalFormat = internalformat;
     texture._compressed = false;
     img.internalFormat = internalformat;
@@ -6559,10 +6795,13 @@
     if (!spec) return;
     const img = ensureImage(texture, target);
     const isCube = img.target === C.TEXTURE_CUBE_MAP;
+    const existing = img.levels[level];
     const levelData = allocLevel(spec, width, height, 1, isCube);
     if (isCube) {
       const face = cubeFaceIndex2(target);
-      for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = void 0;
+      for (let f = 0; f < 6; f++) {
+        levelData.data[f] = f !== face && existing && existing.data[f] !== void 0 ? existing.data[f] : void 0;
+      }
     }
     img.levels[level] = levelData;
     texture._internalFormat = internalformat;
@@ -17271,28 +17510,41 @@
   function installUserFunctions(ast, env) {
     const fns = /* @__PURE__ */ new Map();
     const fnLocalNames = /* @__PURE__ */ new Map();
+    const byName = /* @__PURE__ */ new Map();
     for (const d of ast.declarations) {
-      if (d.kind === "function-definition") {
-        fns.set(d.prototype.name, d);
-        fnLocalNames.set(d.prototype.name, collectLocalNames(d.body));
-      }
+      if (d.kind !== "function-definition") continue;
+      const name = d.prototype.name;
+      if (name === "main") continue;
+      const key = signatureKey(name, d.prototype.params.map(declaredParamType));
+      fns.set(key, d);
+      fnLocalNames.set(key, collectLocalNames(d.body));
+      let keys = byName.get(name);
+      if (!keys) byName.set(name, keys = []);
+      keys.push(key);
     }
     const stack = [];
     let nextLabel = 0;
     let nextSuffix = 0;
     env.emitUserCall = (name, args, argTypes, rawArgs) => {
       var _a;
-      const fn = fns.get(name);
-      if (!fn) return null;
+      const keys = byName.get(name);
+      if (!keys || keys.length === 0) return null;
       if (name === "main") {
         throw new Error("codegen: user function 'main' cannot be called (semantics should reject it)");
       }
+      const best = pickUserOverload(name, keys, fns, rawArgs != null ? rawArgs : [], env.layout.version);
+      if (best === null) return null;
+      if (best.score > 0 && matches(name, builtinSignatures(env.layout.version)).length > 0) {
+        return null;
+      }
+      const key = best.key;
+      const fn = fns.get(key);
       if (stack.includes(name)) {
         throw new Error(`codegen: recursive call to '${name}' (semantics should reject recursion)`);
       }
       stack.push(name);
       try {
-        return inlineCall(fn, args, argTypes, rawArgs != null ? rawArgs : [], env, (_a = fnLocalNames.get(name)) != null ? _a : /* @__PURE__ */ new Set(), {
+        return inlineCall(fn, args, argTypes, rawArgs != null ? rawArgs : [], env, (_a = fnLocalNames.get(key)) != null ? _a : /* @__PURE__ */ new Set(), {
           label: () => `EP_${nextLabel++}`,
           suffix: () => `$c${nextSuffix++}`
         });
@@ -17301,6 +17553,115 @@
       }
     };
   }
+  function declaredParamType(p) {
+    const base = p.type.resolved;
+    if (!base) throw new Error("codegen: param type unresolved (semantics must run first)");
+    if (p.arrayDims.length === 0) return base;
+    let t = base;
+    for (let i = p.arrayDims.length - 1; i >= 0; i--) {
+      const dim = p.arrayDims[i];
+      const cv = dim ? dim.constValue : void 0;
+      const size = typeof cv === "number" && Number.isInteger(cv) && cv > 0 ? cv : dim === null ? null : 1;
+      t = { kind: "array", element: t, size };
+    }
+    return t;
+  }
+  function signatureKey(name, params) {
+    return `${name}(${params.map(typeKey).join(",")})`;
+  }
+  function typeKey(t) {
+    switch (t.kind) {
+      case "void":
+        return "v";
+      case "scalar":
+        return t.base;
+      case "vector":
+        return `${t.base}${t.size}`;
+      case "matrix":
+        return `m${t.cols}x${t.rows}`;
+      case "sampler":
+        return `s:${t.sampler}`;
+      case "struct":
+        return `t:${t.name}`;
+      case "array":
+        return `${typeKey(t.element)}[${t.size === null ? "" : t.size}]`;
+    }
+  }
+  function pickUserOverload(name, keys, fns, rawArgs, version) {
+    void version;
+    const argTypes = rawArgs.map((a) => a.resolvedType);
+    let bestKey = null;
+    let bestScore = Infinity;
+    for (const key of keys) {
+      const params = fns.get(key).prototype.params.map(declaredParamType);
+      if (params.length !== argTypes.length) continue;
+      let score = 0;
+      let ok = true;
+      for (let i = 0; i < params.length; i++) {
+        const at = argTypes[i];
+        if (typeEquals(at, params[i])) continue;
+        if (typeEquals(at, params[i])) {
+          score += 1;
+          continue;
+        }
+        ok = false;
+        break;
+      }
+      if (!ok) continue;
+      if (score < bestScore) {
+        bestScore = score;
+        bestKey = key;
+      } else if (score === bestScore) {
+        return null;
+      }
+    }
+    if (bestKey === null) return null;
+    return { key: bestKey, score: bestScore };
+  }
+  function globalDeclType(base, dec) {
+    if (dec.arrayDims.length === 0) return base;
+    let t = base;
+    for (let i = dec.arrayDims.length - 1; i >= 0; i--) {
+      const dim = dec.arrayDims[i];
+      const cv = dim.constValue;
+      t = { kind: "array", element: t, size: typeof cv === "number" && cv > 0 ? cv : 1 };
+    }
+    return t;
+  }
+  function installUserGlobals(ast, env) {
+    const lines = [];
+    for (const d of ast.declarations) {
+      if (d.kind !== "global-var-decl") continue;
+      if (d.type.qualifiers.storage !== void 0) continue;
+      const base = d.type.resolved;
+      if (!base) continue;
+      for (const dec of d.declarators) {
+        const type = globalDeclType(base, dec);
+        env.declareLocal(dec.name, type, { array: true });
+        const lv = env.lookupLocal(dec.name);
+        const n = flatComponents(type);
+        const int = lv.int === true;
+        const store = int ? "ctx.intScratch" : "ctx.scratch";
+        const baseOff = lv.scratchBase;
+        if (dec.init) {
+          const vals = emitExpr(dec.init, env);
+          for (let c = 0; c < n; c++) {
+            const v2 = vals[c];
+            lines.push(`${store}[${baseOff} + ${c}] = ${v2.pre && v2.pre.length ? foldPre(v2.pre, v2.v) : v2.v};`);
+          }
+        } else {
+          for (let c = 0; c < n; c++) lines.push(`${store}[${baseOff} + ${c}] = 0;`);
+        }
+        if (env.dual && !int) {
+          for (let c = 0; c < n; c++) {
+            lines.push(`${store}[${baseOff} + ${n} + ${c}] = 0;`);
+            lines.push(`${store}[${baseOff} + ${2 * n} + ${c}] = 0;`);
+          }
+        }
+      }
+    }
+    return lines;
+  }
   function inlineCall(fn, args, argTypes, rawArgs, env, fnLocalNames, ctx) {
     var _a, _b, _c, _d, _e, _f, _g;
     const params = fn.prototype.params;
@@ -17308,6 +17669,14 @@
       throw new Error(
         `codegen: call to '${fn.prototype.name}' with ${rawArgs.length} args, expected ${params.length}`
       );
+    }
+    for (let i = 0; i < params.length; i++) {
+      const n = flatComponents(paramTypeOf(params[i], rawArgs[i].resolvedType));
+      if (args[i].length !== n) {
+        throw new Error(
+          `codegen: overload mismatch for '${fn.prototype.name}': param ${i} has ${n} components, call passes ${args[i].length}`
+        );
+      }
     }
     const frame = env.pushParamFrame();
     try {
@@ -17559,9 +17928,10 @@ ${inner.map((l) => "  " + l).join("\n")}
     var _a;
     const env = new CodegenEnv("VERTEX", layout);
     for (const s of (_a = layout.structNames) != null ? _a : []) env.structNames.add(s);
+    const globalInit = installUserGlobals(ast, env);
     installUserFunctions(ast, env);
     const main = findMain(ast);
-    const lines = emitStatements(main.body.body, env);
+    const lines = [...globalInit, ...emitStatements(main.body.body, env)];
     const body = (env.temps.length ? `var ${env.temps.join(", ")};` : "") + "\n" + lines.join("\n");
     return { body, scratchSize: env.scratchSize, intScratchSize: env.intScratchSize };
   }
@@ -17578,9 +17948,10 @@ ${inner.map((l) => "  " + l).join("\n")}
     const env = new CodegenEnv("FRAGMENT", layout);
     for (const s of (_a = layout.structNames) != null ? _a : []) env.structNames.add(s);
     env.dual = layout.uses.derivatives;
+    const globalInit = installUserGlobals(ast, env);
     installUserFunctions(ast, env);
     const main = findMain2(ast);
-    const lines = emitStatements(main.body.body, env);
+    const lines = [...globalInit, ...emitStatements(main.body.body, env)];
     const body = (env.temps.length ? `var ${env.temps.join(", ")};` : "") + "\n" + lines.join("\n");
     return { body, scratchSize: env.scratchSize, intScratchSize: env.intScratchSize };
   }
@@ -20767,6 +21138,29 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (fb.depth && fb.depth.data instanceof Float32Array) fb.depth.data.fill(1);
     if (fb.stencil && fb.stencil.data instanceof Uint8Array) fb.stencil.data.fill(0);
   }
+  function transferToImageBitmapSnapshot(ctx) {
+    var _a;
+    const dfb = ctx._defaultFB;
+    if (!dfb || !dfb.color) return null;
+    const w = dfb.color.width, h = dfb.color.height;
+    const data = new Uint8Array(w * h * 4);
+    const src = dfb.color.data;
+    if (!(src instanceof Uint8Array)) return null;
+    buildPresentedPixels(
+      src,
+      data,
+      w,
+      h,
+      ctx._attrs.premultipliedAlpha !== false,
+      ctx._attrs.alpha !== false
+    );
+    clearDefaultFramebufferForPreserve(ctx, dfb);
+    try {
+      (_a = ctx._presentSurface) == null ? void 0 : _a.present();
+    } catch {
+    }
+    return { width: w, height: h, data: new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength) };
+  }
   function ensureCanvasSize(ctx) {
     const dfb = ctx._defaultFB;
     if (!dfb) return;
@@ -21644,6 +22038,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       samplerStates: env.samplerStates,
       scratch: sc.scratch,
       intScratch: sc.intScratch,
+      // gl_DepthRange builtin uniform: [near, far, far - near] (state already
+      // clamped to 0..1 by depthRange(); GLES2 §2.11.1).
+      depthRange: new Float32Array([s.depth.range[0], s.depth.range[1], s.depth.range[1] - s.depth.range[0]]),
       out: { position: sc.outPosition, pointSize: 0, varyings: sc.outVaryings }
     };
     const vertexLocs = [];
@@ -25277,6 +25674,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   var TEXTURE_IMMUTABLE_FORMAT = 37167;
   var TEXTURE_IMMUTABLE_LEVELS = 33503;
   var RGB9_E52 = 35901;
+  var isPow22 = (v2) => v2 > 0 && (v2 & v2 - 1) === 0;
   var everBoundTextures = /* @__PURE__ */ new WeakSet();
   function isLost6(ctx) {
     return ctx._isLost;
@@ -25576,6 +25974,10 @@ ${inner.map((l) => "  " + l).join("\n")}
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
+      if (ctx._version === 1 && (!isPow22(lv.width) || !isPow22(lv.height))) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
       if (img.target === C1.TEXTURE_CUBE_MAP) {
         for (let f = 0; f < 6; f++) {
           if (lv.data[f] === void 0) {
@@ -25645,7 +26047,23 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (target === C2.TEXTURE_2D_ARRAY) return { maxW: lim.MAX_TEXTURE_SIZE, maxH: lim.MAX_TEXTURE_SIZE, maxD: lim.MAX_ARRAY_TEXTURE_LAYERS, maxDim: lim.MAX_TEXTURE_SIZE };
     return { maxW: lim.MAX_TEXTURE_SIZE, maxH: lim.MAX_TEXTURE_SIZE, maxD: 1, maxDim: lim.MAX_TEXTURE_SIZE };
   }
-  var isPow22 = (v2) => v2 > 0 && (v2 & v2 - 1) === 0;
+  var isPow23 = (v2) => v2 > 0 && (v2 & v2 - 1) === 0;
+  function validateLevelDims(ctx, target, level, width, height, depth) {
+    const lim = dimLimit(ctx, target);
+    const scale = Math.pow(2, level);
+    const maxW = Math.max(1, Math.floor(lim.maxW / scale));
+    const maxH = Math.max(1, Math.floor(lim.maxH / scale));
+    const maxD = target === C2.TEXTURE_3D ? Math.max(1, Math.floor(lim.maxD / scale)) : lim.maxD;
+    if (width > maxW || height > maxH || depth > maxD) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return false;
+    }
+    if (level > Math.floor(Math.log2(lim.maxDim))) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return false;
+    }
+    return true;
+  }
   function commonTexImageValidation(ctx, target, level, width, height, depth, border, is3D) {
     if (is3D ? !is3DTarget(ctx, target) : !is2DTarget(target)) {
       ctx._errors.push(C1.INVALID_ENUM);
@@ -25672,16 +26090,8 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_VALUE);
       return null;
     }
-    const lim = dimLimit(ctx, target);
-    if (width > lim.maxW || height > lim.maxH || depth > lim.maxD) {
-      ctx._errors.push(C1.INVALID_VALUE);
-      return null;
-    }
-    if (level > Math.floor(Math.log2(lim.maxDim))) {
-      ctx._errors.push(C1.INVALID_VALUE);
-      return null;
-    }
-    if (ctx._version === 1 && level > 0 && (!isPow22(width) || !isPow22(height))) {
+    if (!validateLevelDims(ctx, target, level, width, height, depth)) return null;
+    if (ctx._version === 1 && level > 0 && (!isPow23(width) || !isPow23(height))) {
       ctx._errors.push(C1.INVALID_VALUE);
       return null;
     }
@@ -26111,7 +26521,8 @@ ${inner.map((l) => "  " + l).join("\n")}
     const rowLength = unpack.rowLength > 0 ? unpack.rowLength : width;
     const rowBytes = align(rowLength * srcBpp, unpack.alignment);
     const imageHeight = unpack.imageHeight > 0 ? unpack.imageHeight : height;
-    const required = (unpack.skipRows + (unpack.skipImages + depth) * imageHeight) * rowBytes + unpack.skipPixels * srcBpp;
+    const paddedRows = Math.max(0, unpack.skipRows + (unpack.skipImages + depth) * imageHeight - (height > 0 ? 1 : 0));
+    const required = paddedRows * rowBytes + (height > 0 ? rowLength * srcBpp : 0) + unpack.skipPixels * srcBpp;
     if (typeof pixels === "number") {
       const buf = ctx._state.pixelUnpackBuffer;
       if (buf === null || buf._data === null || pixels + required > buf._size) {
@@ -26148,12 +26559,15 @@ ${inner.map((l) => "  " + l).join("\n")}
     return true;
   }
   function sourceDims(source) {
-    if (source !== null && typeof source === "object") {
-      const s = source;
-      if (typeof s.width === "number" && typeof s.height === "number") {
-        return { width: s.width, height: s.height };
-      }
+    if (source === null || typeof source !== "object") return null;
+    const s = source;
+    if (typeof s.videoWidth === "number" && typeof s.readyState === "number") {
+      return typeof s.videoHeight === "number" ? { width: s.videoWidth, height: s.videoHeight } : null;
     }
+    if (typeof s.naturalWidth === "number") {
+      return typeof s.naturalHeight === "number" ? { width: s.naturalWidth, height: s.naturalHeight } : null;
+    }
+    if (typeof s.width === "number" && typeof s.height === "number") return { width: s.width, height: s.height };
     return null;
   }
   function texImage2DDOM(ctx, target, level, internalformat, format, type, source) {
@@ -26225,7 +26639,14 @@ ${inner.map((l) => "  " + l).join("\n")}
     [C1.RGBA4]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_4_4_4_4] },
     [C2.RGBA16F]: { format: C1.RGBA, types: [C2.HALF_FLOAT, C1.FLOAT] },
     [C2.RGBA32F]: { format: C1.RGBA, types: [C1.FLOAT] },
-    [C2.RGBA8UI]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_BYTE] }
+    [C2.RGBA8UI]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_BYTE] },
+    // Unsized internal formats are legal for TexImageSource uploads (WebGL2 spec
+    // §3.7.2): format must equal internalformat and type must be UNSIGNED_BYTE.
+    [C1.RGBA]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE] },
+    [C1.RGB]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE] },
+    [C1.LUMINANCE_ALPHA]: { format: C1.LUMINANCE_ALPHA, types: [C1.UNSIGNED_BYTE] },
+    [C1.LUMINANCE]: { format: C1.LUMINANCE, types: [C1.UNSIGNED_BYTE] },
+    [C1.ALPHA]: { format: C1.ALPHA, types: [C1.UNSIGNED_BYTE] }
   };
   function texImage2DBuffer(ctx, target, level, internalformat, width, height, border, format, type, pixels) {
     const tex2 = commonTexImageValidation(ctx, target, level, width, height, 1, border, false);
@@ -26288,6 +26709,11 @@ ${inner.map((l) => "  " + l).join("\n")}
       return null;
     }
     if (level < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    const lim = dimLimit(ctx, target);
+    if (level > Math.floor(Math.log2(lim.maxDim))) {
       ctx._errors.push(C1.INVALID_VALUE);
       return null;
     }
@@ -26608,16 +27034,8 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
-    const lim = dimLimit(ctx, target);
-    if (width > lim.maxW || height > lim.maxH) {
-      ctx._errors.push(C1.INVALID_VALUE);
-      return;
-    }
-    if (level > Math.floor(Math.log2(lim.maxDim))) {
-      ctx._errors.push(C1.INVALID_VALUE);
-      return;
-    }
-    if (ctx._version === 1 && level > 0 && (!isPow22(width) || !isPow22(height))) {
+    if (!validateLevelDims(ctx, target, level, width, height, 1)) return;
+    if (ctx._version === 1 && level > 0 && (!isPow23(width) || !isPow23(height))) {
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
@@ -26671,6 +27089,11 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
+    const lim = dimLimit(ctx, target);
+    if (level > Math.floor(Math.log2(lim.maxDim))) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
     if (!hasTextureLevel(tex2, target, level)) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
@@ -26705,6 +27128,11 @@ ${inner.map((l) => "  " + l).join("\n")}
       return;
     }
     if (level < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    const lim = dimLimit(ctx, target);
+    if (level > Math.floor(Math.log2(lim.maxDim))) {
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
@@ -29067,6 +29495,9 @@ ${inner.map((l) => "  " + l).join("\n")}
         ctx._errors.push(C1.INVALID_OPERATION);
       }
     };
+    proto._transferToImageBitmap = function() {
+      return transferToImageBitmapSnapshot(this);
+    };
     const p2 = proto;
     if ("drawArraysInstanced" in p2) {
       p2.drawArraysInstanced = function(mode, first, count, instanceCount) {
@@ -29527,10 +29958,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (!(query instanceof WebGLQuery)) {
           throw new TypeError(`Argument is not of type 'WebGLQuery'`);
         }
-        if (query._context !== ctx) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return false;
-        }
+        if (query._context !== ctx) return false;
         return !query._deleted && query._target !== 0;
       };
     }
@@ -29595,10 +30023,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (!(sync instanceof WebGLSync)) {
           throw new TypeError(`Argument is not of type 'WebGLSync'`);
         }
-        if (sync._context !== ctx) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return false;
-        }
+        if (sync._context !== ctx) return false;
         return !sync._deleted;
       };
     }
@@ -29705,10 +30130,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (!(sampler instanceof WebGLSampler)) {
           throw new TypeError(`Argument is not of type 'WebGLSampler'`);
         }
-        if (sampler._context !== ctx) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return false;
-        }
+        if (sampler._context !== ctx) return false;
         return !sampler._deleted;
       };
     }
@@ -29818,10 +30240,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (!(vertexArray instanceof WebGLVertexArrayObject)) {
           throw new TypeError(`Argument is not of type 'WebGLVertexArrayObject'`);
         }
-        if (vertexArray._context !== ctx) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return false;
-        }
+        if (vertexArray._context !== ctx) return false;
         return !vertexArray._deleted && everBoundVAOs2.has(vertexArray);
       };
     }
@@ -29884,10 +30303,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (!(transformFeedback instanceof WebGLTransformFeedback)) {
           throw new TypeError(`Argument is not of type 'WebGLTransformFeedback'`);
         }
-        if (transformFeedback._context !== ctx) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return false;
-        }
+        if (transformFeedback._context !== ctx) return false;
         return !transformFeedback._deleted && everBoundTFs.has(transformFeedback);
       };
     }
@@ -30179,9 +30595,12 @@ ${inner.map((l) => "  " + l).join("\n")}
      * chainToNative() re-chains our prototypes under the native ones, the native
      * accessors would otherwise run on our non-native `this` and throw
      * "Illegal invocation" (WebIDL brand check). three.js/Babylon read AND assign
-     * these unguarded, so the setters must never throw (the renderer stays sRGB
-     * regardless of what is assigned — native enum validation is deliberately
-     * skipped to avoid crashing engines).
+     * these unguarded, so the setters must never throw. The drawing buffer stays
+     * sRGB regardless of drawingBufferColorSpace; unpackColorSpace IS honored:
+     * DOM-source texture uploads convert sRGB→display-p3 when it is 'display-p3'
+     * (see teximage.ts). Native enum validation is deliberately skipped (no
+     * TypeError) to avoid crashing engines — any string is stored, the upload
+     * path only acts on 'display-p3'.
      */
     get drawingBufferColorSpace() {
       return "srgb";
@@ -30189,9 +30608,12 @@ ${inner.map((l) => "  " + l).join("\n")}
     set drawingBufferColorSpace(_value) {
     }
     get unpackColorSpace() {
-      return "srgb";
+      return this._state.pixelStore.unpack.unpackColorSpace;
     }
-    set unpackColorSpace(_value) {
+    set unpackColorSpace(value) {
+      if (typeof value === "string") {
+        this._state.pixelStore.unpack.unpackColorSpace = value;
+      }
     }
     /** Format of the drawing buffer: RGBA8 (0x8058). */
     get drawingBufferFormat() {
@@ -30625,6 +31047,12 @@ ${inner.map((l) => "  " + l).join("\n")}
     readPixels(x, y, width, height, format, type, pixels) {
       throw new Error("GL stub");
     }
+    /**
+     * @internal installed via installDrawApi — see api/draw.ts
+     */
+    _transferToImageBitmap() {
+      throw new Error("GL stub");
+    }
   };
   installConstants(WebGLRenderingContext.prototype, C1);
   installAll(WebGLRenderingContext.prototype);
@@ -30940,6 +31368,16 @@ ${inner.map((l) => "  " + l).join("\n")}
   function slotKey(type) {
     return type === "webgl2" ? "webgl2" : "webgl";
   }
+  function hideInternalFields(ctx) {
+    for (const key of Object.keys(ctx)) {
+      Object.defineProperty(ctx, key, {
+        value: ctx[key],
+        writable: true,
+        enumerable: false,
+        configurable: true
+      });
+    }
+  }
   function createContext(canvas, attrs, type) {
     const slot = slotFor(canvas);
     const key = slotKey(type);
@@ -30949,12 +31387,14 @@ ${inner.map((l) => "  " + l).join("\n")}
       if (slot.webgl) return null;
       slot.webgl2 = new WebGL2RenderingContext(canvas, attrs, type, CONTEXT_TOKEN);
       initContextResources(slot.webgl2);
+      hideInternalFields(slot.webgl2);
       return slot.webgl2;
     }
     if (slot.webgl) return slot.webgl;
     if (slot.webgl2) return null;
     slot.webgl = new WebGLRenderingContext(canvas, attrs, type, CONTEXT_TOKEN);
     initContextResources(slot.webgl);
+    hideInternalFields(slot.webgl);
     return slot.webgl;
   }
 
