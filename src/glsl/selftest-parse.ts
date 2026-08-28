@@ -725,11 +725,21 @@ void main() { gl_Position = vec4(0.0); }
 }
 
 {
-  // Anonymous structs are not allowed in GLSL ES.
-  const errs = parseFail('struct {\n  float x;\n} s;\n', 100);
-  check(errs.length === 1, `anon-struct count: ${errs.length}`);
-  check(errs[0].line === 1, `anon-struct line: ${errs[0].line}`);
-  check(errs[0].message.includes('anonymous structs'), `anon-struct msg: ${errs[0].message}`);
+  // Anonymous structs WITH a declarator (`struct { ... } s;`) now COMPILE —
+  // the GLSL ES grammar permits them and ANGLE accepts (crbug 401296; CTS
+  // ogles build_009 CorrectFull_vert + shaders-with-uniform-structs
+  // anonymous-struct subtest rely on it). The parser synthesizes a unique
+  // `__anon_struct_N` name so semantics/codegen can register the type. A
+  // BARE `struct { ... };` (no declarator) is still an error.
+  const ast = parseOk('struct {\n  float x;\n} s;\n', 100);
+  check(ast.declarations.length === 1, `anon-struct+declarator count: ${ast.declarations.length}`);
+  const g = gvar(ast.declarations[0]);
+  check(g.type.base.kind === 'struct-definition' && g.type.base.name === '__anon_struct_1', `anon-struct synthetic name: ${g.type.base.kind === 'struct-definition' ? g.type.base.name : '?'}`);
+  check(g.declarators.length === 1 && g.declarators[0].name === 's', 'anon-struct declarator name s');
+  const errs = parseFail('struct {\n  float x;\n};\n', 100);
+  check(errs.length === 1, `bare anon-struct count: ${errs.length}`);
+  check(errs[0].line === 1, `bare anon-struct line: ${errs[0].line}`);
+  check(errs[0].message.includes('anonymous structs'), `bare anon-struct msg: ${errs[0].message}`);
 }
 
 {

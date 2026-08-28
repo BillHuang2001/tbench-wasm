@@ -108,12 +108,16 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
 /* ------------------------------------------------------------------ */
 
 {
-  const info = okInfo('attribute vec4 p; attribute vec2 q[3]; uniform mat4 m; void main() { gl_Position = p; }', 100, 'VERTEX');
+  // 1.00 attributes must be scalar: `attribute vec2 q;` (attribute ARRAYS are
+  // an error in ESSL 1.00 — GLSL ES 1.00 Appendix A §5, CTS
+  // shader-with-attrib-array.vert.html + ogles build attribute2_vert; version
+  // 300 is unaffected, see info2 below).
+  const info = okInfo('attribute vec4 p; attribute vec2 q; uniform mat4 m; void main() { gl_Position = p; }', 100, 'VERTEX');
   check(info.attributes.length === 2, 'two attributes in declaration order');
   check(info.attributes[0].name === 'p' && info.attributes[0].arraySize === 1 && info.attributes[0].location === null, 'attr p: name/arraySize/location null');
   checkType(info.attributes[0].type, V4, 'attr p element type');
-  check(info.attributes[1].name === 'q' && info.attributes[1].arraySize === 3 && info.attributes[1].location === null, 'array attr q: bare name, arraySize 3');
-  checkType(info.attributes[1].type, V2, 'array attr q element type');
+  check(info.attributes[1].name === 'q' && info.attributes[1].arraySize === 1 && info.attributes[1].location === null, 'attr q: bare name, arraySize 1');
+  checkType(info.attributes[1].type, V2, 'attr q element type');
   check(info.uniforms.length === 1 && info.uniforms[0].name === 'm', 'uniform m collected');
   checkType(info.uniforms[0].type, M4, 'uniform m full type');
   check(info.uniforms[0].precision === 'highp', 'vertex float uniform defaults highp');
@@ -127,8 +131,8 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   checkType(info2.attributes[1].type, V3, '3.00 array attribute element type');
 
   okInfo('#version 300 es\nin ivec3 v;\nvoid main() {}', 300, 'VERTEX'); // integral vertex input OK in 3.00
-  okInfo('attribute vec2 q[3]; void main() { gl_Position = q[0].xyxy; }', 100, 'VERTEX'); // 1.00 attribute arrays OK
-
+  const eArr = errs('attribute vec2 q[3]; void main() { gl_Position = q[0].xyxy; }', 100, 'VERTEX');
+  check(hasErr(eArr, 1, "'q' : attribute variables cannot be arrays in GLSL ES 1.00"), '1.00 attribute array → error');
   const e1 = errs('attribute vec4 p; void main() { gl_FragColor = p; }', 100, 'FRAGMENT');
   check(hasErr(e1, 1, "'attribute' : only valid in vertex shaders"), 'attribute in fragment → stage error line 1');
 
