@@ -92,9 +92,13 @@
  *    layer, or same renderbuffer) for any mask bit → INVALID_OPERATION;
  *    incomplete read or draw FBO → INVALID_FRAMEBUFFER_OPERATION (GLES3
  *    §4.4.4);
- *    multisample: draw-multisampled + read-single OR both multisampled →
- *    INVALID_OPERATION; read-multisampled + draw-single → OK (resolve, CTS
- *    multisampled-depth-renderbuffer-initialization.html). Then delegates to
+ *    multisample (GLES3 §4.4.4): draw-multisampled — including the
+ *    antialiased default framebuffer — → INVALID_OPERATION (never a legal
+ *    blit destination); read-multisampled + draw-single (resolve) → legal
+ *    ONLY when the source/destination rectangles are identical and the
+ *    formats match per mask bit (CTS blitframebuffer-test.html
+ *    multisampling_srgb, blitframebuffer-resolve-to-back-buffer.html), else
+ *    INVALID_OPERATION. Then delegates to
  *    draw.executeBlitFramebuffer (try/catch → INVALID_OPERATION while stub).
  */
 
@@ -1464,13 +1468,52 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
-      // Multisample rules (CTS-verified): resolve (read MS + draw single) is
-      // legal; draw MS with read single OR read MS → INVALID_OPERATION.
+      // Multisample rules (GLES3 §4.4.4, CTS-verified): a multisampled DRAW
+      // framebuffer is never a legal blit destination — including the
+      // antialiased default framebuffer (its back buffer IS multisampled;
+      // CTS blitframebuffer-resolve-to-back-buffer.html "All attempts to blit
+      // to an antialiased back buffer should fail"). The resolve case (read MS
+      // + draw single) is legal ONLY when the source and destination
+      // rectangles have identical (X0,Y0,X1,Y1) bounds — no scaling or
+      // flipping — and the formats match per mask bit (CTS
+      // blitframebuffer-test.html multisampling_srgb).
       const readMS = readFbo !== null && readFbo._multisampled;
-      const drawMS = drawFbo !== null && drawFbo._multisampled;
+      const drawMS = drawFbo !== null
+        ? drawFbo._multisampled
+        : ctx._attrs.antialias === true;
       if (drawMS) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
+      }
+      if (readMS) {
+        // Identical source/destination bounds (GLES3 §4.4.4).
+        if (srcX0 !== dstX0 || srcY0 !== dstY0 || srcX1 !== dstX1 || srcY1 !== dstY1) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        // Identical formats per mask bit (color: read-buffer selection vs the
+        // first enabled draw buffer; depth/stencil: attachment formats).
+        if ((mask & C1.COLOR_BUFFER_BIT) !== 0 &&
+            blitReadColorFormat(ctx, readFbo) !== blitDrawColorFormat(ctx, drawFbo)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if ((mask & C1.DEPTH_BUFFER_BIT) !== 0) {
+          const srcDepth = blitAttachmentFormat(readFbo, DEPTH_ATTACHMENT, C2.DEPTH_COMPONENT24);
+          const dstDepth = blitAttachmentFormat(drawFbo, DEPTH_ATTACHMENT, C2.DEPTH_COMPONENT24);
+          if (srcDepth !== 0 && dstDepth !== 0 && srcDepth !== dstDepth) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+        }
+        if ((mask & C1.STENCIL_BUFFER_BIT) !== 0) {
+          const srcStencil = blitAttachmentFormat(readFbo, STENCIL_ATTACHMENT, C1.STENCIL_INDEX8);
+          const dstStencil = blitAttachmentFormat(drawFbo, STENCIL_ATTACHMENT, C1.STENCIL_INDEX8);
+          if (srcStencil !== 0 && dstStencil !== 0 && srcStencil !== dstStencil) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+        }
       }
       try {
         executeBlitFramebuffer(ctx, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
@@ -1522,6 +1565,60 @@ function getDrawBufferList(ctx: WebGLRenderingContext, fbo: WebGLFramebuffer | n
     perFboDrawBuffers.set(fbo, list);
   }
   return list;
+}
+
+/**
+ * Internal format of the color image a blit READS (the read-buffer selection
+ * of the READ framebuffer). The default framebuffer is RGBA8, or RGB8 when the
+ * drawing buffer has no alpha channel (blitframebuffer-resolve-to-back-buffer.html
+ * treats an alpha:false back buffer as a no-alpha format). 0 when the selected
+ * attachment has no image — the engine no-ops the color bit, so no match
+ * requirement applies.
+ */
+function blitReadColorFormat(ctx: WebGLRenderingContext, readFbo: WebGLFramebuffer | null): GLenum {
+  if (readFbo === null) return ctx._attrs.alpha === false ? C2.RGB8 : C1.RGBA8;
+  const rec = readFbo._attachments.get(ctx._state.readBuffer);
+  if (!rec) return 0;
+  return rec.type === 'renderbuffer'
+    ? rec.renderbuffer._internalformat
+    : (rec.texture._image ? rec.texture._image.internalFormat : 0);
+}
+
+/**
+ * Internal format of the color image a blit WRITES (the first enabled draw
+ * buffer of the DRAW framebuffer; default framebuffer as above). 0 when no
+ * enabled draw buffer has an image (engine no-op).
+ */
+function blitDrawColorFormat(ctx: WebGLRenderingContext, drawFbo: WebGLFramebuffer | null): GLenum {
+  if (drawFbo === null) return ctx._attrs.alpha === false ? C2.RGB8 : C1.RGBA8;
+  let db = NONE;
+  for (const b of getDrawBufferList(ctx, drawFbo)) {
+    if (b !== NONE) {
+      db = b;
+      break;
+    }
+  }
+  if (db === NONE) return 0;
+  const rec = drawFbo._attachments.get(db);
+  if (!rec) return 0;
+  return rec.type === 'renderbuffer'
+    ? rec.renderbuffer._internalformat
+    : (rec.texture._image ? rec.texture._image.internalFormat : 0);
+}
+
+/**
+ * Internal format of a depth/stencil attachment point for the GLES3 §4.4.4
+ * format-match rule. The default framebuffer reports its conceptual format;
+ * FBOs report the attached image's format, or 0 when nothing is attached
+ * (callers treat 0 as "no transfer" — the engine no-ops missing depth/stencil).
+ */
+function blitAttachmentFormat(fbo: WebGLFramebuffer | null, point: GLenum, defaultFormat: GLenum): GLenum {
+  if (fbo === null) return defaultFormat;
+  const rec = fbo._attachments.get(point);
+  if (!rec) return 0;
+  return rec.type === 'renderbuffer'
+    ? rec.renderbuffer._internalformat
+    : (rec.texture._image ? rec.texture._image.internalFormat : 0);
 }
 
 /** W2 default-framebuffer attachment parameter values. */
