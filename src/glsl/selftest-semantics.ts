@@ -725,9 +725,11 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
     'FRAGMENT',
   );
 
-  // Structs containing arrays are not assignable / not comparable (GLSL ES
-  // 1.00 §5.7/§5.8; CTS struct-assign.html / struct-equals.html) — the rule
-  // is version-independent (100 AND 300).
+  // Structs containing arrays are not ASSIGNABLE (GLSL ES 1.00 §5.7/§5.8; CTS
+  // struct-assign.html) — version-independent (100 AND 300). ==/!= on structs
+  // containing arrays: rejected at 100 (GLSL ES 1.00 §5.9; CTS struct-equals.
+  // html), ALLOWED at 300 (element-wise, recursively — CTS compare-structs-
+  // containing-arrays.html).
   const s1 = errs(
     'precision mediump float;\nstruct S { float f[3]; };\nvoid main() {\n  S a, b;\n  a = b;\n  gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n}',
     100,
@@ -752,12 +754,30 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
     'FRAGMENT',
   );
   check(hasErr(s4, 6, "'=' : cannot assign a struct containing an array"), '3.00 struct-with-array assignment → error line 6');
-  const s5 = errs(
-    '#version 300 es\nstruct S { float f[3]; };\nout vec4 o;\nvoid main() {\n  S a, b;\n  bool c = (a == b);\n  o = vec4(1.0);\n}',
+  // ES 3.00: struct-with-array == is LEGAL (element-wise, recursively).
+  const s5 = okInfo(
+    '#version 300 es\nprecision mediump float;\nstruct S { float f[3]; };\nout vec4 o;\nvoid main() {\n  S a, b;\n  bool c = (a == b);\n  o = vec4(1.0);\n}',
     300,
     'FRAGMENT',
   );
-  check(hasErr(s5, 6, "'==' : cannot compare structs containing an array"), '3.00 struct-with-array == → error line 6');
+  check(s5 !== null, '3.00 struct-with-array == accepted (locals)');
+  // ES 1.00: the same comparison on UNIFORM struct operands stays rejected
+  // (the uniform-struct-with-array declaration itself is legal at 100).
+  const s6 = errs(
+    'struct S { float a[2]; };\nuniform S us;\nvoid main() { bool b = (us == us); gl_Position = vec4(float(b)); }',
+    100,
+    'VERTEX',
+  );
+  check(hasErr(s6, 3, "'==' : cannot compare structs containing an array"), '1.00 uniform struct-with-array == → error line 3');
+  // ES 3.00: plain struct-with-array == on LOCAL variables, mirroring the CTS
+  // compare-structs-containing-arrays.html page (bool array members, member
+  // assignments, comparison inside an expression).
+  const s7 = okInfo(
+    '#version 300 es\nstruct MyStruct { bool a[2]; };\nvoid main() { MyStruct b; b.a[0] = true; b.a[1] = false; MyStruct c; c.a[0] = true; c.a[1] = false; bool x = (b == c); gl_Position = vec4(float(x)); }',
+    300,
+    'VERTEX',
+  );
+  check(s7 !== null, '3.00 struct-with-array == accepted (CTS page mirror, locals)');
 }
 
 /* ------------------------------------------------------------------ */
@@ -805,11 +825,13 @@ const a12 = okInfo('#version 300 es\nvoid main() { int a[3]; int b[3]; int c = (
 check(a12 !== null, '(a = b).length() accepted');
 const a13 = okInfo('#version 300 es\nvoid main() { int a = (int[1](0)).length(); gl_Position = vec4(float(a)); }', 300, 'VERTEX');
 check(a13 !== null, '(int[1](0)).length() accepted');
-// Array-of-struct equality at 300: plain S accepted; S-with-array-member rejected.
+// Array-of-struct equality at 300: plain S and S-with-array-member both
+// accepted (array == compares elements element-wise; struct-with-array
+// elements compare recursively at 300 — compare-structs-containing-arrays).
 const a14 = okInfo('#version 300 es\nstruct S { int x; };\nvoid main() { S a[3]; S b[3]; bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
 check(a14 !== null, 'S[3] == S[3] accepted (S without arrays)');
-const a15 = errs('#version 300 es\nstruct S { int f[2]; };\nvoid main() { S a[3]; S b[3]; bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
-check(hasErr(a15, 3, "'==' : cannot compare structs containing an array"), 'S[3] == S[3] with S containing an array → error line 3');
+const a15 = okInfo('#version 300 es\nstruct S { int f[2]; };\nvoid main() { S a[3]; S b[3]; bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+check(a15 !== null, 'S[3] == S[3] with S containing an array accepted (ES 3.00)');
 // Indexing an array-valued expression result (array-complex-indexing).
 const a16 = okInfo('#version 300 es\nvoid main() { float a[2] = float[2](0.0, 0.0); float b[2] = float[2](2.0, 1.0); float c = (a = b)[0]; gl_Position = vec4(c); }', 300, 'VERTEX');
 check(a16 !== null, '(a = b)[0] indexing accepted');

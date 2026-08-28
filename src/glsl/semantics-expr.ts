@@ -549,8 +549,10 @@ function containsSampler(t: GLSLType): boolean {
  * §5.7/§5.8: "The assignment and equality operators are not defined for
  * structures that contain arrays or sampler types"; "structures containing
  * arrays ... may not be used as the target of an assignment". The CTS
- * struct-assign/struct-equals pages require struct-with-array assignment and
- * comparison to fail to compile.
+ * struct-assign/struct-equals pages require struct-with-array ASSIGNMENT to
+ * fail to compile at BOTH versions; struct-with-array ==/!= is rejected at
+ * version 100 only — ES 3.00 compares element-wise, recursively (CTS
+ * compare-structs-containing-arrays.html) — so callers gate on ctx.version.
  */
 function containsArray(t: GLSLType): boolean {
   switch (t.kind) {
@@ -697,14 +699,19 @@ function analyzeBinary(e: BinaryExpr, scope: Scope, ctx: SemContext): void {
       // the same type (result: one bool). ES 3.00 §5.9 ALSO defines equality
       // for ARRAYS (element-wise, same element type + same size); ES 1.00
       // arrays are never comparable. Structs containing a sampler are NOT
-      // comparable (samplers may not be struct members per §4.1.7 — the CTS
-      // struct-equals page requires the comparison to fail to compile).
+      // comparable at ANY version (samplers may not be struct members per
+      // §4.1.7 — the CTS struct-equals page requires the comparison to fail
+      // to compile). Structs containing ARRAYS: rejected at version 100
+      // (GLSL ES 1.00 §5.9; CTS struct-equals.html), ALLOWED at version 300
+      // (element-wise, recursively — the CTS compare-structs-containing-
+      // arrays.html page requires `b == c` on structs with array members to
+      // compile and render correctly).
       else if (lt.kind === 'struct' && rt.kind === 'struct') {
         if (containsSampler(lt)) {
           ctx.error(e.loc.line, `'${e.op}' : cannot compare structs containing a sampler`);
           return;
         }
-        if (containsArray(lt)) {
+        if (ctx.version === 100 && containsArray(lt)) {
           ctx.error(e.loc.line, `'${e.op}' : cannot compare structs containing an array`);
           return;
         }
@@ -712,22 +719,17 @@ function analyzeBinary(e: BinaryExpr, scope: Scope, ctx: SemContext): void {
       } else if (lt.kind === 'array' && rt.kind === 'array') {
         if (ctx.version === 300 && typeEquals(lt, rt)) {
           // ES 3.00: array equality compares ELEMENT-wise. Struct elements
-          // apply the same restrictions as whole-struct comparison (the CTS
-          // compare-structs-containing-arrays page rejects `S[n] == S[n]`
-          // when S contains an array); scalar/vector/matrix elements need no
-          // extra check. NOT const-folded — array-typed nodes carry no scalar
-          // constValue, and the comparison is a runtime element-wise op
-          // (codegen's concern).
+          // are comparable at 300 (element-wise, recursively — CTS compare-
+          // structs-containing-arrays.html); version 100 never reaches this
+          // block (outer guard) and falls through to the generic
+          // 'cannot be compared' error. Sampler elements stay rejected.
+          // Scalar/vector/matrix elements need no extra check. NOT
+          // const-folded — array-typed nodes carry no scalar constValue, and
+          // the comparison is a runtime element-wise op (codegen's concern).
           const el = lt.element;
-          if (el.kind === 'struct') {
-            if (containsSampler(el)) {
-              ctx.error(e.loc.line, `'${e.op}' : cannot compare structs containing a sampler`);
-              return;
-            }
-            if (containsArray(el)) {
-              ctx.error(e.loc.line, `'${e.op}' : cannot compare structs containing an array`);
-              return;
-            }
+          if (el.kind === 'struct' && containsSampler(el)) {
+            ctx.error(e.loc.line, `'${e.op}' : cannot compare structs containing a sampler`);
+            return;
           }
           ok = true;
         }
