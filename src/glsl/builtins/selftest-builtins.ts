@@ -303,7 +303,17 @@ check(matches('min', builtinFunctions300).length === 21, 'min must have 21 signa
 check(matches('max', builtinFunctions300).length === 21, 'max must have 21 signatures in 3.00');
 check(matches('clamp', builtinFunctions300).length === 21, 'clamp must have 21 signatures in 3.00');
 check(matches('mix', builtinFunctions300).length === 11, 'mix must have 11 signatures in 3.00 (7 from 1.00 + 4 genBType selector)');
-check(matches('isnan', builtinFunctions300).length === 4, 'isnan must have 4 signatures (genType only)');
+// isnan/isinf: float-family args, genBType returns (GLSL ES 3.00 §8.3).
+const ISNAN_INF_RET: Array<[string, string]> = [
+  ['float', 'bool'], ['vec2', 'bvec2'], ['vec3', 'bvec3'], ['vec4', 'bvec4'],
+];
+for (const name of ['isnan', 'isinf']) {
+  check(matches(name, builtinFunctions300).length === 4, `${name} must have 4 signatures (genType only)`);
+  for (const [param, ret] of ISNAN_INF_RET) {
+    const s = matches(name, builtinFunctions300).find((ss) => canon(ss.params[0]) === param);
+    check(s !== undefined && canon(s.ret) === ret, `${name}(${param}) must return ${ret}`);
+  }
+}
 check(matches('trunc', builtinFunctions300).length === 4, 'trunc must have 4 signatures (genType only)');
 check(matches('modf', builtinFunctions300).length === 4, 'modf must have 4 signatures');
 check(matches('bitfieldExtract', builtinFunctions300).length === 8, 'bitfieldExtract must have 8 signatures');
@@ -391,6 +401,30 @@ if (!dr100.ok) console.error('  100 errors: ' + JSON.stringify(dr100.errors));
 const dr300 = compileShader('#version 300 es\n' + DEPTH_RANGE_SRC_BODY, { type: 'VERTEX', version: 300 });
 check(dr300.ok, '300: shader reading gl_DepthRange.near/far/diff must compile');
 if (!dr300.ok) console.error('  300 errors: ' + JSON.stringify(dr300.errors));
+
+/* ------------------------------------------------------------------ */
+/* 7. isnan/isinf must resolve to genBType (regression: they used to   */
+/*    resolve to genType, breaking bool contexts + ternaries)          */
+/* ------------------------------------------------------------------ */
+
+const ISNAN_INF_SRC = [
+  '#version 300 es',
+  'precision highp float;',
+  'out vec4 o;',
+  'void main() {',
+  '  float x = 1.0;',
+  '  vec4 v = vec4(0.0, x, -x, 1.0);',
+  '  bool b = isinf(x);',
+  '  bvec4 bv = isnan(v);',
+  '  float y = b ? 1.0 : 0.0;',
+  '  float z = any(bv) ? 1.0 : 0.0;',
+  '  o = vec4(y + z);',
+  '}',
+].join('\n');
+
+const ni = compileShader(ISNAN_INF_SRC, { type: 'FRAGMENT', version: 300 });
+check(ni.ok, '300: isinf/isnan in bool assignments and ternaries must compile');
+if (!ni.ok) console.error('  errors: ' + JSON.stringify(ni.errors));
 
 /* ------------------------------------------------------------------ */
 /* Report + exit                                                       */

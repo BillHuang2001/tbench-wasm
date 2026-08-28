@@ -229,7 +229,7 @@ void main() {
 
   const g3 = gvar(d[3]);
   check(g3.type.qualifiers.storage === 'const' && g3.type.base.kind === 'type-name' && g3.type.base.name === 'float', 'const float');
-  lit(g3.declarators[0].init, 3.14159, 'float');
+  lit(g3.declarators[0].init, 3.141590118408203, 'float'); // f32 rounding of 3.14159
 
   const g4 = gvar(d[4]);
   check(g4.declarators.length === 2, `two declarators: ${g4.declarators.length}`);

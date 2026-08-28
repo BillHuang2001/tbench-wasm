@@ -23,8 +23,8 @@
  *   for 3D / 2DArray / 2DArrayShadow).
  * - abs/sign take genType + genIType; min/max/clamp take genType/genIType/
  *   genUType (each with its scalar overload); mix adds a genBType selector.
- * - isnan/isinf are genType (float) only. trunc/round/roundEven are
- *   genType only.
+ * - isnan/isinf take genType (float) args only and return genBType.
+ *   trunc/round/roundEven are genType only.
  * - bitCount/findLSB/findMSB return genIType even for genUType inputs.
  * - NOT included (deliberately): textureGather, textureQueryLod,
  *   textureQueryLevels (not in ES 3.00), fma (not in ES 3.00), and
@@ -189,8 +189,9 @@ const common300: BuiltinSignature[] = [
   ...clampFns('clamp', genIType, I),
   ...clampFns('clamp', genUType, U),
   ...genType.map((t, i) => sig('mix', [t, t, genBType[i]], t)), // mix(x, y, bvec selector)
-  ...gen('isnan', genType),
-  ...gen('isinf', genType),
+  // isnan/isinf: float-family args, genBType returns (GLSL ES 3.00 §8.3).
+  ...genType.map((t, i) => sig('isnan', [t], genBType[i])),
+  ...genType.map((t, i) => sig('isinf', [t], genBType[i])),
   ...convert('floatBitsToInt', genIType),
   ...convert('floatBitsToUint', genUType),
   ...genIType.map((t) => sig('intBitsToFloat', [t], sizeMatchedFloat(t))),
