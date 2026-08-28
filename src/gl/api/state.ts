@@ -112,8 +112,9 @@ const DST_BLEND_FACTORS: number[] = SRC_BLEND_FACTORS.filter((f) => f !== C1.SRC
 const BLEND_EQUATIONS: number[] = [C1.FUNC_ADD, C1.FUNC_SUBTRACT, C1.FUNC_REVERSE_SUBTRACT];
 const BLEND_EQUATIONS_V2: number[] = [...BLEND_EQUATIONS, C2.MIN, C2.MAX];
 
-// WEBGL_blend_func_extended (versions [1,2]): dual-source factors.
-const SRC1_BLEND_FACTORS: number[] = [
+// WEBGL_blend_func_extended (versions [1,2]): dual-source factors. Exported
+// for the draw engine's dual-source draw-time validation (src/gl/draw.ts).
+export const SRC1_BLEND_FACTORS: number[] = [
   0x88f9, // SRC1_COLOR_WEBGL
   0x8589, // SRC1_ALPHA_WEBGL
   0x88fa, // ONE_MINUS_SRC1_COLOR_WEBGL

@@ -90,6 +90,7 @@ import type { WebGLProgram } from './objects';
 import type { ProgramModel } from './objects';
 import type { WebGLBuffer, WebGLQuery, WebGLTexture, WebGLTransformFeedback } from './objects';
 import { ensureProgramLinked } from './api/programs';
+import { SRC1_BLEND_FACTORS } from './api/state';
 
 /** A fully validated, assembled draw request (before rasterizer call). */
 export interface DrawRequest {
@@ -1797,6 +1798,79 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
       if (!drawBufferAttachmentIs(ctx, dbIdx, C2.RGB9_E5)) continue;
       const m = s.colorMaskPerDrawBuffer.get(dbIdx) ?? s.colorMask;
       if ((m[0] || m[1] || m[2] || m[3]) && !(m[0] && m[1] && m[2] && m[3])) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+    }
+  }
+  // WEBGL_blend_func_extended (dual-source blending): draw-time restrictions
+  // (CTS conformance2/extensions/webgl-blend-func-extended.html + the WebGL1
+  // variant — the page matrix is authoritative). A dual-source factor is
+  // ACTIVE for a draw buffer when its effective blend state (per-drawbuffer
+  // OES_draw_buffers_indexed entry, else the base blend state) contains any
+  // SRC1_* factor. Both rules fire with blending ENABLED or DISABLED — the
+  // page asserts errors while BLEND is off (js:470-472, js:311-316).
+  if (ctx._extensions.has('WEBGL_blend_func_extended')) {
+    // (1) Draw-buffer limit: INVALID_OPERATION when the number of ACTIVE draw
+    // buffers (non-NONE drawBuffers entries) exceeds
+    // MAX_DUAL_SOURCE_DRAW_BUFFERS_WEBGL and any active draw buffer uses a
+    // dual-source factor (page js:398-485: 4 SRC1_* funcs × 4 factor slots ×
+    // blend on/off → 32 assertions; non-SRC1 funcs → NO_ERROR).
+    let activeBuffers = 0;
+    for (let i = 0; i < s.drawBuffers.length; i++) {
+      if (s.drawBuffers[i] !== C1.NONE) activeBuffers++;
+    }
+    if (activeBuffers > s.limits.MAX_DUAL_SOURCE_DRAW_BUFFERS_WEBGL) {
+      for (let i = 0; i < s.drawBuffers.length; i++) {
+        if (s.drawBuffers[i] === C1.NONE) continue;
+        const be = s.blendPerDrawBuffer.get(i);
+        if (
+          SRC1_BLEND_FACTORS.includes(be?.srcRGB ?? s.blend.srcRGB) ||
+          SRC1_BLEND_FACTORS.includes(be?.dstRGB ?? s.blend.dstRGB) ||
+          SRC1_BLEND_FACTORS.includes(be?.srcAlpha ?? s.blend.srcAlpha) ||
+          SRC1_BLEND_FACTORS.includes(be?.dstAlpha ?? s.blend.dstAlpha)
+        ) {
+          pushError(ctx, C1.INVALID_OPERATION);
+          return;
+        }
+      }
+    }
+    // (2) Missing fragment outputs: for every active draw buffer with a
+    // dual-source factor and an effective color mask that is not all false,
+    // the fragment shader must write the PRIMARY output (location 0); when
+    // blending is enabled for the buffer it must ALSO write a SECONDARY
+    // output (location 0, index 1) (page js:304-396 — "no fragment outputs",
+    // "only gl_SecondaryFragColorEXT" and "only index 1 output" error even
+    // with blending disabled; "only gl_FragColor"/"only index 0 output"
+    // error only with blending enabled; all masked-out → NO_ERROR). `index`
+    // is not yet part of the glsl output model (layout(index=1) unsupported)
+    // — treated as absent, i.e. no secondary output.
+    let hasPrimary = false;
+    let hasSecondary = false;
+    const outs = pm.fragment?.outputs;
+    if (outs) {
+      for (const o of outs) {
+        if (o.location !== 0) continue;
+        if ((o as { index?: number }).index === 1) hasSecondary = true;
+        else hasPrimary = true;
+      }
+    }
+    const blendEnables = (s as unknown as { blendEnablePerDrawBuffer?: Map<number, boolean> }).blendEnablePerDrawBuffer;
+    for (let i = 0; i < s.drawBuffers.length; i++) {
+      if (s.drawBuffers[i] === C1.NONE) continue;
+      const be = s.blendPerDrawBuffer.get(i);
+      if (
+        !SRC1_BLEND_FACTORS.includes(be?.srcRGB ?? s.blend.srcRGB) &&
+        !SRC1_BLEND_FACTORS.includes(be?.dstRGB ?? s.blend.dstRGB) &&
+        !SRC1_BLEND_FACTORS.includes(be?.srcAlpha ?? s.blend.srcAlpha) &&
+        !SRC1_BLEND_FACTORS.includes(be?.dstAlpha ?? s.blend.dstAlpha)
+      ) {
+        continue;
+      }
+      const m = s.colorMaskPerDrawBuffer.get(i) ?? s.colorMask;
+      if (!(m[0] || m[1] || m[2] || m[3])) continue;
+      const blendEnabled = i === 0 ? s.caps.BLEND : (blendEnables?.get(i) ?? s.caps.BLEND);
+      if (!hasPrimary || (blendEnabled && !hasSecondary)) {
         pushError(ctx, C1.INVALID_OPERATION);
         return;
       }
