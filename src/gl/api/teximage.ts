@@ -98,7 +98,7 @@ function boundTextureForTarget(ctx: WebGLRenderingContext, target: GLenum): WebG
   // state.ts texture-unit slots are typed with the DOM WebGLTexture interface;
   // they always hold renderer WebGLTexture instances (bindTexture writes them).
   if (target === C1.TEXTURE_2D) return unit.texture2D as unknown as WebGLTexture | null;
-  if (isCubeFace(target)) return unit.textureCube as unknown as WebGLTexture | null;
+  if (target === C1.TEXTURE_CUBE_MAP || isCubeFace(target)) return unit.textureCube as unknown as WebGLTexture | null;
   if (target === C2.TEXTURE_3D) return unit.texture3D as unknown as WebGLTexture | null;
   if (target === C2.TEXTURE_2D_ARRAY) return unit.texture2DArray as unknown as WebGLTexture | null;
   return null;
@@ -110,7 +110,7 @@ function dimLimit(
   target: GLenum,
 ): { maxW: number; maxH: number; maxD: number; maxDim: number } {
   const lim = ctx._state.limits;
-  if (isCubeFace(target)) return { maxW: lim.MAX_CUBE_MAP_TEXTURE_SIZE, maxH: lim.MAX_CUBE_MAP_TEXTURE_SIZE, maxD: 1, maxDim: lim.MAX_CUBE_MAP_TEXTURE_SIZE };
+  if (target === C1.TEXTURE_CUBE_MAP || isCubeFace(target)) return { maxW: lim.MAX_CUBE_MAP_TEXTURE_SIZE, maxH: lim.MAX_CUBE_MAP_TEXTURE_SIZE, maxD: 1, maxDim: lim.MAX_CUBE_MAP_TEXTURE_SIZE };
   if (target === C2.TEXTURE_3D) return { maxW: lim.MAX_3D_TEXTURE_SIZE, maxH: lim.MAX_3D_TEXTURE_SIZE, maxD: lim.MAX_3D_TEXTURE_SIZE, maxDim: lim.MAX_3D_TEXTURE_SIZE };
   if (target === C2.TEXTURE_2D_ARRAY) return { maxW: lim.MAX_TEXTURE_SIZE, maxH: lim.MAX_TEXTURE_SIZE, maxD: lim.MAX_ARRAY_TEXTURE_LAYERS, maxDim: lim.MAX_TEXTURE_SIZE };
   return { maxW: lim.MAX_TEXTURE_SIZE, maxH: lim.MAX_TEXTURE_SIZE, maxD: 1, maxDim: lim.MAX_TEXTURE_SIZE };
