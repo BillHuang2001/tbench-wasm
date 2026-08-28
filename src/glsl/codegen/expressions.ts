@@ -81,7 +81,7 @@ type StorageKind =
        *  (which retype p.type but must NOT change the stride). */
       declComps: number;
     }
-  | { kind: 'output'; location: number };
+  | { kind: 'output'; location: number; index: number };
 
 /** Walked access path: identifier + member/index chains. `dyn` (outermost
  *  dynamic index) is at most one — GLSL allows dynamic indexing on the
@@ -158,7 +158,7 @@ function leafRead(p: P, env: CodegenEnv, c: number): string {
         // (swizzles retype p.type to the swizzle width).
         return attribRead(p.type, st.location, st.declComps, p.dyn, flatC);
       case 'output':
-        return outputAccess(p.type, st.location, p.dyn, flatC);
+        return outputAccess(p.type, st.location, st.index, p.dyn, flatC);
     }
   }
   if (p.builtin) {
@@ -303,7 +303,7 @@ function leafWrite(p: P, env: CodegenEnv, c: number): string {
       case 'attrib':
         throw new Error('codegen: attributes are read-only');
       case 'output':
-        return outputAccess(p.type, st.location, p.dyn, flatC);
+        return outputAccess(p.type, st.location, st.index, p.dyn, flatC);
     }
   }
   if (p.builtin) {
@@ -592,12 +592,12 @@ function walk(e: Expr, env: CodegenEnv): P {
           p.lvalue = env.stage === 'VERTEX';
           return p;
         case 'output':
-          p.storage = { kind: 'output', location: info.location };
+          p.storage = { kind: 'output', location: info.location, index: info.index };
           p.lvalue = true;
           return p;
         case 'builtin': {
           if (e.name === 'gl_FragData') {
-            p.storage = { kind: 'output', location: env.layout.outputLocations.get('gl_FragData') ?? 0 };
+            p.storage = { kind: 'output', location: env.layout.outputLocations.get('gl_FragData') ?? 0, index: 0 };
             p.lvalue = true;
             return p;
           }

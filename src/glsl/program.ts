@@ -352,6 +352,10 @@ export interface FragmentExecCtx extends BaseExecCtx {
   out: {
     /** Color per output location (preallocated Float32Array(4) each). */
     color: Float32Array[];
+    /** Optional dual-source secondary color per output location (index-1
+     *  outputs; preallocated Float32Array(4) each; raster allocates when the
+     *  program has index-1 outputs). */
+    secondary?: Float32Array[];
     /** gl_FragDepth (written when fragment.usesFragDepth). */
     fragDepth: number;
   };

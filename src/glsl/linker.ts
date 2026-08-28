@@ -1605,6 +1605,7 @@ function layoutAttributes(vs: Shader, opts: LinkOptions, limits: LinkLimits): At
 
 interface OutputLayoutResult {
   map: Map<string, number>;
+  indices: Map<string, number>;
   outputs: { location: number; index: number; type: number }[];
 }
 
@@ -1616,9 +1617,12 @@ interface OutputLayoutResult {
  *  (ShaderInfo carries the declaration entry + per-element '<name>[k]'
  *  entries — see compiler.ts OutputDecl). Every entry carries the dual-source
  *  blend `index` (0/1): same location with indices 0/1 links fine (primary +
- *  secondary); same location AND index conflicts. */
+ *  secondary); same location AND index conflicts. `indices` mirrors `map`
+ *  (name → dual-source index) so codegen can route index-1 outputs to
+ *  ctx.out.secondary. */
 function layoutOutputs(fs: Shader, limits: LinkLimits): OutputLayoutResult | { error: string } {
   const map = new Map<string, number>();
+  const indices = new Map<string, number>();
   const outputs: { location: number; index: number; type: number }[] = [];
   if (fs.version === 100) {
     for (const o of fs.info.outputs) {
@@ -1629,6 +1633,7 @@ function layoutOutputs(fs: Shader, limits: LinkLimits): OutputLayoutResult | { e
         // GL_EXT_blend_func_extended: secondary color = location 0, index 1.
         // gl/ (draw.ts) reads index === 1 to detect dual-source outputs.
         map.set('gl_SecondaryFragColorEXT', 0);
+        indices.set('gl_SecondaryFragColorEXT', 1);
         outputs.push({ location: 0, index: 1, type: toGLenum(o.type) });
       } else if (o.name.startsWith('gl_FragData')) {
         const idx = o.index ?? 0;
@@ -1669,6 +1674,7 @@ function layoutOutputs(fs: Shader, limits: LinkLimits): OutputLayoutResult | { e
         }
         occupied.set(key, el.base);
         map.set(o.name, loc);
+        indices.set(o.name, o.index ?? 0);
         outputs.push({ location: loc, index: o.index ?? 0, type: toGLenum(o.type) });
         continue;
       }
@@ -1686,6 +1692,7 @@ function layoutOutputs(fs: Shader, limits: LinkLimits): OutputLayoutResult | { e
         return { error: `linker: output '${o.name}' location ${base} exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
       }
       map.set(o.name, base);
+      indices.set(o.name, o.index ?? 0);
       const outIndex = o.index ?? 0;
       if (o.arraySize === 1) {
         const key = `${base}:${outIndex}`;
@@ -1713,7 +1720,7 @@ function layoutOutputs(fs: Shader, limits: LinkLimits): OutputLayoutResult | { e
       }
     }
   }
-  return { map, outputs };
+  return { map, indices, outputs };
 }
 
 /** '<name>[k]' suffix of an array-output ELEMENT entry (null = declaration). */
@@ -1933,6 +1940,7 @@ export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkRes
     varyings: vl.map,
     attribLocations: al.map,
     outputLocations: ol.map,
+    outputIndices: ol.indices,
     uses,
     structNames,
   };
