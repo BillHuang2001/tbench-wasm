@@ -658,8 +658,12 @@ function readSourceTexel(dv: DataView, byteOff: number, format: GLenum, type: GL
     case C.RGB: case C.RGB_INTEGER: out[3] = 1; break;
     case C.RG: case C.RG_INTEGER: out[2] = 0; out[3] = 1; break;
     case C.LUMINANCE: out[1] = out[0]; out[2] = out[0]; out[3] = 1; break;
-    case C.LUMINANCE_ALPHA: out[1] = out[0]; out[2] = out[0]; break;
-    case C.ALPHA: out[0] = 0; out[1] = 0; out[2] = 0; break;
+    // LUMINANCE_ALPHA stores [L, A]; encoders read L from out[0] and A from
+    // out[3] (raster registry) or out[1] (local spec) — keep both slots = A.
+    case C.LUMINANCE_ALPHA: out[2] = out[0]; out[3] = out[1]; break;
+    // ALPHA stores A; encoders read it from out[0] (local spec) or out[3]
+    // (raster registry) — keep both slots = A.
+    case C.ALPHA: out[1] = 0; out[2] = 0; out[3] = out[0]; break;
     case C.RED: case C.RED_INTEGER: case C.DEPTH_COMPONENT: out[1] = 0; out[2] = 0; out[3] = 1; break;
     default: break;
   }
@@ -966,11 +970,17 @@ export function uploadTexImage(
   if (!spec) return;
   const img = ensureImage(texture, target);
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
+  const existing = img.levels[level];
   const levelData = allocLevel(spec, width, height, depth, isCube);
   if (isCube) {
-    // Only the uploaded face is defined (cube completeness needs all 6).
+    // Only the uploaded face is (re)defined; keep faces from earlier uploads
+    // (cube completeness needs all 6, and fillCubeTexture uploads per-face).
     const face = cubeFaceIndex(target);
-    for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = undefined as unknown as ArrayBufferView;
+    for (let f = 0; f < 6; f++) {
+      levelData.data[f] = f !== face && existing && existing.data[f] !== undefined
+        ? existing.data[f]
+        : (undefined as unknown as ArrayBufferView);
+    }
   }
   img.levels[level] = levelData;
   texture._internalFormat = internalformat;
@@ -1115,10 +1125,16 @@ export function copyTexImage(
   if (!spec) return;
   const img = ensureImage(texture, target);
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
+  const existing = img.levels[level];
   const levelData = allocLevel(spec, width, height, 1, isCube);
   if (isCube) {
+    // Keep faces from earlier copyTexImage2D calls (see uploadTexImage).
     const face = cubeFaceIndex(target);
-    for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = undefined as unknown as ArrayBufferView;
+    for (let f = 0; f < 6; f++) {
+      levelData.data[f] = f !== face && existing && existing.data[f] !== undefined
+        ? existing.data[f]
+        : (undefined as unknown as ArrayBufferView);
+    }
   }
   img.levels[level] = levelData;
   texture._internalFormat = internalformat;

@@ -25,7 +25,9 @@
  *  - getTexParameter: TEXTURE_IMMUTABLE_FORMAT / TEXTURE_IMMUTABLE_LEVELS
  *    (WebGL2 only), else the texParameter pname table → _params value.
  *  - generateMipmap: complete, non-depth/non-stencil/non-integer base level
- *    required (INVALID_OPERATION otherwise); float formats need the linear-
+ *    required (INVALID_OPERATION otherwise); WebGL1 additionally rejects a
+ *    non-power-of-two base level (INVALID_OPERATION — NPOT textures have no
+ *    mip chain); float formats need the linear-
  *    filter extensions (W1: OES_texture_float_linear / OES_texture_half_float_linear;
  *    W2: EXT_color_buffer_float; RGB9_E5 always rejected). Delegates to the
  *    engine's generateMipmap for the actual level building.
@@ -43,6 +45,8 @@ const COMPARE_REF_TO_TEXTURE = 0x884e;
 const TEXTURE_IMMUTABLE_FORMAT = 0x912f;
 const TEXTURE_IMMUTABLE_LEVELS = 0x82df;
 const RGB9_E5 = 0x8c3d;
+
+const isPow2 = (v: number): boolean => v > 0 && (v & (v - 1)) === 0;
 
 /**
  * Textures that have been bound at least once. isTexture returns false for
@@ -411,6 +415,12 @@ export function installTexturesApi(proto: WebGLRenderingContext): void {
     const base = tex._params[C2.TEXTURE_BASE_LEVEL] ?? 0;
     const lv = img.levels[base];
     if (!lv || lv.width < 1 || lv.height < 1) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    // WebGL 1.0 §5.14.8: generateMipmap on a non-power-of-two base level
+    // generates INVALID_OPERATION (NPOT textures have no mip chain in WebGL1).
+    if (ctx._version === 1 && (!isPow2(lv.width) || !isPow2(lv.height))) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
