@@ -254,7 +254,8 @@ function floatReadOK(ctx: WebGLRenderingContext, type: GLenum, halfFloat: boolea
 function floatStorageReadOK(ctx: WebGLRenderingContext, format: GLenum, type: GLenum): boolean {
   if (format !== C1.RGBA) return false;
   if (type === C1.FLOAT) {
-    return extSupported(ctx, 'OES_texture_float') || extSupported(ctx, 'EXT_color_buffer_half_float');
+    return extSupported(ctx, 'OES_texture_float') || extSupported(ctx, 'OES_texture_half_float') ||
+      extSupported(ctx, 'EXT_color_buffer_half_float');
   }
   if (type === 0x140b /* HALF_FLOAT */ || type === 0x8d61 /* HALF_FLOAT_OES */) {
     return extSupported(ctx, 'OES_texture_half_float') || extSupported(ctx, 'EXT_color_buffer_half_float');
