@@ -36,6 +36,13 @@
  *      t@16, t.x@16, t.y@24, size 48.
  *  14. limits: maxUniformBlockSize / maxVertexUniformBlocks /
  *      maxCombinedUniformBlocks exceeded → link errors.
+ *  15. struct MEMBER arrays stay whole in the active-uniform layout (CTS
+ *      shader-with-array-of-structs-containing-arrays.html): `my_struct
+ *      {vec4 color1[2]; vec4 color2[2];} u_colors[2]` → 4 entries
+ *      'u_colors[i].colorN[0]' size 2; uniformMap aliases '<p>.m' + '<p>.m[k]'
+ *      → the leaf; round-trip run.
+ *  16. struct-ELEMENT member arrays still expand per element ('u.a[0].c',
+ *      'u.a[1].c' — a struct-array member has no GLenum for one entry).
  *  18. gl_DepthRange builtin uniform reflection: usage-gated active-uniform
  *      entries ('gl_DepthRange.near/far/diff', GL_FLOAT, size 1) backed by 3
  *      real float-store slots appended after user uniforms (1.00 vertex /
@@ -1613,6 +1620,154 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
         `depthRange program floatStore is 3 floats larger (using ${usingFloatLen} vs not-using ${p.floatStore.length})`,
       );
     }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 15. Struct MEMBER arrays stay whole in the active-uniform layout     */
+/*     (CTS shader-with-array-of-structs-containing-arrays.html)        */
+/* ------------------------------------------------------------------ */
+/* PIN: `my_struct { vec4 color1[2]; vec4 color2[2]; } u_colors[2];`
+ * reports 4 getActiveUniform entries ('u_colors[i].colorN[0]', size 2) —
+ * only the TOP-LEVEL array expands; member arrays stay whole. Pre-fix the
+ * linker expanded member arrays per element → 8 entries of size 1 and the
+ * uniformMap lacked the bare '<p>.m' / '<p>.m[k]' keys (getUniformLocation
+ * returned null → the CTS page's loc00-11 checks failed). */
+
+{
+  const vs = compile(
+    `attribute vec4 aPos;
+     void main() { gl_Position = aPos; }`,
+    'VERTEX',
+    100,
+  );
+  const fs = compile(
+    `precision mediump float;
+     struct my_struct {
+       vec4 color1[2];
+       vec4 color2[2];
+     };
+     uniform my_struct u_colors[2];
+     void main(void) {
+       gl_FragColor = u_colors[0].color1[0] + u_colors[0].color2[0] +
+                      u_colors[1].color1[1] + u_colors[1].color2[1];
+     }`,
+    'FRAGMENT',
+    100,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `member-array struct pair links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    // 4 active uniforms (was 8 pre-fix), one per member array, in walk order
+    // (top-level element 0 then 1, member declaration order).
+    const expect = [
+      { name: 'u_colors[0].color1[0]', loc: 0 },
+      { name: 'u_colors[0].color2[0]', loc: 8 },
+      { name: 'u_colors[1].color1[0]', loc: 16 },
+      { name: 'u_colors[1].color2[0]', loc: 24 },
+    ];
+    check(
+      p.uniforms.length === 4 && p.uniforms.map((u) => u.name).join('|') === expect.map((e) => e.name).join('|'),
+      `4 active uniforms in walk order (got ${JSON.stringify(p.uniforms.map((u) => u.name))})`,
+    );
+    for (let i = 0; i < expect.length; i++) {
+      const u = p.uniforms[i];
+      check(
+        u.name === expect[i].name && u.location === expect[i].loc && u.type === FLOAT_VEC4 &&
+          u.size === 2 && u.components === 4 && u.blockIndex === -1,
+        `uniform[${i}] '${expect[i].name}' @${expect[i].loc} FLOAT_VEC4 size 2 (got ${JSON.stringify(u)})`,
+      );
+    }
+    // uniformMap: bare root + '[0]' → first leaf; every member-array alias
+    // ('<p>.m' bare and '<p>.m[k]' k < size) → the SAME leaf; out-of-range
+    // '<p>.m[2]' and unknown paths absent.
+    const um = p.uniformMap;
+    check(
+      um.get('u_colors') === um.get('u_colors[0]') && um.get('u_colors[0]') === um.get('u_colors[0].color1[0]'),
+      `uniformMap 'u_colors'/'u_colors[0]' → first leaf`,
+    );
+    const aliases: [string, string][] = [
+      ['u_colors[0].color1', 'u_colors[0].color1[0]'],
+      ['u_colors[0].color1[1]', 'u_colors[0].color1[0]'],
+      ['u_colors[0].color2', 'u_colors[0].color2[0]'],
+      ['u_colors[0].color2[1]', 'u_colors[0].color2[0]'],
+      ['u_colors[1].color1', 'u_colors[1].color1[0]'],
+      ['u_colors[1].color1[1]', 'u_colors[1].color1[0]'],
+      ['u_colors[1].color2', 'u_colors[1].color2[0]'],
+      ['u_colors[1].color2[1]', 'u_colors[1].color2[0]'],
+    ];
+    for (const [key, leaf] of aliases) {
+      const info = um.get(key);
+      check(info !== undefined && info === um.get(leaf), `uniformMap '${key}' → leaf '${leaf}'`);
+    }
+    check(
+      um.has('u_colors[0].color1[2]') === false && um.has('u_colors[2]') === false && um.has('u_colors[0].color3') === false,
+      `out-of-range/unknown member-array keys absent`,
+    );
+    // Round-trip: write one vec4 per member-array element (emulating gl's
+    // getUniformLocation: element k of a leaf starts at location + k*stride)
+    // and run the fragment — mirrors the CTS page's yellow-draw (which failed
+    // pre-fix because loc00-11 were null).
+    const write = (key: string, v: [number, number, number, number]) => {
+      const info = um.get(key)!;
+      const m = /\[(\d+)\]$/.exec(key);
+      const elem = m !== null && info.size > 1 ? parseInt(m[1], 10) : 0;
+      const loc = info.location + elem * 4; // vec4 element stride 4
+      p.floatStore[loc + 0] = v[0];
+      p.floatStore[loc + 1] = v[1];
+      p.floatStore[loc + 2] = v[2];
+      p.floatStore[loc + 3] = v[3];
+    };
+    write('u_colors[0].color1[0]', [1, 0, 0, 0]);
+    write('u_colors[0].color2[0]', [0, 1, 0, 0]);
+    write('u_colors[1].color1[1]', [0, 0, 1, 0]);
+    write('u_colors[1].color2[1]', [0, 0, 0, 1]);
+    const fctx = fragmentCtx(p);
+    p.fragment.run(fctx);
+    const c = fctx.out.color[0];
+    check(
+      c[0] === 1 && c[1] === 1 && c[2] === 1 && c[3] === 1,
+      `member-array round-trip: color [1,1,1,1] (got [${Array.from(c).join(', ')}])`,
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 16. Struct-element MEMBER arrays still expand per element            */
+/*     (struct-array members have no GLenum — one entry would throw)    */
+/* ------------------------------------------------------------------ */
+
+{
+  const vs = compile(
+    `attribute vec4 aPos;
+     void main() { gl_Position = aPos; }`,
+    'VERTEX',
+    100,
+  );
+  const fs = compile(
+    `precision mediump float;
+     struct A { vec4 c; };
+     struct B { A a[2]; };
+     uniform B u;
+     void main() { gl_FragColor = u.a[0].c + u.a[1].c; }`,
+    'FRAGMENT',
+    100,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `struct-array member pair links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    check(
+      p.uniforms.length === 2 && p.uniforms[0].name === 'u.a[0].c' && p.uniforms[0].size === 1 &&
+        p.uniforms[1].name === 'u.a[1].c' && p.uniforms[1].size === 1,
+      `struct-array member expands to 'u.a[0].c'/'u.a[1].c' size 1 (got ${JSON.stringify(p.uniforms.map((u) => u.name))})`,
+    );
+    check(
+      p.uniformMap.get('u.a[0].c') !== undefined && p.uniformMap.get('u.a[1].c') !== undefined &&
+        p.uniformMap.get('u') === p.uniformMap.get('u.a[0].c'),
+      `struct-array member leaves in uniformMap`,
+    );
   }
 }
 

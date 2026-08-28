@@ -469,8 +469,15 @@ function mergeUniforms(vs: Shader, fs: Shader): MergedUniform[] | { error: strin
 }
 
 /** Visit every flattened LEAF path of a type in allocation order (struct
- *  members recurse; array elements expand per index — matching emitType's
- *  uniformSlots keys). */
+ *  members recurse; TOP-LEVEL array elements expand per index — matching
+ *  emitType's uniformSlots keys). STRUCT MEMBER arrays stay WHOLE: one leaf
+ *  '<p>.m[0]' carrying the array type, so getActiveUniform reports a single
+ *  entry with size = array length — only the top-level array dimension expands
+ *  (CTS shader-with-array-of-structs-containing-arrays.html expects 4 entries
+ *  for `my_struct { vec4 color1[2]; vec4 color2[2]; } u_colors[2];`, not 8).
+ *  Arrays whose element chain leads to a struct still expand per element: a
+ *  struct-array member has no GLenum, so it cannot be reported as one entry
+ *  (leafInfo would throw on toGLenum(struct)). */
 function walkLeaves(path: string, t: GLSLType, cb: (path: string, leaf: GLSLType) => void): void {
   switch (t.kind) {
     case 'scalar':
@@ -480,7 +487,7 @@ function walkLeaves(path: string, t: GLSLType, cb: (path: string, leaf: GLSLType
       cb(path, t);
       return;
     case 'struct':
-      for (const m of t.members) walkLeaves(`${path}.${m.name}`, m.type, cb);
+      for (const m of t.members) walkMember(`${path}.${m.name}`, m.type, cb);
       return;
     case 'array': {
       const n = t.size ?? 0;
@@ -490,6 +497,19 @@ function walkLeaves(path: string, t: GLSLType, cb: (path: string, leaf: GLSLType
     case 'void':
       return;
   }
+}
+
+/** Member walk: non-array types recurse through walkLeaves (nested structs
+ *  keep expanding); arrays of leaf types (scalar/vector/matrix/sampler) stay
+ *  whole as ONE leaf at '<p>.m[0]' — getActiveUniform expands only the
+ *  top-level array dimension of a struct uniform. Struct-element arrays expand
+ *  per element (see walkLeaves). */
+function walkMember(path: string, t: GLSLType, cb: (path: string, leaf: GLSLType) => void): void {
+  if (t.kind === 'array' && unwrapArrays(t).kind !== 'struct') {
+    cb(`${path}[0]`, t);
+    return;
+  }
+  walkLeaves(path, t, cb);
 }
 
 interface UniformLayoutResult {
@@ -549,12 +569,22 @@ function layoutUniforms(merged: MergedUniform[], limits: LinkLimits): UniformLay
       uniformMap.set(u.decl.name, uniformMap.get(leaves[0].path)!);
     } else {
       // Struct / struct-array: getActiveUniform entries per flattened leaf
-      // ('u.m', 'u[0].m', 'u[2].m'; size 1 each). uniformMap: leaf paths +
-      // bare name → first leaf; struct arrays also key 'u[0]' → first leaf.
+      // ('u.m', 'u[0].m', 'u[2].m'). MEMBER arrays stay whole: one entry
+      // '<p>.m[0]' with size = array length (only the TOP-LEVEL array expands —
+      // CTS shader-with-array-of-structs-containing-arrays.html). uniformMap:
+      // leaf paths + bare names ('u', 'u[0]', '<p>.m') → first leaf; member
+      // array elements '<p>.m[k]' (k < size) alias the SAME leaf — gl's
+      // getUniformLocation derives the element from the QUERY name.
       for (const l of leaves) {
-        const info = leafInfo(l.path, l.type, 1);
+        const size = l.type.kind === 'array' ? l.type.size ?? 1 : 1;
+        const info = leafInfo(l.path, l.type, size);
         uniforms.push(info);
         uniformMap.set(l.path, info);
+        if (l.type.kind === 'array') {
+          const bare = l.path.slice(0, -3); // strip the trailing '[0]'
+          uniformMap.set(bare, info);
+          for (let k = 0; k < size; k++) uniformMap.set(`${bare}[${k}]`, info);
+        }
       }
       const first = uniformMap.get(leaves[0].path)!;
       uniformMap.set(u.decl.name, first);
