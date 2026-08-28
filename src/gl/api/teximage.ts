@@ -22,7 +22,10 @@
  *    DOM form is NOT in the spec and is rejected (INVALID_OPERATION).
  *  - WebGL2: buffer-form pixels may be a NUMBER (byte offset into
  *    PIXEL_UNPACK_BUFFER — must be bound; flipY/premultiplyAlpha must be off;
- *    offset+required ≤ buffer size).
+ *    offset+required ≤ buffer size). The buffer form also accepts trailing
+ *    srcOffset (and optional srcLength) numeric arguments AFTER an
+ *    ArrayBufferView — the upload reads starting at element srcOffset of the
+ *    view, in the view's element units (spec §3.7.2; applySrcOffset slices).
  * Validation highlights: border must be 0 (INVALID_VALUE); internalformat vs
  * format/type compatibility per WebGL1 tables + extension-gated formats
  * (WEBGL_depth_texture / OES_texture_float(_linear) / OES_texture_half_float /
@@ -752,6 +755,46 @@ function validatePixelsSize(
     return false;
   }
   return true;
+}
+
+/**
+ * WebGL2 srcOffset/srcLength overloads (spec §3.7.2): the extra numeric
+ * arguments after the ArrayBufferView select a sub-range of the view, in
+ * ELEMENTS of the view's element type (not bytes). srcOffset/srcLength are
+ * converted WebIDL-style (unsigned long long: NaN → 0, negatives wrap to
+ * huge — so offset=-1 becomes a huge offset and errors). Returns the sliced
+ * view, or null after pushing INVALID_OPERATION (offset beyond the view, or
+ * srcOffset+srcLength beyond the view). The too-short effective-length check
+ * is left to validatePixelsSize, which pushes INVALID_OPERATION (the CTS
+ * views-with-offsets probe expects exactly that for effective < required).
+ */
+function applySrcOffset(
+  ctx: WebGLRenderingContext,
+  view: ArrayBufferView,
+  srcOffsetArg: unknown,
+  srcLengthArg: unknown,
+): ArrayBufferView | null {
+  // `length`/`subarray` aren't on the TS ArrayBufferView base type (DataView
+  // excluded); typed arrays all have them (the callers only pass views).
+  const v = view as unknown as { length: number; subarray(begin: number, end: number): ArrayBufferView };
+  const off = Number(srcOffsetArg) >>> 0;
+  if (off > v.length) {
+    // Effective length would be negative (covers the CTS offset=-1 probe).
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return null;
+  }
+  let effLen = v.length - off;
+  if (srcLengthArg !== undefined) {
+    const srcLen = Number(srcLengthArg) >>> 0;
+    if (srcLen > 0) {
+      if (off + srcLen > v.length) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
+      effLen = srcLen;
+    }
+  }
+  return v.subarray(off, off + effLen);
 }
 
 /** WebGL2 PBO (pixels = byte offset) pre-checks: bound, flipY/premultiply, offset. */
@@ -1948,7 +1991,13 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       texImage2DDOMWithDims(ctx, target, level, internalformat, width, height, border, format, type, pixels);
       return;
     }
-    texImage2DBuffer(ctx, target, level, internalformat, width, height, border, format, type, pixels ?? null);
+    let bufPixels: TexImageSourceArg = pixels ?? null;
+    if (ctx._version === 2 && arguments.length >= 10 && ArrayBuffer.isView(bufPixels)) {
+      // WebGL2 srcOffset/srcLength overload: (…, view, srcOffset[, srcLength]).
+      bufPixels = applySrcOffset(ctx, bufPixels, arguments[9], arguments[10]);
+      if (bufPixels === null) return;
+    }
+    texImage2DBuffer(ctx, target, level, internalformat, width, height, border, format, type, bufPixels);
   };
 
   proto.texSubImage2D = function (
@@ -1976,7 +2025,13 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       texSubImage2DDOMWithDims(ctx, target, level, xoffset, yoffset, width, height, format, type, pixels);
       return;
     }
-    texSubImage2DBuffer(ctx, target, level, xoffset, yoffset, width, height, format, type, pixels ?? null);
+    let bufPixels: TexImageSourceArg = pixels ?? null;
+    if (ctx._version === 2 && arguments.length >= 10 && ArrayBuffer.isView(bufPixels)) {
+      // WebGL2 srcOffset/srcLength overload: (…, view, srcOffset[, srcLength]).
+      bufPixels = applySrcOffset(ctx, bufPixels, arguments[9], arguments[10]);
+      if (bufPixels === null) return;
+    }
+    texSubImage2DBuffer(ctx, target, level, xoffset, yoffset, width, height, format, type, bufPixels);
   };
 
   proto.copyTexImage2D = function (
@@ -2072,7 +2127,13 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
         texImage3DDOMWithDims(ctx, target, level, internalformat, width, height, depth, border, format, type, pixels);
         return;
       }
-      texImage3DBuffer(ctx, target, level, internalformat, width, height, depth, border, format, type, pixels ?? null);
+      let bufPixels: TexImageSourceArg = pixels ?? null;
+      if (arguments.length >= 11 && ArrayBuffer.isView(bufPixels)) {
+        // WebGL2 srcOffset/srcLength overload: (…, view, srcOffset[, srcLength]).
+        bufPixels = applySrcOffset(ctx, bufPixels, arguments[10], arguments[11]);
+        if (bufPixels === null) return;
+      }
+      texImage3DBuffer(ctx, target, level, internalformat, width, height, depth, border, format, type, bufPixels);
     };
 
     p.texSubImage3D = function (
@@ -2102,7 +2163,13 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
         texSubImage3DDOMWithDims(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
         return;
       }
-      texSubImage3DBuffer(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels ?? null);
+      let bufPixels: TexImageSourceArg = pixels ?? null;
+      if (arguments.length >= 12 && ArrayBuffer.isView(bufPixels)) {
+        // WebGL2 srcOffset/srcLength overload: (…, view, srcOffset[, srcLength]).
+        bufPixels = applySrcOffset(ctx, bufPixels, arguments[11], arguments[12]);
+        if (bufPixels === null) return;
+      }
+      texSubImage3DBuffer(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, bufPixels);
     };
 
     p.texStorage2D = function (
