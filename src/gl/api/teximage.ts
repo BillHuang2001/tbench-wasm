@@ -964,10 +964,37 @@ function svgImageDims(s: Record<string, unknown>): { width: number; height: numb
   return { width: w, height: h };
 }
 
+/**
+ * Visible (decoded frame) dimensions of an HTMLVideoElement, via the
+ * VideoFrame API. The element's videoWidth/videoHeight IDL properties can
+ * exceed the VISIBLE frame size (coded/padding rows — the CTS resource
+ * npot-video-1920x1080.mp4 reports videoHeight 1112 in Chromium while the
+ * visible frame is 1080); native uploads size the texture from the decoded
+ * frame's visible size, NOT from videoWidth/videoHeight (CTS
+ * npot-video-sizing.html expects the uploaded texture to be 1080 high).
+ * Returns null when VideoFrame is unavailable (Node, older browsers) or
+ * cannot be constructed for this source (not-ready/cross-origin) — callers
+ * fall back to the element properties.
+ */
+function videoVisibleDims(s: Record<string, unknown>): { width: number; height: number } | null {
+  const VF = (globalThis as { VideoFrame?: new (src: unknown) => unknown }).VideoFrame;
+  if (typeof VF !== 'function') return null;
+  try {
+    const vf = new VF(s);
+    const rect = (vf as { visibleRect?: { width: number; height: number } }).visibleRect;
+    if (rect && rect.width > 0 && rect.height > 0) return { width: rect.width, height: rect.height };
+  } catch {
+    // Fall through to the element properties.
+  }
+  return null;
+}
+
 function sourceDims(source: unknown): { width: number; height: number } | null {
   if (source === null || typeof source !== 'object') return null;
   const s = source as Record<string, unknown>;
   if (typeof s.videoWidth === 'number' && typeof s.readyState === 'number') {
+    const vis = videoVisibleDims(s);
+    if (vis !== null) return vis;
     return typeof s.videoHeight === 'number' ? { width: s.videoWidth, height: s.videoHeight } : null;
   }
   if (typeof s.naturalWidth === 'number') {
