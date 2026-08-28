@@ -1145,19 +1145,23 @@ function varyingMatchKey(v: { blockName: string | null; name: string }): string 
  *  fragment key (read side), sharing one (index, offset) — Program.varyings
  *  keeps ONE entry per vertex leaf. */
 function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayoutResult | { error: string } {
-  // INVARIANCE (GLSL ES 1.00 §4.6.4 "Invariance and linkage"): a matched
-  // varying must be invariant in BOTH stages or NEITHER. The invariant flag
-  // is the qualifier-form `invariant varying vec4 v;` (VaryingDecl.invariant,
-  // recorded by semantics) OR the short form `invariant v;` (an
-  // 'invariant-decl' AST node — semantics records no ShaderInfo effect for
-  // it, so the linker reads the AST). `#pragma STDGL invariant(all)` marks
-  // every OUTPUT of the stage invariant — the preprocessor DROPS pragma
-  // lines, so it is detected in the original source. The pragma affects ONLY
-  // outputs: in the vertex stage that is the varyings + gl_Position +
-  // gl_PointSize; in the fragment stage it is gl_FragColor/gl_FragData only,
-  // so fragment varyings (INPUTS) and gl_FragCoord/gl_PointCoord are NOT
-  // made invariant by it (shaders-with-invariance case 17: variant VS +
-  // pragma-only FS links).
+  // INVARIANCE matching: GLSL ES 1.00 §4.6.4 requires a matched varying to be
+  // invariant in BOTH stages or NEITHER (link error otherwise — CTS
+  // shaders-with-invariance.html cases 1-3/18). GLSL ES 3.00 §4.6.1 REMOVED
+  // the requirement: "an invariant output from one shader stage will still
+  // match an input of a subsequent stage without the input being declared as
+  // invariant" (CTS valid-invariant.html — VS invariant + FS variant must
+  // LINK). The invariant flag is the qualifier-form `invariant varying vec4
+  // v;` (VaryingDecl.invariant, recorded by semantics) OR the short form
+  // `invariant v;` (an 'invariant-decl' AST node — semantics records no
+  // ShaderInfo effect for it, so the linker reads the AST). `#pragma STDGL
+  // invariant(all)` marks every OUTPUT of the stage invariant — the
+  // preprocessor DROPS pragma lines, so it is detected in the original
+  // source. The pragma affects ONLY outputs: in the vertex stage that is the
+  // varyings + gl_Position + gl_PointSize; in the fragment stage it is
+  // gl_FragColor/gl_FragData only, so fragment varyings (INPUTS) and
+  // gl_FragCoord/gl_PointCoord are NOT made invariant by it
+  // (shaders-with-invariance case 17: variant VS + pragma-only FS links).
   const vsInvNames = invariantDeclNames(vs);
   const fsInvNames = invariantDeclNames(fs);
   const vsPragma = hasInvariantAllPragma(vs);
@@ -1191,7 +1195,10 @@ function layoutVaryings(vs: Shader, fs: Shader, limits: LinkLimits): VaryingLayo
     if (f.flat !== v.flat) {
       return { error: `linker: varying '${f.name}' flat qualifier mismatch` };
     }
-    if (invariantOf(f, 'fs') !== invariantOf(v, 'vs')) {
+    // GLSL ES 1.00 §4.6.4: invariance must MATCH between the stages (both
+    // invariant or both variant). ESSL 3.00 drops this rule (§4.6.1) — an
+    // invariant vertex output links with a variant fragment input.
+    if (vs.version === 100 && invariantOf(f, 'fs') !== invariantOf(v, 'vs')) {
       return { error: `linker: varying '${f.name}' invariance mismatch` };
     }
   }

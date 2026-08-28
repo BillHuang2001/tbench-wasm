@@ -220,6 +220,87 @@ const FLOAT_MAT4x3 = 0x8b6a;
 }
 
 /* ------------------------------------------------------------------ */
+/* 3. Invariance linking: ESSL 1.00 §4.6.4 vs ESSL 3.00 §4.6.1         */
+/* ------------------------------------------------------------------ */
+
+{
+  // ESSL 3.00 §4.6.1: "an invariant output from one shader stage will still
+  // match an input of a subsequent stage without the input being declared as
+  // invariant" — an invariant vertex output links with a VARIANT fragment
+  // input (CTS valid-invariant.html, all three forms). Pre-fix the linker
+  // rejected every form with "varying 'v_varying' invariance mismatch".
+  const vsSrcs: [string, string][] = [
+    [
+      'qualifier',
+      `#version 300 es
+       precision mediump float;
+       invariant out vec4 v_varying;
+       void main() { v_varying = vec4(0.0, 0.0, 0.0, 1.0); gl_Position = v_varying; }`,
+    ],
+    [
+      'separate statement',
+      `#version 300 es
+       precision mediump float;
+       out vec4 v_varying;
+       invariant v_varying;
+       void main() { v_varying = vec4(0.0, 0.0, 0.0, 1.0); gl_Position = v_varying; }`,
+    ],
+    [
+      'global pragma',
+      `#version 300 es
+       #pragma STDGL invariant(all)
+       precision mediump float;
+       out vec4 v_varying;
+       void main() { v_varying = vec4(0.0, 0.0, 0.0, 1.0); gl_Position = v_varying; }`,
+    ],
+  ];
+  const fs = compile(
+    `#version 300 es
+     precision mediump float;
+     in vec4 v_varying;
+     out vec4 my_color;
+     void main() { my_color = v_varying; }`,
+    'FRAGMENT',
+    300,
+  );
+  for (const [label, src] of vsSrcs) {
+    const vs = compile(src, 'VERTEX', 300);
+    const l = linkProgram(vs, fs);
+    check(l.ok, `ES 3.00 invariant VS (${label}) + variant FS links (${l.ok ? '' : l.log})`);
+  }
+  // ESSL 1.00 §4.6.4: "The invariance of varyings that are declared in both
+  // the vertex and fragment shaders must match" — the mismatch link error is
+  // version-100-only and must stay (shaders-with-invariance.html cases 1-3).
+  const vs100 = compile(
+    `invariant varying vec4 v_varying;
+     void main() { gl_Position = v_varying; }`,
+    'VERTEX',
+    100,
+  );
+  const fs100Variant = compile(
+    `precision mediump float;
+     varying vec4 v_varying;
+     void main() { gl_FragColor = v_varying; }`,
+    'FRAGMENT',
+    100,
+  );
+  const l100a = linkProgram(vs100, fs100Variant);
+  check(
+    !l100a.ok && l100a.log.includes("varying 'v_varying' invariance mismatch"),
+    `ES 1.00 invariant VS + variant FS still fails the link (${l100a.ok ? 'linked' : l100a.log})`,
+  );
+  const fs100Invariant = compile(
+    `precision mediump float;
+     invariant varying vec4 v_varying;
+     void main() { gl_FragColor = v_varying; }`,
+    'FRAGMENT',
+    100,
+  );
+  const l100b = linkProgram(vs100, fs100Invariant);
+  check(l100b.ok, `ES 1.00 invariant VS + invariant FS links (${l100b.ok ? '' : l100b.log})`);
+}
+
+/* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
 
