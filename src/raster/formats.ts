@@ -46,6 +46,20 @@ import {
   DEPTH_COMPONENT, DEPTH_STENCIL,
 } from './gl-enums';
 
+/**
+ * EXT_texture_norm16 internal formats (WebGL2 extension). gl-enums.ts has no
+ * entries for these (they are extension constants owned by gl/); raster only
+ * needs the numeric keys to register them in the shared registry.
+ */
+export const R16_EXT = 0x822a;
+export const RG16_EXT = 0x822c;
+export const RGB16_EXT = 0x8054;
+export const RGBA16_EXT = 0x805b;
+export const R16_SNORM_EXT = 0x8f98;
+export const RG16_SNORM_EXT = 0x8f99;
+export const RGB16_SNORM_EXT = 0x8f9a;
+export const RGBA16_SNORM_EXT = 0x8f9b;
+
 /** How a format's texels are stored in Surface.data. */
 export type StorageKind =
   | 'u8' | 'i8'          // Uint8Array / Int8Array
@@ -619,6 +633,8 @@ reg({ format: DEPTH24_STENCIL8, components: 1, storage: 'f32', isDepth: true, is
 // --- WebGL2 R ---
 regColor(R8, 'u8', P_U8, 1, { normalized: true });
 regColor(R8_SNORM, 'i8', P_I8, 1, { normalized: true, isSigned: true });
+regColor(R16_EXT, 'u16', P_U16, 1, { normalized: true });
+regColor(R16_SNORM_EXT, 'i16', P_I16, 1, { normalized: true, isSigned: true });
 regColor(R16F, 'f32', P_F32, 1, { isFloat: true });
 regColor(R32F, 'f32', P_F32, 1, { isFloat: true });
 regColor(R8UI, 'u8', P_I_U8, 1, { isInteger: true });
@@ -631,6 +647,8 @@ regColor(R32I, 'i32', P_I_I32, 1, { isInteger: true, isSigned: true });
 // --- WebGL2 RG ---
 regColor(RG8, 'u8', P_U8, 2, { normalized: true });
 regColor(RG8_SNORM, 'i8', P_I8, 2, { normalized: true, isSigned: true });
+regColor(RG16_EXT, 'u16', P_U16, 2, { normalized: true });
+regColor(RG16_SNORM_EXT, 'i16', P_I16, 2, { normalized: true, isSigned: true });
 regColor(RG16F, 'f32', P_F32, 2, { isFloat: true });
 regColor(RG32F, 'f32', P_F32, 2, { isFloat: true });
 regColor(RG8UI, 'u8', P_I_U8, 2, { isInteger: true });
@@ -643,6 +661,8 @@ regColor(RG32I, 'i32', P_I_I32, 2, { isInteger: true, isSigned: true });
 // --- WebGL2 RGB ---
 regColor(RGB8, 'u8', P_U8, 3, { normalized: true });
 regColor(RGB8_SNORM, 'i8', P_I8, 3, { normalized: true, isSigned: true });
+regColor(RGB16_EXT, 'u16', P_U16, 3, { normalized: true });
+regColor(RGB16_SNORM_EXT, 'i16', P_I16, 3, { normalized: true, isSigned: true });
 regColor(RGB16F, 'f32', P_F32, 3, { isFloat: true });
 regColor(RGB32F, 'f32', P_F32, 3, { isFloat: true });
 regColor(RGB8UI, 'u8', P_I_U8, 3, { isInteger: true });
@@ -655,6 +675,8 @@ regColor(RGB32I, 'i32', P_I_I32, 3, { isInteger: true, isSigned: true });
 // --- WebGL2 RGBA ---
 regColor(RGBA8, 'u8', P_U8, 4, { normalized: true });
 regColor(RGBA8_SNORM, 'i8', P_I8, 4, { normalized: true, isSigned: true });
+regColor(RGBA16_EXT, 'u16', P_U16, 4, { normalized: true });
+regColor(RGBA16_SNORM_EXT, 'i16', P_I16, 4, { normalized: true, isSigned: true });
 regColor(RGBA16F, 'f32', P_F32, 4, { isFloat: true });
 regColor(RGBA32F, 'f32', P_F32, 4, { isFloat: true });
 regColor(RGBA8UI, 'u8', P_I_U8, 4, { isInteger: true });
@@ -695,6 +717,7 @@ const RENDERBUFFER_FORMATS_1 = new Set<number>([
 ]);
 const RENDERBUFFER_FORMATS_2 = new Set<number>([
   R8, RG8, RGBA8, RGB10_A2, RGB10_A2UI, RGBA4, RGB5_A1, RGB565, SRGB8_ALPHA8,
+  R16_EXT, RG16_EXT, RGBA16_EXT, // EXT_texture_norm16 (RGB16_EXT + SNORM are NOT renderable)
   R16F, RG16F, RGBA16F, R32F, RG32F, RGBA32F, R11F_G11F_B10F, RGB9_E5,
   R8I, R8UI, RG8I, RG8UI, RGBA8I, RGBA8UI,
   R16I, R16UI, RG16I, RG16UI, RGBA16I, RGBA16UI,
@@ -816,13 +839,13 @@ export const ALL_INTERNAL_FORMATS: readonly GLenum[] = [
   // WebGL1 sized
   RGBA4, RGB5_A1, RGB565, DEPTH_COMPONENT16, STENCIL_INDEX8, DEPTH24_STENCIL8,
   // WebGL2 R
-  R8, R8_SNORM, R16F, R32F, R8UI, R8I, R16UI, R16I, R32UI, R32I,
+  R8, R8_SNORM, R16_EXT, R16_SNORM_EXT, R16F, R32F, R8UI, R8I, R16UI, R16I, R32UI, R32I,
   // WebGL2 RG
-  RG8, RG8_SNORM, RG16F, RG32F, RG8UI, RG8I, RG16UI, RG16I, RG32UI, RG32I,
+  RG8, RG8_SNORM, RG16_EXT, RG16_SNORM_EXT, RG16F, RG32F, RG8UI, RG8I, RG16UI, RG16I, RG32UI, RG32I,
   // WebGL2 RGB
-  RGB8, RGB8_SNORM, RGB16F, RGB32F, RGB8UI, RGB8I, RGB16UI, RGB16I, RGB32UI, RGB32I,
+  RGB8, RGB8_SNORM, RGB16_EXT, RGB16_SNORM_EXT, RGB16F, RGB32F, RGB8UI, RGB8I, RGB16UI, RGB16I, RGB32UI, RGB32I,
   // WebGL2 RGBA
-  RGBA8, RGBA8_SNORM, RGBA16F, RGBA32F, RGBA8UI, RGBA8I, RGBA16UI, RGBA16I,
+  RGBA8, RGBA8_SNORM, RGBA16_EXT, RGBA16_SNORM_EXT, RGBA16F, RGBA32F, RGBA8UI, RGBA8I, RGBA16UI, RGBA16I,
   RGBA32UI, RGBA32I,
   // WebGL2 packed / special
   RGB10_A2, RGB10_A2UI, R11F_G11F_B10F, RGB9_E5, SRGB8, SRGB8_ALPHA8,

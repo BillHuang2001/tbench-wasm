@@ -44,6 +44,8 @@ import {
   readU32At, readCompAt, packDepth24Stencil, halfToFloat, floatToHalf,
   unpack11, unpack10,
   P_I_U8, P_I_I8, P_I_U16, P_I_I16, P_I_U32, P_I_I32,
+  R16_EXT, RG16_EXT, RGB16_EXT, RGBA16_EXT,
+  R16_SNORM_EXT, RG16_SNORM_EXT, RGB16_SNORM_EXT, RGBA16_SNORM_EXT,
 } from './formats';
 import type { PixelFormatInfo, PerCompParams, StorageKind } from './formats';
 
@@ -296,8 +298,8 @@ function texImageDstAllowed(srcFormat: GLenum, srcType: GLenum): ReadonlySet<num
       switch (srcType) {
         case UNSIGNED_BYTE: return new Set([R8, R8UI]);
         case BYTE: return new Set([R8_SNORM, R8I]);
-        case UNSIGNED_SHORT: return new Set([R16UI]);
-        case SHORT: return new Set([R16I]);
+        case UNSIGNED_SHORT: return new Set([R16UI, R16_EXT]);
+        case SHORT: return new Set([R16I, R16_SNORM_EXT]);
         case UNSIGNED_INT: return new Set([R32UI]);
         case INT: return new Set([R32I]);
         case HALF_FLOAT: return new Set([R16F]);
@@ -308,8 +310,8 @@ function texImageDstAllowed(srcFormat: GLenum, srcType: GLenum): ReadonlySet<num
       switch (srcType) {
         case UNSIGNED_BYTE: return new Set([RG8, RG8UI]);
         case BYTE: return new Set([RG8_SNORM, RG8I]);
-        case UNSIGNED_SHORT: return new Set([RG16UI]);
-        case SHORT: return new Set([RG16I]);
+        case UNSIGNED_SHORT: return new Set([RG16UI, RG16_EXT]);
+        case SHORT: return new Set([RG16I, RG16_SNORM_EXT]);
         case UNSIGNED_INT: return new Set([RG32UI]);
         case INT: return new Set([RG32I]);
         case HALF_FLOAT: return new Set([RG16F]);
@@ -322,8 +324,8 @@ function texImageDstAllowed(srcFormat: GLenum, srcType: GLenum): ReadonlySet<num
         case BYTE: return new Set([RGB8_SNORM, RGB8I]);
         case UNSIGNED_SHORT_5_6_5: return new Set([RGB565, RGB]);
         case UNSIGNED_INT_2_10_10_10_REV: return new Set([RGB10_A2, RGB10_A2UI]);
-        case UNSIGNED_SHORT: return new Set([RGB16UI]);
-        case SHORT: return new Set([RGB16I]);
+        case UNSIGNED_SHORT: return new Set([RGB16UI, RGB16_EXT]);
+        case SHORT: return new Set([RGB16I, RGB16_SNORM_EXT]);
         case UNSIGNED_INT: return new Set([RGB32UI]);
         case INT: return new Set([RGB32I]);
         case HALF_FLOAT: return new Set([RGB16F]);
@@ -339,8 +341,8 @@ function texImageDstAllowed(srcFormat: GLenum, srcType: GLenum): ReadonlySet<num
         case UNSIGNED_SHORT_4_4_4_4: return new Set([RGBA4, RGBA]);
         case UNSIGNED_SHORT_5_5_5_1: return new Set([RGB5_A1, RGBA]);
         case UNSIGNED_INT_2_10_10_10_REV: return new Set([RGB10_A2, RGB10_A2UI]);
-        case UNSIGNED_SHORT: return new Set([RGBA16UI]);
-        case SHORT: return new Set([RGBA16I]);
+        case UNSIGNED_SHORT: return new Set([RGBA16UI, RGBA16_EXT]);
+        case SHORT: return new Set([RGBA16I, RGBA16_SNORM_EXT]);
         case UNSIGNED_INT: return new Set([RGBA32UI]);
         case INT: return new Set([RGBA32I]);
         case HALF_FLOAT: return new Set([RGBA16F]);
