@@ -829,6 +829,34 @@ function ensureImage(texture: WebGLTexture, target: GLenum): NonNullable<WebGLTe
   return texture._image;
 }
 
+/**
+ * Virtual texture size (mip-chain inference). The raster sampler derives the
+ * implicit LOD from img.width/height (the level-0 dims — the texture's VIRTUAL
+ * size); a texture that defines only levels > 0 (TEXTURE_BASE_LEVEL > 0, level
+ * 0 never uploaded) leaves them 0 and every sample lands on the magnification
+ * path (λ=0 → base level). The mip-chain invariant (level L dims = base >> L)
+ * lets us infer the level-0 dims from any defined level: `dims << level`.
+ * Level-0 uploads keep writing the ACTUAL dims. Only applies while level 0 is
+ * still undefined (dims 0). tex-mipmap-levels.html partial-level draw (base
+ * level 2: 8×8/4×4/2×2 → virtual 32×32 → λ = log2(32·½) = 4 → level 4).
+ */
+function inferVirtualSize(
+  img: NonNullable<WebGLTexture['_image']>,
+  level: number,
+  width: number,
+  height: number,
+  depth: number,
+): void {
+  if (level > 0 && img.width === 0 && img.height === 0) {
+    const scale = 2 ** level;
+    img.width = width * scale;
+    img.height = height * scale;
+    // TEXTURE_3D halves depth per level (2D_ARRAY keeps a constant layer
+    // count; cube faces are indexed separately and never use img.depth).
+    if (img.target === C.TEXTURE_3D) img.depth = depth * scale;
+  }
+}
+
 const isPow2 = (v: number): boolean => v > 0 && (v & (v - 1)) === 0;
 
 /**
@@ -1464,6 +1492,8 @@ export function uploadTexImage(
     img.width = width;
     img.height = height;
     img.depth = isCube ? 6 : depth;
+  } else {
+    inferVirtualSize(img, level, width, height, depth);
   }
   recordLevelOrigin(texture, level, format, type);
   copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, 0, 0, 0, explicitDims);
@@ -1651,6 +1681,8 @@ export function copyTexImage(
     img.width = width;
     img.height = height;
     img.depth = isCube ? 6 : 1;
+  } else {
+    inferVirtualSize(img, level, width, height, 1);
   }
   copyFromReadSurface(ctx, img.levels[level], cubeFaceIndex(target), spec, x, y, width, height);
   updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
@@ -1788,6 +1820,8 @@ export function compressedTexImage(
       img.width = width;
       img.height = height;
       img.depth = isCube ? 6 : depth;
+    } else {
+      inferVirtualSize(img, level, width, height, depth);
     }
   } else {
     // Partial (block-aligned) update: overwrite the byte range in place.
@@ -1815,7 +1849,9 @@ export function compressedTexImage(
 export function generateMipmap(ctx: WebGLRenderingContext, texture: WebGLTexture, target: GLenum): void {
   const img = texture._image;
   if (!img) return;
-  const base = img.levels[0];
+  const baseLevel = texture._params[C.TEXTURE_BASE_LEVEL] ?? 0;
+  const maxLevel = texture._params[C.TEXTURE_MAX_LEVEL] ?? 1000;
+  const base = img.levels[baseLevel];
   if (!base) return;
   const spec = specForImage(img);
   if (!spec) return;
@@ -1826,13 +1862,18 @@ export function generateMipmap(ctx: WebGLRenderingContext, texture: WebGLTexture
   // levels hold ENCODED values (the sampler decodes at sampling time). Alpha
   // is not sRGB-encoded and is never transformed.
   const useSRGB = spec.isSRGB;
-  const maxDim = Math.max(img.width, img.height, !isCube && !isArray ? img.depth : 1);
-  const levels = Math.floor(Math.log2(maxDim)) + 1;
+  // GLES 3.0 §3.8.14: levels base+1..q are (re)generated from the base level,
+  // where q = min(maxLevel, floor(log2(maxSize)) + baseLevel) and maxSize is
+  // the largest base-level dimension. Levels already defined inside that range
+  // (partial chains — tex-mipmap-levels.html) are OVERWRITTEN with content
+  // derived from the base level.
+  const maxDim = Math.max(base.width, base.height, !isCube && !isArray ? base.depth : 1);
+  const q = Math.min(maxLevel, Math.floor(Math.log2(maxDim)) + baseLevel);
   const out = new Float32Array(4);
-  let w = img.width;
-  let h = img.height;
-  let d = isCube ? 6 : img.depth;
-  for (let l = 1; l < levels; l++) {
+  let w = base.width;
+  let h = base.height;
+  let d = isCube ? 6 : base.depth;
+  for (let l = baseLevel + 1; l <= q; l++) {
     const nw = Math.max(1, w >> 1);
     const nh = Math.max(1, h >> 1);
     const nd = isArray ? d : Math.max(1, d >> 1);

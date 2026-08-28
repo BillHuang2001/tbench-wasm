@@ -29,7 +29,8 @@
  *    non-power-of-two base level (INVALID_OPERATION — NPOT textures have no
  *    mip chain); float formats need the linear-
  *    filter extensions (W1: OES_texture_float_linear / OES_texture_half_float_linear;
- *    W2: EXT_color_buffer_float; RGB9_E5 always rejected). Delegates to the
+ *    W2: 32F needs OES_texture_float_linear, 16F is core-filterable;
+ *    RGB9_E5 always rejected). Delegates to the
  *    engine's generateMipmap for the actual level building.
  */
 
@@ -446,17 +447,18 @@ export function installTexturesApi(proto: WebGLRenderingContext): void {
     }
     if (img.info.isFloat) {
       if (ctx._version === 2) {
-        // RGB9_E5 is never mipmap-generatable; the 16F formats are
-        // mipmap-generatable with either float extension (EXT_color_buffer_half_float
-        // makes them color-renderable → their mip chain must be buildable), all
-        // other float formats need EXT_color_buffer_float.
-        const is16F =
-          img.internalFormat === 0x822d /* R16F */ ||
-          img.internalFormat === 0x822f /* RG16F */ ||
-          img.internalFormat === 0x881a /* RGBA16F */;
-        const floatExtOK = ctx._extensions.has('EXT_color_buffer_float') ||
-          (is16F && ctx._extensions.has('EXT_color_buffer_half_float'));
-        if (img.internalFormat === RGB9_E5 || !floatExtOK) {
+        // GLES 3.0 §3.8.14: generateMipmap requires the base level to be
+        // texture-filterable. On WebGL2 the 16F formats (and R11F_G11F_B10F)
+        // are filterable in core; the 32F formats become filterable ONLY with
+        // OES_texture_float_linear (tex-mipmap-levels.html: RGBA32F fails
+        // with just EXT_color_buffer_float, succeeds once the _linear
+        // extension is enabled); RGB9_E5 is never mipmap-generatable.
+        const is32F =
+          img.internalFormat === 0x822e /* R32F */ ||
+          img.internalFormat === 0x8230 /* RG32F */ ||
+          img.internalFormat === 0x8815 /* RGB32F */ ||
+          img.internalFormat === 0x8814 /* RGBA32F */;
+        if (img.internalFormat === RGB9_E5 || (is32F && !ctx._extensions.has('OES_texture_float_linear'))) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
