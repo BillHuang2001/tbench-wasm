@@ -376,6 +376,90 @@ function runVertex(src: string, opts?: { version?: 100 | 300 }): RunResult {
 }
 
 /* ------------------------------------------------------------------ */
+/* 22. ogles functions collision: CALLEE local named like a CALLER     */
+/*     local that is passed as an ARG (functions.ts per-call-site      */
+/*     locals — regresses the 9 black-rendering ogles functions pages: */
+/*     functions_057_to_126.html). Before the fix the callee's `var`   */
+/*     reused the caller's JS name, and IIFE hoisting shadowed the arg */
+/*     materialization read with `undefined` → is_all(ret,true) got a  */
+/*     garbage arg → gray stayed 0 (black pixels).                     */
+/* ------------------------------------------------------------------ */
+
+{
+  const r = runVertex(
+    `bvec4 function(in bvec4 par);
+     bool is_all(const in bvec4 par, const in bool value);
+     void set_all(out bvec4 par, const in bool value);
+     void main(void) {
+       bvec4 par = bvec4(true, true, true, true);
+       bvec4 ret = bvec4(false, false, false, false);
+       ret = function(par);
+       if (is_all(par, true) && is_all(ret, true)) { gl_Position = vec4(1.0); }
+       else { gl_Position = vec4(0.0); }
+     }
+     bvec4 function(in bvec4 par) {
+       if (is_all(par, true)) { set_all(par, false); return bvec4(true, true, true, true); }
+       else { return bvec4(false, false, false, false); }
+     }
+     bool is_all(const in bvec4 par, const in bool value) {
+       bool ret = true;
+       if (par[0] != value) ret = false;
+       if (par[1] != value) ret = false;
+       if (par[2] != value) ret = false;
+       if (par[3] != value) ret = false;
+       return ret;
+     }
+     void set_all(out bvec4 par, const in bool value) {
+       par[0] = value; par[1] = value; par[2] = value; par[3] = value;
+     }`,
+    { version: 300 },
+  );
+  check(
+    r.ctx.out.position[0] === 1,
+    `ogles collision (callee local 'ret' vs caller arg 'ret'): white path (got ${r.ctx.out.position[0]})`,
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 23. nested call: f's local x passed as ARG to g, which declares its */
+/*     own local x (resolveLocal's enclosing-frame fallback). Before   */
+/*     the fix the innermost frame's `localNames` short-circuited to   */
+/*     locals_, missing f's per-call-site x → `unknown identifier` or  */
+/*     a hoisted-undefined arg.                                        */
+/* ------------------------------------------------------------------ */
+
+{
+  const r = runVertex(
+    `float g(float b) { float x = b * 2.0; return x; }
+     float f(float a) { float x = a * 3.0; return g(x) + x; }
+     void main() { gl_Position.x = f(1.0); }`,
+  );
+  check(r.ctx.out.position[0] === 9, `nested same-named locals: f(1.0) === 9 (got ${r.ctx.out.position[0]})`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 24. same-named ARRAY local in caller and callee (per-call-site      */
+/*     scratch). Before the fix inlined-body array locals shared one   */
+/*     scratch region with the caller (silent aliasing).               */
+/* ------------------------------------------------------------------ */
+
+{
+  const r = runVertex(
+    `float sum2(float a[2]) { float x[2]; x[0] = a[0]; x[1] = a[1]; return x[0] + x[1]; }
+     void main() {
+       float x[2]; x[0] = 1.0; x[1] = 2.0;
+       float y[2]; y[0] = 3.0; y[1] = 4.0;
+       if (sum2(x) == 3.0 && sum2(y) == 7.0 && x[0] == 1.0 && y[1] == 4.0) { gl_Position.x = 1.0; }
+       else { gl_Position.x = 0.0; }
+     }`,
+  );
+  check(
+    r.ctx.out.position[0] === 1,
+    `same-named array locals (caller+callee, 2 call sites) don't alias (got ${r.ctx.out.position[0]})`,
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
 

@@ -182,27 +182,51 @@ function emitDeclStmt(s: DeclStmt, env: CodegenEnv, out: string[]): void {
   for (const d of s.declarators) {
     if (d.name === '') continue; // parser error-recovery placeholder
     const type = declaratorType(base, d);
-    const existing = env.lookupLocal(d.name);
+    // Inlined-body locals first: the active frame materializes them with
+    // per-call-site unique JS names (functions.ts), so a callee local can
+    // NEVER alias a caller's same-named local (ogles functions pages — the
+    // reuse path below would otherwise share the caller's JS names and the
+    // IIFE's `var` hoisting would shadow the caller's values).
+    const frameLv = env.frameLocal(d.name, type);
     let lv: LocalVar;
-    if (existing !== null) {
-      // Sibling-scope re-declaration: reuse the JS names / scratch block —
-      // sibling scopes are disjoint in time, the initializer re-initializes.
-      if (!typeEquals(existing.type, type)) {
-        if (existing.kind === 'scratch') {
+    if (frameLv !== null) {
+      // Sibling-scope re-declaration inside the same inlined body: reuse the
+      // frame's per-call-site var (same checks as the locals_ path below).
+      if (!typeEquals(frameLv.type, type)) {
+        if (frameLv.kind === 'scratch') {
           throw new Error(
             `codegen: sibling re-declaration of '${d.name}' with a different array type is unsupported`,
           );
         }
-        if (flatComponents(existing.type) < flatComponents(type)) {
+        if (flatComponents(frameLv.type) < flatComponents(type)) {
           throw new Error(
             `codegen: sibling re-declaration of '${d.name}' with a wider type is unsupported`,
           );
         }
       }
-      lv = existing;
+      lv = frameLv;
     } else {
-      env.declareLocal(d.name, type);
-      lv = env.lookupLocal(d.name)!;
+      const existing = env.lookupLocal(d.name);
+      if (existing !== null) {
+        // Sibling-scope re-declaration: reuse the JS names / scratch block —
+        // sibling scopes are disjoint in time, the initializer re-initializes.
+        if (!typeEquals(existing.type, type)) {
+          if (existing.kind === 'scratch') {
+            throw new Error(
+              `codegen: sibling re-declaration of '${d.name}' with a different array type is unsupported`,
+            );
+          }
+          if (flatComponents(existing.type) < flatComponents(type)) {
+            throw new Error(
+              `codegen: sibling re-declaration of '${d.name}' with a wider type is unsupported`,
+            );
+          }
+        }
+        lv = existing;
+      } else {
+        env.declareLocal(d.name, type);
+        lv = env.lookupLocal(d.name)!;
+      }
     }
     if (d.init === null) {
       // Keep the declaration explicit even when uninitialized (flat locals

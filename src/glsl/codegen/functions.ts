@@ -43,14 +43,23 @@
  * top-down, so same-named params/locals of nested calls never collide
  * (locals_ alone can hold only ONE entry per GLSL name).
  *
+ * The function's OWN body locals get the SAME per-call-site treatment
+ * (env.frameLocal, consulted by statements.ts's emitDeclStmt BEFORE the
+ * locals_ reuse path): the first declaration of each local inside the
+ * inlined body materializes it through makeParamLocal with the call site's
+ * `<name>$c<N>` suffix, so a callee local can never alias a caller's
+ * same-named local (ogles functions pages — without this, the shared
+ * locals_ registration made the callee's `var` shadow the caller's values
+ * via IIFE hoisting) and nested same-named locals never share scratch.
+ * Sibling-scope re-declarations inside one body reuse the frame's var.
+ *
  * KNOWN LIMITATIONS (reported):
- * - Same-named LOCALS of different types in different functions: statements.ts
- *   reuses the first registration (locals_ is keyed by GLSL name); a wider
- *   re-declaration throws a clear link-time error. Same-typed reuse is safe
- *   (each inline has its own IIFE var scope).
- * - Nested same-named ARRAY locals share one scratch region (silent aliasing).
+ * - A local declared in DIFFERENT sibling scopes of one inlined body with a
+ *   WIDER type than the first declaration throws a clear link-time error
+ *   (same rule as the locals_ path — the frame var keeps the first type).
  * - Call-site frames are NOT visible to statements.ts's decl-reuse path
- *   (lookupLocal stays locals_-only by design — see env.resolveLocal).
+ *   (lookupLocal stays locals_-only by design — see env.resolveLocal;
+ *   emitDeclStmt checks env.frameLocal first).
  */
 import type {
   CompoundStmt,
@@ -360,7 +369,7 @@ function inlineCall(
       );
     }
   }
-  const frame = env.pushParamFrame();
+  const frame = env.pushParamFrame(ctx.suffix);
   try {
     for (const n of fnLocalNames) frame.localNames.add(n);
 

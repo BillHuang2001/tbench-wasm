@@ -331,10 +331,21 @@ export interface LocalVar {
 
 /** One inlined call's scope (C3b): the call's param LocalVars (per-call-site
  *  unique JS names) + the function's local names (pre-scanned from its body,
- *  so an inner local shadows an outer same-named param in resolveLocal). */
+ *  so an inner local shadows an outer same-named param in resolveLocal) +
+ *  the function's OWN locals, materialized per call site with unique JS
+ *  names (frameLocal — a callee local can never alias a caller's same-named
+ *  local, and nested same-named locals never share scratch). */
 export interface ParamFrame {
   params: Map<string, LocalVar>;
   localNames: Set<string>;
+  /** Per-call-site LocalVars for the function's own body locals, keyed by
+   *  GLSL name. Created lazily by frameLocal at each declaration statement
+   *  (decl-before-use ⇒ the entry always exists before any read); sibling
+   *  re-declarations reuse the cached entry. */
+  locals: Map<string, LocalVar>;
+  /** The call site's JS-name suffix generator (the inliner's ctx.suffix).
+   *  null for frames created without one (no such callers today). */
+  suffix: (() => string) | null;
 }
 
 /** Struct member → relative flat offset (within the struct). */
@@ -707,9 +718,16 @@ export class CodegenEnv {
    *  never collide (locals_ alone cannot hold two entries per GLSL name). */
   private paramFrames_: ParamFrame[] = [];
 
-  /** Push a frame for one inlined call (the inliner pops it after the body). */
-  pushParamFrame(): ParamFrame {
-    const frame: ParamFrame = { params: new Map(), localNames: new Set() };
+  /** Push a frame for one inlined call (the inliner pops it after the body).
+   *  `suffix` is the call site's JS-name suffix generator — frameLocal uses
+   *  it to give the function's OWN locals unique per-call-site JS names. */
+  pushParamFrame(suffix: (() => string) | null = null): ParamFrame {
+    const frame: ParamFrame = {
+      params: new Map(),
+      localNames: new Set(),
+      locals: new Map(),
+      suffix,
+    };
     this.paramFrames_.push(frame);
     return frame;
   }
@@ -766,17 +784,53 @@ export class CodegenEnv {
   }
 
   /**
+   * The per-call-site LocalVar for a local declared inside an INLINED
+   * function body (statements.ts's emitDeclStmt consults this BEFORE the
+   * locals_ reuse path — a callee local must never alias a caller's
+   * same-named local, even when the types differ). Returns null when the
+   * innermost frame does not declare `name` (→ the caller falls back to
+   * locals_).
+   *
+   * The var is created lazily on the FIRST declaration (unique JS names via
+   * the frame's per-call-site suffix, per-call-site scratch for arrays) and
+   * cached for sibling-scope re-declarations — mirror of makeParamLocal's
+   * naming/scratch machinery, so dual-mode dx/dy triples and struct member
+   * offsets come for free.
+   */
+  frameLocal(name: string, type: GLSLType): LocalVar | null {
+    const frame = this.paramFrames_[this.paramFrames_.length - 1];
+    if (!frame || !frame.localNames.has(name) || frame.suffix === null) return null;
+    let lv = frame.locals.get(name);
+    if (lv === undefined) {
+      lv = this.makeParamLocal(name, type, frame.suffix());
+      frame.locals.set(name, lv);
+    }
+    return lv;
+  }
+
+  /**
    * Resolve an identifier for READS: active param frames first (innermost
-   * frame's params, then its locals — an inner local shadows an outer
-   * param), then declared locals. Declarations use lookupLocal (locals_
-   * only — statements.ts's sibling re-declaration path must not see frames).
+   * frame's params, then its per-call-site locals — an inner local shadows
+   * an outer param), then declared locals. Declarations use lookupLocal
+   * (locals_ only — statements.ts's sibling re-declaration path must not
+   * see frames).
+   *
+   * Frame locals are materialized lazily (frameLocal) at their declaration
+   * statement, which precedes every read in valid GLSL (decl-before-use).
+   * A read of a name the innermost function DECLARES but has not materialized
+   * yet therefore refers to an ENCLOSING scope — the reachable case is
+   * nested-call argument materialization (`g(x)` inside f, where g declares a
+   * local x: the arg x is f's x, read while g's frame is already active) —
+   * so the search continues outward through the outer frames and locals_.
    */
   resolveLocal(name: string): LocalVar | null {
     for (let i = this.paramFrames_.length - 1; i >= 0; i--) {
       const f = this.paramFrames_[i];
       const p = f.params.get(name);
       if (p) return p;
-      if (f.localNames.has(name)) return this.locals_.get(name) ?? null;
+      const l = f.locals.get(name);
+      if (l) return l;
+      if (f.localNames.has(name)) continue; // inner fn declares it; not yet materialized → outer scopes
     }
     return this.locals_.get(name) ?? null;
   }
@@ -889,11 +943,18 @@ export class CodegenEnv {
   ensureDynScratch(name: string): { base: number; int: boolean; copyIn: string[]; copyOut: string[] } {
     let lv = this.locals_.get(name);
     if (!lv) {
-      // Frame params (inlined calls) live outside locals_ — resolve them too.
+      // Frame params AND per-call-site locals (inlined calls) live outside
+      // locals_ — resolve them too.
       for (let i = this.paramFrames_.length - 1; i >= 0; i--) {
-        const p = this.paramFrames_[i].params.get(name);
+        const f = this.paramFrames_[i];
+        const p = f.params.get(name);
         if (p) {
           lv = p;
+          break;
+        }
+        const l = f.locals.get(name);
+        if (l) {
+          lv = l;
           break;
         }
       }
