@@ -84,8 +84,10 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
     }
     const i = pname - DRAW_BUFFER0;
     if (s.drawFramebuffer === null) {
+      // Storage is normalized to attachment indices ([COLOR_ATTACHMENT0] for
+      // BACK, [NONE], or [] = no color buffers) — report the spec-visible value.
       const db0 = s.drawBuffers[0];
-      return db0 === NONE ? NONE : BACK;
+      return db0 === NONE || db0 === undefined ? NONE : BACK;
     }
     return s.drawBuffers[i] ?? NONE;
   }

@@ -722,7 +722,6 @@ interface AttribExtraction {
   dv: DataView;
   typeSize: number;
   stride: number;
-  colOffset: number;
   divisor: number;
   integer: boolean;
   unsigned: boolean;
@@ -794,7 +793,6 @@ function buildAttribs(
       const elemCount = a.divisor > 0
         ? Math.ceil(req.instanceCount / a.divisor)
         : req.count;
-      const colOffset = col * (dims ? dims.rows * typeSize : 0);
       const need = elemCount * comps;
       const integer = a.integer;
       const unsigned = integer && (a.type === C1.UNSIGNED_BYTE || a.type === C1.UNSIGNED_SHORT || a.type === C1.UNSIGNED_INT);
@@ -802,7 +800,7 @@ function buildAttribs(
       totals[pool] += need;
       extract.push({
         l, pool, need, elemCount, comps,
-        data, dv: new DataView(data), typeSize, stride, colOffset,
+        data, dv: new DataView(data), typeSize, stride,
         divisor: a.divisor, integer, unsigned, normalized: a.normalized,
         aSize: a.size, aType: a.type, aOffset: a.offset,
       });
@@ -816,7 +814,7 @@ function buildAttribs(
   // Pass 2 (fill): cumulative per-pool cursor (element units, reset per draw).
   let floatBase = 0, intBase = 0, uintBase = 0;
   for (const ex of extract) {
-    const { l, pool, need, elemCount, comps, data, dv, typeSize, stride, colOffset,
+    const { l, pool, need, elemCount, comps, data, dv, typeSize, stride,
             divisor, integer, unsigned, normalized, aSize, aType, aOffset } = ex;
     if (integer) {
       // raw integer path (vertexAttribIPointer)
@@ -827,7 +825,7 @@ function buildAttribs(
       if (unsigned) uintBase += need; else intBase += need;
       for (let e = 0; e < elemCount; e++) {
         const element = divisor > 0 ? e : (indices ? indices[e] : req.firstOrOffset + e);
-        const byteOff = aOffset + element * stride + colOffset;
+        const byteOff = aOffset + element * stride;
         for (let c = 0; c < comps; c++) {
           let v = 0;
           if (c < aSize && byteOff + c * typeSize + typeSize <= data.byteLength) {
@@ -843,7 +841,7 @@ function buildAttribs(
       floatBase += need;
       for (let e = 0; e < elemCount; e++) {
         const element = divisor > 0 ? e : (indices ? indices[e] : req.firstOrOffset + e);
-        const byteOff = aOffset + element * stride + colOffset;
+        const byteOff = aOffset + element * stride;
         for (let c = 0; c < comps; c++) {
           let v = 0;
           if (c < aSize && byteOff + c * typeSize + typeSize <= data.byteLength) {
