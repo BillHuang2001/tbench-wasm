@@ -237,7 +237,7 @@ function parsePostfixExpr(p: Parser): Expr {
       e = { kind: 'call', callee: e, args, loc: e.loc };
     } else if (t.text === '++' || t.text === '--') {
       p.next();
-      e = { kind: 'unary', op: t.text, operand: e, loc: e.loc };
+      e = { kind: 'unary', op: t.text, operand: e, loc: e.loc, postfix: true };
     } else {
       break;
     }

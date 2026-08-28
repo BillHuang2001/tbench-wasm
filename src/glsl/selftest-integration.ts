@@ -864,6 +864,111 @@ let uboDual: Program | null = null;
   }
 }
 
+/* 10. Postfix ++/-- semantics: result = OLD value, operand ±1          */
+/* ================================================================== */
+
+{
+  /** Compile a 1.00 vertex shader (fragment = trivial pass-through pair),
+   *  link, run once, return ctx.out.position. */
+  const runVertexPos = (src: string, version: 100 | 300 = 100): Float32Array => {
+    const vs = compile(src, 'VERTEX', version);
+    const fs = compile(
+      version === 100
+        ? `precision mediump float; void main() { gl_FragColor = vec4(0.0); }`
+        : `#version 300 es\nprecision mediump float; out vec4 o; void main() { o = vec4(0.0); }`,
+      'FRAGMENT',
+      version,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `postfix pair links (${l.ok ? '' : l.log})`);
+    if (!l.ok) return new Float32Array(0);
+    const p = l.program;
+    const vctx = vertexCtx(p);
+    p.vertex.run(vctx);
+    return vctx.out.position;
+  };
+
+  // The exact CTS ogles operators repro: int k = m++; → k=23, m=24.
+  {
+    const pos = runVertexPos(`void main() { int m = 23; int k = m++; gl_Position = vec4(float(k), float(m), 0.0, 1.0); }`);
+    check(pos[0] === 23 && pos[1] === 24, `postfix ++: k=23, m=24 (got ${pos[0]}, ${pos[1]})`);
+  }
+  {
+    const pos = runVertexPos(`void main() { int m = 23; int k = ++m; gl_Position = vec4(float(k), float(m), 0.0, 1.0); }`);
+    check(pos[0] === 24 && pos[1] === 24, `prefix ++: k=24, m=24 (got ${pos[0]}, ${pos[1]})`);
+  }
+  {
+    const pos = runVertexPos(`void main() { int m = 23; int k = m--; gl_Position = vec4(float(k), float(m), 0.0, 1.0); }`);
+    check(pos[0] === 23 && pos[1] === 22, `postfix --: k=23, m=22 (got ${pos[0]}, ${pos[1]})`);
+  }
+  {
+    const pos = runVertexPos(`void main() { int m = 23; int k = --m; gl_Position = vec4(float(k), float(m), 0.0, 1.0); }`);
+    check(pos[0] === 22 && pos[1] === 22, `prefix --: k=22, m=22 (got ${pos[0]}, ${pos[1]})`);
+  }
+  // Two postfixes in ONE expression: (m++) + (m++) = 23 + 24 = 47, m = 25.
+  {
+    const pos = runVertexPos(`void main() { int m = 23; int y = (m++) + (m++); gl_Position = vec4(float(y), float(m), 0.0, 1.0); }`);
+    check(pos[0] === 47 && pos[1] === 25, `(m++)+(m++): y=47, m=25 (got ${pos[0]}, ${pos[1]})`);
+  }
+  // Postfix in an array index: a[i++] reads a[old i], then i += 1.
+  {
+    const pos = runVertexPos(`void main() {
+      int a[3]; a[0] = 10; a[1] = 20; a[2] = 30;
+      int i = 1;
+      int v = a[i++];
+      int w = a[i++];
+      gl_Position = vec4(float(v), float(w), float(i), 1.0);
+    }`);
+    check(pos[0] === 20 && pos[1] === 30 && pos[2] === 3, `a[i++]: v=20, w=30, i=3 (got ${pos[0]}, ${pos[1]}, ${pos[2]})`);
+  }
+  // Postfix in a call argument.
+  {
+    const pos = runVertexPos(`int twice(int x) { return x * 2; }
+      void main() { int m = 5; int r = twice(m++); gl_Position = vec4(float(r), float(m), 0.0, 1.0); }`);
+    check(pos[0] === 10 && pos[1] === 6, `twice(m++): r=10, m=6 (got ${pos[0]}, ${pos[1]})`);
+  }
+  // Postfix in loop conditions (while + do-while bodies).
+  {
+    const pos = runVertexPos(`void main() {
+      int s = 0; int i = 0;
+      while (i++ < 4) s += i;
+      gl_Position = vec4(float(s), float(i), 0.0, 1.0);
+    }`);
+    check(pos[0] === 10 && pos[1] === 5, `while (i++ < 4): s=10, i=5 (got ${pos[0]}, ${pos[1]})`);
+  }
+  {
+    const pos = runVertexPos(`void main() {
+      int s = 0; int i = 0;
+      do { s += i; } while (i++ < 4);
+      gl_Position = vec4(float(s), float(i), 0.0, 1.0);
+    }`);
+    check(pos[0] === 10 && pos[1] === 5, `do { s+=i; } while (i++ < 4): s=10, i=5 (got ${pos[0]}, ${pos[1]})`);
+  }
+  // Float postfix/prefix.
+  {
+    const pos = runVertexPos(`void main() { float t = 1.5; float f = t++; gl_Position = vec4(f, t, 0.0, 1.0); }`);
+    check(pos[0] === 1.5 && pos[1] === 2.5, `float postfix ++: f=1.5, t=2.5 (got ${pos[0]}, ${pos[1]})`);
+  }
+  {
+    const pos = runVertexPos(`void main() { float t = 1.5; float f = ++t; gl_Position = vec4(f, t, 0.0, 1.0); }`);
+    check(pos[0] === 2.5 && pos[1] === 2.5, `float prefix ++: f=2.5, t=2.5 (got ${pos[0]}, ${pos[1]})`);
+  }
+  // uint postfix (ES 3.00).
+  {
+    const pos = runVertexPos(
+      `#version 300 es
+       void main() { uint m = 24u; uint k = m--; gl_Position = vec4(float(k), float(m), 0.0, 1.0); }`,
+      300,
+    );
+    check(pos[0] === 24 && pos[1] === 23, `uint postfix --: k=24, m=23 (got ${pos[0]}, ${pos[1]})`);
+  }
+  // Postfix on a swizzle lvalue: result = old component values.
+  {
+    const pos = runVertexPos(`void main() { vec2 t = vec2(1.0, 2.0); vec2 f = t.xy++; gl_Position = vec4(f.x, f.y + t.x * 10.0 + t.y, 0.0, 1.0); }`);
+    check(pos[0] === 1.0 && pos[1] === 2.0 + 2.0 * 10.0 + 3.0, `vec2 postfix swizzle: f=(1,2), t=(2,3) (got ${pos[0]}, ${pos[1]})`);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
