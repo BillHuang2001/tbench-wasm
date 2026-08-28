@@ -570,46 +570,50 @@ export function varyingVertexAccess(type: GLSLType, offset: number, dyn: DynTerm
 }
 
 /* ------------------------------------------------------------------ */
-/* Bit-preserving UINT varying pack (TF-capture bit-exactness)         */
+/* Bit-preserving INT/UINT varying pack (TF-capture bit-exactness)     */
 /* ------------------------------------------------------------------ */
 
 /**
- * UINT varyings pack their 32-bit VALUE's BIT PATTERN into the float32
- * record cell (`R.u2f`) instead of the float32-rounded value: the gl TF
- * capture (draw.ts captureTransformFeedback) copies the record bits RAW
- * into the TF buffer, so a rounded float corrupts getBufferSubData reads
- * of uint32s > 2^24 (CTS get-buffer-sub-data-validity.html). The fragment
- * side and vertex read-backs unpack via `R.f2u` (the record's float32 bits
- * are the true uint32 bits; flat integral varyings copy bit-exact through
- * the raster).
- *
- * INT varyings are deliberately NOT packed: the int32 sign bit is the
- * float32 sign bit, so small negative ints land on exponent-0xFF (NaN) bit
- * patterns and CORRUPT in the Float32Array store — ints keep float32-value
- * packing (exact for |v| < 2^24, rounding beyond — unchanged behavior).
- * UINT NaN-range patterns (0x7F800000..0x7FFFFFFF, 0xFF800000..0xFFFFFFFF)
- * likewise corrupt in the store: a documented limitation of the fixed
- * Float32 record (they were float32-rounded before the pack — never exact).
+ * INT/UINT varyings pack their 32-bit VALUE's BIT PATTERN into the float32
+ * record cell (`R.u2f`) instead of the float32-rounded value: values > 2^24
+ * (e.g. gl_VertexID = 0x7FFFFFFD) would otherwise round in the record and
+ * corrupt fragment reads and vertex read-backs (CTS vertex-id.html). The
+ * fragment side and vertex read-backs unpack via `R.f2u` (uint) / `R.f2i`
+ * (int32 reinterpret) — the record's float32 bits are the true 32-bit
+ * pattern; integral varyings are flat (GLSL ES 3.00 §4.3.6, enforced at
+ * semantics — VaryingInfo.flat is implied for integral types) so the raster
+ * copies cells bit-exact with no interpolation. Writing a signed int to the
+ * Uint32Array view wraps via ToUint32 (two's-complement bits are exact), so
+ * one `R.u2f` write serves both int and uint. NaN-pattern payloads (exponent
+ * 0xFF, e.g. 0x7FFFFFFD / 0xFFFFFFFF) survive the Float32Array record
+ * round-trip bit-exact in V8 (Node + headless Chromium — pinned by
+ * selftest-uint-varying.ts section 7).
  */
-/** Unpacked read of a packed cell: stored float32 bits → uint32 JS number. */
-export function unpackVaryingCell(cell: string): string {
-  return `R.f2u(${cell})`;
+/** Unpacked read of a packed cell: stored float32 bits → int32/uint32 JS
+ *  number (`signed` selects the int32 reinterpret, uint32 otherwise). */
+export function unpackVaryingCell(cell: string, signed: boolean): string {
+  return signed ? `R.f2i(${cell})` : `R.f2u(${cell})`;
 }
 
-/** Packed write of one component: `(cell = R.u2f(rv), R.f2u(cell))` — the
- *  expression's value is the assigned uint (the cell holds its bit pattern). */
-export function packVaryingWrite(cell: string, rv: string): string {
-  return `(${cell} = R.u2f(${rv}), ${unpackVaryingCell(cell)})`;
+/** Packed write of one component: `(cell = R.u2f(rv), <unpack>(cell))` — the
+ *  expression's value is the assigned value (the cell holds its bit pattern). */
+export function packVaryingWrite(cell: string, rv: string, signed: boolean): string {
+  return `(${cell} = R.u2f(${rv}), ${unpackVaryingCell(cell, signed)})`;
 }
 
 /** Packed compound-assignment write of one component (mirrors compoundOp's
- *  uint formulas — `*` uses Math.imul, plain JS `*` loses low bits above
- *  2^53): unpack the old value, apply the op with the uint `>>> 0` wrap,
- *  repack; the expression's value is the unpacked post-write cell read. */
-export function packVaryingCompound(op: string, cell: string, rv: string): string {
-  const un = unpackVaryingCell(cell);
+ *  int/uint formulas — `*` uses Math.imul, plain JS `*` loses low bits above
+ *  2^53): unpack the old value, apply the op with the int32 `| 0` (signed) or
+ *  uint `>>> 0` (unsigned) wrap, repack; the expression's value is the
+ *  unpacked post-write cell read. `/` (int truncates toward zero, uint
+ *  floors) and `%` (int sign-of-dividend, uint unsigned) and `>>` (int
+ *  arithmetic, uint logical) diverge between the families; `+ - * << & | ^`
+ *  are bit-identical. */
+export function packVaryingCompound(op: string, cell: string, rv: string, signed: boolean): string {
+  const un = unpackVaryingCell(cell, signed);
   const inner = op === '*' ? `Math.imul(${un}, ${rv})` : `((${un}) ${op} (${rv}))`;
-  return `(${cell} = R.u2f((${inner}) >>> 0), ${un})`;
+  const wrap = signed ? '| 0' : '>>> 0';
+  return `(${cell} = R.u2f((${inner}) ${wrap}), ${un})`;
 }
 
 /** Fragment varying read: ctx.varyings[index].v[...] (C5 overrides via env.varyingRead). */
@@ -623,9 +627,11 @@ export function varyingFragmentRead(
 ): string {
   const comp = dyn ? `(${dyn.temp}) * ${dyn.stride} + ${c}` : String(c);
   const s = env.varyingRead(index, comp);
-  // Packed uint varyings (see packVaryingWrite): the cell holds the value's
-  // bit pattern — unpack to the uint value.
-  return isUintType(type) ? unpackVaryingCell(s) : s;
+  // Packed int/uint varyings (see packVaryingWrite): the cell holds the
+  // value's bit pattern — unpack to the int32/uint32 value.
+  if (isUintType(type)) return unpackVaryingCell(s, false);
+  if (isIntType(type)) return unpackVaryingCell(s, true);
+  return s;
 }
 
 /** Declared per-location component count of an attribute type: vector → size,
@@ -749,9 +755,15 @@ function structPathRead(
         case 'varying': {
           const vl = env.lookupVarying(subKey);
           if (!vl) throw new Error(`codegen: missing varying layout for '${subKey}'`);
-          return env.stage === 'VERTEX'
-            ? varyingVertexAccess(m.type, vl.offset, dyn, c - off)
-            : varyingFragmentRead(env, m.type, vl.index, vl.elemComponents, dyn, c - off);
+          if (env.stage === 'VERTEX') {
+            // Vertex read-back of a packed int/uint leaf (see packVaryingWrite):
+            // the cell holds the value's bit pattern — unpack to the value.
+            const s = varyingVertexAccess(m.type, vl.offset, dyn, c - off);
+            if (isUintType(m.type)) return unpackVaryingCell(s, false);
+            if (isIntType(m.type)) return unpackVaryingCell(s, true);
+            return s;
+          }
+          return varyingFragmentRead(env, m.type, vl.index, vl.elemComponents, dyn, c - off);
         }
       }
     }
@@ -1377,9 +1389,11 @@ export function globalPathRef(env: CodegenEnv, info: GlobalInfo, type: GLSLType)
           true,
           (c) => {
             const s = varyingPathRead(env, info.key, type, null, c);
-            // Packed uint varying read-back (see packVaryingWrite): the cell
-            // holds the value's bit pattern — unpack to the uint value.
-            return isUintType(type) ? unpackVaryingCell(s) : s;
+            // Packed int/uint varying read-back (see packVaryingWrite): the
+            // cell holds the value's bit pattern — unpack to the value.
+            if (isUintType(type)) return unpackVaryingCell(s, false);
+            if (isIntType(type)) return unpackVaryingCell(s, true);
+            return s;
           },
           (c) => varyingPathRead(env, info.key, type, null, c),
         );
