@@ -427,7 +427,7 @@ export function unpack10(v: number): number {
 }
 
 /** Float → 11-bit float bits (5-bit exp bias 15, 6-bit mantissa; round-half-even). */
-function floatToFloat11(f: number): number {
+export function pack11(f: number): number {
   if (f !== f || f <= 0) return 0; // NaN / negatives clamp to 0
   if (f === Infinity) return 0x7c0;
   _f32[0] = f;
@@ -450,7 +450,7 @@ function floatToFloat11(f: number): number {
 }
 
 /** Float → 10-bit float bits (5-bit exp bias 15, 5-bit mantissa; round-half-even). */
-function floatToFloat10(f: number): number {
+export function pack10(f: number): number {
   if (f !== f || f <= 0) return 0;
   if (f === Infinity) return 0x7c0;
   _f32[0] = f;
@@ -472,6 +472,24 @@ function floatToFloat10(f: number): number {
   return v;
 }
 
+/**
+ * Float triple → UNSIGNED_INT_5_9_9_9_REV bits (shared exponent E, 9-bit
+ * mantissas; round-half-even). Mirror of FNS_9E5's quantization: E =
+ * max(0, floor(log2(maxC)) + 16), mantissa c = round(c / 2^(E−24)) ∈ [0,511].
+ */
+export function pack9E5(r: number, g: number, b: number): number {
+  const maxC = Math.max(r, g, b);
+  if (maxC > 2 ** -25) {
+    const exp = Math.max(0, Math.floor(Math.log2(maxC)) + 16);
+    const scale = 2 ** (exp - 24);
+    return (exp << 27) |
+      (clamp(Math.round(r / scale), 0, 511) << 18) |
+      (clamp(Math.round(g / scale), 0, 511) << 9) |
+      clamp(Math.round(b / scale), 0, 511);
+  }
+  return 0; // maxC ≤ 2^-25 → all-zero (value 0)
+}
+
 const FNS_111110: { decode: DecodeFn; encode: EncodeFn } = {
   decode(data, byteOffset, out) {
     out[0] = readF32At(data, byteOffset);
@@ -480,9 +498,9 @@ const FNS_111110: { decode: DecodeFn; encode: EncodeFn } = {
     out[3] = 1;
   },
   encode(data, byteOffset, r, g, b) {
-    writeF32At(data, byteOffset, unpack11(floatToFloat11(r)));
-    writeF32At(data, byteOffset + 4, unpack11(floatToFloat11(g)));
-    writeF32At(data, byteOffset + 8, unpack10(floatToFloat10(b)));
+    writeF32At(data, byteOffset, unpack11(pack11(r)));
+    writeF32At(data, byteOffset + 4, unpack11(pack11(g)));
+    writeF32At(data, byteOffset + 8, unpack10(pack10(b)));
   },
 };
 
@@ -496,18 +514,11 @@ const FNS_9E5: { decode: DecodeFn; encode: EncodeFn } = {
     out[3] = 1;
   },
   encode(data, byteOffset, r, g, b) {
-    const maxC = Math.max(r, g, b);
-    let rm = 0, gm = 0, bm = 0, scale = 0;
-    if (maxC > 2 ** -25) {
-      const exp = Math.max(0, Math.floor(Math.log2(maxC)) + 16);
-      scale = 2 ** (exp - 24);
-      rm = clamp(Math.round(r / scale), 0, 511);
-      gm = clamp(Math.round(g / scale), 0, 511);
-      bm = clamp(Math.round(b / scale), 0, 511);
-    }
-    writeF32At(data, byteOffset, rm * scale);
-    writeF32At(data, byteOffset + 4, gm * scale);
-    writeF32At(data, byteOffset + 8, bm * scale);
+    const v = pack9E5(r, g, b);
+    const scale = 2 ** (((v >> 27) & 0x1f) - 24);
+    writeF32At(data, byteOffset, ((v >> 18) & 0x1ff) * scale);
+    writeF32At(data, byteOffset + 4, ((v >> 9) & 0x1ff) * scale);
+    writeF32At(data, byteOffset + 8, (v & 0x1ff) * scale);
   },
 };
 
