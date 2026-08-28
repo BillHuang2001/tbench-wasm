@@ -5022,56 +5022,50 @@
      * Never touches _pixels (gl/ readPixels aliases it zero-copy).
      */
     buildPresentedCopy(premultipliedAlpha, alpha) {
-      buildPresentedPixels(
-        this._pixels,
-        this._scratch,
-        this._width,
-        this._height,
-        premultipliedAlpha,
-        alpha
-      );
-    }
-  };
-  function buildPresentedPixels(src, dst, w, h, premultipliedAlpha, alpha) {
-    if (w === 0 || h === 0) {
-      return;
-    }
-    const rowBytes = w * 4;
-    if (!premultipliedAlpha && alpha) {
+      const src = this._pixels;
+      const dst = this._scratch;
+      const w = this._width;
+      const h = this._height;
+      if (w === 0 || h === 0) {
+        return;
+      }
+      const rowBytes = w * 4;
+      if (!premultipliedAlpha && alpha) {
+        for (let i = 0; i < h; i++) {
+          const s = (h - 1 - i) * rowBytes;
+          const d = i * rowBytes;
+          for (let k = 0; k < rowBytes; k++) {
+            dst[d + k] = src[s + k];
+          }
+        }
+        return;
+      }
       for (let i = 0; i < h; i++) {
         const s = (h - 1 - i) * rowBytes;
         const d = i * rowBytes;
-        for (let k = 0; k < rowBytes; k++) {
-          dst[d + k] = src[s + k];
+        for (let j = 0; j < w; j++) {
+          const si = s + j * 4;
+          const di = d + j * 4;
+          let r = src[si];
+          let g2 = src[si + 1];
+          let b = src[si + 2];
+          const a = src[si + 3];
+          if (premultipliedAlpha && a > 0) {
+            r = (r * 255 + (a >> 1)) / a | 0;
+            g2 = (g2 * 255 + (a >> 1)) / a | 0;
+            b = (b * 255 + (a >> 1)) / a | 0;
+            if (r > 255) r = 255;
+            if (g2 > 255) g2 = 255;
+            if (b > 255) b = 255;
+          }
+          dst[di] = r;
+          dst[di + 1] = g2;
+          dst[di + 2] = b;
+          dst[di + 3] = alpha ? a : 255;
         }
       }
-      return;
     }
-    for (let i = 0; i < h; i++) {
-      const s = (h - 1 - i) * rowBytes;
-      const d = i * rowBytes;
-      for (let j = 0; j < w; j++) {
-        const si = s + j * 4;
-        const di = d + j * 4;
-        let r = src[si];
-        let g2 = src[si + 1];
-        let b = src[si + 2];
-        const a = src[si + 3];
-        if (premultipliedAlpha && a > 0) {
-          r = (r * 255 + (a >> 1)) / a | 0;
-          g2 = (g2 * 255 + (a >> 1)) / a | 0;
-          b = (b * 255 + (a >> 1)) / a | 0;
-          if (r > 255) r = 255;
-          if (g2 > 255) g2 = 255;
-          if (b > 255) b = 255;
-        }
-        dst[di] = r;
-        dst[di + 1] = g2;
-        dst[di + 2] = b;
-        dst[di + 3] = alpha ? a : 255;
-      }
-    }
-  }
+  };
   var NodeCanvasSurface = class {
     constructor() {
       __publicField(this, "_width", 0);
@@ -20773,29 +20767,6 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (fb.depth && fb.depth.data instanceof Float32Array) fb.depth.data.fill(1);
     if (fb.stencil && fb.stencil.data instanceof Uint8Array) fb.stencil.data.fill(0);
   }
-  function transferToImageBitmapSnapshot(ctx) {
-    var _a;
-    const dfb = ctx._defaultFB;
-    if (!dfb || !dfb.color) return null;
-    const w = dfb.color.width, h = dfb.color.height;
-    const data = new Uint8Array(w * h * 4);
-    const src = dfb.color.data;
-    if (!(src instanceof Uint8Array)) return null;
-    buildPresentedPixels(
-      src,
-      data,
-      w,
-      h,
-      ctx._attrs.premultipliedAlpha !== false,
-      ctx._attrs.alpha !== false
-    );
-    clearDefaultFramebufferForPreserve(ctx, dfb);
-    try {
-      (_a = ctx._presentSurface) == null ? void 0 : _a.present();
-    } catch {
-    }
-    return { width: w, height: h, data: new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength) };
-  }
   function ensureCanvasSize(ctx) {
     const dfb = ctx._defaultFB;
     if (!dfb) return;
@@ -29096,9 +29067,6 @@ ${inner.map((l) => "  " + l).join("\n")}
         ctx._errors.push(C1.INVALID_OPERATION);
       }
     };
-    proto._transferToImageBitmap = function() {
-      return transferToImageBitmapSnapshot(this);
-    };
     const p2 = proto;
     if ("drawArraysInstanced" in p2) {
       p2.drawArraysInstanced = function(mode, first, count, instanceCount) {
@@ -30655,12 +30623,6 @@ ${inner.map((l) => "  " + l).join("\n")}
       throw new Error("GL stub");
     }
     readPixels(x, y, width, height, format, type, pixels) {
-      throw new Error("GL stub");
-    }
-    /**
-     * @internal installed via installDrawApi — see api/draw.ts
-     */
-    _transferToImageBitmap() {
       throw new Error("GL stub");
     }
   };
