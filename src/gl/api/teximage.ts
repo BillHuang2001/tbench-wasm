@@ -984,6 +984,7 @@ function texImage2DDOM(
   uploadTexImage(
     ctx, tex, target, level, internalformat, dims.width, dims.height, 1, 0, format, type,
     source as unknown as TexImageSourceArg, source,
+    false, // inferred dims (6-arg form): scale the source to the element size
   );
 }
 
@@ -1046,6 +1047,7 @@ function texImage2DDOMWithDims(
   uploadTexImage(
     ctx, tex, target, level, internalformat, width, height, 1, border, format, type,
     source as unknown as TexImageSourceArg, source,
+    true, // explicit dims: width/height select a source sub-rectangle (no scaling)
   );
 }
 
@@ -1212,6 +1214,7 @@ function texImage3DDOMWithDims(
   uploadTexImage(
     ctx, tex, target, level, internalformat, width, height, depth, border, format, type,
     source as unknown as TexImageSourceArg, source,
+    true, // explicit dims: width/height select a source sub-rectangle (no scaling)
   );
 }
 
@@ -1338,6 +1341,7 @@ function texSubImage2DDOM(
   uploadTexSubImage(
     ctx, tex, target, level, xoffset, yoffset, 0, dims.width, dims.height, 1, format, type,
     source as unknown as TexImageSourceArg, source,
+    false, // inferred dims (7-arg form): scale the source to the element size
   );
 }
 
@@ -1374,6 +1378,7 @@ function texSubImage2DDOMWithDims(
   uploadTexSubImage(
     ctx, tex, target, level, xoffset, yoffset, 0, width, height, 1, format, type,
     source as unknown as TexImageSourceArg, source,
+    true, // explicit dims: width/height select a source sub-rectangle (no scaling)
   );
 }
 
@@ -1499,6 +1504,7 @@ function texSubImage3DDOMWithDims(
   uploadTexSubImage(
     ctx, tex, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type,
     source as unknown as TexImageSourceArg, source,
+    true, // explicit dims: width/height select a source sub-rectangle (no scaling)
   );
 }
 
