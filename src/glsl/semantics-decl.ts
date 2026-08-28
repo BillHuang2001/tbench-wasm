@@ -468,6 +468,23 @@ function analyzeGlobalDecl(d: GlobalVarDecl, ctx: SemContext, info: ShaderInfo):
   if (loc !== undefined && (!Number.isInteger(loc) || loc < 0)) {
     ctx.error(d.loc.line, "'layout(location=)' : location must be a non-negative integer");
   }
+  const idx = q.layout?.index;
+  if (idx !== undefined) {
+    // GL_EXT_blend_func_extended (ES 3.00): `layout(index=N)` is a fragment-
+    // OUTPUT-only qualifier: it requires the extension, an explicit location,
+    // and N ∈ {0, 1} (mirrors ANGLE's checks). The CTS page grades the
+    // extension gate: `layout(location=0, index=1)` without the pragma must
+    // fail to compile (webgl-blend-func-extended.js missing300).
+    if (!ctx.enabledExtensions.has('GL_EXT_blend_func_extended')) {
+      ctx.error(d.loc.line, "'layout(index=)' : requires extension 'GL_EXT_blend_func_extended' to be enabled");
+    } else if (ctx.stage !== 'FRAGMENT' || q.storage !== 'out') {
+      ctx.error(d.loc.line, "'layout(index=)' : only valid on fragment shader outputs");
+    } else if (loc === undefined) {
+      ctx.error(d.loc.line, "'layout(index=)' : index requires an explicit location");
+    } else if (idx !== 0 && idx !== 1) {
+      ctx.error(d.loc.line, "'layout(index=)' : index must be 0 or 1");
+    }
+  }
   // GLSL ES §4.5.3: precision qualifiers apply to float/int/sampler types
   // only — `mediump bool` / `mediump bvecN` are illegal on globals too
   // (conformance/glsl/misc/boolean_precision.html).
@@ -571,7 +588,11 @@ function analyzeGlobalDecl(d: GlobalVarDecl, ctx: SemContext, info: ShaderInfo):
             ctx.error(line, `'${name}' : fragment shader outputs must be float, int or uint scalars, vectors, or arrays of these`);
           }
           const explicitLoc = q.layout?.location ?? null;
-          info.outputs.push({ name, index: null, location: explicitLoc, type: element, arraySize });
+          // Dual-source blend index (GL_EXT_blend_func_extended): 0 default,
+          // 1 for the secondary output. Reuses OutputDecl.index (1.00 uses it
+          // for the gl_FragData[N] slot; 3.00 for layout(index=)).
+          const outIndex = q.layout?.index ?? 0;
+          info.outputs.push({ name, index: outIndex, location: explicitLoc, type: element, arraySize });
           if (arraySize > 1) {
             // One per-element entry per slot, named '<name>[k]', with the
             // FINAL location (explicit base, or 0 — the single-output
@@ -582,7 +603,7 @@ function analyzeGlobalDecl(d: GlobalVarDecl, ctx: SemContext, info: ShaderInfo):
             // 'fragColor[1]', ...) directly.
             const base = explicitLoc ?? 0;
             for (let k = 0; k < arraySize; k++) {
-              info.outputs.push({ name: `${name}[${k}]`, index: null, location: base + k, type: element, arraySize: 1 });
+              info.outputs.push({ name: `${name}[${k}]`, index: outIndex, location: base + k, type: element, arraySize: 1 });
             }
           }
         }
@@ -730,6 +751,8 @@ interface FragOutputState {
   fragDataWritten: boolean;
   fragDataIndices: number[];
   fragDataLine: number;
+  /** gl_SecondaryFragColorEXT written (GL_EXT_blend_func_extended, 1.00). */
+  secondaryFragColorWritten: boolean;
 }
 
 /** The base identifier of an lvalue chain (member/index objects), plus the
@@ -799,6 +822,7 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
     fragDataWritten: false,
     fragDataIndices: [],
     fragDataLine: 1,
+    secondaryFragColorWritten: false,
   };
   const written = new Set<IdentifierExpr>(); // write-root identifiers (not reads)
 
@@ -835,6 +859,10 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
     } else if (ctx.version === 100 && ctx.stage === 'FRAGMENT') {
       if (name === 'gl_FragColor') {
         fragOut.fragColorWritten = true;
+      } else if (name === 'gl_SecondaryFragColorEXT') {
+        // Dual-source secondary color (GL_EXT_blend_func_extended): location
+        // 0, index 1 — legal alone or alongside gl_FragColor (no XOR rule).
+        fragOut.secondaryFragColorWritten = true;
       } else if (name === 'gl_FragData') {
         fragOut.fragDataWritten = true;
         fragOut.fragDataLine = root.loc.line;
@@ -1159,6 +1187,10 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
     }
     if (fragOut.fragColorWritten) {
       info.outputs.push({ name: 'gl_FragColor', index: null, location: null, type: VEC4_FLOAT, arraySize: 1 });
+    }
+    if (fragOut.secondaryFragColorWritten) {
+      // GL_EXT_blend_func_extended: secondary color = location 0, index 1.
+      info.outputs.push({ name: 'gl_SecondaryFragColorEXT', index: null, location: null, type: VEC4_FLOAT, arraySize: 1 });
     }
   }
 

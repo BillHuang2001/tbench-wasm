@@ -141,18 +141,23 @@ export interface FragmentStage {
   usesFragDepth: boolean;
   /**
    * Fragment color outputs, ONE ENTRY PER SLOT: WebGL1 — gl_FragColor
-   * (location 0) or gl_FragData[0..n] with EXT_draw_buffers. WebGL2 — the
-   * assigned locations of every output variable, expanded per slot: an array
-   * output `out vec4 my_FragData[8]` produces 8 entries (locations
-   * base..base+7); scalar/vector outputs produce 1 entry each (explicit
-   * layout(location=) honored).
+   * (location 0) or gl_FragData[0..n] with EXT_draw_buffers or
+   * gl_SecondaryFragColorEXT (location 0, index 1 — dual-source secondary).
+   * WebGL2 — the assigned locations of every output variable, expanded per
+   * slot: an array output `out vec4 my_FragData[8]` produces 8 entries
+   * (locations base..base+7); scalar/vector outputs produce 1 entry each
+   * (explicit layout(location=) honored).
    * `type` = GLenum of the element type (GL_FLOAT_VEC4 | GL_INT_VEC4 |
    * GL_UNSIGNED_INT_VEC4 | ... — any float/int/uint scalar or vector).
+   * `index` = the dual-source blend index (0/1): outputs with the same
+   * location but indices 0/1 are the primary/secondary pair
+   * (GL_EXT_blend_func_extended; gl/ reads index === 1 for dual-source
+   * draw validation).
    * Name → location lookups (getFragDataLocation) are NOT part of this array:
    * gl/ builds its map from ShaderInfo.outputs (which carries declaration +
    * per-element '<name>[k]' entries).
    */
-  outputs: { location: number; type: number }[];
+  outputs: { location: number; index: number; type: number }[];
 }
 
 /** One captured transform-feedback varying (WebGL2, SEPARATE_ATTRIBS or INTERLEAVED). */

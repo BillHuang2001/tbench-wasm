@@ -714,9 +714,9 @@ function setStorage(p: Parser, t: Token, q: TypeQualifiers, storage: StorageClas
 }
 
 /**
- * `layout ( id [= const-expr] [, ...] )` — `location`/`binding` are captured
- * (literal values only; semantics resolves non-literal constants); the
- * uniform-block layout ids `std140`/`shared`/`packed` are captured into
+ * `layout ( id [= const-expr] [, ...] )` — `location`/`binding`/`index` are
+ * captured (literal values only; semantics resolves non-literal constants);
+ * the uniform-block layout ids `std140`/`shared`/`packed` are captured into
  * `blockLayout` (semantics rejects `shared`/`packed` — WebGL2 supports only
  * std140); `row_major`/`column_major` are captured into `rowMajor` (ES 3.00
  * §4.3.9, block-level or member-level); other unknown ids are accepted and
@@ -735,6 +735,7 @@ function parseLayoutQualifiers(p: Parser): LayoutQualifiers {
         const v = parseAssignmentExpr(p);
         if (idT.name === 'location') layout.location = intValueOf(v);
         else if (idT.name === 'binding') layout.binding = intValueOf(v);
+        else if (idT.name === 'index') layout.index = intValueOf(v);
       } else if (idT.name === 'row_major') {
         layout.rowMajor = true;
       } else if (idT.name === 'column_major') {

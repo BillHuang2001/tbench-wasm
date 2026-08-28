@@ -104,6 +104,12 @@ export interface TypeQualifiers {
 export interface LayoutQualifiers {
   location?: number;
   binding?: number;
+  /**
+   * `layout(index=N)` (GL_EXT_blend_func_extended, ES 3.00): the dual-source
+   * blend index (0/1) of a fragment output. Fragment-output-only, requires an
+   * explicit `location`, and is a compile error without the extension.
+   */
+  index?: number;
   /** Explicit uniform-block layout id (`std140`/`shared`/`packed`), if any. */
   blockLayout?: string;
   /**

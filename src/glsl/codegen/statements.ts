@@ -65,6 +65,9 @@ import {
   flatComponents,
   foldPre,
   scalarBaseOf,
+  unpackVaryingCell,
+  packVaryingWrite,
+  packVaryingCompound,
 } from './env.js';
 import { emitExpr, emitLValue, materialize, matrixCompoundMul } from './expressions.js';
 import type { Value } from './index.js';
@@ -432,14 +435,21 @@ function emitExprStmt(e: Expr, env: CodegenEnv, out: string[]): void {
     const delta = e.op === '++' ? '1' : '-1';
     const base = scalarBaseOf(lv.type);
     if (base === null || base === 'bool') throw new Error('codegen: cannot increment a bool');
-    for (const tgt of lv.targets) {
-      out.push(
-        base === 'float'
-          ? `${tgt} = ${tgt} + ${delta};`
-          : base === 'int'
-            ? `${tgt} = ((${tgt} + ${delta}) | 0);`
-            : `${tgt} = ((${tgt} + ${delta}) >>> 0);`,
-      );
+    for (let c = 0; c < lv.targets.length; c++) {
+      const tgt = lv.targets[c];
+      if (lv.bits && lv.bits[c]) {
+        // Packed uint varying cell (VERTEX): unpack the old value, increment
+        // with the uint wrap, repack (see packVaryingWrite).
+        out.push(`${tgt} = R.u2f(((${unpackVaryingCell(tgt)} + ${delta}) >>> 0));`);
+      } else {
+        out.push(
+          base === 'float'
+            ? `${tgt} = ${tgt} + ${delta};`
+            : base === 'int'
+              ? `${tgt} = ((${tgt} + ${delta}) | 0);`
+              : `${tgt} = ((${tgt} + ${delta}) >>> 0);`,
+        );
+      }
     }
     if (lv.copyBack) out.push(lv.copyBack);
     return;
@@ -486,9 +496,13 @@ function emitAssignStmt(
     if (lv.prelude) out.push(lv.prelude);
     if (op === '=') {
       for (let c = 0; c < lv.targets.length; c++) {
-        // Dual mode: write the whole triple as one comma statement
-        // `(vslot = vv, dxslot = dxv, dyslot = dyv, vslot);`.
-        if (env.dual && lv.dualTargets && lv.dualTargets[c]) {
+        // Packed uint varying cell (VERTEX): store the value's BIT PATTERN via
+        // R.u2f (see packVaryingWrite) — the statement form drops the value.
+        if (lv.bits && lv.bits[c]) {
+          out.push(`${lv.targets[c]} = R.u2f(${conv[c].v});`);
+        } else if (env.dual && lv.dualTargets && lv.dualTargets[c]) {
+          // Dual mode: write the whole triple as one comma statement
+          // `(vslot = vv, dxslot = dxv, dyslot = dyv, vslot);`.
           out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c])};`);
         } else {
           out.push(`${lv.targets[c]} = ${conv[c].v};`);
@@ -501,9 +515,13 @@ function emitAssignStmt(
       }
       const cop = op.replace('=', '');
       for (let c = 0; c < lv.targets.length; c++) {
-        // Dual mode, float target: linear ops (+=, -=) update all three planes
-        // via dualWrite; non-linear compounds throw (C5a2 templates).
-        if (env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]) {
+        // Packed uint varying cell (VERTEX): unpack the old value, apply the
+        // op with the uint wrap, repack (see packVaryingCompound).
+        if (lv.bits && lv.bits[c]) {
+          out.push(`${packVaryingCompound(cop, lv.targets[c], conv[c].v)};`);
+        } else if (env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]) {
+          // Dual mode, float target: linear ops (+=, -=) update all three planes
+          // via dualWrite; non-linear compounds throw (C5a2 templates).
           out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c], cop)};`);
         } else {
           out.push(`${compoundOpExpr(cop, lv.targets[c], conv[c].v, base)};`);
