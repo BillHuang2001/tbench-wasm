@@ -208,6 +208,8 @@ export interface PixelStoreUnpack {
   flipY: boolean; // UNPACK_FLIP_Y_WEBGL
   premultiplyAlpha: boolean; // UNPACK_PREMULTIPLY_ALPHA_WEBGL
   colorspaceConversion: GLenum; // UNPACK_COLORSPACE_CONVERSION_WEBGL (BROWSER_DEFAULT_WEBGL|NONE)
+  /** gl.unpackColorSpace ('srgb' | 'display-p3'); storage for the IDL accessor. */
+  unpackColorSpace: string;
   rowLength: number; // UNPACK_ROW_LENGTH (WebGL2)
   skipRows: number; // UNPACK_SKIP_ROWS (WebGL2)
   skipPixels: number; // UNPACK_SKIP_PIXELS (WebGL2)
@@ -372,6 +374,7 @@ export function createDefaultState(version: 1 | 2): State {
         flipY: false,
         premultiplyAlpha: false,
         colorspaceConversion: 0x9244 /* BROWSER_DEFAULT_WEBGL */,
+        unpackColorSpace: 'srgb',
         rowLength: 0,
         skipRows: 0,
         skipPixels: 0,

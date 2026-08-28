@@ -110,6 +110,40 @@ function dimLimit(
 const isPow2 = (v: number): boolean => v > 0 && (v & (v - 1)) === 0;
 
 /**
+ * Per-level dimension + level-bound validation (GLES2/3 + WebGL semantics;
+ * CTS texture-size-limit.html / tex-3d-size-limit.html): the maximum
+ * width/height at level L is max(1, maxSize >> L) where maxSize is the
+ * target's size limit, and the maximum level is floor(log2(maxSize)).
+ * TEXTURE_2D_ARRAY layers (depth) are NOT level-scaled; TEXTURE_3D depth IS
+ * (max(1, MAX_3D_TEXTURE_SIZE >> L)). Pushes INVALID_VALUE and returns false
+ * when out of bounds. Uses division (not >>) so huge levels cannot wrap via
+ * JS's mod-32 shift semantics.
+ */
+function validateLevelDims(
+  ctx: WebGLRenderingContext,
+  target: GLenum,
+  level: number,
+  width: number,
+  height: number,
+  depth: number,
+): boolean {
+  const lim = dimLimit(ctx, target);
+  const scale = Math.pow(2, level);
+  const maxW = Math.max(1, Math.floor(lim.maxW / scale));
+  const maxH = Math.max(1, Math.floor(lim.maxH / scale));
+  const maxD = target === C2.TEXTURE_3D ? Math.max(1, Math.floor(lim.maxD / scale)) : lim.maxD;
+  if (width > maxW || height > maxH || depth > maxD) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return false;
+  }
+  if (level > Math.floor(Math.log2(lim.maxDim))) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return false;
+  }
+  return true;
+}
+
+/**
  * Shared texImage2D/texImage3D validation (both forms): target, bound texture,
  * immutability, border, level, dims vs limits. Returns the bound texture, or
  * null with an error pushed.
@@ -149,15 +183,7 @@ function commonTexImageValidation(
     ctx._errors.push(C1.INVALID_VALUE);
     return null;
   }
-  const lim = dimLimit(ctx, target);
-  if (width > lim.maxW || height > lim.maxH || depth > lim.maxD) {
-    ctx._errors.push(C1.INVALID_VALUE);
-    return null;
-  }
-  if (level > Math.floor(Math.log2(lim.maxDim))) {
-    ctx._errors.push(C1.INVALID_VALUE);
-    return null;
-  }
+  if (!validateLevelDims(ctx, target, level, width, height, depth)) return null;
   if (ctx._version === 1 && level > 0 && (!isPow2(width) || !isPow2(height))) {
     ctx._errors.push(C1.INVALID_VALUE);
     return null;
@@ -671,6 +697,12 @@ function bytesPerTexel(ctx: WebGLRenderingContext, format: GLenum, type: GLenum)
  * Required source-bytes for (width, height, depth) per UNPACK_* state, then
  * check the actual source (ArrayBufferView size or PBO range). Pushes the
  * error and returns false when the source is too small.
+ *
+ * WebGL 1.0 §5.14.8 / WebGL 2.0 §3.7: every row is padded to UNPACK_ALIGNMENT
+ * EXCEPT the last row of the last image, which is stored unpadded
+ * (`rowLength * bytesPerPixel` — the CTS fillTexture helpers allocate exactly
+ * this). Required = padded rows before the last row + unpadded last row
+ * (+ skipPixels), in bytes.
  */
 function validatePixelsSize(
   ctx: WebGLRenderingContext,
@@ -686,9 +718,9 @@ function validatePixelsSize(
   const rowLength = unpack.rowLength > 0 ? unpack.rowLength : width;
   const rowBytes = align(rowLength * srcBpp, unpack.alignment);
   const imageHeight = unpack.imageHeight > 0 ? unpack.imageHeight : height;
-  const required =
-    (unpack.skipRows + (unpack.skipImages + depth) * imageHeight) * rowBytes +
-    unpack.skipPixels * srcBpp;
+  // Rows before the unpadded last row (0 when nothing is uploaded, e.g. height 0).
+  const paddedRows = Math.max(0, unpack.skipRows + (unpack.skipImages + depth) * imageHeight - (height > 0 ? 1 : 0));
+  const required = paddedRows * rowBytes + (height > 0 ? rowLength * srcBpp : 0) + unpack.skipPixels * srcBpp;
   if (typeof pixels === 'number') {
     // WebGL2 PIXEL_UNPACK_BUFFER offset path (w2ValidatePbo checked the binding).
     const buf = ctx._state.pixelUnpackBuffer;
@@ -732,14 +764,23 @@ function w2ValidatePbo(ctx: WebGLRenderingContext, pixels: number): boolean {
 // DOM-source helpers
 // ---------------------------------------------------------------------------
 
-/** Width/height of a DOM TexImageSource (numbers only — mocks/ImageData included). */
+/**
+ * Width/height of a DOM TexImageSource (duck-typed, mirroring present/image.ts).
+ * HTMLVideoElement's `.width`/`.height` are the reflected content attributes
+ * (0 in Chromium) — the intrinsic frame size is `videoWidth`/`videoHeight`;
+ * images use `naturalWidth`/`naturalHeight`; canvas/ImageBitmap/ImageData use
+ * `.width`/`.height`. Returns null for anything without numeric dims.
+ */
 function sourceDims(source: unknown): { width: number; height: number } | null {
-  if (source !== null && typeof source === 'object') {
-    const s = source as { width?: unknown; height?: unknown };
-    if (typeof s.width === 'number' && typeof s.height === 'number') {
-      return { width: s.width, height: s.height };
-    }
+  if (source === null || typeof source !== 'object') return null;
+  const s = source as Record<string, unknown>;
+  if (typeof s.videoWidth === 'number' && typeof s.readyState === 'number') {
+    return typeof s.videoHeight === 'number' ? { width: s.videoWidth, height: s.videoHeight } : null;
   }
+  if (typeof s.naturalWidth === 'number') {
+    return typeof s.naturalHeight === 'number' ? { width: s.naturalWidth, height: s.naturalHeight } : null;
+  }
+  if (typeof s.width === 'number' && typeof s.height === 'number') return { width: s.width, height: s.height };
   return null;
 }
 
@@ -941,6 +982,11 @@ function commonTexSubValidation(
     return null;
   }
   if (level < 0) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return null;
+  }
+  const lim = dimLimit(ctx, target);
+  if (level > Math.floor(Math.log2(lim.maxDim))) {
     ctx._errors.push(C1.INVALID_VALUE);
     return null;
   }
@@ -1255,15 +1301,7 @@ function copyTexImage2DImpl(
     ctx._errors.push(C1.INVALID_VALUE);
     return;
   }
-  const lim = dimLimit(ctx, target);
-  if (width > lim.maxW || height > lim.maxH) {
-    ctx._errors.push(C1.INVALID_VALUE);
-    return;
-  }
-  if (level > Math.floor(Math.log2(lim.maxDim))) {
-    ctx._errors.push(C1.INVALID_VALUE);
-    return;
-  }
+  if (!validateLevelDims(ctx, target, level, width, height, 1)) return;
   if (ctx._version === 1 && level > 0 && (!isPow2(width) || !isPow2(height))) {
     ctx._errors.push(C1.INVALID_VALUE);
     return;
@@ -1338,6 +1376,11 @@ function copyTexSubImage2DImpl(
     ctx._errors.push(C1.INVALID_VALUE);
     return;
   }
+  const lim = dimLimit(ctx, target);
+  if (level > Math.floor(Math.log2(lim.maxDim))) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return;
+  }
   if (!hasTextureLevel(tex, target, level)) {
     ctx._errors.push(C1.INVALID_OPERATION);
     return;
@@ -1384,6 +1427,11 @@ function copyTexSubImage3DImpl(
     return;
   }
   if (level < 0) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return;
+  }
+  const lim = dimLimit(ctx, target);
+  if (level > Math.floor(Math.log2(lim.maxDim))) {
     ctx._errors.push(C1.INVALID_VALUE);
     return;
   }

@@ -36,7 +36,7 @@ import { rasterizeTriangle, signedArea2 } from './triangles';
 import { rasterizeLine } from './lines';
 import { rasterizePoint } from './points';
 import { createFragmentOps } from './fragment-ops';
-import { createTextureEnv } from './sampler';
+import { createTextureEnv } from './sampler-env';
 
 /**
  * Additive DrawCall fields from the raster contract (fragment uniform store,

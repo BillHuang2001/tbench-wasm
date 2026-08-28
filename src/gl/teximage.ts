@@ -658,12 +658,56 @@ function readSourceTexel(dv: DataView, byteOff: number, format: GLenum, type: GL
     case C.RGB: case C.RGB_INTEGER: out[3] = 1; break;
     case C.RG: case C.RG_INTEGER: out[2] = 0; out[3] = 1; break;
     case C.LUMINANCE: out[1] = out[0]; out[2] = out[0]; out[3] = 1; break;
-    case C.LUMINANCE_ALPHA: out[1] = out[0]; out[2] = out[0]; break;
-    case C.ALPHA: out[0] = 0; out[1] = 0; out[2] = 0; break;
+    // LUMINANCE_ALPHA stores [L, A]; encoders read L from out[0] and A from
+    // out[3] (raster registry) or out[1] (local spec) — keep both slots = A.
+    case C.LUMINANCE_ALPHA: out[2] = out[0]; out[3] = out[1]; break;
+    // ALPHA stores A; encoders read it from out[0] (local spec) or out[3]
+    // (raster registry) — keep both slots = A.
+    case C.ALPHA: out[1] = 0; out[2] = 0; out[3] = out[0]; break;
     case C.RED: case C.RED_INTEGER: case C.DEPTH_COMPONENT: out[1] = 0; out[2] = 0; out[3] = 1; break;
     default: break;
   }
   void raw;
+}
+
+// ---------------------------------------------------------------------------
+// unpackColorSpace (display-p3) conversion for DOM-source uploads
+// ---------------------------------------------------------------------------
+
+/** sRGB EOTF: encoded [0,1] → linear light (display-p3 shares this curve). */
+function srgbToLinear(v: number): number {
+  return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+}
+
+/** sRGB OETF: linear light → encoded [0,1], clamped (display-p3 shares this curve). */
+function linearToSrgb(v: number): number {
+  if (v <= 0) return 0;
+  if (v >= 1) return 1;
+  return v <= 0.0031308 ? v * 12.92 : Math.pow(v, 1 / 2.4) * 1.055 - 0.055;
+}
+
+/**
+ * Convert straight-alpha RGBA8 pixels in place from sRGB to display-p3
+ * (gl.unpackColorSpace = 'display-p3' DOM uploads). Per the WebGL color-space
+ * rules and the CSS Color 4 "predefined-to-predefined" conversion: linearize
+ * with the sRGB EOTF, apply the linear-light sRGB→display-p3 primary matrix
+ * (0.8224621 0.177538 0 / 0.0331941 0.9668058 0 / 0.0170827 0.0723974
+ * 0.9104399), re-encode with the sRGB OETF. Alpha is preserved unchanged.
+ * Matches the CTS expectations (webgl-test-utils.js namedColorInColorSpace):
+ * sRGB red (255,0,0) → (234,51,35), green (0,255,0) → (117,251,76).
+ */
+function srgbToDisplayP3(data: Uint8ClampedArray): void {
+  for (let i = 0; i < data.length; i += 4) {
+    const r = srgbToLinear(data[i] / 255);
+    const g = srgbToLinear(data[i + 1] / 255);
+    const b = srgbToLinear(data[i + 2] / 255);
+    const rp = 0.8224621 * r + 0.177538 * g;
+    const gp = 0.0331941 * r + 0.9668058 * g;
+    const bp = 0.0170827 * r + 0.0723974 * g + 0.9104399 * b;
+    data[i] = Math.round(linearToSrgb(rp) * 255);
+    data[i + 1] = Math.round(linearToSrgb(gp) * 255);
+    data[i + 2] = Math.round(linearToSrgb(bp) * 255);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -700,12 +744,18 @@ function copyRows(
   dstZOffset: number,
 ): void {
   const out = new Float32Array(4);
+  const srcBytes = p.src.byteLength;
   for (let r = 0; r < height; r++) {
     const srcRow = srcRow0 + (p.flipY ? height - 1 - r : r);
     const dstY = yoff + r;
     const srcBase = srcRow * p.srcRowBytes + p.srcSkipPixels * p.srcBpp;
+    // Bounds clamp: a source shorter than the requested rect must not throw
+    // (and silently drop the whole copy via the API-boundary catch) — copy
+    // only the texels the source actually provides.
+    if (srcBase < 0 || srcBase >= srcBytes) continue;
+    const maxX = Math.min(width, Math.floor((srcBytes - srcBase) / p.srcBpp));
     const dstBase = (dstZOffset + dstY * dstW + xoff) * p.dstBpp;
-    for (let x = 0; x < width; x++) {
+    for (let x = 0; x < maxX; x++) {
       readSourceTexel(p.src, srcBase + x * p.srcBpp, p.srcFormat, p.srcType, p.domain, out);
       if (p.premultiply) { out[0] *= out[3]; out[1] *= out[3]; out[2] *= out[3]; }
       if (p.dstStencil !== undefined && p.srcFormat === C.DEPTH_STENCIL) {
@@ -866,6 +916,12 @@ function copyPixelsIntoLevel(
       const res = decodeImageSource(source as never) as { ok: boolean; image?: { width: number; height: number; data: Uint8ClampedArray } };
       if (res && res.ok && res.image) {
         const im = res.image;
+        // unpackColorSpace = 'display-p3': convert the decoded (sRGB) pixels to
+        // display-p3 before upload (WebGL color-space rules; CSS Color 4
+        // matrices). Integer formats store raw channel values and are exempt.
+        if (!spec.isInteger && ctx.unpackColorSpace === 'display-p3') {
+          srgbToDisplayP3(im.data);
+        }
         const dv = new DataView(im.data.buffer, im.data.byteOffset, im.data.byteLength);
         const p: CopyParams = {
           src: dv,
@@ -966,13 +1022,24 @@ export function uploadTexImage(
   if (!spec) return;
   const img = ensureImage(texture, target);
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
-  const levelData = allocLevel(spec, width, height, depth, isCube);
+  // Cube faces are independent images: when re-uploading a face into an
+  // existing level of the same size/format, reuse the record so previously
+  // uploaded faces keep their data (cube completeness needs all 6 defined).
+  const prev = isCube ? img.levels[level] : undefined;
+  const reuse = !!(prev && prev.width === width && prev.height === height && img.internalFormat === internalformat);
+  const levelData = reuse ? prev : allocLevel(spec, width, height, depth, isCube);
   if (isCube) {
-    // Only the uploaded face is defined (cube completeness needs all 6).
     const face = cubeFaceIndex(target);
-    for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = undefined as unknown as ArrayBufferView;
+    if (!reuse) {
+      // Fresh record: only the uploaded face is defined (cube completeness needs all 6).
+      for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = undefined as unknown as ArrayBufferView;
+    } else if (levelData.data[face] === undefined) {
+      // Reused record: allocate the view for the face being (re)defined.
+      const perFace = width * height;
+      levelData.data[face] = new spec.ctor((perFace * spec.bytesPerPixel) / spec.bytesPerElement);
+    }
   }
-  img.levels[level] = levelData;
+  if (!reuse) img.levels[level] = levelData;
   texture._internalFormat = internalformat;
   texture._compressed = false;
   img.internalFormat = internalformat;
@@ -1115,10 +1182,16 @@ export function copyTexImage(
   if (!spec) return;
   const img = ensureImage(texture, target);
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
+  const existing = img.levels[level];
   const levelData = allocLevel(spec, width, height, 1, isCube);
   if (isCube) {
+    // Keep faces from earlier copyTexImage2D calls (see uploadTexImage).
     const face = cubeFaceIndex(target);
-    for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = undefined as unknown as ArrayBufferView;
+    for (let f = 0; f < 6; f++) {
+      levelData.data[f] = f !== face && existing && existing.data[f] !== undefined
+        ? existing.data[f]
+        : (undefined as unknown as ArrayBufferView);
+    }
   }
   img.levels[level] = levelData;
   texture._internalFormat = internalformat;

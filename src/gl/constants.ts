@@ -1,16 +1,19 @@
 /**
  * src/gl/constants.ts — THE single source of truth for all WebGL constants.
  *
- * Three groups:
+ * Four groups:
  *  - `C1`: WebGL 1.0 core constants (GLES2 set + WebGL-specific). Installed on
  *    `WebGLRenderingContext.prototype` so `gl.COLOR_BUFFER_BIT` works.
  *  - `C2`: WebGL 2.0 additions. Installed on `WebGL2RenderingContext.prototype`
  *    (inherited through the prototype chain — WebGL2 contexts see C1+C2).
+ *  - `CInternal`: engine-only constants that must NOT be installed on any
+ *    context prototype (removed from the WebGL spec, or added post-CTS-suite;
+ *    see the table comment). Merged into `C` for internal `C.X` access.
  *  - `CExt`: extension constants (installed on the extension objects only, never
  *    on the context). Grouped by extension; names carry the extension suffix.
  *
- * `C` merges C1+C2 for internal engine use. Values verified against the Khronos
- * WebGL 1.0/2.0 spec (and extension specs) at /testsuites/WebGL.
+ * `C` merges C1+C2+CInternal for internal engine use. Values verified against the
+ * Khronos WebGL 1.0/2.0 spec (and extension specs) at /testsuites/WebGL.
  *
  * raster/ and glsl/ may import individual constants from here or duplicate per
  * contract — but the CONTEXT-class constant surface MUST come from this file.
@@ -319,7 +322,6 @@ export const C1 = {
   VERTEX_SHADER: 0x8b31,
   FRAGMENT_SHADER: 0x8b30,
   SHADER_TYPE: 0x8b4f,
-  SHADER_COMPILER: 0x8dfa,
   COMPILE_STATUS: 0x8b81,
   DELETE_STATUS: 0x8b80,
   LINK_STATUS: 0x8b82,
@@ -327,8 +329,6 @@ export const C1 = {
   ATTACHED_SHADERS: 0x8b85,
   ACTIVE_UNIFORMS: 0x8b86,
   ACTIVE_ATTRIBUTES: 0x8b89,
-  SHADER_BINARY_FORMATS: 0x8df8,
-  NUM_SHADER_BINARY_FORMATS: 0x8df9,
   MAX_VERTEX_ATTRIBS: 0x8869,
   MAX_VERTEX_UNIFORM_VECTORS: 0x8dfb,
   MAX_VARYING_VECTORS: 0x8dfc,
@@ -345,7 +345,6 @@ export const C1 = {
   RENDERER: 0x1f01,
   VERSION: 0x1f02,
   SHADING_LANGUAGE_VERSION: 0x8b8c,
-  EXTENSIONS: 0x1f03,
 
   // ---- Vertex attrib arrays ----
   VERTEX_ATTRIB_ARRAY_ENABLED: 0x8622,
@@ -443,22 +442,6 @@ export const C2 = {
   COLOR_ATTACHMENT13: 0x8ced,
   COLOR_ATTACHMENT14: 0x8cee,
   COLOR_ATTACHMENT15: 0x8cef,
-  COLOR_ATTACHMENT16: 0x8cf0,
-  COLOR_ATTACHMENT17: 0x8cf1,
-  COLOR_ATTACHMENT18: 0x8cf2,
-  COLOR_ATTACHMENT19: 0x8cf3,
-  COLOR_ATTACHMENT20: 0x8cf4,
-  COLOR_ATTACHMENT21: 0x8cf5,
-  COLOR_ATTACHMENT22: 0x8cf6,
-  COLOR_ATTACHMENT23: 0x8cf7,
-  COLOR_ATTACHMENT24: 0x8cf8,
-  COLOR_ATTACHMENT25: 0x8cf9,
-  COLOR_ATTACHMENT26: 0x8cfa,
-  COLOR_ATTACHMENT27: 0x8cfb,
-  COLOR_ATTACHMENT28: 0x8cfc,
-  COLOR_ATTACHMENT29: 0x8cfd,
-  COLOR_ATTACHMENT30: 0x8cfe,
-  COLOR_ATTACHMENT31: 0x8cff,
   FRAMEBUFFER_INCOMPLETE_MULTISAMPLE: 0x8d56,
   MAX_SAMPLES: 0x8d57,
   HALF_FLOAT: 0x140b,
@@ -503,17 +486,10 @@ export const C2 = {
   TEXTURE_COMPARE_MODE: 0x884c,
   TEXTURE_COMPARE_FUNC: 0x884d,
   STENCIL_INDEX8: 0x8d48,
-  STENCIL_INDEX: 0x1901,
   R11F_G11F_B10F: 0x8c3a,
   UNSIGNED_INT_10F_11F_11F_REV: 0x8c3b,
   RGB9_E5: 0x8c3d,
   UNSIGNED_INT_5_9_9_9_REV: 0x8c3e,
-  TEXTURE_2D_MULTISAMPLE: 0x9100,
-  TEXTURE_2D_MULTISAMPLE_ARRAY: 0x9102,
-  TEXTURE_BINDING_2D_MULTISAMPLE: 0x9104,
-  TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY: 0x9105,
-  TEXTURE_SAMPLES: 0x9106,
-  TEXTURE_FIXED_SAMPLE_LOCATIONS: 0x9107,
   SAMPLER_2D_ARRAY: 0x8dc1,
   SAMPLER_2D_ARRAY_SHADOW: 0x8dc4,
   SAMPLER_CUBE_SHADOW: 0x8dc5,
@@ -622,8 +598,6 @@ export const C2 = {
   FRAGMENT_SHADER_DERIVATIVE_HINT: 0x8b8b,
   VERTEX_ATTRIB_ARRAY_INTEGER: 0x88fd,
   VERTEX_ATTRIB_ARRAY_DIVISOR: 0x88fe,
-  MAX_VERTEX_ATTRIB_STRIDE: 0x82e5,
-  MAX_VERTEX_ATTRIB_RELATIVE_OFFSET: 0x82d9,
   MAX_VERTEX_OUTPUT_COMPONENTS: 0x9122,
   MAX_FRAGMENT_INPUT_COMPONENTS: 0x9125,
   MIN_PROGRAM_TEXEL_OFFSET: 0x8904,
@@ -653,7 +627,6 @@ export const C2 = {
   CURRENT_QUERY: 0x8865,
   ANY_SAMPLES_PASSED: 0x8c2f,
   ANY_SAMPLES_PASSED_CONSERVATIVE: 0x8d6a,
-  FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS: 0x8da8,
   SAMPLER_BINDING: 0x8919,
   PIXEL_PACK_BUFFER: 0x88eb,
   PIXEL_UNPACK_BUFFER: 0x88ec,
@@ -665,6 +638,55 @@ export const C2 = {
   COPY_WRITE_BUFFER_BINDING: 0x8f37,
   TEXTURE_IMMUTABLE_FORMAT: 0x912f,
   TEXTURE_IMMUTABLE_LEVELS: 0x82df,
+} as const;
+
+// ---------------------------------------------------------------------------
+// Internal-only constants (NOT installed on any context prototype)
+// ---------------------------------------------------------------------------
+// These GLenum values are used by the engine internally but must NOT appear on
+// the context object: the CTS pages `conformance/context/constants-and-
+// properties.html` / `conformance2/context/constants-and-properties-2.html`
+// enumerate `for (var i in gl)` and fail on any non-function property outside
+// their (suite-version 2.0.1) expected lists. EXTENSIONS/SHADER_COMPILER/
+// SHADER_BINARY_FORMATS/NUM_SHADER_BINARY_FORMATS were removed from the WebGL
+// spec (getParameter(EXTENSIONS) is INVALID_ENUM; there are no shader binary
+// formats); the rest (MSAA textures, COLOR_ATTACHMENT16-31, STENCIL_INDEX,
+// MAX_VERTEX_ATTRIB_STRIDE/RELATIVE_OFFSET, FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS)
+// were added to the WebGL2 spec AFTER the CTS suite version and are not in its
+// expected list. Merged into `C` so engine code keeps `C.X` access.
+export const CInternal = {
+  // Removed from the WebGL 1.0/2.0 spec
+  EXTENSIONS: 0x1f03,
+  SHADER_COMPILER: 0x8dfa,
+  SHADER_BINARY_FORMATS: 0x8df8,
+  NUM_SHADER_BINARY_FORMATS: 0x8df9,
+  // WebGL2 additions post-dating CTS suite 2.0.1
+  STENCIL_INDEX: 0x1901,
+  COLOR_ATTACHMENT16: 0x8cf0,
+  COLOR_ATTACHMENT17: 0x8cf1,
+  COLOR_ATTACHMENT18: 0x8cf2,
+  COLOR_ATTACHMENT19: 0x8cf3,
+  COLOR_ATTACHMENT20: 0x8cf4,
+  COLOR_ATTACHMENT21: 0x8cf5,
+  COLOR_ATTACHMENT22: 0x8cf6,
+  COLOR_ATTACHMENT23: 0x8cf7,
+  COLOR_ATTACHMENT24: 0x8cf8,
+  COLOR_ATTACHMENT25: 0x8cf9,
+  COLOR_ATTACHMENT26: 0x8cfa,
+  COLOR_ATTACHMENT27: 0x8cfb,
+  COLOR_ATTACHMENT28: 0x8cfc,
+  COLOR_ATTACHMENT29: 0x8cfd,
+  COLOR_ATTACHMENT30: 0x8cfe,
+  COLOR_ATTACHMENT31: 0x8cff,
+  TEXTURE_2D_MULTISAMPLE: 0x9100,
+  TEXTURE_2D_MULTISAMPLE_ARRAY: 0x9102,
+  TEXTURE_BINDING_2D_MULTISAMPLE: 0x9104,
+  TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY: 0x9105,
+  TEXTURE_SAMPLES: 0x9106,
+  TEXTURE_FIXED_SAMPLE_LOCATIONS: 0x9107,
+  MAX_VERTEX_ATTRIB_STRIDE: 0x82e5,
+  MAX_VERTEX_ATTRIB_RELATIVE_OFFSET: 0x82d9,
+  FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS: 0x8da8,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -853,10 +875,14 @@ export const CExt = {
   COMPRESSED_SIGNED_RED_GREEN_RGTC2_EXT: 0x8dbe,
 } as const;
 
-/** Merged core constants (WebGL1 + WebGL2) for internal engine use. */
-export const C: Record<keyof typeof C1 | keyof typeof C2, number> = {
+/** Merged core constants (WebGL1 + WebGL2 + internal-only) for engine use. */
+export const C: Record<
+  keyof typeof C1 | keyof typeof C2 | keyof typeof CInternal,
+  number
+> = {
   ...C1,
   ...C2,
+  ...CInternal,
 };
 
 /** Convenience: extract all values of a constant table (used to install on prototypes). */

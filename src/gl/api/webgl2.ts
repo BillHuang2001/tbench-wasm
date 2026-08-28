@@ -427,10 +427,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       if (!(query instanceof WebGLQuery)) {
         throw new TypeError(`Argument is not of type 'WebGLQuery'`);
       }
-      if (query._context !== ctx) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return false;
-      }
+      if (query._context !== ctx) return false; // cross-context: false, NO error
       // CTS query/query.html: false until first beginQuery (_target set), true
       // afterwards, false after delete.
       return !query._deleted && query._target !== 0;
@@ -501,10 +498,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       if (!(sync instanceof WebGLSync)) {
         throw new TypeError(`Argument is not of type 'WebGLSync'`);
       }
-      if (sync._context !== ctx) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return false;
-      }
+      if (sync._context !== ctx) return false; // cross-context: false, NO error
       return !sync._deleted;
     };
   }
@@ -625,10 +619,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       if (!(sampler instanceof WebGLSampler)) {
         throw new TypeError(`Argument is not of type 'WebGLSampler'`);
       }
-      if (sampler._context !== ctx) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return false;
-      }
+      if (sampler._context !== ctx) return false; // cross-context: false, NO error
       // CTS samplers.html: true even if never bound.
       return !sampler._deleted;
     };
@@ -749,10 +740,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       if (!(vertexArray instanceof WebGLVertexArrayObject)) {
         throw new TypeError(`Argument is not of type 'WebGLVertexArrayObject'`);
       }
-      if (vertexArray._context !== ctx) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return false;
-      }
+      if (vertexArray._context !== ctx) return false; // cross-context: false, NO error
       // CTS vertex-array-object.html: false until first bind.
       return !vertexArray._deleted && everBoundVAOs.has(vertexArray);
     };
@@ -824,10 +812,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       if (!(transformFeedback instanceof WebGLTransformFeedback)) {
         throw new TypeError(`Argument is not of type 'WebGLTransformFeedback'`);
       }
-      if (transformFeedback._context !== ctx) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return false;
-      }
+      if (transformFeedback._context !== ctx) return false; // cross-context: false, NO error
       // CTS transform_feedback.html: false until first bind.
       return !transformFeedback._deleted && everBoundTFs.has(transformFeedback);
     };

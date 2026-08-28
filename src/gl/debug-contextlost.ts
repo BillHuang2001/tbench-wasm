@@ -1,7 +1,9 @@
 /**
- * TEMP diagnostic: load the context-lost CTS pages and dump the failing
- * assertions (the harness shim records reportResults failure messages in
- * window.__softglCts.messages; the runner's JSON report does not surface them).
+ * TEMP diagnostic: load CTS pages and dump the failing assertions (the harness
+ * shim records reportResults failure messages in window.__softglCts.messages;
+ * the runner's JSON report does not surface them). The WebGL version is inferred
+ * from the URL path (conformance2/… → 2, else 1) — pages that need webglVersion=2
+ * (e.g. conformance2/context/constants-and-properties-2.html) get it automatically.
  * Usage: npx tsx src/gl/debug-contextlost.ts [url...]
  */
 import { chromium } from "playwright";
@@ -33,7 +35,9 @@ await context.addInitScript(HARNESS_SHIM_SCRIPT);
 
 for (const url of urls) {
   const page = await context.newPage();
-  const full = `${server.baseUrl}sdk/tests/${url}?webglVersion=1`;
+  // Infer the WebGL version from the URL path (conformance2/…, deqp/ → 2, else 1).
+  const version = url.startsWith("conformance2/") || url.startsWith("deqp/") ? 2 : 1;
+  const full = `${server.baseUrl}sdk/tests/${url}?webglVersion=${version}`;
   const msgs: string[] = [];
   const logs: string[] = [];
   page.on("pageerror", (err) => msgs.push(`pageerror: ${err.message}`));

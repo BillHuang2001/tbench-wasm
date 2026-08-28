@@ -90,7 +90,7 @@ import type { WebGLFramebuffer, FramebufferAttachment } from './objects';
 import type { FramebufferTarget, Surface, PixelFormatInfo } from '../raster';
 import { getFormat } from '../raster';
 import type { GLenum } from './types';
-import { C1, C2 } from './constants';
+import { C, C1, C2 } from './constants';
 
 /* ================================================================== */
 /* Constants                                                           */
@@ -526,7 +526,7 @@ export function checkFramebufferStatus(ctx: WebGLRenderingContext, fbo: WebGLFra
     for (const entry of sampleEntries) {
       const l = isLayeredAttachment(entry) ? 1 : 0;
       if (layered === -1) layered = l;
-      else if (layered !== l) return C2.FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS;
+      else if (layered !== l) return C.FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS;
     }
   }
 

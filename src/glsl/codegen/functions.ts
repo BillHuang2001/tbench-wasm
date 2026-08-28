@@ -59,8 +59,11 @@ import type {
   ParamDecl,
   Stmt,
   TranslationUnit,
+  VarDeclarator,
 } from '../ast.js';
 import type { GLSLType } from '../types.js';
+import { typeEquals } from '../types.js';
+import { matches, builtinSignatures } from '../builtins/index.js';
 import {
   CodegenEnv,
   LocalVar,
@@ -70,7 +73,7 @@ import {
   foldPre,
   scalarBaseOf,
 } from './env.js';
-import { emitLValue } from './expressions.js';
+import { emitExpr, emitLValue } from './expressions.js';
 import { emitStatements } from './statements.js';
 import type { Value } from './index.js';
 
@@ -79,32 +82,60 @@ import type { Value } from './index.js';
  * Call BEFORE emitting main (main's body emission triggers the inlines).
  * Prototypes without definitions are left out (calling one falls through to
  * the builtin lookup, which reports it as an unknown builtin).
+ *
+ * OVERLOADS (BUG A fix): the registry is keyed by SIGNATURE (name + declared
+ * param type list — storage qualifiers like out/inout are not part of the
+ * GLSL overload identity), never by name alone: a name-keyed registry let
+ * overloads overwrite each other and every call inlined the LAST definition
+ * (`Cannot read properties of undefined (reading 'v')` at bind-line
+ * generation when the call's component counts differed, silent miscompiles
+ * when they aligned). emitUserCall re-derives the overload resolution
+ * (mirror of semantics' scoreSignature/pickBest over all DEFINITIONS of the
+ * name) and inlines the chosen body with ITS OWN locals.
  */
 export function installUserFunctions(ast: TranslationUnit, env: CodegenEnv): void {
   const fns = new Map<string, FunctionDefinition>();
   const fnLocalNames = new Map<string, Set<string>>();
+  const byName = new Map<string, string[]>(); // name → signature keys (definition order)
   for (const d of ast.declarations) {
-    if (d.kind === 'function-definition') {
-      fns.set(d.prototype.name, d);
-      fnLocalNames.set(d.prototype.name, collectLocalNames(d.body));
-    }
+    if (d.kind !== 'function-definition') continue; // bare prototypes have no body
+    const name = d.prototype.name;
+    if (name === 'main') continue; // the entry point is never a callable
+    const key = signatureKey(name, d.prototype.params.map(declaredParamType));
+    fns.set(key, d);
+    fnLocalNames.set(key, collectLocalNames(d.body));
+    let keys = byName.get(name);
+    if (!keys) byName.set(name, (keys = []));
+    keys.push(key);
   }
   const stack: string[] = [];
   let nextLabel = 0;
   let nextSuffix = 0;
 
   env.emitUserCall = (name, args, argTypes, rawArgs) => {
-    const fn = fns.get(name);
-    if (!fn) return null; // not a user function → builtin/ctor path
+    const keys = byName.get(name);
+    if (!keys || keys.length === 0) return null; // not a user function → builtin/ctor path
     if (name === 'main') {
       throw new Error("codegen: user function 'main' cannot be called (semantics should reject it)");
     }
+    const best = pickUserOverload(name, keys, fns, rawArgs ?? [], env.layout.version);
+    if (best === null) return null; // no user overload matches → builtin/ctor path
+    if (best.score > 0 && matches(name, builtinSignatures(env.layout.version)).length > 0) {
+      // Hybrid guard (GLSL ES 1.00 §6.1): user overloads of builtin names
+      // resolve across user AND builtin signatures; a NON-exact user match
+      // against a name with builtin signatures falls through to the builtin
+      // path (in reachable states semantics never lets the user win at
+      // score > 0 while a builtin signature exists — ties are link errors).
+      return null;
+    }
+    const key = best.key;
+    const fn = fns.get(key)!;
     if (stack.includes(name)) {
       throw new Error(`codegen: recursive call to '${name}' (semantics should reject recursion)`);
     }
     stack.push(name);
     try {
-      return inlineCall(fn, args, argTypes, rawArgs ?? [], env, fnLocalNames.get(name) ?? new Set(), {
+      return inlineCall(fn, args, argTypes, rawArgs ?? [], env, fnLocalNames.get(key) ?? new Set(), {
         label: () => `EP_${nextLabel++}`,
         suffix: () => `$c${nextSuffix++}`,
       });
@@ -114,11 +145,184 @@ export function installUserFunctions(ast: TranslationUnit, env: CodegenEnv): voi
   };
 }
 
+/** The declared GLSL type of a function param: base + array dims (an unsized
+ *  `[]` dim stays size null — mirror of semantics' wrapArrayDims). */
+function declaredParamType(p: ParamDecl): GLSLType {
+  const base = p.type.resolved;
+  if (!base) throw new Error('codegen: param type unresolved (semantics must run first)');
+  if (p.arrayDims.length === 0) return base;
+  let t = base;
+  for (let i = p.arrayDims.length - 1; i >= 0; i--) {
+    const dim = p.arrayDims[i] as Expr | null;
+    const cv = dim ? dim.constValue : undefined;
+    const size = typeof cv === 'number' && Number.isInteger(cv) && cv > 0 ? cv : dim === null ? null : 1;
+    t = { kind: 'array', element: t, size };
+  }
+  return t;
+}
+
+/** Canonical signature key: name + declared param types. Storage qualifiers
+ *  (out/inout) are ignored — GLSL overload identity is the param type list. */
+function signatureKey(name: string, params: GLSLType[]): string {
+  return `${name}(${params.map(typeKey).join(',')})`;
+}
+
+function typeKey(t: GLSLType): string {
+  switch (t.kind) {
+    case 'void':
+      return 'v';
+    case 'scalar':
+      return t.base;
+    case 'vector':
+      return `${t.base}${t.size}`;
+    case 'matrix':
+      return `m${t.cols}x${t.rows}`;
+    case 'sampler':
+      return `s:${t.sampler}`;
+    case 'struct':
+      return `t:${t.name}`;
+    case 'array':
+      return `${typeKey(t.element)}[${t.size === null ? '' : t.size}]`;
+  }
+}
+
+interface UserOverloadPick {
+  key: string;
+  /** 0 = every arg typeEquals the param; > 0 = implicit conversions used
+   *  (unreachable at HEAD — semantics' convertible IS typeEquals). */
+  score: number;
+}
+
+/**
+ * Re-derive the overload resolution semantics performed at analyze time
+ * (semantics-expr.ts scoreSignature/pickBest — READ-ONLY there, mirrored
+ * here): per-arg 0 = exact typeEquals, 1 = convertible (semantics'
+ * convertible(from, to) is typeEquals at HEAD — no implicit promotions),
+ * else no match; the unique lowest-scoring user DEFINITION wins; a tie is a
+ * link error in semantics (unreachable here — treat as no user match);
+ * no match → null (builtin/ctor path). `rawArgs[i].resolvedType` is the same
+ * data semantics scored, so the re-derivation is exact.
+ */
+function pickUserOverload(
+  name: string,
+  keys: string[],
+  fns: Map<string, FunctionDefinition>,
+  rawArgs: Expr[],
+  version: 100 | 300,
+): UserOverloadPick | null {
+  void version;
+  const argTypes = rawArgs.map((a) => a.resolvedType!);
+  let bestKey: string | null = null;
+  let bestScore = Infinity;
+  for (const key of keys) {
+    const params = fns.get(key)!.prototype.params.map(declaredParamType);
+    if (params.length !== argTypes.length) continue;
+    let score = 0;
+    let ok = true;
+    for (let i = 0; i < params.length; i++) {
+      const at = argTypes[i];
+      if (typeEquals(at, params[i])) continue;
+      // semantics' convertible(from, to) === typeEquals(from, to) at HEAD
+      // (semantics-expr.ts:83) — no implicit promotions exist; kept as a
+      // distinct branch so a future convertible stays mirrored.
+      if (typeEquals(at, params[i])) {
+        score += 1;
+        continue;
+      }
+      ok = false;
+      break;
+    }
+    if (!ok) continue;
+    if (score < bestScore) {
+      bestScore = score;
+      bestKey = key;
+    } else if (score === bestScore) {
+      // Ambiguous (semantics reports a link error) — never pick arbitrarily.
+      return null;
+    }
+  }
+  if (bestKey === null) return null;
+  return { key: bestKey, score: bestScore };
+}
+
 interface InlineCtx {
   /** Unique epilogue label for the call site (shared monotonic counter). */
   label(): string;
   /** Unique JS-name suffix for the call site's param locals. */
   suffix(): string;
+}
+
+/** The declared type of one global declarator: base + array dims (mirror of
+ *  semantics-decl's fullType — dims fold to positive ints, recovery size 1). */
+function globalDeclType(base: GLSLType, dec: VarDeclarator): GLSLType {
+  if (dec.arrayDims.length === 0) return base;
+  let t = base;
+  for (let i = dec.arrayDims.length - 1; i >= 0; i--) {
+    const dim = dec.arrayDims[i];
+    const cv = dim.constValue;
+    t = { kind: 'array', element: t, size: typeof cv === 'number' && cv > 0 ? cv : 1 };
+  }
+  return t;
+}
+
+/**
+ * Register non-const file-scope GLOBAL variables into the env's scratch
+ * storage (BUG B fix): `float gray = 0.0;` at file scope is legal GLSL ES
+ * 1.00/3.00 (constant initializer); semantics accepts it and the walker
+ * resolves the identifier through env.resolveLocal — but codegen had NO
+ * storage surface for non-const globals (`codegen: unknown identifier` at
+ * expressions.ts:547).
+ *
+ * Each global becomes a SCRATCH-kind LocalVar in env.locals_ (declareLocal
+ * with the array flag — scratch is REQUIRED: there is no `var` declaration
+ * site for a global, so flat JS-var locals would be undeclared in the body).
+ * Safe: semantics forbids locals shadowing globals (Scope.declare rejects
+ * redefinition in any enclosing scope), so resolveLocal/walk/leafRead/
+ * leafWrite/leafDual/ensureDynScratch all handle it via the existing
+ * scratch machinery. `const` globals are skipped (they fold via constValue).
+ *
+ * Returns the initialization LINES to prepend to main's body (run once per
+ * invocation, before main's statements): per component
+ * `ctx.scratch[base + c] = <init>;` (ctx.intScratch for integral blocks),
+ * where `<init>` = the declarator's const init emitted per component, or 0
+ * when there is no initializer. Dual mode: the dx/dy planes are zeroed
+ * (allocScratch charged 3× — v at base, dx at base+n, dy at base+2n).
+ */
+export function installUserGlobals(ast: TranslationUnit, env: CodegenEnv): string[] {
+  const lines: string[] = [];
+  for (const d of ast.declarations) {
+    if (d.kind !== 'global-var-decl') continue;
+    // attribute/varying/uniform/in/out/const globals live on other surfaces
+    // (layout-driven storage / const folding) — plain variables only.
+    if (d.type.qualifiers.storage !== undefined) continue;
+    const base = d.type.resolved;
+    if (!base) continue; // defensive (semantics resolves every declaration)
+    for (const dec of d.declarators) {
+      const type = globalDeclType(base, dec);
+      env.declareLocal(dec.name, type, { array: true }); // scratch-backed
+      const lv = env.lookupLocal(dec.name)!;
+      const n = flatComponents(type);
+      const int = lv.int === true;
+      const store = int ? 'ctx.intScratch' : 'ctx.scratch';
+      const baseOff = lv.scratchBase!;
+      if (dec.init) {
+        const vals = emitExpr(dec.init, env);
+        for (let c = 0; c < n; c++) {
+          const v = vals[c];
+          lines.push(`${store}[${baseOff} + ${c}] = ${v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v};`);
+        }
+      } else {
+        for (let c = 0; c < n; c++) lines.push(`${store}[${baseOff} + ${c}] = 0;`);
+      }
+      if (env.dual && !int) {
+        for (let c = 0; c < n; c++) {
+          lines.push(`${store}[${baseOff} + ${n} + ${c}] = 0;`);
+          lines.push(`${store}[${baseOff} + ${2 * n} + ${c}] = 0;`);
+        }
+      }
+    }
+  }
+  return lines;
 }
 
 interface OutArg {
@@ -144,6 +348,17 @@ function inlineCall(
     throw new Error(
       `codegen: call to '${fn.prototype.name}' with ${rawArgs.length} args, expected ${params.length}`,
     );
+  }
+  // Defensive: the inlined body's param SHAPES must match the call's value
+  // counts — a wrong-overload inline would otherwise crash on undefined-'.v'
+  // (short temp arrays) or silently miscompile (aligned counts, wrong body).
+  for (let i = 0; i < params.length; i++) {
+    const n = flatComponents(paramTypeOf(params[i], rawArgs[i].resolvedType));
+    if (args[i].length !== n) {
+      throw new Error(
+        `codegen: overload mismatch for '${fn.prototype.name}': param ${i} has ${n} components, call passes ${args[i].length}`,
+      );
+    }
   }
   const frame = env.pushParamFrame();
   try {
