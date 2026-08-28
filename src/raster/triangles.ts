@@ -200,13 +200,13 @@ export function rasterizeTriangle(
           + l2 * buf[vary1 + c] * invW1
           + l0 * buf[vary2 + c] * invW2) * w;
       }
-      quadW[slot] = w;
+      quadW[slot] = wDenom;
     } else {
       // Degenerate perspective denominator: plain barycentric mix.
       for (let c = 0; c < n; c++) {
         quadV[base + c] = l1 * buf[vary0 + c] + l2 * buf[vary1 + c] + l0 * buf[vary2 + c];
       }
-      quadW[slot] = 1;
+      quadW[slot] = wDenom;
     }
     quadDepth[slot] = l1 * z0 + l2 * z1 + l0 * z2 + polyOffset;
     quadPC[slot * 2] = 0;

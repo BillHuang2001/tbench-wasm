@@ -58,12 +58,42 @@ const DIAMOND_NORMALS: readonly (readonly [number, number])[] = [
  * Diamond-exit test for one pixel. `a` = (ax, ay) and `b` = (bx, by) are the
  * segment endpoints in pixel-local coordinates (pixel center = origin).
  * Returns true iff the half-open segment [a, b) exits the unit diamond.
+ *
+ * Axis-aligned tangents (the segment lies exactly on a diamond vertex line,
+ * |u| = 0.5 or |v| = 0.5): the strict rule covers nothing, but conformant
+ * hardware (D3D half-open quad convention) lights ONE side — the pixel whose
+ * diamond RIGHT vertex (vertical segments) or TOP vertex (horizontal
+ * segments) the segment passes through. So an axis-aligned segment lying
+ * exactly on an integer pixel boundary still covers its column/row (column
+ * x−1 for a line at integer x, row y−1 for a line at integer y), which the
+ * CTS line-rendering-quality test requires. All other cases (interior
+ * diamonds, 45° diagonals, non-axis-aligned tangents) keep the strict rule.
  */
 function diamondExit(ax: number, ay: number, bx: number, by: number): boolean {
   const dx = bx - ax, dy = by - ay;
-  // Fast reject: a constant |u| (or |v|) ≥ 0.5 keeps f ≥ 0.5 everywhere.
-  if (dx === 0 && Math.abs(ax) >= 0.5) return false;
-  if (dy === 0 && Math.abs(ay) >= 0.5) return false;
+  // Fast reject: a constant |u| (or |v|) > 0.5 keeps f ≥ 0.5 everywhere.
+  if (dx === 0) {
+    if (Math.abs(ax) > 0.5) return false;
+    if (Math.abs(ax) === 0.5) {
+      // u = ±0.5 tangent. Only the right-vertex side (ax = +0.5) is covered
+      // here — the left-vertex tangent belongs to the neighbor pixel. Covered
+      // iff the diamond vertex (u = 0.5, v = 0) lies on the half-open segment
+      // [start, end): t* = −ay/dy ∈ [0, 1). (dy = 0 ⇒ degenerate point.)
+      if (ax !== 0.5 || dy === 0) return false;
+      const t = -ay / dy;
+      return t >= 0 && t < 1;
+    }
+  } else if (dy === 0) {
+    if (Math.abs(ay) > 0.5) return false;
+    if (Math.abs(ay) === 0.5) {
+      // v = ±0.5 tangent. Only the top-vertex side (ay = +0.5) is covered;
+      // covered iff the diamond vertex (u = 0, v = 0.5) lies on the half-open
+      // segment: t* = −ax/dx ∈ [0, 1).
+      if (ay !== 0.5 || dx === 0) return false;
+      const t = -ax / dx;
+      return t >= 0 && t < 1;
+    }
+  }
   // {t : f(t) ≤ 0.5} = interval [tLo, tHi] ∩ [0, 1), from the four
   // half-plane constraints (su·dx + sv·dy)·t ≤ 0.5 − su·ax − sv·ay.
   let tLo = 0, tHi = 1;
@@ -198,13 +228,13 @@ export function rasterizeLine(
         quadV[base + c] = ((1 - t) * buf[vary0 + c] * invW0
           + t * buf[vary1 + c] * invW1) * w;
       }
-      quadW[slot] = w;
+      quadW[slot] = wDenom;
     } else {
       // Degenerate perspective denominator: plain linear mix.
       for (let c = 0; c < n; c++) {
         quadV[base + c] = (1 - t) * buf[vary0 + c] + t * buf[vary1 + c];
       }
-      quadW[slot] = 1;
+      quadW[slot] = wDenom;
     }
     quadDepth[slot] = (1 - t) * z0 + t * z1;
     quadPC[slot * 2] = 0;
