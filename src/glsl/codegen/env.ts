@@ -193,7 +193,21 @@ export function convertScalar(v: string, from: string, to: string): string {
 }
 
 /**
- * Convert a Value[] (flat components of `from`) to `to`'s scalar base.
+ * Convert a Value[] (flat components of `from`) to `to`'s scalar base,
+ * producing EXACTLY `flatComponents(to)` values (the caller's lvalue /
+ * initializer width is authoritative):
+ * - width match: per-component base conversion (the historical behavior);
+ * - SCALAR source (`vals.length === 1`) with a wider target: BROADCAST — a
+ *   scalar RHS applies component-wise to a vector/matrix lvalue (GLSL ES
+ *   1.00 §5.6: `v /= 2.0`, `m *= 2.0` lower to per-component ops), so every
+ *   target slot receives the converted scalar;
+ * - any other width mismatch (defensive — semantics rejects e.g. vec→mat):
+ *   cycle/truncate so the payload is exactly `n` entries — downstream code
+ *   reads `conv[c].v` for c < n and would crash on an undefined entry.
+ * Broadcast copies SHARE the source Value (its `pre` array and duals ride
+ * along): multi-component results always share one pre array (emitPres
+ * dedupes by identity, so the materialization runs once), and every
+ * component equals the source, so the derivatives are the source's.
  * Same-base conversions (float→float — incl. shape-changing broadcasts/
  * truncations at the caller) return `vals` unchanged, duals and all.
  * DUAL MODE (detected by the values carrying dx — only dual mode sets it):
@@ -201,12 +215,45 @@ export function convertScalar(v: string, from: string, to: string): string {
  * derivative planes) and preserves `pre` (the dx/dy strings may reference
  * temps its statements set); float→int/uint/bool drops the duals (integral
  * results carry none). Non-dual mode keeps the historical behavior
- * byte-identical (conversion drops pre — callers re-attach it when needed).
+ * byte-identical for width matches (conversion drops pre — callers re-attach
+ * it when needed); shape-changing broadcasts keep pre (the caller re-attach
+ * loops only walk the SOURCE length, so the extra copies would lose it).
  */
 export function convertValue(vals: Value[], from: GLSLType, to: GLSLType): Value[] {
   const fb = scalarBaseOf(from);
   const tb = scalarBaseOf(to);
-  if (fb === null || tb === null || fb === tb) return vals;
+  if (fb === null || tb === null) return vals;
+  const n = flatComponents(to);
+  if (vals.length !== n) {
+    if (vals.length === 0) return vals; // empty payload — deeper invariant break
+    if (fb === tb) {
+      // Same base, different width: share the source Values (pre/duals ride
+      // along; cycling fills every slot, truncation keeps the first n).
+      const out: Value[] = [];
+      for (let c = 0; c < n; c++) out.push(vals[c % vals.length]);
+      return out;
+    }
+    const dual = vals[0].dx !== undefined;
+    const out: Value[] = [];
+    for (let c = 0; c < n; c++) {
+      const src = vals[c % vals.length];
+      if (!dual) {
+        out.push({ v: convertScalar(src.v, fb, tb), pre: src.pre });
+      } else {
+        const conv: Value = { v: convertScalar(src.v, fb, tb) };
+        if (tb === 'float') {
+          // int/uint → float: the source carries no duals — constant duals.
+          conv.dx = '0';
+          conv.dy = '0';
+        }
+        // float → int/uint/bool: integral result — no duals (left absent).
+        if (src.pre && src.pre.length > 0) conv.pre = src.pre;
+        out.push(conv);
+      }
+    }
+    return out;
+  }
+  if (fb === tb) return vals;
   const dual = vals.length > 0 && vals[0].dx !== undefined;
   if (!dual) return vals.map((v) => ({ v: convertScalar(v.v, fb, tb) }));
   return vals.map((v) => {

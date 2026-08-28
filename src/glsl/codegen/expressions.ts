@@ -1545,8 +1545,11 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
   if (e.op === '=') {
     let conv = convertValue(rhs, e.value.resolvedType!, t);
     // convertValue DROPS Value.pre when it converts scalar bases — re-attach
-    // (mirrors statements.ts convertPreserving) so RHS pres survive.
-    for (let c = 0; c < n; c++) {
+    // (mirrors statements.ts convertPreserving) so RHS pres survive. Iterate
+    // the SOURCE length: a broadcast RHS (scalar → vector/matrix) is shorter
+    // than the lvalue — reading past it would hit `undefined.pre`.
+    const srcN = Math.min(n, rhs.length);
+    for (let c = 0; c < srcN; c++) {
       const src = rhs[c];
       if (conv[c] !== src && src.pre && src.pre.length > 0) {
         conv = conv.map((v, i) => (i === c ? { ...v, pre: src.pre } : v));
@@ -1600,8 +1603,12 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
   if (!base) throw new Error('codegen: cannot compound-assign a non-scalar-shaped value');
   let conv = convertValue(rhs, e.value.resolvedType!, t);
   // convertValue DROPS Value.pre when it converts scalar bases — re-attach
-  // (mirrors statements.ts convertPreserving) so RHS pres survive.
-  for (let c = 0; c < n; c++) {
+  // (mirrors statements.ts convertPreserving) so RHS pres survive. Iterate
+  // the SOURCE length: a broadcast RHS (scalar → vector/matrix — `v += s`,
+  // `m *= s`) is shorter than the lvalue — reading past it would hit
+  // `undefined.pre`.
+  const srcN = Math.min(n, rhs.length);
+  for (let c = 0; c < srcN; c++) {
     const src = rhs[c];
     if (conv[c] !== src && src.pre && src.pre.length > 0) {
       conv = conv.map((v, i) => (i === c ? { ...v, pre: src.pre } : v));

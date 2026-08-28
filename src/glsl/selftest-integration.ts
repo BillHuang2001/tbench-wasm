@@ -27,6 +27,9 @@
  *   8. Program contract sanity on the check-1 program: uniformMap keys,
  *      no block members in uniformMap (check-3 program), varying order,
  *      store sizing vs. location high-water marks, scratchSize > 0.
+ *   9. scalar-RHS broadcast on vector/matrix lvalues: +=/-=/*=//= (and ES3
+ *      %= on ivec4) with a scalar RHS — statement, expression and for-update
+ *      contexts, matrix lvalues, ES 1.00 + ES 3.00, and dual mode.
  *
  * Run: npx tsx src/glsl/selftest-integration.ts
  * Prints "OK" and exits 0 on success; non-zero exit on failure.
@@ -674,6 +677,190 @@ let uboDual: Program | null = null;
     check(p3.uniformMap.has('p.k') === false && p3.uniformMap.has('p.j') === false && p3.uniformMap.has('k') === false,
       `UBO members absent from uniformMap (keys: [${[...p3.uniformMap.keys()].join(', ')}])`);
     check(p3.scratchSize >= 0 && p3.intScratchSize >= 0, `UBO+dual program scratch sizes sane (${p3.scratchSize}/${p3.intScratchSize})`);
+  }
+}
+
+/* ================================================================== */
+/* 9. Scalar-RHS broadcast on vector/matrix lvalues (assignment)       */
+/* ================================================================== */
+/* Regression: a scalar RHS of an assignment to a vector/matrix lvalue
+ * (`x /= 2.0`, `m *= 2.0`, `x -= 1.0` in a for-update, `(y *= 2.0).x` in an
+ * expression) must emit a per-component broadcast — EVERY lvalue slot gets
+ * the converted scalar. Before the fix the scalar was emitted into slot 0
+ * only and the remaining slots read `undefined.v`/`undefined.pre` at link
+ * time ("codegen failed: Cannot read properties of undefined"). All five
+ * compound ops (+=, -=, *=, /=, %=) + the plain `=` defensive path, statement
+ * and expression contexts, ES 1.00 and ES 3.00, float and integral bases,
+ * and dual mode are covered. */
+
+{
+  // ES 1.00: /= on a vec4 local (statement context).
+  {
+    const vs = compile(`attribute vec4 aPos; varying vec4 v; void main() { v = aPos; gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       varying vec4 v;
+       void main() { vec4 x = v; x /= 2.0; gl_FragColor = x; }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `scalar-broadcast vec4 /= links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program, [{ v: new Float32Array([1, 2, 4, 8]) }]);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [0.5, 1, 2, 4].forEach((e, c) => near(o[c], e, `vec4 /= 2.0 → out[${c}]`));
+    }
+  }
+
+  // ES 3.00: += on a vec4 local (statement context).
+  {
+    const vs = compile(`#version 300 es\nin vec4 aPos; out vec4 v; void main() { v = aPos; gl_Position = aPos; }`, 'VERTEX', 300);
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       in vec4 v;
+       out vec4 c;
+       void main() { vec4 x = v; x += 1.5; c = x; }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `scalar-broadcast vec4 += (ES3) links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program, [{ v: new Float32Array([1, 2, 4, 8]) }]);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [2.5, 3.5, 5.5, 9.5].forEach((e, c) => near(o[c], e, `vec4 += 1.5 → out[${c}]`));
+    }
+  }
+
+  // Matrix lvalues: mat2 *= and mat4 /= (scalar → every matrix slot).
+  {
+    const vs = compile(`attribute vec4 aPos; void main() { gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       void main() {
+         mat2 m = mat2(1.0, 2.0, 3.0, 4.0);
+         m *= 2.0;
+         mat4 n = mat4(8.0);
+         n /= 2.0;
+         gl_FragColor = vec4(m[0][0], m[0][1], m[1][0], m[1][1]) +
+                        vec4(n[0][0], n[1][1], n[2][2], n[3][3]) / 20.0;
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `scalar-broadcast mat2 *= / mat4 /= links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [2.2, 4.2, 6.2, 8.2].forEach((e, c) => near(o[c], e, `mat *= scalar → out[${c}]`));
+    }
+  }
+
+  // -= in a for-update slot (updateString path — non-comma update).
+  {
+    const vs = compile(`attribute vec4 aPos; varying vec4 v; void main() { v = aPos; gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       varying vec4 v;
+       void main() {
+         vec4 x = v;
+         for (int i = 0; i < 3; x -= 1.0) { i++; }
+         gl_FragColor = x;
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `scalar-broadcast vec4 -= in for-update links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program, [{ v: new Float32Array([1, 2, 4, 8]) }]);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [-2, -1, 1, 5].forEach((e, c) => near(o[c], e, `vec4 -= 1.0 ×3 → out[${c}]`));
+    }
+  }
+
+  // *= in an EXPRESSION context (emitAssign path — the assignment's VALUE is
+  // consumed: `(y *= 2.0).x`).
+  {
+    const vs = compile(`attribute vec4 aPos; varying vec4 v; void main() { v = aPos; gl_Position = aPos; }`, 'VERTEX', 100);
+    const fs = compile(
+      `precision mediump float;
+       varying vec4 v;
+       void main() {
+         vec2 y = v.xy;
+         float r = (y *= 2.0).x;
+         gl_FragColor = vec4(r, y.y, 0.0, 1.0);
+       }`,
+      'FRAGMENT',
+      100,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `scalar-broadcast vec2 *= in expression links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program, [{ v: new Float32Array([1, 2, 4, 8]) }]);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [2, 4, 0, 1].forEach((e, c) => near(o[c], e, `(y *= 2.0).x → out[${c}]`));
+    }
+  }
+
+  // ES 3.00 integral base: ivec4 %= int scalar (int broadcast).
+  {
+    const vs = compile(`#version 300 es\nin vec4 aPos; out vec4 v; void main() { v = aPos; gl_Position = aPos; }`, 'VERTEX', 300);
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       in vec4 v;
+       out vec4 c;
+       void main() {
+         ivec4 x = ivec4(5, 7, 9, 11);
+         x %= 3;
+         c = vec4(x) / 10.0;
+       }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `scalar-broadcast ivec4 %= links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const fctx = fragmentCtx(l.program);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      [0.2, 0.1, 0, 0.2].forEach((e, c) => near(o[c], e, `ivec4 %= 3 → out[${c}]`));
+    }
+  }
+
+  // DUAL MODE: += scalar on a varying-derived vec4, then dFdx reads the
+  // broadcast result — every component's derivative plane must be updated
+  // (the scalar contributes constant duals 0; the varying's ddx flows).
+  {
+    const vs = compile(`#version 300 es\nin vec4 aPos; out vec4 v; void main() { v = aPos; gl_Position = aPos; }`, 'VERTEX', 300);
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       in vec4 v;
+       out vec4 c;
+       void main() { vec4 x = v; x += 2.0; c = x + dFdx(x); }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `scalar-broadcast vec4 += (dual mode) links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      check(l.program.fragment.usesDerivatives === true, `dual broadcast variant uses derivatives`);
+      const fctx = fragmentCtx(l.program, [{ v: new Float32Array([1, 2, 4, 8]), ddx: new Float32Array([1, 0, 0, 0]), ddy: new Float32Array([0, 0, 0, 0]) }]);
+      l.program.fragment.run(fctx);
+      const o = fctx.out.color[0];
+      // c_c = (v_c + 2) + d(v_c + 2)/dx = v_c + 2 + ddx(v_c)
+      [4, 4, 6, 10].forEach((e, c) => near(o[c], e, `dual x += 2.0 + dFdx → out[${c}]`));
+    }
   }
 }
 
