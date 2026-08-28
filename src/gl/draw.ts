@@ -2793,6 +2793,39 @@ function validateCommonDraw(ctx: WebGLRenderingContext, mode: GLenum, indexed: b
       }
     }
   }
+  // GLES 3.0 §2.11.6/§2.11.7 (CTS conformance2/rendering/
+  // uniform-block-buffer-size.html): a draw is INVALID_OPERATION when any
+  // ACTIVE uniform block of the current program is not backed by a buffer
+  // range large enough to contain the block. Covers: nothing bound at the
+  // block's binding point, a buffer with no data store (never bufferData'd),
+  // a store smaller than the block, and a bindBufferRange whose size is
+  // smaller than the block. The per-program blockIndex → binding-point map
+  // lives in api/programs.ts's private WeakMap — read it back through the
+  // public query (same pattern as the engine's block-store build in
+  // executeDraw; safe on a linked program, pushes no errors).
+  {
+    const pm2 = prog._program;
+    if (pm2) {
+      const blocks = pm2.uniformBlocks ?? [];
+      if (blocks.length > 0) {
+        const gl2 = ctx as unknown as {
+          getActiveUniformBlockParameter?: (program: WebGLProgram, uniformBlockIndex: GLuint, pname: GLenum) => unknown;
+        };
+        for (let bi = 0; bi < blocks.length; bi++) {
+          const binding =
+            gl2.getActiveUniformBlockParameter !== undefined
+              ? ((gl2.getActiveUniformBlockParameter(prog, blocks[bi].index, C2.UNIFORM_BLOCK_BINDING) as number) || 0)
+              : 0;
+          const buf = binding < s.uniformBuffers.length ? s.uniformBuffers[binding] : null;
+          const range = binding < s.uniformBufferRanges.length ? s.uniformBufferRanges[binding] : null;
+          if (!buf || !buf._data || !range || range.size < blocks[bi].size) {
+            pushError(ctx, C1.INVALID_OPERATION);
+            return false;
+          }
+        }
+      }
+    }
+  }
   const fb = resolveDrawTarget(ctx);
   if (!fb) {
     pushError(ctx, C1.INVALID_FRAMEBUFFER_OPERATION);
