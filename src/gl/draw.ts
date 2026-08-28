@@ -280,6 +280,41 @@ function resolveReadDepthStencil(ctx: WebGLRenderingContext, attachment: GLenum)
   }
 }
 
+/**
+ * Does the READ framebuffer's attachment point hold an image? (GLES 3.0 §4.3.2
+ * blit missing-image validation.) Uses the RAW attachment record, NOT
+ * getAttachmentSurface's plane-scoped views: a depth-stencil image attached at
+ * DEPTH_ATTACHMENT resolves to null via getAttachmentSurface(DEPTH_ATTACHMENT)
+ * (deliberate — stencil-only blits must not copy depth) even though the point
+ * HAS an image (blitframebuffer-test.html binds the same DEPTH24_STENCIL8
+ * renderbuffer at DEPTH_ATTACHMENT on both sides and expects a DEPTH blit to
+ * succeed).
+ */
+function readAttachmentHasImage(ctx: WebGLRenderingContext, attachment: GLenum): boolean {
+  const s = ctx._state;
+  const fbo = s.readFramebuffer;
+  if (fbo === null) {
+    const dfb = ctx._defaultFB;
+    if (!dfb) return false;
+    return attachment === C1.DEPTH_ATTACHMENT ? !!dfb.depth : !!dfb.stencil;
+  }
+  const entry = fbo._attachments.get(attachment);
+  if (!entry) return false;
+  try {
+    if (entry.type === 'renderbuffer') return !!entry.renderbuffer._surface;
+    const tex = entry.texture;
+    const img = tex._image;
+    if (!img || entry.level < 0) return false;
+    const lvl = img.levels[entry.level];
+    if (!lvl) return false;
+    const isCube = entry.face !== undefined && entry.face >= 0x8515 && entry.face <= 0x851a;
+    const idx = isCube ? entry.face - 0x8515 : entry.layer;
+    return !!lvl.data[idx];
+  } catch {
+    return false;
+  }
+}
+
 /** Present the drawing buffer when the draw/clear/blit touched the default FB. */
 function presentIfDefault(ctx: WebGLRenderingContext): void {
   if (ctx._state.drawFramebuffer !== null) return;
@@ -1786,6 +1821,19 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
     for (let i = 0; i < s.drawBuffers.length; i++) {
       if (s.drawBuffers[i] === C1.NONE) continue;
       if (declared.has(i)) continue;
+      // RASTERIZER_DISCARD discards every fragment before any output write —
+      // the undefined-output rule is moot (CTS draw-buffers.html asserts
+      // NO_ERROR for an undefined-output draw with discard enabled).
+      if (s.caps.RASTERIZER_DISCARD) break;
+      // The rule applies ONLY to draw buffers with an attached image: a
+      // non-NONE draw buffer whose attachment point has no image is simply
+      // skipped by the rasterizer — no error (CTS
+      // read-draw-when-missing-image.html draws with
+      // drawBuffers=[NONE, COLOR_ATTACHMENT1] and [COLOR_ATTACHMENT0,
+      // COLOR_ATTACHMENT1] where CA1 is unattached → NO_ERROR).
+      const db = s.drawBuffers[i];
+      const dbIdx = db - C1.COLOR_ATTACHMENT0;
+      if (dbIdx < 0 || dbIdx >= fb.color.length || !fb.color[dbIdx]) continue;
       const m = s.colorMaskPerDrawBuffer.get(i) ?? s.colorMask;
       if (m[0] || m[1] || m[2] || m[3]) {
         pushError(ctx, C1.INVALID_OPERATION);
@@ -2460,6 +2508,18 @@ export function executeBlitFramebuffer(
   if (mask & C1.COLOR_BUFFER_BIT) {
     const src = resolveReadColor(ctx);
     const fb = resolveDrawTarget(ctx);
+    // GLES 3.0 §4.3.2 + CTS read-draw-when-missing-image.html: when the read
+    // buffer has NO image, a color blit is INVALID_OPERATION only if the
+    // blit's destination — the first enabled draw buffer — HAS an image;
+    // source- and destination-both-missing → NO_ERROR no-op.
+    if (!src && fb) {
+      const db0 = s.drawBuffers[0] ?? C1.COLOR_ATTACHMENT0;
+      const dst0 = db0 === C1.NONE ? null : fb.color[db0 - C1.COLOR_ATTACHMENT0];
+      if (dst0) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+    }
     if (src && fb) {
       const db0 = s.drawBuffers[0] ?? C1.COLOR_ATTACHMENT0;
       const dst = db0 === C1.NONE ? null : fb.color[db0 - C1.COLOR_ATTACHMENT0];
@@ -2479,6 +2539,20 @@ export function executeBlitFramebuffer(
     const fb = resolveDrawTarget(ctx);
     const dstDepth = fb ? fb.depth : null;
     const dstStencil = fb ? fb.stencil ?? (fb.depth && fb.depth.stencilData ? fb.depth : null) : null;
+    // GLES 3.0 §4.3.2 + CTS read-draw-when-missing-image.html: a depth/stencil
+    // blit is INVALID_OPERATION when exactly one side (source or destination)
+    // has the buffer; both-present or both-missing → proceed/no-op. The source
+    // side is judged by raw attachment presence (readAttachmentHasImage) —
+    // plane-scoped resolution would misreport DS images attached at
+    // DEPTH_ATTACHMENT as "missing".
+    if ((mask & C1.DEPTH_BUFFER_BIT) !== 0 && readAttachmentHasImage(ctx, C1.DEPTH_ATTACHMENT) !== !!dstDepth) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return;
+    }
+    if ((mask & C1.STENCIL_BUFFER_BIT) !== 0 && readAttachmentHasImage(ctx, C1.STENCIL_ATTACHMENT) !== !!dstStencil) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return;
+    }
     if (srcDepth && dstDepth) {
       try {
         blitDepthStencilSurface(srcDepth, dstDepth, srcX0, srcY0, srcW, srcH, dstX0, dstY0, dstW, dstH);
