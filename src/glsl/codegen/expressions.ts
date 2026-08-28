@@ -705,6 +705,39 @@ function walk(e: Expr, env: CodegenEnv): P {
       }
       if (ot.kind === 'matrix') {
         const rows = ot.rows;
+        // ROW-MAJOR BLOCK MEMBER: a matrix COLUMN is not contiguous in memory —
+        // component r of column c lives at float index c + r*4 (rows are
+        // 16-byte strided). Materialize the column into a synthesized flat
+        // local so const/dynamic component indexing and swizzles read the
+        // strided bytes (the generic path folds const columns as contiguous
+        // flatOff, which is only valid for column-major storage).
+        if (p.storage && p.storage.kind === 'block') {
+          const entry = env.lookupBlockMember(p.storage.blockIndex, p.storage.key);
+          if (entry !== null && entry.rowMajor) {
+            const base = `${entry.offset} / 4${p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.stride / 4}` : ''}`;
+            let colTerm: string;
+            if (isConst) {
+              colTerm = String(cv);
+            } else {
+              const t = env.allocTemp();
+              p.pre.push(`${t} = ${idxV!.pre && idxV!.pre.length ? foldPre(idxV!.pre, idxV!.v) : idxV!.v}`);
+              colTerm = t;
+            }
+            const compNames: string[] = [];
+            const dxNames: (string | null)[] = [];
+            const dyNames: (string | null)[] = [];
+            for (let r = 0; r < rows; r++) {
+              compNames.push(`ctx.blockStores[${p.storage.blockIndex}][${base} + ${colTerm} + ${r} * 4]`);
+              dxNames.push('0');
+              dyNames.push('0');
+            }
+            const q = freshP({ kind: 'vector', base: 'float', size: rows as 2 | 3 | 4 });
+            q.local = { name: '_rmcol', type: q.type, kind: 'flat', compNames, dxNames, dyNames, synth: true };
+            q.pre = p.pre;
+            q.lvalue = false;
+            return q;
+          }
+        }
         p.type = { kind: 'vector', base: 'float', size: rows };
         p.swz = null;
         if (isConst) {
@@ -747,7 +780,13 @@ function walk(e: Expr, env: CodegenEnv): P {
           }
           p.dyn = { temp: t, stride: 0, elemSlots: rows };
         } else if (p.storage) {
-          p.dyn = { temp: t, stride: storageElemStride(p, rows), elemSlots: 0 };
+          // Block matrices: the column stride is the std140 matrixStride
+          // (16 bytes — 4*rows only matches square matrices).
+          const stride =
+            p.storage.kind === 'block'
+              ? (env.lookupBlockMember(p.storage.blockIndex, p.storage.key)?.matrixStride ?? 4 * rows)
+              : storageElemStride(p, rows);
+          p.dyn = { temp: t, stride, elemSlots: 0 };
         }
         return p;
       }

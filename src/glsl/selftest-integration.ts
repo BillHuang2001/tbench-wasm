@@ -412,7 +412,7 @@ let uboDual: Program | null = null;
 {
   const vs = compile(
     `#version 300 es
-     uniform Params { float k; float j; } p;
+     uniform Params { highp float k; highp float j; } p;
      in vec4 aPos;
      float scale(float x) { return x * p.k + p.j; }
      out float vX;
@@ -423,7 +423,7 @@ let uboDual: Program | null = null;
   const fs = compile(
     `#version 300 es
      precision mediump float;
-     uniform Params { float k; float j; } p;
+     uniform Params { highp float k; highp float j; } p;
      in float vX;
      out vec4 oColor;
      float scale(float x) { return x * p.k + p.j; }
