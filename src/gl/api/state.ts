@@ -156,6 +156,30 @@ function constFactorPairInvalid(src: number, dst: number): boolean {
   );
 }
 
+/** Per-drawbuffer blend entry shape (mirrors State.blendPerDrawBuffer values). */
+interface BlendEntryAll {
+  srcRGB: number; dstRGB: number; srcAlpha: number; dstAlpha: number;
+  eqRGB: number; eqAlpha: number;
+}
+
+/**
+ * OES_draw_buffers_indexed: non-indexed blend setters modify the blend state
+ * of ALL draw buffers (buffer 0's entry is what getParameter + the draw
+ * pipeline read). Overwrites every per-drawbuffer entry with the freshly-set
+ * values so previous blendEquationiOES/blendFunciOES entries are replaced
+ * (CTS oes-draw-buffers-indexed.html "Non-indexed calls modify all draw
+ * buffers state").
+ */
+function writeBlendAllDrawBuffers(ctx: WebGLRenderingContext, e: BlendEntryAll): void {
+  const s = ctx._state;
+  for (let i = 0; i < s.limits.MAX_DRAW_BUFFERS; i++) s.blendPerDrawBuffer.set(i, e);
+}
+
+/** Same overwrite-all semantics for colorMask (non-indexed colorMask modifies every draw buffer). */
+function writeColorMaskAllDrawBuffers(ctx: WebGLRenderingContext, m: [boolean, boolean, boolean, boolean]): void {
+  const s = ctx._state;
+  for (let i = 0; i < s.limits.MAX_DRAW_BUFFERS; i++) s.colorMaskPerDrawBuffer.set(i, [m[0], m[1], m[2], m[3]]);
+}
 /** Blend equation set per context (EXT_blend_minmax widens WebGL1). */
 function blendEquations(ctx: WebGLRenderingContext): number[] {
   if (ctx._version === 2) return BLEND_EQUATIONS_V2;
@@ -252,6 +276,13 @@ export function installStateApi(proto: WebGLRenderingContext): void {
     }
     ctx._state.blend.eqRGB = mode;
     ctx._state.blend.eqAlpha = mode;
+    // OES_draw_buffers_indexed: non-indexed setters update ALL draw buffers.
+    const s = ctx._state;
+    writeBlendAllDrawBuffers(ctx, {
+      srcRGB: s.blend.srcRGB, dstRGB: s.blend.dstRGB,
+      srcAlpha: s.blend.srcAlpha, dstAlpha: s.blend.dstAlpha,
+      eqRGB: mode, eqAlpha: mode,
+    });
   };
 
   proto.blendEquationSeparate = function (this: WebGLRenderingContext, modeRGB: GLenum, modeAlpha: GLenum): void {
@@ -264,6 +295,12 @@ export function installStateApi(proto: WebGLRenderingContext): void {
     }
     ctx._state.blend.eqRGB = modeRGB;
     ctx._state.blend.eqAlpha = modeAlpha;
+    const s = ctx._state;
+    writeBlendAllDrawBuffers(ctx, {
+      srcRGB: s.blend.srcRGB, dstRGB: s.blend.dstRGB,
+      srcAlpha: s.blend.srcAlpha, dstAlpha: s.blend.dstAlpha,
+      eqRGB: modeRGB, eqAlpha: modeAlpha,
+    });
   };
 
   proto.blendFunc = function (this: WebGLRenderingContext, sfactor: GLenum, dfactor: GLenum): void {
@@ -282,6 +319,12 @@ export function installStateApi(proto: WebGLRenderingContext): void {
     ctx._state.blend.dstRGB = dfactor;
     ctx._state.blend.srcAlpha = sfactor;
     ctx._state.blend.dstAlpha = dfactor;
+    const s = ctx._state;
+    writeBlendAllDrawBuffers(ctx, {
+      srcRGB: sfactor, dstRGB: dfactor,
+      srcAlpha: sfactor, dstAlpha: dfactor,
+      eqRGB: s.blend.eqRGB, eqAlpha: s.blend.eqAlpha,
+    });
   };
 
   proto.blendFuncSeparate = function (this: WebGLRenderingContext, srcRGB: GLenum, dstRGB: GLenum, srcAlpha: GLenum, dstAlpha: GLenum): void {
@@ -305,6 +348,11 @@ export function installStateApi(proto: WebGLRenderingContext): void {
     ctx._state.blend.dstRGB = dstRGB;
     ctx._state.blend.srcAlpha = srcAlpha;
     ctx._state.blend.dstAlpha = dstAlpha;
+    const s = ctx._state;
+    writeBlendAllDrawBuffers(ctx, {
+      srcRGB, dstRGB, srcAlpha, dstAlpha,
+      eqRGB: s.blend.eqRGB, eqAlpha: s.blend.eqAlpha,
+    });
   };
 
   proto.clearColor = function (this: WebGLRenderingContext, red: GLclampf, green: GLclampf, blue: GLclampf, alpha: GLclampf): void {
@@ -335,7 +383,13 @@ export function installStateApi(proto: WebGLRenderingContext): void {
   proto.colorMask = function (this: WebGLRenderingContext, red: GLboolean, green: GLboolean, blue: GLboolean, alpha: GLboolean): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    ctx._state.colorMask = [!!red, !!green, !!blue, !!alpha];
+    const m: [boolean, boolean, boolean, boolean] = [!!red, !!green, !!blue, !!alpha];
+    ctx._state.colorMask = m;
+    // OES_draw_buffers_indexed: non-indexed colorMask updates ALL draw
+    // buffers (overwrites previous colorMaskiOES entries — CTS
+    // oes-draw-buffers-indexed.html expects getIndexedParameter(COLOR_WRITEMASK,
+    // 0) AND (..., 1) to both reflect the new value after gl.colorMask).
+    writeColorMaskAllDrawBuffers(ctx, m);
   };
 
   proto.cullFace = function (this: WebGLRenderingContext, mode: GLenum): void {
