@@ -39,6 +39,7 @@
 
 import type { RasterState } from './types';
 import {
+  RECORD_OFFSET_CLIP_DISTANCE, RECORD_OFFSET_CULL_DISTANCE,
   RECORD_OFFSET_W, RECORD_OFFSET_X, RECORD_OFFSET_Y, RECORD_OFFSET_Z,
   VARYINGS_OFFSET,
 } from './types';
@@ -163,17 +164,27 @@ export function rasterizeTriangle(
   const quadDepth = rs.quadDepth;
   const quadW = rs.quadW;
   const quadPC = rs.quadPointCoord;
+  const quadClip = rs.quadClipDist;
+  const quadCull = rs.quadCullDist;
   const usesDeriv = rs.dc.program.fragment.usesDerivatives;
 
   const vary0 = i0 + VARYINGS_OFFSET;
   const vary1 = i1 + VARYINGS_OFFSET;
   const vary2 = i2 + VARYINGS_OFFSET;
+  // Clip/cull distance slots (8 floats each at fixed record offsets).
+  const cd0 = i0 + RECORD_OFFSET_CLIP_DISTANCE;
+  const cd1 = i1 + RECORD_OFFSET_CLIP_DISTANCE;
+  const cd2 = i2 + RECORD_OFFSET_CLIP_DISTANCE;
+  const cu0 = i0 + RECORD_OFFSET_CULL_DISTANCE;
+  const cu1 = i1 + RECORD_OFFSET_CULL_DISTANCE;
+  const cu2 = i2 + RECORD_OFFSET_CULL_DISTANCE;
 
   /**
    * Computes the edge values and interpolated attributes for one pixel at
    * (px, py), storing the attribute set into quad slot `slot`
    * (quadV[slot·n .. slot·n+n), quadDepth[slot], quadW[slot],
-   * quadPointCoord[2·slot .. 2·slot+2] = 0 for triangles).
+   * quadPointCoord[2·slot .. 2·slot+2] = 0 for triangles,
+   * quadClipDist/quadCullDist[slot·8 .. slot·8+8)).
    * Returns whether the pixel center is inside the triangle (top-left rule,
    * restricted to the rasterization bbox so quads straddling the bbox edge do
    * not mark out-of-bounds pixels as inside).
@@ -193,6 +204,7 @@ export function rasterizeTriangle(
     // vertex 0, e2 = E(v2→v0) with vertex 1 (see the barycentric comment).
     const wDenom = l1 * invW0 + l2 * invW1 + l0 * invW2;
     const base = slot * n;
+    const cq = slot * 8;
     if (isFinite(wDenom) && Math.abs(wDenom) >= 1e-15) {
       const w = 1 / wDenom;
       for (let c = 0; c < n; c++) {
@@ -200,11 +212,26 @@ export function rasterizeTriangle(
           + l2 * buf[vary1 + c] * invW1
           + l0 * buf[vary2 + c] * invW2) * w;
       }
+      // Clip/cull distances: perspective-correct, same wDenom as the varyings
+      // (EXT_clip_cull_distance: fragment inputs are interpolated like any
+      // other varying).
+      for (let k = 0; k < 8; k++) {
+        quadClip[cq + k] = (l1 * buf[cd0 + k] * invW0
+          + l2 * buf[cd1 + k] * invW1
+          + l0 * buf[cd2 + k] * invW2) * w;
+        quadCull[cq + k] = (l1 * buf[cu0 + k] * invW0
+          + l2 * buf[cu1 + k] * invW1
+          + l0 * buf[cu2 + k] * invW2) * w;
+      }
       quadW[slot] = wDenom;
     } else {
       // Degenerate perspective denominator: plain barycentric mix.
       for (let c = 0; c < n; c++) {
         quadV[base + c] = l1 * buf[vary0 + c] + l2 * buf[vary1 + c] + l0 * buf[vary2 + c];
+      }
+      for (let k = 0; k < 8; k++) {
+        quadClip[cq + k] = l1 * buf[cd0 + k] + l2 * buf[cd1 + k] + l0 * buf[cd2 + k];
+        quadCull[cq + k] = l1 * buf[cu0 + k] + l2 * buf[cu1 + k] + l0 * buf[cu2 + k];
       }
       quadW[slot] = wDenom;
     }

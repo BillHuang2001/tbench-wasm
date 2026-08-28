@@ -23,7 +23,8 @@
 
 import type { RasterState } from './types';
 import {
-  ALIASED_POINT_SIZE_RANGE, RECORD_OFFSET_POINT_SIZE, RECORD_OFFSET_W,
+  ALIASED_POINT_SIZE_RANGE, RECORD_OFFSET_CLIP_DISTANCE,
+  RECORD_OFFSET_CULL_DISTANCE, RECORD_OFFSET_POINT_SIZE, RECORD_OFFSET_W,
   RECORD_OFFSET_X, RECORD_OFFSET_Y, RECORD_OFFSET_Z, VARYINGS_OFFSET,
 } from './types';
 import { runFragment, runQuad } from './fragment-ops';
@@ -68,9 +69,15 @@ export function rasterizePoint(
   const quadDepth = rs.quadDepth;
   const quadW = rs.quadW;
   const quadPC = rs.quadPointCoord;
+  const quadClip = rs.quadClipDist;
+  const quadCull = rs.quadCullDist;
   const usesDeriv = rs.dc.program.fragment.usesDerivatives;
 
   const vary = i + VARYINGS_OFFSET;
+  // Clip/cull distance slots (8 floats each at fixed record offsets); for
+  // points they are CONSTANT across the point, like the varyings.
+  const cd = i + RECORD_OFFSET_CLIP_DISTANCE;
+  const cu = i + RECORD_OFFSET_CULL_DISTANCE;
 
   /**
    * Computes one pixel: half-open square coverage test plus the (constant)
@@ -86,6 +93,11 @@ export function rasterizePoint(
     if (!fill) return inside;
     const base = slot * n;
     for (let c = 0; c < n; c++) quadV[base + c] = buf[vary + c];
+    const cq = slot * 8;
+    for (let k = 0; k < 8; k++) {
+      quadClip[cq + k] = buf[cd + k];
+      quadCull[cq + k] = buf[cu + k];
+    }
     quadDepth[slot] = z;
     quadW[slot] = w;
     quadPC[slot * 2] = (cx - left) * invSize;

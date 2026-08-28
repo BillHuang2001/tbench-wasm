@@ -13,11 +13,18 @@
  * `../raster` for a compile-time check).
  *
  * Storage conventions (MANDATORY):
- *  - Vertex records are packed in a Float32Array: `[x, y, z, w, pointSize, varyings...]`.
+ *  - Vertex records are packed in a Float32Array:
+ *    `[x, y, z, w, pointSize, clipDist[8], cullDist[8], varyings...]`.
  *    x/y/z/w are CLIP-space when the record is handed to draw(); after the
  *    viewport transform (clip.applyViewportTransform) x/y/z are WINDOW coords
  *    and w is preserved as clip w (needed for perspective interpolation and
  *    gl_FragCoord.w = 1/w_clip).
+ *    The 8 clip-distance slots (RECORD_OFFSET_CLIP_DISTANCE = 5) hold the
+ *    per-plane clip distances written by the vertex shader (WEBGL/EXT
+ *    clip_cull_distance); the 8 cull-distance slots (RECORD_OFFSET_CULL_DISTANCE
+ *    = 13) hold the cull distances. gl/ zeroes all 16 slots per draw, so
+ *    shaders that do not write them yield 0 (never negative → never clipped
+ *    or culled by them).
  *  - Surface rows: row 0 is the BOTTOM row (GL window coordinates, y up).
  *    The drawing buffer's present() path flips for display; readPixels does
  *    NOT flip (GL semantics).
@@ -37,10 +44,24 @@ export const RECORD_OFFSET_Y = 1;
 export const RECORD_OFFSET_Z = 2;
 export const RECORD_OFFSET_W = 3;
 export const RECORD_OFFSET_POINT_SIZE = 4;
+/**
+ * First of the 8 per-plane clip-distance slots (WEBGL/EXT_clip_cull_distance):
+ * one float per clip plane, 8 slots. A vertex is OUTSIDE plane i when
+ * clipDist[i] < 0; raster clips against the planes whose bit is set in
+ * DrawCall.clipDistPlanes. gl/ zeroes these slots per draw (unwritten = 0).
+ */
+export const RECORD_OFFSET_CLIP_DISTANCE = 5;
+/**
+ * First of the 8 per-plane cull-distance slots: one float per cull plane.
+ * Value-driven culling (EXT_clip_cull_distance has no CULL_DISTANCE<i>
+ * enables): a primitive is discarded when, for any slot i ∈ 0..7, ALL its
+ * vertices have cullDist[i] < 0. gl/ zeroes these slots per draw.
+ */
+export const RECORD_OFFSET_CULL_DISTANCE = 13;
 /** Index of the first varying component in a vertex record. */
-export const VARYINGS_OFFSET = 5;
+export const VARYINGS_OFFSET = 21;
 /** Number of header floats before the varyings. */
-export const RECORD_HEADER_FLOATS = 5;
+export const RECORD_HEADER_FLOATS = 21;
 
 /**
  * Per-varying metadata (structurally identical to glsl's VaryingInfo; raster
@@ -103,6 +124,19 @@ export interface FragmentExecCtx {
   frontFacing: boolean;
   /** [s, t] in 0..1 for POINTS primitives; zero otherwise. */
   pointCoord: Float32Array;
+  /**
+   * Interpolated gl_ClipDistance values (length 8, one per clip plane) for the
+   * current fragment — perspective-correct interpolation of the vertex
+   * record's clip-distance slots (WEBGL/EXT_clip_cull_distance). Raster ALWAYS
+   * allocates and fills these (8 zeros when the shader does not use them);
+   * optional only so hand-built test ctxs may omit them.
+   */
+  clipDistance?: Float32Array;
+  /**
+   * Interpolated gl_CullDistance values (length 8, one per cull plane) for the
+   * current fragment, same convention as `clipDistance`.
+   */
+  cullDistance?: Float32Array;
   /**
    * Builtin gl_DepthRange state: [near, far, far − near] (GLSL ES 1.00 §7.6
    * / 3.00 §7.7), from the current DrawCall.depthRange. Codegen lowers
@@ -364,6 +398,19 @@ export interface DrawCall {
    * [near, far].
    */
   clipDepthMode?: GLenum;
+  /**
+   * Bitmask of ENABLED user clip planes (WEBGL/EXT_clip_cull_distance): bit i
+   * = CLIP_DISTANCE<i> enabled (gl.enable(CLIP_DISTANCE<i>)). A vertex is
+   * outside plane i when its record clip-dist slot (RECORD_OFFSET_CLIP_DISTANCE
+   * + i) is < 0; the primitive is clipped against every set plane, after the 6
+   * standard planes. Absent → 0 (no user clip planes; byte-identical to the
+   * pre-extension pipeline). Cull distances need NO enable bitmask: per
+   * EXT_clip_cull_distance the enabled cull half-spaces are exactly those
+   * written by gl_CullDistance, and raster's cull is value-driven ("all
+   * vertices negative for any slot → discard"); unwritten slots are zeroed by
+   * gl/ per draw and never cull.
+   */
+  clipDistPlanes?: number;
   scissor: ScissorState;
   cull: CullState;
   polygonOffset: PolygonOffsetState;
@@ -545,4 +592,10 @@ export interface RasterState {
   quadW: Float32Array;
   /** Per-pixel point coords [s,t]×4 (POINTS only; else zeros). */
   quadPointCoord: Float32Array;
+  /** Per-pixel interpolated clip distances: 4 × 8, laid out [pixel][i] like
+   *  quadV (WEBGL/EXT_clip_cull_distance; filled by the primitive rasterizers,
+   *  consumed by setupFragmentCtx). */
+  quadClipDist: Float32Array;
+  /** Per-pixel interpolated cull distances: 4 × 8, [pixel][i]. */
+  quadCullDist: Float32Array;
 }

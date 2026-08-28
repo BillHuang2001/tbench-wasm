@@ -26,6 +26,9 @@
 
 import type { DrawCall, FragmentExecCtx, RasterState, SamplerState, TextureImage, VaryingInterpolant } from './types';
 import {
+  RECORD_OFFSET_CLIP_DISTANCE, RECORD_OFFSET_CULL_DISTANCE,
+} from './types';
+import {
   POINTS, LINES, LINE_LOOP, LINE_STRIP, TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN,
   FRONT, BACK, FRONT_AND_BACK, CW, CCW,
   NEAREST_MIPMAP_LINEAR, LINEAR, REPEAT, NONE, LEQUAL,
@@ -113,11 +116,22 @@ export function draw(dc: DrawCall): void {
   const stride = dc.vertexStride;
   const { first, count, instanceCount, mode } = dc;
 
-  // Per-draw scratch: one primitive buffer (3 records) + two clip buffers of
-  // MAX_CLIPPED_VERTICES records each (see clip.ts). Allocated once per draw.
+  // EXT/WebGL clip_cull_distance: enabled user clip planes (bitmask) + the
+  // number of extra S-H clip passes they add. Cull distances need no enable
+  // (value-driven, see cullDistanceDiscards).
+  const clipPlanes = dc.clipDistPlanes ?? 0;
+  const pop = popcount(clipPlanes);
+
+  // Per-draw scratch: one primitive buffer (3 records) + two clip buffers.
+  // Without user clip planes the clip buffers keep the legacy size
+  // (MAX_CLIPPED_VERTICES records each — byte-identical behavior); with them,
+  // P = 6 + pop passes can grow a triangle to ≤ 3+P = 9+pop vertices, so both
+  // buffers are sized at 9+pop records (scratch needs only ≤ 3+(P−2), but
+  // sharing one size keeps the code simple). Allocated once per draw.
   const primBuf = new Float32Array(3 * stride);
-  const clipA = new Float32Array(MAX_CLIPPED_VERTICES * stride);
-  const clipB = new Float32Array(MAX_CLIPPED_VERTICES * stride);
+  const clipRecs = clipPlanes === 0 ? MAX_CLIPPED_VERTICES : 9 + pop;
+  const clipA = new Float32Array(clipRecs * stride);
+  const clipB = new Float32Array(clipRecs * stride);
 
   // Flat-varying component ranges as [startFloat, componentCount] pairs, with
   // startFloat an ABSOLUTE float index within the record.
@@ -288,6 +302,12 @@ export function createRasterState(dc: DrawCall): RasterState {
     tex: createTextureEnv(dc.textures),
     out: { color: colorOuts, secondary: secondaryOuts, fragDepth: 0 },
     discarded: false,
+    // Interpolated gl_ClipDistance/gl_CullDistance (8 values each) — ALWAYS
+    // allocated and filled per fragment by setupFragmentCtx, even when the
+    // program does not use them (codegen reads them only for shaders that
+    // declare the builtins; additive-optional for hand-built test ctxs).
+    clipDistance: new Float32Array(8),
+    cullDistance: new Float32Array(8),
   };
 
   return {
@@ -300,6 +320,10 @@ export function createRasterState(dc: DrawCall): RasterState {
     quadDepth: new Float32Array(4),
     quadW: new Float32Array(4),
     quadPointCoord: new Float32Array(8),
+    // Per-pixel interpolated clip/cull distances (4 pixels × 8 slots,
+    // [pixel][i] — same layout convention as quadV).
+    quadClipDist: new Float32Array(32),
+    quadCullDist: new Float32Array(32),
   };
 }
 
@@ -334,6 +358,43 @@ function copyRecord(
   for (let i = 0; i < stride; i++) dst[dstBase + i] = src[srcBase + i];
 }
 
+/** Population count of a 32-bit mask (called once per draw; trivial). */
+function popcount(x: number): number {
+  let n = 0;
+  while (x !== 0) {
+    x &= x - 1;
+    n++;
+  }
+  return n;
+}
+
+/**
+ * EXT_clip_cull_distance cull test: true when the primitive is DISCARDED.
+ * There are no CULL_DISTANCE<i> enables — the enabled cull half-spaces are
+ * exactly those written by gl_CullDistance (EXT spec: "If the cull distance
+ * for any enabled cull half-space is negative for all of the vertices of the
+ * primitive under consideration, the primitive is discarded"). Value-driven:
+ * for each slot i ∈ 0..7, if EVERY vertex has cullDist[i] < 0 → discard.
+ * Unwritten slots are zero (gl/ zeroes the record slots per draw) → never
+ * negative → no-op. No allocation.
+ */
+function cullDistanceDiscards(
+  buf: Float32Array, base: number, count: number, stride: number,
+): boolean {
+  for (let i = 0; i < 8; i++) {
+    const off = RECORD_OFFSET_CULL_DISTANCE + i;
+    let allNeg = true;
+    for (let v = 0; v < count; v++) {
+      if (buf[base + v * stride + off] >= 0) {
+        allNeg = false;
+        break;
+      }
+    }
+    if (allNeg) return true;
+  }
+  return false;
+}
+
 /** Assembles, flat-fixes, clips, transforms, culls and rasterizes one triangle. */
 function emitTriangle(
   dc: DrawCall, rs: RasterState, primBuf: Float32Array,
@@ -348,7 +409,12 @@ function emitTriangle(
 
   applyFlatFixup(primBuf, 0, 3, stride, dc.varyingsOffset, flatRanges);
 
-  const nv = clipPrimitive(primBuf, 0, stride, 3, clipA, clipB, 0, dc.clipDepthMode);
+  // Cull against the cull volume FIRST, then clip to the clip volume (EXT
+  // spec order: "Primitives are culled against the cull volume and then
+  // clipped to the clip volume").
+  if (cullDistanceDiscards(primBuf, 0, 3, stride)) return;
+
+  const nv = clipPrimitive(primBuf, 0, stride, 3, clipA, clipB, 0, dc.clipDepthMode, dc.clipDistPlanes);
   if (nv === 0) return;
   applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange, dc.clipOrigin, dc.clipDepthMode);
 
@@ -389,7 +455,10 @@ function emitLine(
 
   applyFlatFixup(primBuf, 0, 2, stride, dc.varyingsOffset, flatRanges);
 
-  const nv = clipPrimitive(primBuf, 0, stride, 2, clipA, clipB, 0, dc.clipDepthMode);
+  // Cull volume first, then clip volume (EXT spec order).
+  if (cullDistanceDiscards(primBuf, 0, 2, stride)) return;
+
+  const nv = clipPrimitive(primBuf, 0, stride, 2, clipA, clipB, 0, dc.clipDepthMode, dc.clipDistPlanes);
   if (nv === 0) return;
   applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange, dc.clipOrigin, dc.clipDepthMode);
 
@@ -404,8 +473,25 @@ function emitPoint(
 ): void {
   copyRecord(dc.vertices, ia * stride, primBuf, 0, stride);
 
+  // Cull volume first (a point is a one-vertex primitive: any cull slot
+  // negative discards it), then the clip checks.
+  if (cullDistanceDiscards(primBuf, 0, 1, stride)) return;
+
   // Points are not polygon-clipped; only the 6-plane visibility test applies.
   if (!pointIsVisible(primBuf, 0, stride, dc.clipDepthMode)) return;
+
+  // User clip planes (EXT_clip_cull_distance): a point outside an ENABLED
+  // clip plane (clipDist[i] < 0) is discarded — "clipping passes it unchanged
+  // if it lies within the clip volume; otherwise it is discarded".
+  const clipPlanes = dc.clipDistPlanes ?? 0;
+  if (clipPlanes !== 0) {
+    for (let i = 0; i < 8; i++) {
+      if ((clipPlanes & (1 << i)) !== 0 &&
+          primBuf[RECORD_OFFSET_CLIP_DISTANCE + i] < 0) {
+        return;
+      }
+    }
+  }
   applyViewportTransform(primBuf, 0, stride, 1, dc.viewport, dc.depthRange, dc.clipOrigin, dc.clipDepthMode);
 
   rs.frontFacing = false; // undefined for points

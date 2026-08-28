@@ -538,8 +538,9 @@ export class FragmentOpsImpl implements FragmentOps {
 /**
  * Quad fragment driver. Runs the fragment shader for a 2×2 quad of pixels
  * with origins at (qx, qy) (pixels (qx,qy),(qx+1,qy),(qx,qy+1),(qx+1,qy+1)).
- * `rs.quadV/quadDepth/quadW/quadPointCoord` hold the 4 precomputed per-pixel
- * values (see RasterState) and `rs.frontFacing` the primitive facing.
+ * `rs.quadV/quadDepth/quadW/quadPointCoord/quadClipDist/quadCullDist` hold the
+ * 4 precomputed per-pixel values (see RasterState) and `rs.frontFacing` the
+ * primitive facing.
  * `inside` is a 4-bit mask (bit p = pixel p inside the primitive).
  *
  *  - Inside pixels: ops.test → shader → (if not discarded) ops.finalize.
@@ -580,7 +581,7 @@ export function runQuad(rs: RasterState, qx: number, qy: number, inside: number)
           s[0] = 0; s[1] = 0; s[2] = 0; s[3] = 1;
         }
       }
-      setupFragmentCtx(ctx, x, y, rs.quadDepth[p], rs.quadW[p], rs.quadV, rs.totalVaryComponents, p);
+      setupFragmentCtx(ctx, x, y, rs.quadDepth[p], rs.quadW[p], rs.quadV, rs.totalVaryComponents, p, rs.quadClipDist, rs.quadCullDist);
       ctx.pointCoord[0] = rs.quadPointCoord[2 * p];
       ctx.pointCoord[1] = rs.quadPointCoord[2 * p + 1];
       ctx.frontFacing = rs.frontFacing;
@@ -625,7 +626,7 @@ export function runFragment(
       s[0] = 0; s[1] = 0; s[2] = 0; s[3] = 1;
     }
   }
-  setupFragmentCtx(ctx, x, y, depth, w, rs.quadV, total, pixel);
+  setupFragmentCtx(ctx, x, y, depth, w, rs.quadV, total, pixel, rs.quadClipDist, rs.quadCullDist);
   ctx.pointCoord[0] = rs.quadPointCoord[2 * pixel];
   ctx.pointCoord[1] = rs.quadPointCoord[2 * pixel + 1];
   ctx.frontFacing = rs.frontFacing;
@@ -640,10 +641,16 @@ export function runFragment(
   }
 }
 
-/** Fills ctx for one pixel from the quad scratch (see RasterState layout). */
+/** Fills ctx for one pixel from the quad scratch (see RasterState layout).
+ *  `quadClip`/`quadCull` (optional, 4×8 floats laid out [pixel][i]) carry the
+ *  per-pixel interpolated gl_ClipDistance/gl_CullDistance; when present the
+ *  pixel's 8 values are copied into ctx.clipDistance/ctx.cullDistance (raster
+ *  always provides them via rs.quadClipDist/quadCullDist; standalone callers
+ *  may omit them). */
 export function setupFragmentCtx(
   ctx: FragmentExecCtx, x: number, y: number, depth: number, w: number,
   quadV: Float32Array, quadStride: number, pixel: number,
+  quadClip?: Float32Array, quadCull?: Float32Array,
 ): void {
   const fc = ctx.fragCoord;
   // gl_FragCoord.xy = window pixel center (GLSL ES 1.00 §7.1 / 3.00 §7.1):
@@ -670,6 +677,17 @@ export function setupFragmentCtx(
       }
     }
     offset += n;
+  }
+  // Interpolated gl_ClipDistance/gl_CullDistance (8 values each). The ctx
+  // arrays are always allocated by createRasterState; the quad buffers are
+  // always filled by the primitive rasterizers.
+  if (quadClip && ctx.clipDistance) {
+    const cb = pixel * 8;
+    for (let k = 0; k < 8; k++) ctx.clipDistance[k] = quadClip[cb + k];
+  }
+  if (quadCull && ctx.cullDistance) {
+    const cb = pixel * 8;
+    for (let k = 0; k < 8; k++) ctx.cullDistance[k] = quadCull[cb + k];
   }
 }
 

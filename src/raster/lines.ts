@@ -43,6 +43,7 @@
 
 import type { RasterState } from './types';
 import {
+  RECORD_OFFSET_CLIP_DISTANCE, RECORD_OFFSET_CULL_DISTANCE,
   RECORD_OFFSET_W, RECORD_OFFSET_X, RECORD_OFFSET_Y, RECORD_OFFSET_Z,
   VARYINGS_OFFSET,
 } from './types';
@@ -201,16 +202,23 @@ export function rasterizeLine(
   const quadDepth = rs.quadDepth;
   const quadW = rs.quadW;
   const quadPC = rs.quadPointCoord;
+  const quadClip = rs.quadClipDist;
+  const quadCull = rs.quadCullDist;
   const usesDeriv = rs.dc.program.fragment.usesDerivatives;
 
   const vary0 = i0 + VARYINGS_OFFSET;
   const vary1 = i1 + VARYINGS_OFFSET;
+  // Clip/cull distance slots (8 floats each at fixed record offsets).
+  const cd0 = i0 + RECORD_OFFSET_CLIP_DISTANCE;
+  const cd1 = i1 + RECORD_OFFSET_CLIP_DISTANCE;
+  const cu0 = i0 + RECORD_OFFSET_CULL_DISTANCE;
+  const cu1 = i1 + RECORD_OFFSET_CULL_DISTANCE;
 
   /**
    * Computes one pixel: diamond-exit coverage test plus interpolated
    * attributes into quad slot `slot` (varyings via the projection of the
-   * pixel center onto the segment, clamped to [0, 1]). Returns whether the
-   * pixel is covered.
+   * pixel center onto the segment, clamped to [0, 1]; clip/cull distances
+   * with the same t-projection). Returns whether the pixel is covered.
    */
   const computePixel = (px: number, py: number, slot: number, fill: boolean): boolean => {
     const cx = px + 0.5, cy = py + 0.5;
@@ -222,17 +230,28 @@ export function rasterizeLine(
     else if (t > 1) t = 1;
     const wDenom = (1 - t) * invW0 + t * invW1;
     const base = slot * n;
+    const cq = slot * 8;
     if (isFinite(wDenom) && Math.abs(wDenom) >= 1e-15) {
       const w = 1 / wDenom;
       for (let c = 0; c < n; c++) {
         quadV[base + c] = ((1 - t) * buf[vary0 + c] * invW0
           + t * buf[vary1 + c] * invW1) * w;
       }
+      for (let k = 0; k < 8; k++) {
+        quadClip[cq + k] = ((1 - t) * buf[cd0 + k] * invW0
+          + t * buf[cd1 + k] * invW1) * w;
+        quadCull[cq + k] = ((1 - t) * buf[cu0 + k] * invW0
+          + t * buf[cu1 + k] * invW1) * w;
+      }
       quadW[slot] = wDenom;
     } else {
       // Degenerate perspective denominator: plain linear mix.
       for (let c = 0; c < n; c++) {
         quadV[base + c] = (1 - t) * buf[vary0 + c] + t * buf[vary1 + c];
+      }
+      for (let k = 0; k < 8; k++) {
+        quadClip[cq + k] = (1 - t) * buf[cd0 + k] + t * buf[cd1 + k];
+        quadCull[cq + k] = (1 - t) * buf[cu0 + k] + t * buf[cu1 + k];
       }
       quadW[slot] = wDenom;
     }
