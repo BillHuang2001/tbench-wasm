@@ -69,6 +69,7 @@ export const GL = {
   TEXTURE_3D: 0x806f,
   TEXTURE_2D_ARRAY: 0x8c1a,
 
+<<<<<<< HEAD
   // Texture parameter names (texParameteri keys)
   TEXTURE_MAG_FILTER: 0x2800,
   TEXTURE_MIN_FILTER: 0x2801,
@@ -78,6 +79,9 @@ export const GL = {
   TEXTURE_MAX_LEVEL: 0x813d,
 
   // Min/mag filters
+=======
+  // Texture filters (min/mag)
+>>>>>>> ba0e6c7
   NEAREST: 0x2600,
   LINEAR: 0x2601,
   NEAREST_MIPMAP_NEAREST: 0x2700,
@@ -88,6 +92,7 @@ export const GL = {
   // Wrap modes
   CLAMP_TO_EDGE: 0x812f,
   REPEAT: 0x2901,
+  NONE: 0x0000,
 } as const;
 
 /**
