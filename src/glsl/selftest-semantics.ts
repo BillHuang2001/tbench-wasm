@@ -513,7 +513,7 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, -8)); }', 300, 'FRAGMENT');
   okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, 7)); }', 300, 'FRAGMENT');
   // 3-component offsets (sampler3D) and the other offset-family names.
-  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler3D s;\nin vec3 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec3(0)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nprecision mediump sampler3D;\nuniform sampler3D s;\nin vec3 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec3(0)); }', 300, 'FRAGMENT');
   okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureLodOffset(s, uv, 0.0, ivec2(1)); }', 300, 'FRAGMENT');
   okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec4 uv;\nout vec4 c;\nvoid main() { c = textureProjOffset(s, uv, ivec2(1)); }', 300, 'FRAGMENT');
   okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec4 uv;\nout vec4 c;\nvoid main() { c = textureProjLodOffset(s, uv, 0.0, ivec2(1)); }', 300, 'FRAGMENT');
