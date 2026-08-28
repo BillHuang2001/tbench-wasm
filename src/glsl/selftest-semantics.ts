@@ -684,6 +684,83 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
 }
 
 /* ------------------------------------------------------------------ */
+/* 15. Scope: for/function-body no-new-scope + struct-with-array rules */
+/* ------------------------------------------------------------------ */
+
+{
+  // GLSL ES §4.2.2: the for body is a statement-no-new-scope — the for-init
+  // declaration's scope extends over the body, so a braced body does NOT push
+  // a scope; `for (int i...) { int i; }` is a SAME-SCOPE redefinition (CTS
+  // shader-with-for-scoping.html). Blocks nested INSIDE the body still push
+  // their own scopes (shadowing legal).
+  const f1 = errs(
+    'precision mediump float;\nvoid main() {\n  int k = 0;\n  for (int i = 0; i < 10; i++) { int i = k+i; }\n  gl_FragColor = vec4(float(k));\n}',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(f1, 4, "'i' : redefinition"), 'for body redeclares for-init i → redefinition error line 4');
+  okInfo(
+    'precision mediump float;\nvoid main() {\n  int k = 0;\n  for (int i = 0; i < 10; i++) { { int i = k+i; } }\n  gl_FragColor = vec4(float(k));\n}',
+    100,
+    'FRAGMENT',
+  );
+
+  // Params + body form a SINGLE scope (CTS shader-with-functional-scoping.
+  // html): a body-level redeclaration of a param is a redefinition; a nested
+  // block shadowing a param is legal.
+  const f2 = errs(
+    'precision mediump float;\nint f(int k) {\n  int k = k + 3;\n  return k;\n}\nvoid main() { gl_FragColor = vec4(1.0); }',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(f2, 3, "'k' : redefinition"), 'function body redeclares param k → redefinition error line 3');
+  okInfo(
+    'precision mediump float;\nint f(int k) {\n  { int k = k + 3; }\n  return k;\n}\nvoid main() { gl_FragColor = vec4(1.0); }',
+    100,
+    'FRAGMENT',
+  );
+  okInfo(
+    '#version 300 es\nint f(int k) {\n  { int k = k + 3; }\n  return k;\n}\nvoid main() { }',
+    300,
+    'FRAGMENT',
+  );
+
+  // Structs containing arrays are not assignable / not comparable (GLSL ES
+  // 1.00 §5.7/§5.8; CTS struct-assign.html / struct-equals.html) — the rule
+  // is version-independent (100 AND 300).
+  const s1 = errs(
+    'precision mediump float;\nstruct S { float f[3]; };\nvoid main() {\n  S a, b;\n  a = b;\n  gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n}',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(s1, 5, "'=' : cannot assign a struct containing an array"), 'struct-with-array assignment → error line 5');
+  const s2 = errs(
+    'precision mediump float;\nstruct S { float f[3]; };\nvoid main() {\n  S a, b;\n  bool c = (a == b);\n  gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n}',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(s2, 5, "'==' : cannot compare structs containing an array"), 'struct-with-array == → error line 5');
+  const s3 = errs(
+    'precision mediump float;\nstruct S { float f[3]; };\nvoid main() {\n  S a, b;\n  bool c = (a != b);\n  gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n}',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(s3, 5, "'!=' : cannot compare structs containing an array"), 'struct-with-array != → error line 5');
+  const s4 = errs(
+    '#version 300 es\nstruct S { float f[3]; };\nout vec4 o;\nvoid main() {\n  S a, b;\n  a = b;\n  o = vec4(1.0);\n}',
+    300,
+    'FRAGMENT',
+  );
+  check(hasErr(s4, 6, "'=' : cannot assign a struct containing an array"), '3.00 struct-with-array assignment → error line 6');
+  const s5 = errs(
+    '#version 300 es\nstruct S { float f[3]; };\nout vec4 o;\nvoid main() {\n  S a, b;\n  bool c = (a == b);\n  o = vec4(1.0);\n}',
+    300,
+    'FRAGMENT',
+  );
+  check(hasErr(s5, 6, "'==' : cannot compare structs containing an array"), '3.00 struct-with-array == → error line 6');
+}
+
+/* ------------------------------------------------------------------ */
 /* Summary                                                             */
 /* ------------------------------------------------------------------ */
 

@@ -967,10 +967,16 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
       case 'function-definition':
         // Function scope: params shadow global names (mirrors
         // analyzeFunctionBody — in-parameter-passed-as-inout-argument-and-
-        // global.html, ogles build CorrectFull_vert).
+        // global.html, ogles build CorrectFull_vert). Params and body form a
+        // SINGLE scope: a compound body's statements are walked directly in
+        // the function scope (nested blocks inside still push).
         pushScope();
         for (const p of d.prototype.params) declareLocal(p.name);
-        walkStmt(d.body);
+        if (d.body.kind === 'compound') {
+          for (const st of d.body.body) walkStmt(st);
+        } else {
+          walkStmt(d.body);
+        }
         popScope();
         break;
       default:

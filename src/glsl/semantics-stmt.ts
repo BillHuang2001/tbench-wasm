@@ -160,7 +160,16 @@ export function analyzeStatement(s: Stmt, scope: Scope, ctx: SemContext, fn: { r
         }
       }
       if (s.update !== null) analyzeExpr(s.update, inner, ctx);
-      analyzeStatement(s.body, inner, ctx, fn);
+      // GLSL ES: the for body is a statement-no-new-scope (spec 4.2.2;
+      // CTS shader-with-for-scoping.html) — the for-init declaration's scope
+      // extends over the body, so a braced body does NOT push a scope either;
+      // `for (int i...) { int i; }` is a same-scope redefinition error.
+      // Blocks nested INSIDE the body push their own scopes (shadowing legal).
+      if (s.body.kind === 'compound') {
+        for (const st of s.body.body) analyzeStatement(st, inner, ctx, fn);
+      } else {
+        analyzeStatement(s.body, inner, ctx, fn);
+      }
       ctx.loopDepth--;
       ctx.breakableDepth--;
       return;

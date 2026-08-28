@@ -544,6 +544,25 @@ function containsSampler(t: GLSLType): boolean {
   }
 }
 
+/**
+ * True when a (possibly nested) type contains an array member — GLSL ES 1.00
+ * §5.7/§5.8: "The assignment and equality operators are not defined for
+ * structures that contain arrays or sampler types"; "structures containing
+ * arrays ... may not be used as the target of an assignment". The CTS
+ * struct-assign/struct-equals pages require struct-with-array assignment and
+ * comparison to fail to compile.
+ */
+function containsArray(t: GLSLType): boolean {
+  switch (t.kind) {
+    case 'array':
+      return true;
+    case 'struct':
+      return t.members.some((m) => containsArray(m.type));
+    default:
+      return false;
+  }
+}
+
 function analyzeUnary(e: UnaryExpr, scope: Scope, ctx: SemContext): void {
   analyzeExpr(e.operand, scope, ctx);
   const t = e.operand.resolvedType;
@@ -684,6 +703,10 @@ function analyzeBinary(e: BinaryExpr, scope: Scope, ctx: SemContext): void {
           ctx.error(e.loc.line, `'${e.op}' : cannot compare structs containing a sampler`);
           return;
         }
+        if (containsArray(lt)) {
+          ctx.error(e.loc.line, `'${e.op}' : cannot compare structs containing an array`);
+          return;
+        }
         ok = typeEquals(lt, rt);
       }
       if (!ok) {
@@ -769,11 +792,16 @@ function analyzeAssign(e: AssignExpr, scope: Scope, ctx: SemContext): void {
       ctx.error(e.value.loc.line, `cannot convert from '${typeName(vt)}' to '${typeName(tt)}'`);
       return;
     }
-    // GLSL ES: structs containing a sampler cannot be assigned (samplers may
-    // not be struct members; the CTS struct-assign page requires this to fail
-    // to compile). Structs containing arrays already fail elsewhere (codegen).
+    // GLSL ES: structs containing a sampler or an ARRAY cannot be assigned
+    // (samplers may not be struct members; arrays may not be assignment
+    // targets — spec §5.7/§5.8; the CTS struct-assign page requires both to
+    // fail to compile).
     if (containsSampler(tt)) {
       ctx.error(e.loc.line, `'=' : cannot assign a struct containing a sampler`);
+      return;
+    }
+    if (containsArray(tt)) {
+      ctx.error(e.loc.line, `'=' : cannot assign a struct containing an array`);
       return;
     }
     e.resolvedType = tt;

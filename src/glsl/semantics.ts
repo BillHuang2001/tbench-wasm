@@ -874,7 +874,15 @@ function analyzeFunctionBody(d: FunctionDefinition, sig: FnSymbol, global: Scope
     if (p.name === '') continue; // unnamed param: no symbol
     fnScope.declare({ kind: 'var', name: p.name, type: p.type, storage: p.storage }, ctx, d.loc.line);
   }
-  analyzeStatement(d.body, fnScope, ctx, { returnType: sig.retType });
+  // GLSL ES: a function's params and body form a SINGLE scope (spec 4.2.2;
+  // CTS shader-with-functional-scoping.html) — the body compound (always a
+  // compound per the grammar) does NOT push a scope. Nested blocks inside
+  // the body push their own scopes (shadowing legal).
+  if (d.body.kind === 'compound') {
+    for (const st of d.body.body) analyzeStatement(st, fnScope, ctx, { returnType: sig.retType });
+  } else {
+    analyzeStatement(d.body, fnScope, ctx, { returnType: sig.retType });
+  }
   ctx.currentFunction = savedFn;
   ctx.loopDepth = savedLoop;
   ctx.breakableDepth = savedBreak;
