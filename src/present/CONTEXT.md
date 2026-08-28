@@ -42,6 +42,7 @@ Exact names (gl/ and entry.ts import from `./present`):
 ## Known Issues / Gotchas
 - `canvas.getContext('2d')` returns null if the canvas already has a native (browser) WebGL/other non-2D context → present() degrades to buffer-only (rendering still correct, just not visible). Degenerate case — handle by degrading, not failing.
 - For HTMLImageElement always use `naturalWidth`/`naturalHeight` (intrinsic size), never CSS sizes (`clientWidth`/`offsetWidth`).
+- **Videos must be accepted from readyState 1 (HAVE_METADATA)**: a video is frame-drawable (and natively uploadable) once metadata is loaded — the first frame is available at readyState 1. CTS `conformance/textures/misc/video-rotation.html` videos upload at readyState 1; a stricter gate (`readyState >= 2`, HAVE_CURRENT_DATA) rejected them → decode `{ok:false}` → gl/teximage.ts zero-filled the level → all-black quads (1P/64F). Accept `readyState >= 1`; still reject readyState 0 (HAVE_NOTHING).
 - `putImageData` does not scale: the buffer size must equal the canvas bitmap size; the auto-resize safety net handles drift.
 - Incomplete/broken images must return `{ok:false}` immediately — never block waiting for load (spec: texImage2D with an incomplete source → INVALID_VALUE).
 - Cross-origin images taint the scratch canvas → getImageData throws → mapped to `{ok:false}` (INVALID_VALUE). Setting `crossOrigin` is the page's job.

@@ -260,7 +260,7 @@ function decodeViaNativeWebGLWithFallback(source: unknown, width: number, height
  * management) with the scratch-2D drawImage+getImageData path as fallback.
  * ImageBitmap stays on the 2D path on purpose (see the (e) branch).
  * Returns {ok:false} — never throws — for incomplete images (image not loaded
- * or broken, video without current data), tainted canvases (SecurityError),
+ * or broken, video without metadata), tainted canvases (SecurityError),
  * and unsupported or null sources.
  */
 export function decodeImageSource(source: ImageSource): DecodeResult {
@@ -288,12 +288,18 @@ export function decodeImageSource(source: ImageSource): DecodeResult {
     return decodeViaNativeWebGLWithFallback(source, v.naturalWidth, v.naturalHeight);
   }
 
-  // (c) HTMLVideoElement duck-type — require current frame data (readyState
-  // >= HAVE_CURRENT_DATA) and a nonzero intrinsic size.
+  // (c) HTMLVideoElement duck-type — accept from readyState >= HAVE_METADATA
+  // (1): videos are frame-drawable (and natively uploadable) once metadata is
+  // loaded — the first frame is available at readyState 1. The CTS
+  // video-rotation videos upload at readyState 1; a stricter gate (readyState
+  // >= 2, HAVE_CURRENT_DATA) made gl/teximage.ts zero-fill the level (its
+  // documented {ok:false} fallback), producing black textures for rotation-
+  // metadata videos. Still reject readyState 0 (HAVE_NOTHING) and require a
+  // nonzero intrinsic size.
   if (typeof v.videoWidth === 'number' && typeof v.readyState === 'number') {
     if (
       typeof v.videoHeight !== 'number' ||
-      v.readyState < 2 ||
+      v.readyState < 1 ||
       v.videoWidth <= 0 ||
       v.videoHeight <= 0
     ) {
