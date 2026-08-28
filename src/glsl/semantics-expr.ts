@@ -434,6 +434,26 @@ export function analyzeExpr(e: Expr, scope: Scope, ctx: SemContext): void {
       return;
     case 'comma': {
       for (const x of e.exprs) analyzeExpr(x, scope, ctx);
+      // WebGL 2.0 spec "Unsupported variants of GLSL ES 3.00 operators": the
+      // sequence operator is not allowed with arrays, structs containing
+      // arrays, or void operands (CTS forbidden-operators.html — the ternary
+      // path enforces the same restrictions: void via an explicit check,
+      // arrays/structs via the type-match rule). ES 1.00 keeps its historical
+      // permissive behavior (no graded test restricts it).
+      if (ctx.version === 300) {
+        for (const x of e.exprs) {
+          const xt = x.resolvedType;
+          if (xt === undefined) continue; // subexpression already errored
+          if (xt.kind === 'void') {
+            ctx.error(x.loc.line, `',' : cannot use a void expression as a sequence operator operand`);
+            continue;
+          }
+          if (containsArray(xt)) {
+            ctx.error(x.loc.line, `',' : sequence operator operands cannot be arrays or structures containing arrays`);
+            continue;
+          }
+        }
+      }
       const last = e.exprs[e.exprs.length - 1];
       if (last !== undefined && last.resolvedType !== undefined) {
         e.resolvedType = last.resolvedType;
