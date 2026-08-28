@@ -1679,11 +1679,13 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
   const tf = s.transformFeedback;
   const tfActive = !!tf && tf._active && !tf._paused;
 
-  // Active occlusion query (not counted during transform feedback).
+  // Active occlusion query (not counted during transform feedback). The
+  // active-query slots are keyed by NUMERIC GLenum target (api/webgl2.ts
+  // setActiveQuery writes `slots[target]`), NOT by the named fields.
   let activeQuery: WebGLQuery | null = null;
   if (!tfActive) {
-    const q1 = s.activeQueries.ANY_SAMPLES_PASSED;
-    const q2 = s.activeQueries.ANY_SAMPLES_PASSED_CONSERVATIVE;
+    const q1 = (s.activeQueries as unknown as Record<number, WebGLQuery | null>)[C2.ANY_SAMPLES_PASSED];
+    const q2 = (s.activeQueries as unknown as Record<number, WebGLQuery | null>)[C2.ANY_SAMPLES_PASSED_CONSERVATIVE];
     if (q1 && q1._active) activeQuery = q1;
     else if (q2 && q2._active) activeQuery = q2;
   }
@@ -1929,7 +1931,11 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
     if (activeQuery) {
       const ref = (dc as unknown as { sampleCountRef?: { value: number } }).sampleCountRef;
       if (ref) {
-        activeQuery._result += ref.value;
+        // ANY_SAMPLES_PASSED(*) is a session-scoped BOOLEAN (GLES 3.0 §4.1.4):
+        // the result is 1 when any sample passed during the session, else 0.
+        // `_result` is reset to 0 at beginQuery; only ever RAISE it so a later
+        // all-failed draw cannot clear an earlier pass.
+        if (ref.value > 0) activeQuery._result = 1;
         activeQuery._resultAvailable = true;
       }
     }
@@ -2100,11 +2106,39 @@ function makeLocalPack(surf: Surface, format: GLenum, type: GLenum): ((src: Arra
         decodeSurfaceTexel(surf, so, tmp);
         (dst as Uint32Array)[d >> 2] = tmp[0] >>> 0;
       };
-    case C1.UNSIGNED_SHORT: // DEPTH_COMPONENT
-      return (_src, so, dst, d) => {
-        decodeSurfaceTexel(surf, so, tmp);
-        (dst as Uint16Array)[d >> 1] = Math.min(0xffff, Math.max(0, Math.round(tmp[0] * 0xffff)));
-      };
+    case C1.UNSIGNED_SHORT:
+      if (format === C1.DEPTH_COMPONENT) {
+        return (_src, so, dst, d) => {
+          decodeSurfaceTexel(surf, so, tmp);
+          (dst as Uint16Array)[d >> 1] = Math.min(0xffff, Math.max(0, Math.round(tmp[0] * 0xffff)));
+        };
+      }
+      // Color reads (norm16 surfaces via RGBA/UNSIGNED_SHORT — GL
+      // EXT_texture_norm16): pack ALL components ×65535. Previously this branch
+      // was depth-only and color reads dropped G/B/A (27189,0,0,0).
+      {
+        const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
+        return (_src, so, dst, d) => {
+          decodeSurfaceTexel(surf, so, tmp);
+          const d16 = dst as Uint16Array;
+          const base = d >> 1;
+          if (comps === 4) {
+            d16[base] = (u8(tmp[0]) * 65535 + 0.5) | 0;
+            d16[base + 1] = (u8(tmp[1]) * 65535 + 0.5) | 0;
+            d16[base + 2] = (u8(tmp[2]) * 65535 + 0.5) | 0;
+            d16[base + 3] = (u8(tmp[3]) * 65535 + 0.5) | 0;
+          } else if (comps === 3) {
+            d16[base] = (u8(tmp[0]) * 65535 + 0.5) | 0;
+            d16[base + 1] = (u8(tmp[1]) * 65535 + 0.5) | 0;
+            d16[base + 2] = (u8(tmp[2]) * 65535 + 0.5) | 0;
+          } else if (comps === 2) {
+            d16[base] = (u8(tmp[0]) * 65535 + 0.5) | 0;
+            d16[base + 1] = (u8(tmp[3]) * 65535 + 0.5) | 0;
+          } else {
+            d16[base] = (u8(tmp[0]) * 65535 + 0.5) | 0;
+          }
+        };
+      }
     case C2.UNSIGNED_INT_24_8:
       return (_src, so, dst, d) => {
         decodeSurfaceTexel(surf, so, tmp);

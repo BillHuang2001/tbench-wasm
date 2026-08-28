@@ -47,7 +47,7 @@
 
 import type { WebGLRenderingContext } from '../webgl1';
 import type { WebGL2RenderingContext } from '../webgl2';
-import { C1, C2 } from '../constants';
+import { C1, C2, CExt } from '../constants';
 import {
   executeClear,
   executeClearBuffer,
@@ -193,7 +193,7 @@ const RP_PAIRS_2 = new Set<number>();
   const P = (format: number, ...types: number[]): void => {
     for (const t of types) RP_PAIRS_2.add((format << 16) | t);
   };
-  P(C1.RGBA, C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_5_5_1, C1.UNSIGNED_SHORT_4_4_4_4,
+  P(C1.RGBA, C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_SHORT_5_5_5_1, C1.UNSIGNED_SHORT_4_4_4_4,
     C2.HALF_FLOAT, C1.FLOAT, C2.UNSIGNED_INT_2_10_10_10_REV);
   P(C2.RGBA_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
   P(C1.RGB, C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_6_5,
@@ -318,6 +318,23 @@ function readComboOK(
     case C2.RGB10_A2:
       return (format === C1.RGBA && type === C2.UNSIGNED_INT_2_10_10_10_REV) || universalRGBA;
     case C2.RGB10_A2UI: return universalUInt;
+    // EXT_texture_norm16 — 16-bit unorm color-renderable surfaces. GL
+    // EXT_texture_norm16: "RGBA/UNSIGNED_SHORT accepted in addition to
+    // RGBA/UNSIGNED_BYTE for 16-bit unorm surfaces" (CTS ext-texture-norm16.html
+    // testNorm16Render reads RGBA/UNSIGNED_SHORT via checkCanvasRect for ALL
+    // formats); R/RG additionally read back via their native RED/RG formats.
+    case CExt.R16_EXT:
+      return (format === C1.RGBA &&
+          (type === C1.UNSIGNED_SHORT || type === C1.UNSIGNED_BYTE)) ||
+        (format === C2.RED && type === C1.UNSIGNED_SHORT) ||
+        universalRGBA;
+    case CExt.RG16_EXT:
+      return (format === C1.RGBA &&
+          (type === C1.UNSIGNED_SHORT || type === C1.UNSIGNED_BYTE)) ||
+        (format === C2.RG && type === C1.UNSIGNED_SHORT) ||
+        universalRGBA;
+    case CExt.RGBA16_EXT:
+      return (format === C1.RGBA && type === C1.UNSIGNED_SHORT) || universalRGBA;
     // Floating point (renderable only with the color-buffer-float extensions).
     // FLOAT is accepted with format ∈ {RED, RG, RGB, RGBA} for the 16F formats
     // when EITHER float color-buffer extension is enabled (GLES3 ReadPixels
