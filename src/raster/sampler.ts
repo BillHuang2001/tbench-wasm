@@ -687,8 +687,13 @@ function sampleLevels(
     if (plan.hi <= plan.base) {
       level0 = plan.base;
     } else {
-      level0 = clampLevel(Math.floor(lambda), plan.base, plan.hi - 1);
+      // Per spec: level0 = clamp(⌊λ⌋, base, hi), level1 = min(level0+1, hi),
+      // f = frac(λ). floor(λ) may fall below base (e.g. 0 < λ < 1) and clamps
+      // UP to base; a floor(λ) ≥ hi reaches the top level (no hi−1 cap), with
+      // level1 == level0 == hi (self-blend at weight f is the level itself).
+      level0 = clampLevel(Math.floor(lambda), plan.base, plan.hi);
       level1 = level0 + 1;
+      if (level1 > plan.hi) level1 = plan.hi;
       f = lambda - Math.floor(lambda);
     }
   }
