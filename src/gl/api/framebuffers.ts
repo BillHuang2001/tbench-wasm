@@ -989,7 +989,11 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
             ctx._errors.push(C1.INVALID_ENUM);
             return null;
           }
-          return rec.type === 'renderbuffer' ? 0 : rec.face;
+          // GLES 2.0/3.0 §6.1.13: FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE is
+          // the cube face enum (TEXTURE_CUBE_MAP_POSITIVE_X..NEGATIVE_Z) only
+          // when the attached texture is a cube map; otherwise it is 0 (CTS
+          // gl-object-get-calls.html asserts 0 for TEXTURE_2D attachments).
+          return rec.type === 'renderbuffer' || !isCubeFace(rec.face) ? 0 : rec.face;
         case CExt.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT:
           // EXT_color_buffer_half_float (WebGL1): component-type queries become
           // legal with the extension enabled (CTS ext-color-buffer-half-float.html).
@@ -1038,7 +1042,11 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
           case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
             return rec.type === 'renderbuffer' ? 0 : rec.level;
           case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
-            return rec.type === 'renderbuffer' ? 0 : rec.face;
+            // GLES 2.0/3.0 §6.1.13: FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE is
+            // the cube face enum (TEXTURE_CUBE_MAP_POSITIVE_X..NEGATIVE_Z) only
+            // when the attached texture is a cube map; otherwise it is 0 (CTS
+            // gl-object-get-calls.html asserts 0 for TEXTURE_2D attachments).
+            return rec.type === 'renderbuffer' || !isCubeFace(rec.face) ? 0 : rec.face;
           case C2.FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
             return rec.type === 'renderbuffer' ? 0 : rec.layer;
           case C2.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
