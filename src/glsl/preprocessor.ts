@@ -1155,8 +1155,30 @@ function dispatchDirective(dTokens: PToken[], line: number, st: State): void {
         case 'error':
           handleError(args, line, st);
           return;
-        case 'pragma':
+        case 'pragma': {
+          // ESSL 3.00 §4.6.1: "#pragma STDGL invariant(all)" — "It is an
+          // error to use this pragma in a fragment shader" (only OUTPUTS can
+          // be invariant; the pragma is the vertex-shader debug aid).
+          // ESSL 1.00 has no such restriction (conformance/glsl/misc/
+          // shaders-with-invariance.html case 17 compiles a fragment shader
+          // carrying the pragma). Other pragmas are dropped entirely.
+          if (
+            st.version === 300 &&
+            st.opts.type === 'FRAGMENT' &&
+            args.length === 5 &&
+            args[0].text === 'STDGL' &&
+            args[1].text === 'invariant' &&
+            args[2].text === '(' &&
+            args[3].text === 'all' &&
+            args[4].text === ')'
+          ) {
+            st.errors.push({
+              line: remap(st, line),
+              message: "'invariant(all)' : the '#pragma STDGL invariant(all)' directive is an error in a fragment shader",
+            });
+          }
           return;
+        }
         case 'version':
           handleVersion(args, line, st);
           return;

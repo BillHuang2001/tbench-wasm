@@ -316,6 +316,13 @@ function parseInvariantDecl(p: Parser): ExternalDecl {
       returnDims = parseArrayDims(p, false);
     }
   }
+  // `invariant <qualifiers> BlockName { ... }` — an ES 3.00 interface block
+  // (`invariant out VS_OUT { vec4 c; } v;`). The type spec is already parsed
+  // (with `invariant` re-attached above); a following `{` means a block —
+  // same detection as parseDeclarationOrFunction.
+  if (p.atOp('{')) {
+    return parseInterfaceBlock(p, type);
+  }
   const nameT = p.peek();
   const t3 = p.peek(1);
   if (nameT.kind === 'identifier' && t3.kind === 'op' && t3.text === '(') {

@@ -521,6 +521,15 @@ function analyzeGlobalDecl(d: GlobalVarDecl, ctx: SemContext, info: ShaderInfo):
         if (ctx.stage === 'VERTEX') info.attributes.push(attrOf(name, element, arraySize, q));
         break;
       case 'in': // ES 3.00: vertex input (attribute) or fragment input (varying)
+        // ESSL 3.00 §4.6.1: "Only variables output from a shader can be
+        // candidates for invariance" — `invariant in` is a compile error in
+        // BOTH stages (CTS invalid-invariant.html: fragment input invariant
+        // must fail to compile). ESSL 1.00 explicitly ALLOWS invariant on
+        // varyings input to the fragment shader (§4.6.1 list), so this check
+        // is unreachable at version 100 (`in` never parses there).
+        if (q.invariant === true) {
+          ctx.error(line, `'${name}' : invariant qualifier can only be applied to shader outputs`);
+        }
         if (ctx.stage === 'VERTEX') {
           if (!isValidInputType(element)) {
             ctx.error(line, `'${name}' : attribute variables cannot have a boolean type`);
@@ -606,6 +615,12 @@ function analyzeInterfaceBlock(d: InterfaceBlockDecl, ctx: SemContext, info: Sha
     if (typeof v === 'number' && v > 0) arraySize = v;
   }
   const storage = q.storage;
+  // ESSL 3.00 §4.6.1: only outputs can be invariant — a block-level
+  // `invariant` on an INPUT block (fragment `in` varying block, or vertex
+  // `in` attribute block) is a compile error (invalid-invariant.html).
+  if (storage === 'in' && q.invariant === true) {
+    ctx.error(d.loc.line, `'invariant' : can only be applied to shader outputs`);
+  }
   const isVaryingBlock =
     (storage === 'out' && ctx.stage === 'VERTEX') || (storage === 'in' && ctx.stage === 'FRAGMENT');
   if (!isVaryingBlock) {

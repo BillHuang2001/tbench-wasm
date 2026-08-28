@@ -1068,6 +1068,21 @@ export function analyzeProgram(ast: TranslationUnit, ctx: SemContext): void {
           ctx.error(d.loc.line, `'${d.name}' : invariant declaration must follow the variable declaration`);
         } else if (sym.kind === 'builtin-var' && !INVARIANT_BUILTIN_ALLOWLIST.has(d.name)) {
           ctx.error(d.loc.line, `'${d.name}' : invariant cannot be applied to this built-in variable`);
+        } else if (ctx.version === 300) {
+          // ESSL 3.00 §4.6.1: "Only variables output from a shader can be
+          // candidates for invariance" — the short form on an INPUT is a
+          // compile error in 3.00 (qualifier form `invariant in ...` is
+          // rejected in semantics-decl.ts). Legal targets at 300: user `out`
+          // variables (vertex varyings / fragment outputs) and the vertex
+          // output builtins gl_Position/gl_PointSize (gl_FragColor/gl_FragData
+          // are 1.00-only; gl_FragCoord/gl_PointCoord are fragment INPUTS —
+          // ANGLE rejects them at ES 3.00). ESSL 1.00 explicitly allows
+          // invariant on fragment-input varyings and gl_FragCoord/gl_PointCoord.
+          if (sym.kind === 'var' && sym.storage !== 'out') {
+            ctx.error(d.loc.line, `'${d.name}' : invariant can only be applied to shader outputs`);
+          } else if (sym.kind === 'builtin-var' && sym.name !== 'gl_Position' && sym.name !== 'gl_PointSize') {
+            ctx.error(d.loc.line, `'${d.name}' : invariant can only be applied to shader outputs`);
+          }
         }
         break;
       }

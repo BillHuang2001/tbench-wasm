@@ -1159,6 +1159,82 @@ okInfo(
 );
 
 /* ------------------------------------------------------------------ */
+/* 16. ESSL 3.00 invariant-on-inputs (CTS invalid-invariant.html)      */
+/* ------------------------------------------------------------------ */
+
+{
+  // ESSL 3.00 §4.6.1: "Only variables output from a shader can be candidates
+  // for invariance" — the qualifier form on an INPUT is a compile error in
+  // both stages (pre-fix: accepted and linked). ESSL 1.00 explicitly ALLOWS
+  // invariant on fragment-input varyings (§4.6.1 list) — no 1.00 regression.
+  const g1 = errs(
+    '#version 300 es\nprecision mediump float;\ninvariant in vec4 v_varying;\nout vec4 my_color;\nvoid main() { my_color = v_varying; }',
+    300,
+    'FRAGMENT',
+  );
+  check(
+    hasErr(g1, 3, "'v_varying' : invariant qualifier can only be applied to shader outputs"),
+    'v300 fragment `invariant in` → error line 3',
+  );
+  const g2 = errs(
+    '#version 300 es\nprecision mediump float;\ninvariant in vec4 pos;\nvoid main() { gl_Position = pos; }',
+    300,
+    'VERTEX',
+  );
+  check(
+    hasErr(g2, 3, "'pos' : invariant qualifier can only be applied to shader outputs"),
+    'v300 vertex `invariant in` → error line 3',
+  );
+  // Short form on an input (ESSL 3.00: same rule; ANGLE rejects it).
+  const g3 = errs(
+    '#version 300 es\nprecision mediump float;\nin vec4 v_varying;\ninvariant v_varying;\nout vec4 my_color;\nvoid main() { my_color = v_varying; }',
+    300,
+    'FRAGMENT',
+  );
+  check(hasErr(g3, 4, "'v_varying' : invariant can only be applied to shader outputs"), 'v300 short-form invariant on input → error line 4');
+  // gl_FragCoord is a fragment INPUT — invariant short form on it is an
+  // error at 300 (allowed at 100, pinned above in section 14).
+  const g4 = errs(
+    '#version 300 es\nprecision mediump float;\ninvariant gl_FragCoord;\nout vec4 c;\nvoid main() { c = vec4(gl_FragCoord.xy, 0.0, 1.0); }',
+    300,
+    'FRAGMENT',
+  );
+  check(hasErr(g4, 3, "'gl_FragCoord' : invariant can only be applied to shader outputs"), 'v300 `invariant gl_FragCoord;` → error line 3');
+  // Legal at 300: outputs only.
+  okInfo('#version 300 es\nprecision mediump float;\ninvariant out vec4 v;\nvoid main() { v = vec4(1.0); gl_Position = v; }', 300, 'VERTEX');
+  okInfo('#version 300 es\nout vec4 v;\ninvariant v;\nvoid main() { v = vec4(1.0); gl_Position = v; }', 300, 'VERTEX');
+  okInfo('#version 300 es\nprecision mediump float;\nout vec4 c;\ninvariant c;\nvoid main() { c = vec4(1.0); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\ninvariant gl_Position;\nvoid main() { gl_Position = vec4(1.0); }', 300, 'VERTEX');
+  // Interface blocks: block-level `invariant in` is an error; `invariant out`
+  // is legal (valid-invariant-style block form).
+  const g5 = errs(
+    '#version 300 es\nprecision mediump float;\ninvariant in VS_OUT { vec4 c; } v;\nout vec4 o;\nvoid main() { o = v.c; }',
+    300,
+    'FRAGMENT',
+  );
+  check(hasErr(g5, 3, "'invariant' : can only be applied to shader outputs"), 'v300 fragment `invariant in` block → error line 3');
+  okInfo('#version 300 es\ninvariant out VS_OUT { vec4 c; } v;\nvoid main() { v.c = vec4(1.0); gl_Position = v.c; }', 300, 'VERTEX');
+  // ESSL 3.00 §4.6.1: "#pragma STDGL invariant(all)" is an ERROR in a
+  // fragment shader (invalid-invariant.html subtest 1); legal in a vertex
+  // shader and in 1.00 fragment shaders (shaders-with-invariance case 17).
+  const g6 = errs(
+    '#version 300 es\n#pragma STDGL invariant(all)\nprecision mediump float;\nin vec4 v_varying;\nout vec4 my_color;\nvoid main() { my_color = v_varying; }',
+    300,
+    'FRAGMENT',
+  );
+  check(
+    hasErr(g6, 2, "'invariant(all)' : the '#pragma STDGL invariant(all)' directive is an error in a fragment shader"),
+    'v300 fragment `#pragma STDGL invariant(all)` → error line 2',
+  );
+  okInfo('#version 300 es\n#pragma STDGL invariant(all)\nprecision mediump float;\nout vec4 v_varying;\nvoid main() { v_varying = vec4(1.0); gl_Position = v_varying; }', 300, 'VERTEX');
+  okInfo('#pragma STDGL invariant(all)\nprecision mediump float;\nvarying vec4 v_varying;\nvoid main() { gl_FragColor = v_varying; }', 100, 'FRAGMENT');
+  // 1.00 fragment-input invariant still compiles (shaders-with-invariance
+  // cases 1/8 — qualifier AND short form).
+  okInfo('precision mediump float;\ninvariant varying vec4 v_varying;\nvoid main() { gl_FragColor = v_varying; }', 100, 'FRAGMENT');
+  okInfo('precision mediump float;\nvarying vec4 v_varying;\ninvariant v_varying;\nvoid main() { gl_FragColor = v_varying; }', 100, 'FRAGMENT');
+}
+
+/* ------------------------------------------------------------------ */
 /* Summary                                                             */
 /* ------------------------------------------------------------------ */
 
