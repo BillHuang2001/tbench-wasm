@@ -391,7 +391,9 @@ export function installTexturesApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
       }
-      if (pname === TEXTURE_IMMUTABLE_FORMAT) return tex._immutable ? 1 : 0;
+      // WebGL2 spec: TEXTURE_IMMUTABLE_FORMAT returns a boolean (CTS
+      // gl-object-get-calls.html asserts `false` with typeof boolean).
+      if (pname === TEXTURE_IMMUTABLE_FORMAT) return tex._immutable === true;
       return tex._immutable ? tex._image!.levels.length : 0;
     }
     if (!isValidTexParamPname(ctx, pname)) {

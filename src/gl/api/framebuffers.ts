@@ -956,7 +956,7 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
       }
-      return defaultFbAttachmentParameter(ctx, pname);
+      return defaultFbAttachmentParameter(ctx, attachment, pname);
     }
     if (!isValidAttachment(ctx, attachment)) {
       ctx._errors.push(C1.INVALID_ENUM);
@@ -1666,7 +1666,21 @@ function blitAttachmentFormat(fbo: WebGLFramebuffer | null, point: GLenum, defau
 }
 
 /** W2 default-framebuffer attachment parameter values. */
-function defaultFbAttachmentParameter(ctx: WebGLRenderingContext, pname: GLenum): any {
+function defaultFbAttachmentParameter(ctx: WebGLRenderingContext, attachment: GLenum, pname: GLenum): any {
+  // GLES 3.0 §6.1.13: when the attachment point has no image (default
+  // framebuffer without a depth/stencil buffer), OBJECT_TYPE is NONE and
+  // every other pname generates INVALID_OPERATION (CTS
+  // gl-object-get-calls.html queries STENCIL on a stencil:false context).
+  const fb = ctx._defaultFB;
+  const hasBuffer =
+    attachment === C2.STENCIL ? !!(fb && fb.stencil)
+    : attachment === C2.DEPTH ? !!(fb && fb.depth)
+    : true; // BACK always exists
+  if (!hasBuffer) {
+    if (pname === C1.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE) return NONE;
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return null;
+  }
   switch (pname) {
     case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
       return FRAMEBUFFER_DEFAULT;
@@ -1684,18 +1698,15 @@ function defaultFbAttachmentParameter(ctx: WebGLRenderingContext, pname: GLenum)
     case C2.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
     case C2.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
     case C2.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE: {
-      const fb = ctx._defaultFB;
       const format = fb ? fb.color.format : 0;
       const bits = formatComponentBits(format);
       return bits[pname - C2.FRAMEBUFFER_ATTACHMENT_RED_SIZE];
     }
     case C2.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE: {
-      const fb = ctx._defaultFB;
       const format = fb && fb.depth ? fb.depth.format : 0;
       return formatComponentBits(format)[4];
     }
     case C2.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE: {
-      const fb = ctx._defaultFB;
       const format = fb && fb.stencil ? fb.stencil.format : 0;
       return formatComponentBits(format)[5];
     }

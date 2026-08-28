@@ -902,29 +902,33 @@ function readUniform(pm: GlslProgram, uniform: GlslProgram['uniforms'][number], 
         for (let row = 0; row < r; row++) out[e * c * r + col * r + row] = pm.floatStore[uniform.location + (elem + e) * slots + col * 4 + row];
     return out;
   }
-  if (isFloatType(uniform.type) || uniform.type === C1.BOOL_VEC2) {
-    // FLOAT_VEC* (and BOOL_VEC2 per gl-uniform-arrays.html → Float32Array)
+  if (isBoolType(uniform.type) || uniform.type === C1.BOOL) {
+    // WebGL spec: BOOL/BOOL_VEC* are returned as booleans — scalar → boolean,
+    // vectors/arrays → JS Array of booleans. CTS gl-object-get-calls.html
+    // asserts bval2..4 read back as [true,false,...] (strict Array equality);
+    // gl-uniform-arrays.html element-location reads only need .length + loose
+    // equality, which JS boolean arrays also satisfy.
+    const n = isBoolType(uniform.type) ? components : 1;
+    const out: boolean[] = [];
+    for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out.push(read(elem + e, i) !== 0);
+    return count === 1 && n === 1 ? out[0] : out;
+  }
+  if (isFloatType(uniform.type)) {
     const n = components;
     const out = new Float32Array(count * n);
     for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(elem + e, i);
     return out;
   }
-  if (isIntType(uniform.type) || uniform.type === C1.BOOL_VEC3) {
+  if (isIntType(uniform.type)) {
     const n = components;
     const out = new Int32Array(count * n);
     for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(elem + e, i);
     return out;
   }
-  if (isUintType(uniform.type) || uniform.type === C1.BOOL_VEC4) {
+  if (isUintType(uniform.type)) {
     const n = components;
     const out = new Uint32Array(count * n);
     for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(elem + e, i);
-    return out;
-  }
-  if (uniform.type === C1.BOOL) {
-    if (count === 1) return read(elem, 0) !== 0;
-    const out = new Uint32Array(count);
-    for (let e = 0; e < count; e++) out[e] = read(elem + e, 0) !== 0 ? 1 : 0;
     return out;
   }
   if (isSamplerType(uniform.type)) {
@@ -1665,6 +1669,13 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (p === null) return null;
       const ubi = uniformBlockIndex >>> 0; // WebIDL GLuint
       ensureProgramLinked(ctx, p); // trigger before reading the program model
+      // GLES 3.0 §2.12.6: not-linked program → INVALID_OPERATION (checked
+      // BEFORE the index range check; CTS gl-object-get-calls.html queries a
+      // never-linked program and expects INVALID_OPERATION).
+      if (!p._linkStatus || p._program === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
       const pm = programModels.get(p);
       if (pm === undefined || ubi >= pm.uniformBlocks.length) {
         ctx._errors.push(C1.INVALID_VALUE);
@@ -1743,7 +1754,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
           return null;
       }
       const indices = Array.from(uniformIndices ?? []).map((i) => i >>> 0); // WebIDL GLuint
-      const out: number[] = [];
+      const out: any[] = [];
       for (const i of indices) {
         const u = pm.uniforms[i];
         if (u === undefined) {
@@ -1784,7 +1795,9 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
                 out.push(m.matrixStride);
                 break;
               default:
-                out.push(m.rowMajor ? 1 : 0);
+                // UNIFORM_IS_ROW_MAJOR returns booleans (WebGL2 spec §5.14.10;
+                // CTS gl-object-get-calls.html checks typeof).
+                out.push(m.rowMajor === true);
                 break;
             }
             break;

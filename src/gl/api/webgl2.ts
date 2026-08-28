@@ -729,6 +729,8 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       const s = validateNonNullableObject<WebGLSync>(ctx, sync, Sync.any);
       if (s === null) return null; // INVALID_OPERATION pushed
       switch (pname) {
+        case C2.OBJECT_TYPE:
+          return C2.SYNC_FENCE; // fenceSync objects always have type SYNC_FENCE
         case C2.SYNC_STATUS:
           return s._signaled ? C2.SIGNALED : C2.UNSIGNALED;
         case C2.SYNC_CONDITION:

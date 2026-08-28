@@ -108,10 +108,11 @@
  *    negative args → INVALID_VALUE; dstOffset (or dstOffset+length) beyond the
  *    dst view and srcByteOffset+byteLength beyond the buffer size →
  *    INVALID_VALUE (WebGL2 spec §3.7.2; CTS get-buffer-sub-data.html).
- *  - getBufferParameter: BUFFER_SIZE / BUFFER_USAGE (+ BUFFER_MAPPED → false on
- *    WebGL2).
+ *  - getBufferParameter: BUFFER_SIZE / BUFFER_USAGE only (WebGL2 spec §5.14.4 —
+ *    BUFFER_MAPPED is NOT exposed in WebGL; CTS gl-object-get-calls.html treats
+ *    0x88ED (PIXEL_PACK_BUFFER_BINDING == GL_BUFFER_MAPPED) as INVALID_ENUM).
  *
- * NOTE: the *_READ/*_COPY usage enums and BUFFER_MAPPED are missing from
+ * NOTE: the *_READ/*_COPY usage enums are missing from
  * constants.ts (owned elsewhere) — local GL values are used so validation is
  * correct even before the constant tables are fixed (gl.STREAM_READ etc. are a
  * constants.ts bug, not a validation bug).
@@ -124,14 +125,13 @@ import { WebGLBuffer, WebGLTransformFeedback, WebGLVertexArrayObject, createObje
 import { validateObject, requireBufferData } from '../validation';
 import type { BufferDataSource, GLboolean, GLenum, GLintptr, GLsizeiptr, GLuint } from '../types';
 
-// WebGL2 usage/BUFFER_MAPPED values missing from constants.ts (see NOTE above).
+// WebGL2 usage values missing from constants.ts (see NOTE above).
 const GL_STREAM_READ = 0x88e1;
 const GL_STREAM_COPY = 0x88e2;
 const GL_STATIC_READ = 0x88e5;
 const GL_STATIC_COPY = 0x88e6;
 const GL_DYNAMIC_READ = 0x88e9;
 const GL_DYNAMIC_COPY = 0x88ea;
-const GL_BUFFER_MAPPED = 0x88ed;
 
 /**
  * Buffers that have been bound at least once (any binding point). isBuffer
@@ -958,11 +958,10 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
         return buf._size;
       case C1.BUFFER_USAGE:
         return buf._usage;
-      case GL_BUFFER_MAPPED: // WebGL2: buffers are never mapped
-        if (ctx._version === 2) return false;
-        ctx._errors.push(C1.INVALID_ENUM);
-        return null;
       default:
+        // WebGL2 spec §5.14.4: getBufferParameter accepts ONLY BUFFER_SIZE and
+        // BUFFER_USAGE. GL_BUFFER_MAPPED (0x88ED, = PIXEL_PACK_BUFFER_BINDING)
+        // is not exposed in WebGL — INVALID_ENUM (CTS gl-object-get-calls.html).
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
     }
