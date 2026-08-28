@@ -70,6 +70,8 @@ const MAX_ERRORS = 20;
 export class Parser {
   readonly version: 100 | 300;
   readonly errors: CompileError[] = [];
+  /** Anonymous-struct sequence counter (synthetic `__anon_struct_N` names). */
+  anonStructSeq = 0;
   private readonly tokens: Token[];
   private pos = 0;
   private readonly eofLine: number;
@@ -292,11 +294,20 @@ function parseInvariantDecl(p: Parser): ExternalDecl {
 
 /**
  * `struct S { ... };` (bare type declaration) or `struct S { ... } v;`
- * (declaration with declarators).
+ * (declaration with declarators). A bare ANONYMOUS `struct { ... };` (no
+ * declarator, no name) is rejected here; `struct { ... } v;` gets a synthetic
+ * name so semantics/codegen can register the type.
  */
 function parseStructDecl(p: Parser): ExternalDecl {
   const start = p.peek();
   const def = parseStructDefinition(p);
+  if (def.name === null) {
+    if (p.atOp(';')) {
+      p.error(start.line, 'anonymous structs are not allowed in GLSL ES');
+    } else {
+      def.name = nameAnonymousStruct(p);
+    }
+  }
   if (p.atOp(';')) {
     p.next();
     const decl: StructDecl = { kind: 'struct-decl', name: def.name ?? '', members: def.members, loc: locOf(start) };
@@ -318,7 +329,9 @@ function parseDeclarationOrFunction(p: Parser): ExternalDecl | null {
   const start = p.peek();
   const type = parseTypeSpec(p, { param: false, member: false });
   if (type.base.kind === 'struct-definition') {
-    // `uniform struct S {...} u;` etc.
+    // `uniform struct S {...} u;` / `struct { ... } v;` (anonymous with a
+    // declarator gets a synthetic name so the type can be registered).
+    if (type.base.name === null) type.base.name = nameAnonymousStruct(p);
     const declarators = parseDeclarators(p, false);
     p.expectOp(';', "expected ';' after declaration");
     const decl: GlobalVarDecl = { kind: 'global-var-decl', type, declarators, loc: locOf(start) };
@@ -552,6 +565,15 @@ function setStorage(p: Parser, t: Token, q: TypeQualifiers, storage: StorageClas
   if (prev !== 'const' && storage !== 'const') {
     p.error(t.line, `conflicting storage qualifiers '${prev}' and '${storage}'`);
   }
+  // GLSL ES §6.1.1: `const` may only combine with `in` (or stand alone) —
+  // `const out` / `const inout` parameters are illegal (the function must
+  // write them). Checked in BOTH orders (`out const` is equally invalid).
+  if (
+    (prev === 'const' && (storage === 'out' || storage === 'inout')) ||
+    (storage === 'const' && (prev === 'out' || prev === 'inout'))
+  ) {
+    p.error(t.line, `'const' : const parameters cannot be declared '${prev === 'const' ? storage : prev}'`);
+  }
   q.storage = storage;
 }
 
@@ -626,7 +648,15 @@ function parseTypeName(p: Parser): TypeName {
 /* Structs                                                             */
 /* ------------------------------------------------------------------ */
 
-/** `struct [Name] { members }` — anonymous structs are rejected. */
+/**
+ * `struct [Name] { members }`. Anonymous struct definitions (`struct { ... }`)
+ * PARSE with `name: null` — GLSL ES allows them when a declarator follows
+ * (`struct { float x; } s;`, `uniform struct { vec4 v; } u;` — ANGLE accepts
+ * per crbug 401296, CTS ogles CorrectFull_vert / shaders-with-uniform-structs).
+ * The call sites that build a declaration with a following declarator then
+ * synthesize a unique name (`__anon_struct_N`); a BARE `struct { ... };` with
+ * no declarator is rejected there (semantics-decl/semantics-stmt also guard).
+ */
 function parseStructDefinition(p: Parser): StructDefinition {
   const start = p.next(); // 'struct'
   let name: string | null = null;
@@ -634,15 +664,20 @@ function parseStructDefinition(p: Parser): StructDefinition {
   if (t.kind === 'identifier') {
     p.next();
     name = t.name;
-  } else if (t.kind === 'op' && t.text === '{') {
-    p.error(t.line, 'anonymous structs are not allowed in GLSL ES');
-  } else {
+  } else if (!(t.kind === 'op' && t.text === '{')) {
     p.error(t.line, `expected struct name, found ${describeToken(t)}`);
   }
   p.expectOp('{');
   const members = parseStructMembers(p);
   p.expectOp('}');
   return { kind: 'struct-definition', name, members, loc: locOf(start) };
+}
+
+/** Unique synthetic name for an anonymous struct WITH a declarator. The
+ * `__anon_struct_` prefix cannot be produced by user code that matters
+ * (a user declaration with the same name would simply be a redefinition). */
+export function nameAnonymousStruct(p: Parser): string {
+  return `__anon_struct_${++p.anonStructSeq}`;
 }
 
 /** Struct / interface-block member list: `type name [dims] ;` */

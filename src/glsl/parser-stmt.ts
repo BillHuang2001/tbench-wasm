@@ -29,7 +29,7 @@ import {
   parseExpression, parseAssignmentExpr,
   DECL_KEYWORDS, RESERVED_100, TYPE_KEYWORDS, locOf,
 } from './parser-expr.js';
-import { parseTypeSpec, parseDeclarators, skipBalanced } from './parser.js';
+import { parseTypeSpec, parseDeclarators, nameAnonymousStruct, skipBalanced } from './parser.js';
 
 /** Parse one statement (always returns a node; errors are collected). */
 export function parseStatement(p: Parser): Stmt {
@@ -225,9 +225,20 @@ function parseReturnStmt(p: Parser): ReturnStmt {
 function parseDeclStmt(p: Parser): DeclStmt {
   const start = p.peek();
   const type = parseTypeSpec(p, { param: false, member: false });
-  if (type.base.kind === 'struct-definition' && p.atOp(';')) {
-    p.next();
-    return { kind: 'decl-stmt', type, declarators: [], loc: locOf(start) };
+  if (type.base.kind === 'struct-definition') {
+    if (type.base.name === null) {
+      // Anonymous struct: legal only WITH a declarator (`struct { ... } s;` —
+      // GLSL ES grammar; ANGLE accepts). A bare `struct { ... };` is rejected.
+      if (p.atOp(';')) {
+        p.error(start.line, 'anonymous structs are not allowed in GLSL ES');
+      } else {
+        type.base.name = nameAnonymousStruct(p);
+      }
+    }
+    if (p.atOp(';')) {
+      p.next();
+      return { kind: 'decl-stmt', type, declarators: [], loc: locOf(start) };
+    }
   }
   const declarators = parseDeclarators(p, false);
   p.expectOp(';', "expected ';' after declaration");

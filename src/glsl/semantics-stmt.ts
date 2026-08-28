@@ -29,6 +29,33 @@ import type { Scope, SemContext } from './semantics.js';
 import { declareVariables, resolveTypeSpec } from './semantics.js';
 import { analyzeExpr, convertible } from './semantics-expr.js';
 
+/** True for bool scalars/vectors (`bool`, `bvec2..4`). */
+function isBool(t: GLSLType): boolean {
+  return (t.kind === 'scalar' || t.kind === 'vector') && t.base === 'bool';
+}
+
+/**
+ * Struct-nesting depth of a type: 0 for non-structs (arrays unwrap to their
+ * element), 1 + max(member depth) for structs. Memoized by struct name
+ * (recursive structs are rejected at semantics, so the memo is safe; a
+ * name-guard still prevents pathological loops).
+ */
+function structDepth(t: GLSLType, memo: Map<string, number>): number {
+  if (t.kind === 'array') return structDepth(t.element, memo);
+  if (t.kind !== 'struct') return 0;
+  const cached = memo.get(t.name);
+  if (cached !== undefined) return cached;
+  memo.set(t.name, 0); // in-progress guard (defensive)
+  let inner = 0;
+  for (const m of t.members) {
+    const md = structDepth(m.type, memo);
+    if (md > inner) inner = md;
+  }
+  const depth = 1 + inner;
+  memo.set(t.name, depth);
+  return depth;
+}
+
 /** Report an error when `e`'s resolved type is not a boolean scalar. */
 function requireBool(e: { loc: { line: number }; resolvedType?: GLSLType }, ctx: SemContext, msg: string): void {
   const t = e.resolvedType;
@@ -44,7 +71,25 @@ export function analyzeStatement(s: Stmt, scope: Scope, ctx: SemContext, fn: { r
     case 'decl-stmt': {
       const baseType = resolveTypeSpec(s.type, scope, ctx);
       if (baseType !== null) {
+        // GLSL ES §4.3.3/§4.3.5/§4.3.6: attribute/varying/uniform declarations
+        // are GLOBAL-only. `attribute`/`varying` are 1.00 keywords (locals with
+        // them never parse in 3.00); `uniform` inside a function body is
+        // illegal in both versions. (ogles build attribute_frag/attribute_vert/
+        // uniform_frag/varying_frag.)
+        const storage = s.type.qualifiers.storage;
+        if (storage === 'attribute' || storage === 'varying' || storage === 'uniform') {
+          ctx.error(s.loc.line, `'${storage}' : storage qualifiers are only allowed on global declarations`);
+        }
+        // GLSL ES §4.5.3: precision qualifiers apply to float/int/sampler
+        // types only — `mediump bool` / `mediump bvecN` are illegal
+        // (conformance/glsl/misc/boolean_precision.html).
+        if (s.type.qualifiers.precision !== undefined && isBool(baseType)) {
+          ctx.error(s.loc.line, `'${s.type.qualifiers.precision}' : precision qualifiers are not allowed on bool types`);
+        }
         if (s.type.base.kind === 'struct-definition' && baseType.kind === 'struct') {
+          if (s.type.base.members.length === 0) {
+            ctx.error(s.loc.line, `'struct' : structure must have at least one member`);
+          }
           // `struct S {...};` / `struct S {...} v;` inside a function body:
           // register the struct TYPE in the CURRENT scope so later statements
           // in the same scope (declarations, constructors, member-typed
@@ -55,6 +100,29 @@ export function analyzeStatement(s: Stmt, scope: Scope, ctx: SemContext, fn: { r
           scope.declare({ kind: 'struct', name: baseType.name, type: baseType }, ctx, s.loc.line);
         }
         declareVariables(baseType, s.type, s.declarators, scope, ctx, false);
+        // GLSL ES 1.00 Appendix A §5: arrays of arrays are 3.00-only (ogles
+        // build array1). Array sizes must be CONSTANT INTEGRAL expressions —
+        // a float const (`const float i = 3.0; float f[i];`) is illegal even
+        // when its value is integral (ogles build array6). Runs AFTER
+        // declareVariables (wrapArrayDims analyzes the dim expressions).
+        if (ctx.version === 100) {
+          for (const d of s.declarators) {
+            if (d.arrayDims.length > 1) {
+              ctx.error(d.loc.line, `'[' : arrays of arrays are not allowed in GLSL ES 1.00`);
+            }
+            for (const dim of d.arrayDims) {
+              const dt = dim.resolvedType;
+              if (dt !== undefined && dt.kind === 'scalar' && dt.base === 'float') {
+                ctx.error(dim.loc.line, 'array size must be a constant integer expression');
+              }
+            }
+          }
+        }
+        // WebGL 1.0 limit: at most 4 levels of struct nesting
+        // (conformance/glsl/misc/struct-nesting-exceeds-maximum.html).
+        if (ctx.version === 100 && baseType.kind === 'struct' && structDepth(baseType, new Map()) > 4) {
+          ctx.error(s.loc.line, `'struct' : structure nesting exceeds the maximum of 4 levels`);
+        }
       }
       return;
     }
