@@ -615,8 +615,11 @@ export function parseTypeSpec(p: Parser, ctx: TypeSpecCtx): TypeSpec {
       }
       case 'layout': {
         // `layout` is an identifier in 1.00 — unreachable there.
-        if (ctx.member || ctx.param) {
-          p.error(t.line, `'layout' : layout qualifiers are not allowed on ${ctx.member ? 'struct or block members' : 'function parameters'}`);
+        // ES 3.00 §4.3.9: layout qualifiers may appear on interface-BLOCK
+        // members (row_major/column_major/std140); struct members and
+        // function parameters never take layout qualifiers.
+        if (ctx.param || (ctx.member && !ctx.block)) {
+          p.error(t.line, `'layout' : layout qualifiers are not allowed on ${ctx.member ? 'struct members' : 'function parameters'}`);
           p.next();
           continue;
         }
@@ -675,8 +678,9 @@ function setStorage(p: Parser, t: Token, q: TypeQualifiers, storage: StorageClas
  * (literal values only; semantics resolves non-literal constants); the
  * uniform-block layout ids `std140`/`shared`/`packed` are captured into
  * `blockLayout` (semantics rejects `shared`/`packed` — WebGL2 supports only
- * std140); other unknown ids (`column_major`, ...) are accepted and ignored
- * (the CTS uses them in valid WebGL2 shaders).
+ * std140); `row_major`/`column_major` are captured into `rowMajor` (ES 3.00
+ * §4.3.9, block-level or member-level); other unknown ids are accepted and
+ * ignored (the CTS uses them in valid WebGL2 shaders).
  */
 function parseLayoutQualifiers(p: Parser): LayoutQualifiers {
   const layout: LayoutQualifiers = {};
@@ -691,6 +695,10 @@ function parseLayoutQualifiers(p: Parser): LayoutQualifiers {
         const v = parseAssignmentExpr(p);
         if (idT.name === 'location') layout.location = intValueOf(v);
         else if (idT.name === 'binding') layout.binding = intValueOf(v);
+      } else if (idT.name === 'row_major') {
+        layout.rowMajor = true;
+      } else if (idT.name === 'column_major') {
+        layout.rowMajor = false;
       } else if (idT.name === 'std140' || idT.name === 'shared' || idT.name === 'packed') {
         layout.blockLayout = idT.name;
       }

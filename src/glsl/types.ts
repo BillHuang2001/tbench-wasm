@@ -106,6 +106,12 @@ export interface LayoutQualifiers {
   binding?: number;
   /** Explicit uniform-block layout id (`std140`/`shared`/`packed`), if any. */
   blockLayout?: string;
+  /**
+   * `layout(row_major)` / `layout(column_major)` (ES 3.00 interface-block
+   * layout qualifiers, block-level or member-level). `true` = row_major;
+   * `false` = explicit column_major (or absent — column-major is the default).
+   */
+  rowMajor?: boolean;
 }
 
 /* ------------------------------------------------------------------ */

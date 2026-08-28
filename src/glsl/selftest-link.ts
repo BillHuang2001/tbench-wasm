@@ -521,7 +521,7 @@ const INT = 0x1404; // 5124
 {
   const vs = compile(
     `#version 300 es
-     uniform Blocks { float a; vec3 b; mat4 c; float d[3]; int e; } blk;
+     uniform Blocks { highp float a; highp vec3 b; highp mat4 c; highp float d[3]; highp int e; } blk;
      in vec4 aPos;
      void main(){ gl_Position = aPos + vec4(blk.a, blk.b.x, blk.d[0], 0.0); }`,
     'VERTEX',
@@ -530,7 +530,7 @@ const INT = 0x1404; // 5124
   const fs = compile(
     `#version 300 es
      precision mediump float;
-     uniform Blocks { float a; vec3 b; mat4 c; float d[3]; int e; } blk;
+     uniform Blocks { highp float a; highp vec3 b; highp mat4 c; highp float d[3]; highp int e; } blk;
      out vec4 o;
      void main(){ o = vec4(blk.a + blk.b.x + blk.c[0][0] + blk.d[0] + blk.d[1] + blk.d[2], blk.b.y, blk.b.z, float(blk.e)); }`,
     'FRAGMENT',
@@ -603,7 +603,7 @@ const INT = 0x1404; // 5124
 {
   const vs = compile(
     `#version 300 es
-     uniform Shared { vec4 v; } s;
+     uniform Shared { highp vec4 v; } s;
      in vec4 aPos;
      void main(){ gl_Position = aPos + s.v; }`,
     'VERTEX',
@@ -612,7 +612,7 @@ const INT = 0x1404; // 5124
   const fs = compile(
     `#version 300 es
      precision mediump float;
-     uniform Shared { vec4 v; } s;
+     uniform Shared { highp vec4 v; } s;
      out vec4 o;
      void main(){ o = s.v; }`,
     'FRAGMENT',
@@ -669,7 +669,7 @@ const INT = 0x1404; // 5124
 {
   const vs = compile(
     `#version 300 es
-     uniform Inst { float f; };
+     uniform Inst { highp float f; };
      in vec4 aPos;
      void main(){ gl_Position = aPos + vec4(f); }`,
     'VERTEX',
@@ -678,7 +678,7 @@ const INT = 0x1404; // 5124
   const fs = compile(
     `#version 300 es
      precision mediump float;
-     uniform Inst { float f; };
+     uniform Inst { highp float f; };
      out vec4 o;
      void main(){ o = vec4(f, 0.0, 0.0, 1.0); }`,
     'FRAGMENT',
@@ -847,7 +847,7 @@ const INT = 0x1404; // 5124
   // maxVertexUniformBlocks: two blocks in the VS, max 1.
   const vs2 = compile(
     `#version 300 es
-     uniform A { vec4 a; } ba;
+     uniform A { highp vec4 a; } ba;
      uniform C { vec4 c; } bc;
      void main(){ gl_Position = ba.a + bc.c; }`,
     'VERTEX',
@@ -862,14 +862,14 @@ const INT = 0x1404; // 5124
   // maxFragmentUniformBlocks: one block in each stage, max fragment 0.
   const vs3 = compile(
     `#version 300 es
-     uniform A { vec4 a; } ba;
+     uniform A { highp vec4 a; } ba;
      void main(){ gl_Position = ba.a; }`,
     'VERTEX',
     300,
   );
   const fs3 = compile(`#version 300 es
      precision mediump float;
-     uniform A { vec4 a; } ba;
+     uniform A { highp vec4 a; } ba;
      out vec4 o; void main(){ o = ba.a; }`, 'FRAGMENT', 300);
   const l3 = linkProgram(vs3, fs3, { limits: { maxFragmentUniformBlocks: 0 } });
   check(!l3.ok && l3.log.includes('too many fragment uniform blocks'),
@@ -878,7 +878,7 @@ const INT = 0x1404; // 5124
   // maxCombinedUniformBlocks: two blocks (vs+fs distinct), max combined 1.
   const vs4 = compile(
     `#version 300 es
-     uniform A { vec4 a; } ba;
+     uniform A { highp vec4 a; } ba;
      void main(){ gl_Position = ba.a; }`,
     'VERTEX',
     300,

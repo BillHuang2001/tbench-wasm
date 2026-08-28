@@ -617,7 +617,8 @@ function roundUp(x: number, align: number): number {
 }
 
 /** std140 base alignment (bytes): scalar 4, vec2 8, vec3/vec4 16, matrix 16,
- *  array = element alignment, struct = max member alignment. */
+ *  array = element alignment, struct = max member alignment. Row-major does
+ *  not change alignments (matrix rows are vec4-aligned either way). */
 function std140Align(t: GLSLType): number {
   switch (t.kind) {
     case 'scalar':
@@ -640,9 +641,11 @@ function std140Align(t: GLSLType): number {
 }
 
 /** std140 size of a type: scalar 4, vector 4×n (vec3 = 12), matrix 16×cols
- *  (column stride 16 — column-major is mandatory), array = count × element
- *  stride, struct = members at aligned offsets, rounded to the struct align. */
-function std140Size(t: GLSLType): number {
+ *  column-major / 16×rows row-major (stride 16 either way), array = count ×
+ *  element stride, struct = members at aligned offsets, rounded to the struct
+ *  align. `rowMajor` applies to every matrix inside the type (a block member
+ *  declared `layout(row_major)` carries it into struct members too). */
+function std140Size(t: GLSLType, rowMajor: boolean): number {
   switch (t.kind) {
     case 'scalar':
     case 'sampler':
@@ -650,16 +653,16 @@ function std140Size(t: GLSLType): number {
     case 'vector':
       return 4 * t.size;
     case 'matrix':
-      return 16 * t.cols;
+      return 16 * (rowMajor ? t.rows : t.cols);
     case 'array': {
       const n = t.size ?? 0;
-      return n * std140ArrayStride(t.element);
+      return n * std140ArrayStride(t.element, rowMajor);
     }
     case 'struct': {
       let off = 0;
       for (const m of t.members) {
         off = roundUp(off, std140Align(m.type));
-        off += std140Size(m.type);
+        off += std140Size(m.type, rowMajor);
       }
       return roundUp(off, std140Align(t));
     }
@@ -670,26 +673,30 @@ function std140Size(t: GLSLType): number {
 
 /** std140 stride between consecutive array elements: roundUp(element size,
  *  element alignment). */
-function std140ArrayStride(t: GLSLType): number {
-  return roundUp(std140Size(t), std140Align(t));
+function std140ArrayStride(t: GLSLType, rowMajor: boolean): number {
+  return roundUp(std140Size(t, rowMajor), std140Align(t));
 }
 
 /** Emit BlockMemberLayout entries for type `t` at `byteOffset`, keyed by
  *  `path`. Emits the path root, every nested member leaf, every const-indexed
  *  array element, and the '[0]' dynamic-index prefix (arrayStride set).
  *  When `blockStride` is set (arrayed block) it is stamped on EVERY entry —
- *  codegen resolves any dynamic index inside an arrayed block through it. */
+ *  codegen resolves any dynamic index inside an arrayed block through it.
+ *  `rowMajor` is the member's EFFECTIVE layout qualifier (member-level
+ *  overrides block-level; default column-major) — stamped on every entry so
+ *  codegen's matrix element math picks the right byte order. */
 function emitBlockLayout(
   path: string,
   t: GLSLType,
   byteOffset: number,
   out: Map<string, BlockMemberLayout>,
   blockStride: number | undefined,
+  rowMajor: boolean,
 ): void {
-  const mk = (offset: number, arrayStride: number, matrixStride: number): BlockMemberLayout =>
-    blockStride === undefined
-      ? { offset, arrayStride, matrixStride, rowMajor: false }
-      : { offset, arrayStride, matrixStride, rowMajor: false, blockStride };
+  const mk = (offset: number, arrayStride: number, matrixStride: number): BlockMemberLayout => {
+    const base = { offset, arrayStride, matrixStride, rowMajor };
+    return blockStride === undefined ? base : { ...base, blockStride };
+  };
   switch (t.kind) {
     case 'scalar':
     case 'vector':
@@ -701,17 +708,17 @@ function emitBlockLayout(
       return;
     case 'array': {
       const n = t.size ?? 0;
-      const stride = std140ArrayStride(t.element);
+      const stride = std140ArrayStride(t.element, rowMajor);
       out.set(path, mk(byteOffset, stride, 0));
       if (n > 0) {
         for (let k = 0; k < n; k++) {
-          emitBlockLayout(`${path}[${k}]`, t.element, byteOffset + k * stride, out, blockStride);
+          emitBlockLayout(`${path}[${k}]`, t.element, byteOffset + k * stride, out, blockStride, rowMajor);
         }
         // '[0]' prefix AFTER the element entries — the element-0 leaf entry
         // ('u[0]') would otherwise overwrite its arrayStride with 0, so every
         // dynamically indexed element read would resolve to element 0 (BUG d,
-        // block twin). matrixStride keeps the element's column stride (matrix
-        // elements: const-index reads of element 0 use the same entry).
+        // block twin). matrixStride keeps the element's column/row stride
+        // (matrix elements: const-index reads of element 0 use the same entry).
         out.set(`${path}[0]`, mk(byteOffset, stride, t.element.kind === 'matrix' ? 16 : 0));
       }
       return;
@@ -721,8 +728,8 @@ function emitBlockLayout(
       let off = 0;
       for (const m of t.members) {
         off = roundUp(off, std140Align(m.type));
-        emitBlockLayout(`${path}.${m.name}`, m.type, byteOffset + off, out, blockStride);
-        off += std140Size(m.type);
+        emitBlockLayout(`${path}.${m.name}`, m.type, byteOffset + off, out, blockStride, rowMajor);
+        off += std140Size(m.type, rowMajor);
       }
       return;
     }
@@ -739,6 +746,7 @@ interface BlockLeaf {
   offset: number;
   arrayStride: number;
   matrixStride: number;
+  rowMajor: boolean;
   size: number;
 }
 
@@ -749,12 +757,13 @@ function descendStructLeaves(
   t: Extract<GLSLType, { kind: 'struct' }>,
   byteOffset: number,
   out: BlockLeaf[],
+  rowMajor: boolean,
 ): void {
   let off = 0;
   for (const m of t.members) {
     off = roundUp(off, std140Align(m.type));
-    collectBlockLeaves(`${path}.${m.name}`, m.type, byteOffset + off, out);
-    off += std140Size(m.type);
+    collectBlockLeaves(`${path}.${m.name}`, m.type, byteOffset + off, out, rowMajor);
+    off += std140Size(m.type, rowMajor);
   }
 }
 
@@ -767,9 +776,10 @@ function collectBlockLeaves(
   t: GLSLType,
   byteOffset: number,
   out: BlockLeaf[],
+  rowMajor: boolean,
 ): void {
   if (t.kind === 'struct') {
-    descendStructLeaves(path, t, byteOffset, out);
+    descendStructLeaves(path, t, byteOffset, out, rowMajor);
     return;
   }
   if (t.kind === 'array') {
@@ -779,9 +789,9 @@ function collectBlockLeaves(
       // '[0]' entry cannot represent it). Nested array members recurse and
       // keep their own '[0]' leaf with size = array length.
       const n = t.size ?? 0;
-      const stride = std140ArrayStride(t.element);
+      const stride = std140ArrayStride(t.element, rowMajor);
       for (let k = 0; k < n; k++) {
-        descendStructLeaves(`${path}[${k}]`, t.element, byteOffset + k * stride, out);
+        descendStructLeaves(`${path}[${k}]`, t.element, byteOffset + k * stride, out, rowMajor);
       }
       return;
     }
@@ -789,8 +799,9 @@ function collectBlockLeaves(
       path: `${path}[0]`,
       type: t.element,
       offset: byteOffset,
-      arrayStride: std140ArrayStride(t.element),
+      arrayStride: std140ArrayStride(t.element, rowMajor),
       matrixStride: 0,
+      rowMajor,
       size: t.size ?? 0,
     });
     return;
@@ -801,6 +812,7 @@ function collectBlockLeaves(
     offset: byteOffset,
     arrayStride: 0,
     matrixStride: t.kind === 'matrix' ? 16 : 0,
+    rowMajor,
     size: 1,
   });
 }
@@ -810,6 +822,8 @@ interface BlockLayout {
   blockName: string;
   instanceName: string | null;
   arraySize: number;
+  /** True when the instance declares an explicit array dim (`b[1]` IS arrayed). */
+  instanceArray: boolean;
   /** std140 byte size of ONE block instance (rounded up to 16). */
   size: number;
   /** Member path → byte layout (codegen's `blocks.get(index)` map). */
@@ -825,28 +839,36 @@ interface BlockLayout {
  * the codegen contract (codegen/index.ts):
  * - instance-less blocks: bare member names ('m', 'm[0]', 'm.s.x');
  * - named non-arrayed blocks: instance name + member ('b.m');
- * - arrayed blocks (arraySize > 1): per-element paths ('b[0].m', 'b[1].m')
- *   with every entry stamped blockStride = block size, plus the 'b[0]'
- *   PREFIX entry {offset 0, blockStride} for dynamic instance indexing.
+ * - arrayed blocks (instanceArray, size ≥ 1): per-element paths
+ *   ('b[0].m', 'b[1].m') with every entry stamped blockStride = block size,
+ *   plus the 'b[0]' PREFIX entry {offset 0, blockStride} for dynamic instance
+ *   indexing.
+ * Row-major: a block-level `layout(row_major)` applies to every member; a
+ * member-level `layout(row_major)`/`layout(column_major)` overrides it for
+ * that member (ES 3.00 §4.3.9). Row-major matrices occupy 16 bytes PER ROW
+ * (mat4x3 = 48 bytes) with matrixStride 16 (the row stride); column-major
+ * occupy 16 bytes per column. Codegen bakes the resulting offsets/stride and
+ * the `rowMajor` flag into the matrix element reads.
  */
 function layoutBlock(decl: UniformBlockDecl): BlockLayout {
+  const memberRowMajor = decl.members.map((m) => m.rowMajor ?? decl.rowMajor);
   const memberOffsets: number[] = [];
   let off = 0;
-  for (const m of decl.members) {
-    off = roundUp(off, std140Align(m.type));
+  for (let i = 0; i < decl.members.length; i++) {
+    off = roundUp(off, std140Align(decl.members[i].type));
     memberOffsets.push(off);
-    off += std140Size(m.type);
+    off += std140Size(decl.members[i].type, memberRowMajor[i]);
   }
   const blockSize = roundUp(off, 16);
   const members = new Map<string, BlockMemberLayout>();
   const leafGroups: BlockLeaf[][] = [];
-  const isArrayed = decl.arraySize > 1;
+  const isArrayed = decl.instanceArray;
   const emitMember = (prefix: string, baseOffset: number, blockStride: number | undefined, leaves: BlockLeaf[]): void => {
     for (let i = 0; i < decl.members.length; i++) {
       const m = decl.members[i];
       const path = `${prefix}${m.name}`;
-      emitBlockLayout(path, m.type, baseOffset + memberOffsets[i], members, blockStride);
-      collectBlockLeaves(path, m.type, baseOffset + memberOffsets[i], leaves);
+      emitBlockLayout(path, m.type, baseOffset + memberOffsets[i], members, blockStride, memberRowMajor[i]);
+      collectBlockLeaves(path, m.type, baseOffset + memberOffsets[i], leaves, memberRowMajor[i]);
     }
   };
   if (isArrayed) {
@@ -875,6 +897,7 @@ function layoutBlock(decl: UniformBlockDecl): BlockLayout {
     blockName: decl.name,
     instanceName: decl.instanceName,
     arraySize: decl.arraySize,
+    instanceArray: isArrayed,
     size: blockSize,
     members,
     leafGroups,
@@ -883,13 +906,20 @@ function layoutBlock(decl: UniformBlockDecl): BlockLayout {
 }
 
 /** Two blocks with the same name must have IDENTICAL layouts (member path
- *  sets, every byte offset/stride AND the member types — a float member vs a
- *  vec2 member at the same offset is still a mismatch) to share an index. */
+ *  sets, every byte offset/stride, the member types AND their precision — a
+ *  `mediump vec4` vs a `highp vec4` member is a mismatch (ES 3.00 §4.3.7;
+ *  shader-with-mis-matching-uniform-block.html) and their row-major flags)
+ *  to share an index. */
 function blockLayoutsEqual(a: BlockLayout, b: BlockLayout): boolean {
   if (a.size !== b.size || a.members.size !== b.members.size) return false;
   if (a.declMembers.length !== b.declMembers.length) return false;
   for (let i = 0; i < a.declMembers.length; i++) {
-    if (a.declMembers[i].name !== b.declMembers[i].name || !typeEquals(a.declMembers[i].type, b.declMembers[i].type)) {
+    const ma = a.declMembers[i];
+    const mb = b.declMembers[i];
+    if (ma.name !== mb.name || !typeEquals(ma.type, mb.type) || ma.rowMajor !== mb.rowMajor) {
+      return false;
+    }
+    if (ma.precision !== mb.precision) {
       return false;
     }
   }
@@ -989,10 +1019,10 @@ function layoutBlocks(vs: Shader, fs: Shader, limits: LinkLimits): BlockLayoutRe
       size: l.size,
       arrayStride: l.arrayStride,
       matrixStride: l.matrixStride,
-      rowMajor: false,
+      rowMajor: l.rowMajor,
     });
     const leafInfos = (group: BlockLeaf[]): UniformBlockMemberInfo[] => group.map(memberInfo);
-    if (lay.arraySize > 1) {
+    if (lay.instanceArray) {
       // Arrayed blocks: one UniformBlockInfo PER ELEMENT ('b[0]', 'b[1]'...).
       for (let k = 0; k < lay.arraySize; k++) {
         infos.push({ name: `${lay.instanceName}[${k}]`, index: idx, size: lay.size, activeUniforms: leafInfos(lay.leafGroups[k]) });

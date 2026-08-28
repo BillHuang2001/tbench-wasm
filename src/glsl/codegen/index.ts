@@ -40,8 +40,8 @@ export interface UniformSlot {
 export interface BlockMemberLayout {
   offset: number;        // byte offset of the member's first element
   arrayStride: number;   // bytes between array elements (0 when not an array)
-  matrixStride: number;  // bytes between matrix columns (0 when not a matrix)
-  rowMajor: boolean;     // always false (std140 column-major is mandatory)
+  matrixStride: number;  // bytes between columns (col-major) or rows (row-major); 0 when not a matrix
+  rowMajor: boolean;     // layout(row_major) member (default column-major)
   /**
    * std140 byte size of ONE block instance (bytes between consecutive
    * instances of an ARRAYED block, e.g. `uniform Blocks {..} b[2]`).

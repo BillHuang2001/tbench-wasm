@@ -522,7 +522,10 @@ export function uniformRead(
   return isUintType(type) ? wrapUint(s) : s;
 }
 
-/** Block store read: byte offset → float index; matrix columns stride matrixStride. */
+/** Block store read: byte offset → float index. Column-major matrices store
+ *  column `col` at byte `col * matrixStride` (element [col][row] at
+ *  `col*matrixStride + row*4`); row-major matrices store ROW `row` at byte
+ *  `row * matrixStride` (element [col][row] at `row*matrixStride + col*4`). */
 export function blockRead(
   type: GLSLType,
   blockIndex: number,
@@ -531,13 +534,14 @@ export function blockRead(
   isIntStore: boolean,
   dyn: DynTerm | null,
   c: number,
+  rowMajor: boolean,
 ): string {
   const base = dyn ? `${offset} / 4 + (${dyn.temp}) * ${dyn.stride / 4}` : `${offset} / 4`;
   let idx: string;
   if (type.kind === 'matrix') {
     const col = Math.floor(c / type.rows);
     const row = c % type.rows;
-    idx = `${base} + ${col} * ${matrixStride / 4} + ${row}`;
+    idx = rowMajor ? `${base} + ${row} * ${matrixStride / 4} + ${col}` : `${base} + ${col} * ${matrixStride / 4} + ${row}`;
   } else {
     idx = `${base} + ${c}`;
   }
@@ -630,7 +634,7 @@ export function blockPathRead(
   const entry = env.lookupBlockMember(blockIndex, key);
   if (!entry) throw new Error(`codegen: missing block layout for '${key}' (linker must emit every reachable prefix)`);
   const isIntStore = isIntegralFamily(type);
-  return blockRead(type, blockIndex, entry.offset, entry.matrixStride, isIntStore, dyn, c);
+  return blockRead(type, blockIndex, entry.offset, entry.matrixStride, isIntStore, dyn, c, entry.rowMajor);
 }
 
 /** Read one flat component of a varying path (entry looked up by key). */
@@ -679,7 +683,7 @@ function structPathRead(
           const entry = env.lookupBlockMember(blockIndex!, subKey);
           if (!entry) throw new Error(`codegen: missing block layout for '${subKey}'`);
           const isIntStore = isIntegralFamily(m.type);
-          return blockRead(m.type, blockIndex!, entry.offset, entry.matrixStride, isIntStore, dyn, c - off);
+          return blockRead(m.type, blockIndex!, entry.offset, entry.matrixStride, isIntStore, dyn, c - off, entry.rowMajor);
         }
         case 'varying': {
           const vl = env.lookupVarying(subKey);
