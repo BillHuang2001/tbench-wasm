@@ -89,7 +89,7 @@ export const EXTENSION_SPECS: ExtensionSpec[] = [
   { name: 'EXT_blend_minmax', versions: [1], status: 'implement' },
   { name: 'EXT_frag_depth', versions: [1], status: 'implement' },
   { name: 'EXT_shader_texture_lod', versions: [1], status: 'implement' },
-  { name: 'EXT_sRGB', versions: [1, 2], status: 'implement' },
+  { name: 'EXT_sRGB', versions: [1], status: 'implement' },
   { name: 'OES_element_index_uint', versions: [1], status: 'implement' },
   { name: 'OES_fbo_render_mipmap', versions: [1, 2], status: 'implement' },
   { name: 'OES_standard_derivatives', versions: [1], status: 'implement' },
