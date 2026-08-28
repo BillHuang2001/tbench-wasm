@@ -1847,6 +1847,184 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
 }
 
 /* ------------------------------------------------------------------ */
+/* Fragment output layout (ES 3.00): arrays, scalars, locations        */
+/* ------------------------------------------------------------------ */
+
+{
+  const LIM = { maxDrawBuffers: 8 };
+  const vs = compile('#version 300 es\nvoid main() { gl_Position = vec4(0,0,0,1); }', 'VERTEX', 300);
+
+  // ARRAY output: 8 slots at 0..7 (draw-buffers MRT style, no explicit
+  // location — the ONLY output variable → base 0).
+  {
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       out vec4 my_FragData[8];
+       void main() { my_FragData[0] = vec4(1.0); my_FragData[7] = vec4(2.0); }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs, { limits: LIM });
+    check(l.ok, `8-slot array output links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const outs = l.program.fragment.outputs;
+      check(
+        outs.length === 8 && outs.every((o, i) => o.location === i && o.type === FLOAT_VEC4),
+        `array output → 8 per-slot entries 0..7 FLOAT_VEC4 (got ${JSON.stringify(outs)})`,
+      );
+      const fctx = fragmentCtx(l.program);
+      fctx.out.color = Array.from({ length: 8 }, () => new Float32Array(4));
+      l.program.fragment.run(fctx);
+      check(
+        fctx.out.color[0][0] === 1 && fctx.out.color[7][0] === 2 && fctx.out.color[3][0] === 0,
+        `array output run writes slots 0 and 7 (got ${fctx.out.color[0][0]},${fctx.out.color[7][0]})`,
+      );
+    }
+  }
+
+  // Explicit layout(location=2) on an array → slots 2,3,4.
+  {
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       layout(location = 2) out vec4 a[3];
+       void main() { a[1] = vec4(1.0); }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs, { limits: LIM });
+    check(l.ok, `explicit-location array links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const outs = l.program.fragment.outputs;
+      check(
+        outs.length === 3 && outs[0].location === 2 && outs[1].location === 3 && outs[2].location === 4,
+        `explicit array base 2 → slots 2,3,4 (got ${JSON.stringify(outs)})`,
+      );
+    }
+  }
+
+  // Non-contiguous explicit scalar locations (gl-get-frag-data-location).
+  {
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       layout(location = 2) out vec4 fragColor0;
+       layout(location = 0) out vec4 fragColor1;
+       void main() { fragColor0 = vec4(0,1,0,1); fragColor1 = vec4(1,0,0,1); }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs, { limits: LIM });
+    check(l.ok, `explicit non-contiguous scalar outputs link (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const outs = l.program.fragment.outputs;
+      check(
+        outs.length === 2 && outs[0].location === 2 && outs[1].location === 0,
+        `scalar outputs at 2 and 0 (got ${JSON.stringify(outs)})`,
+      );
+      const fctx = fragmentCtx(l.program);
+      fctx.out.color = Array.from({ length: 3 }, () => new Float32Array(4));
+      l.program.fragment.run(fctx);
+      check(
+        fctx.out.color[2][1] === 1 && fctx.out.color[0][0] === 1,
+        `run writes color[2] and color[0] (got ${fctx.out.color[2][1]},${fctx.out.color[0][0]})`,
+      );
+    }
+  }
+
+  // Scalar INT output (vertex-id): type GL_INT, run writes the int value.
+  {
+    const vsI = compile(
+      `#version 300 es
+       flat out highp int vVertexID;
+       void main() { vVertexID = gl_VertexID; gl_Position = vec4(0,0,0,1); }`,
+      'VERTEX',
+      300,
+    );
+    const fs = compile(
+      `#version 300 es
+       flat in highp int vVertexID;
+       out highp int oVertexID;
+       void main() { oVertexID = vVertexID; }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vsI, fs, { limits: LIM });
+    check(l.ok, `scalar int output links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const p = l.program;
+      check(
+        p.fragment.outputs.length === 1 && p.fragment.outputs[0].location === 0 && p.fragment.outputs[0].type === INT,
+        `int output → [{0, GL_INT}] (got ${JSON.stringify(p.fragment.outputs)})`,
+      );
+      const vctx = vertexCtx(p, { vertexId: 12345 });
+      p.vertex.run(vctx);
+      const fctx = fragmentCtx(p, [vctx.out.varyings]);
+      p.fragment.run(fctx);
+      check(fctx.out.color[0][0] === 12345, `int output run writes 12345 (got ${fctx.out.color[0][0]})`);
+    }
+  }
+
+  // Location conflicts are link errors (explicit duplicate + array overlap).
+  {
+    const fsDup = compile(
+      `#version 300 es
+       precision mediump float;
+       layout(location = 0) out vec4 a;
+       layout(location = 0) out vec4 b;
+       void main() { a = vec4(1.0); b = vec4(2.0); }`,
+      'FRAGMENT',
+      300,
+    );
+    const ld = linkProgram(vs, fsDup, { limits: LIM });
+    check(!ld.ok && ld.log.includes('conflicts with another output'), `duplicate location 0 → link error (${ld.ok ? '' : ld.log})`);
+
+    const fsOver = compile(
+      `#version 300 es
+       precision mediump float;
+       layout(location = 0) out vec4 a[2];
+       layout(location = 1) out vec4 b;
+       void main() { a[0] = vec4(1.0); b = vec4(2.0); }`,
+      'FRAGMENT',
+      300,
+    );
+    const lo = linkProgram(vs, fsOver, { limits: LIM });
+    check(!lo.ok && lo.log.includes('conflicts with another output'), `array/slot overlap → link error (${lo.ok ? '' : lo.log})`);
+  }
+
+  // Multiple output variables without explicit locations → link error
+  // (WEBGL_blend_func_extended 'locations300' expectation).
+  {
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       out vec4 color0;
+       out vec4 color1;
+       void main() { color0 = vec4(1.0); color1 = vec4(2.0); }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs, { limits: LIM });
+    check(!l.ok && l.log.includes("must declare layout(location=)"), `multi-output without locations → link error (${l.ok ? '' : l.log})`);
+  }
+
+  // maxDrawBuffers bound check on array expansion.
+  {
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       layout(location = 6) out vec4 a[3];
+       void main() { a[0] = vec4(1.0); }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs, { limits: { maxDrawBuffers: 8 } });
+    check(!l.ok && l.log.includes('exceeds maxDrawBuffers'), `array expansion past maxDrawBuffers → link error (${l.ok ? '' : l.log})`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
 
