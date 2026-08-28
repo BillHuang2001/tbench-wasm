@@ -600,7 +600,9 @@ function srcBytesPerTexel(format: GLenum, type: GLenum): number {
       return comps * 2;
     case C.UNSIGNED_SHORT_5_6_5: case C.UNSIGNED_SHORT_4_4_4_4: case C.UNSIGNED_SHORT_5_5_5_1:
       return 2; // packed types: 2 bytes/texel TOTAL regardless of component count
-    default: // UNSIGNED_INT, INT, UNSIGNED_INT_24_8, 2_10_10_10_REV, 10F_11F_11F_REV, 5_9_9_9_REV, FLOAT, FLOAT_32_UNSIGNED_INT_24_8_REV
+    case C.UNSIGNED_INT: case C.INT: case C.FLOAT:
+      return comps * 4; // 32-bit per component (RGBA32F → 16, etc.)
+    default: // UNSIGNED_INT_24_8, 2_10_10_10_REV, 10F_11F_11F_REV, 5_9_9_9_REV, FLOAT_32_UNSIGNED_INT_24_8_REV
       return 4;
   }
 }
