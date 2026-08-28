@@ -56,13 +56,23 @@
  *  - renderbufferStorageMultisample: samples < 0 → INVALID_VALUE; samples >
  *    MAX_SAMPLES → INVALID_OPERATION; storage stays single-sampled (software
  *    resolve happens at blit); record rb._samples.
- *  - drawBuffers (W2): sequence<GLenum> conversion (TypeError for non-finite);
+ *  - drawBuffers (W2): WebIDL sequence<GLenum> conversion — ToUint32 per element
+ *    (NaN/Infinity → 0, -1 → 0xFFFFFFFF, 1.5 → 1; TypeError only when the
+ *    argument is not a sequence, e.g. null/undefined or a Symbol element);
  *    length > MAX_DRAW_BUFFERS → INVALID_VALUE; length 0 → INVALID_OPERATION;
  *    default FB: exactly [BACK] or [NONE] else INVALID_OPERATION; FBO: entries
  *    NONE or strictly-increasing COLOR_ATTACHMENTi < MAX_COLOR_ATTACHMENTS
  *    (BACK → INVALID_OPERATION, out-of-range → INVALID_ENUM, out-of-order →
- *    INVALID_OPERATION). Stores state.drawBuffers (same field WEBGL_draw_buffers
- *    writes). WebGL1 gets drawBuffersWEBGL from the extension instead.
+ *    INVALID_OPERATION). Draw-buffer state is FRAMEBUFFER OBJECT state (GLES3
+ *    §4.1.2 / WebGL2 §5.5.5), NOT context state: each FBO owns its list (module-
+ *    level WeakMap, lazily defaulted to [COLOR_ATTACHMENT0, NONE × 7] on first
+ *    bind); drawBuffers() writes the BOUND DRAW framebuffer's list, and
+ *    bindFramebuffer/deleteFramebuffer sync state.drawBuffers (read by
+ *    getters.ts DRAW_BUFFERi) to the newly-bound draw framebuffer's list
+ *    (default framebuffer → [COLOR_ATTACHMENT0] in attachment-index form —
+ *    getters.ts reports it as BACK; draw.ts consumes it as an attachment index).
+ *    WebGL1 gets drawBuffersWEBGL from the extension instead (context state,
+ *    untouched here).
  *  - readBuffer (W2): default FB {NONE, BACK} else INVALID_OPERATION; FBO
  *    {NONE, COLOR_ATTACHMENT0..<max} else INVALID_OPERATION; src below
  *    COLOR_ATTACHMENT0 (non-NONE) → INVALID_ENUM.
@@ -76,6 +86,8 @@
  *    INVALID_OPERATION; same read/draw FBO object (incl. both default) →
  *    INVALID_OPERATION; identical source/dest image (same texture+level+face+
  *    layer, or same renderbuffer) for any mask bit → INVALID_OPERATION;
+ *    incomplete read or draw FBO → INVALID_FRAMEBUFFER_OPERATION (GLES3
+ *    §4.4.4);
  *    multisample: draw-multisampled + read-single OR both multisampled →
  *    INVALID_OPERATION; read-multisampled + draw-single → OK (resolve, CTS
  *    multisampled-depth-renderbuffer-initialization.html). Then delegates to
@@ -204,6 +216,26 @@ function sameAttachmentObject(a: FramebufferAttachment, b: FramebufferAttachment
 }
 
 /**
+ * GLES3 §4.4.2 (framebufferTexture2D / framebufferTextureLayer): attaching a
+ * texture to DEPTH_ATTACHMENT requires its internal format to have a depth
+ * component, to STENCIL_ATTACHMENT a stencil component; WebGL2's
+ * DEPTH_STENCIL_ATTACHMENT (alias of both points) requires both. A
+ * depth-stencil format at DEPTH or STENCIL alone is legal. When the texture
+ * has no allocated image yet (internal format unknown — the record is created
+ * before the level exists), there is no mismatch: framebuffer completeness
+ * reports the unallocated level instead.
+ */
+function textureAttachmentFormatMismatch(tex: WebGLTexture, attachment: GLenum): boolean {
+  const image = tex._image;
+  if (!image) return false;
+  const d = localFormatDesc(image.internalFormat);
+  if (attachment === DEPTH_ATTACHMENT) return !d.isDepth;
+  if (attachment === STENCIL_ATTACHMENT) return !d.isStencil;
+  if (attachment === DEPTH_STENCIL_ATTACHMENT) return !(d.isDepth && d.isStencil);
+  return false;
+}
+
+/**
  * Resolve one attachment point's record. For WebGL2 DEPTH_STENCIL_ATTACHMENT
  * the record is returned only when the depth and stencil attachment points
  * hold the same attachment OBJECT (see sameAttachmentObject); a mismatch
@@ -217,9 +249,15 @@ function resolveAttachmentRecord(
   fbo: WebGLFramebuffer,
   attachment: GLenum,
 ): { rec: FramebufferAttachment | null; conflict: boolean } {
-  if (ctx._version === 2 && attachment === DEPTH_STENCIL_ATTACHMENT && fbo._attachments.has(DEPTH_ATTACHMENT)) {
+  if (ctx._version === 2 && attachment === DEPTH_STENCIL_ATTACHMENT) {
     const d = fbo._attachments.get(DEPTH_ATTACHMENT) ?? null;
     const s = fbo._attachments.get(STENCIL_ATTACHMENT) ?? null;
+    if (d === null && s === null) return { rec: null, conflict: false };
+    // The W2 alias is coherent only when BOTH points hold the same image:
+    // one empty point or two different images → INVALID_OPERATION (WebGL2
+    // spec; framebuffer-object-attachment.html "DEPTH_ATTACHMENT overwrites
+    // depth set by DEPTH_STENCIL_ATTACHMENT" expects the error also when only
+    // the depth point is occupied).
     if (d === null || s === null) return { rec: null, conflict: true };
     if (!sameAttachmentObject(d, s)) return { rec: null, conflict: true };
     return { rec: d, conflict: false };
@@ -300,7 +338,9 @@ function isValidRenderbufferFormat(ctx: WebGLRenderingContext, format: GLenum): 
   return false;
 }
 
-/** WebGL2 core renderbuffer formats (RGB16F/RGB32F are NOT legal — see above). */
+/** WebGL2 core renderbuffer formats (RGB16F/RGB32F are NOT legal — see above;
+ *  STENCIL_INDEX8 is a legal ES3 renderbuffer-only format — CTS
+ *  framebuffer-object-attachment.html renderbufferStorage(STENCIL_INDEX8)). */
 const W2_RB_FORMATS: ReadonlySet<GLenum> = new Set<GLenum>([
   C2.R8, C2.R8UI, C2.R8I, C2.R16UI, C2.R16I, C2.R32UI, C2.R32I,
   C2.RG8, C2.RG8UI, C2.RG8I, C2.RG16UI, C2.RG16I, C2.RG32UI, C2.RG32I,
@@ -310,6 +350,7 @@ const W2_RB_FORMATS: ReadonlySet<GLenum> = new Set<GLenum>([
   C2.RGB10_A2, C1.RGBA4, C1.RGB5_A1, C1.RGB565, C2.SRGB8_ALPHA8,
   C1.DEPTH_COMPONENT16, C2.DEPTH_COMPONENT24, C2.DEPTH_COMPONENT32F,
   C2.DEPTH24_STENCIL8, C2.DEPTH32F_STENCIL8, C1.DEPTH_STENCIL,
+  C1.STENCIL_INDEX8,
 ]);
 
 /** WebGL2 float renderbuffer formats (EXT_color_buffer_float / _half_float). */
@@ -317,9 +358,12 @@ const W2_RB_EXT_FLOAT: ReadonlySet<GLenum> = new Set<GLenum>([
   C2.R16F, C2.RG16F, C2.RGBA16F, C2.R32F, C2.RG32F, C2.RGBA32F, C2.R11F_G11F_B10F,
 ]);
 
-/** WebGL2 renderbuffer formats gated on EXT_texture_norm16. */
+/** WebGL2 renderbuffer formats gated on EXT_texture_norm16. Per the extension
+ *  spec, ONLY R16_EXT/RG16_EXT/RGBA16_EXT are renderbuffer internalformats —
+ *  RGB16_EXT and the SNORM formats are texture-only and renderbufferStorage
+ *  with them must be INVALID_ENUM (ext-texture-norm16.html testExtFormatUnrenderable). */
 const W2_RB_EXT_NORM16: ReadonlySet<GLenum> = new Set<GLenum>([
-  CExt.R16_EXT, CExt.RG16_EXT, CExt.RGB16_EXT, CExt.RGBA16_EXT,
+  CExt.R16_EXT, CExt.RG16_EXT, CExt.RGBA16_EXT,
 ]);
 
 /**
@@ -651,7 +695,14 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
     framebuffer._deleted = true;
     // Deleting a bound FBO resets the binding(s) to the default framebuffer.
     const s = ctx._state;
-    if (s.drawFramebuffer === framebuffer) s.drawFramebuffer = null;
+    if (s.drawFramebuffer === framebuffer) {
+      s.drawFramebuffer = null;
+      // W2: draw-buffer state is framebuffer-object state — the default
+      // framebuffer's list is [COLOR_ATTACHMENT0] (attachment-index form;
+      // getters.ts reports it as BACK). WebGL1's WEBGL_draw_buffers extension
+      // owns s.drawBuffers — never touched here.
+      if (ctx._version === 2) s.drawBuffers = getDrawBufferList(ctx, null);
+    }
     if (s.readFramebuffer === framebuffer) s.readFramebuffer = null;
     ctx._resources.untrack(framebuffer);
   };
@@ -691,6 +742,13 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       // FRAMEBUFFER, WebGL2 keeps the ES3 both-slot behavior).
       s.drawFramebuffer = fbo;
       if (target === C1.FRAMEBUFFER) s.readFramebuffer = fbo;
+      // W2: draw-buffer state is framebuffer-object state (GLES3 §4.1.2) — sync
+      // the context-visible list (s.drawBuffers, read by getters.ts DRAW_BUFFERi)
+      // to the newly-bound draw framebuffer's OWN list ([COLOR_ATTACHMENT0] for
+      // the default framebuffer — attachment-index form; getters.ts reports it
+      // as BACK). WebGL1's WEBGL_draw_buffers extension owns s.drawBuffers as
+      // context state — never touched here.
+      if (ctx._version === 2) s.drawBuffers = getDrawBufferList(ctx, fbo);
     }
     if (fbo) {
       fbo._isBound = true;
@@ -808,6 +866,13 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       }
       if (level < 0 || level >= maxLevel) {
         ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      // GLES3 §4.4.2: the texture's internal format must be compatible with the
+      // attachment point (depth component for DEPTH_ATTACHMENT, stencil for
+      // STENCIL_ATTACHMENT, both for the W2 DEPTH_STENCIL alias).
+      if (ctx._version === 2 && textureAttachmentFormatMismatch(tex, attachment)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
     }
@@ -1126,6 +1191,11 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
           ctx._errors.push(C1.INVALID_VALUE);
           return;
         }
+        // GLES3 §4.4.2.4: same depth/stencil component rule as framebufferTexture2D.
+        if (textureAttachmentFormatMismatch(tex, attachment)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
       }
       // Same-record sharing for DEPTH_STENCIL_ATTACHMENT (see framebufferRenderbuffer).
       const rec: FramebufferAttachment | null =
@@ -1184,14 +1254,14 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       const ctx = this;
       if (isLost(ctx)) return;
       const s = ctx._state;
-      // WebIDL sequence<GLenum> conversion (mirrors the WEBGL_draw_buffers factory).
+      // WebIDL sequence<GLenum> conversion: ToUint32 per element (NaN/Infinity →
+      // 0, -1 → 0xFFFFFFFF, 1.5 → 1 — CTS blitframebuffer-test.html passes a
+      // NaN element and expects it to convert to COLOR_ATTACHMENT0). TypeError
+      // only when the argument is not a sequence (Array.from on null/undefined,
+      // or a Symbol element, throws).
       let arr: number[];
       try {
-        arr = Array.from(buffers as unknown as ArrayLike<unknown>, (v) => {
-          const n = Number(v);
-          if (!Number.isFinite(n)) throw new TypeError('drawBuffers: invalid GLenum in sequence');
-          return n >>> 0;
-        });
+        arr = Array.from(buffers as unknown as ArrayLike<unknown>, (v) => Number(v) >>> 0);
       } catch {
         throw new TypeError('drawBuffers: buffers is not a sequence<GLenum>');
       }
@@ -1212,6 +1282,7 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         s.drawBuffers = arr;
         return;
       }
+      const fbo = s.drawFramebuffer;
       // FBO: NONE or strictly-increasing COLOR_ATTACHMENTi < MAX_COLOR_ATTACHMENTS.
       let last = -1;
       for (const b of arr) {
@@ -1231,6 +1302,9 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         }
         last = idx;
       }
+      // Draw-buffer state is framebuffer-object state: store on the bound DRAW
+      // framebuffer AND mirror into s.drawBuffers (read by getters.ts DRAW_BUFFERi).
+      perFboDrawBuffers.set(fbo, arr);
       s.drawBuffers = arr;
     };
   }
@@ -1333,13 +1407,14 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_OPERATION); // same FBO object (incl. both default)
         return;
       }
-      // Both bound framebuffers must be complete.
+      // Both bound framebuffers must be complete (GLES3 §4.4.4:
+      // INVALID_FRAMEBUFFER_OPERATION when either is incomplete).
       if (readFbo !== null && computeFramebufferStatus(ctx, readFbo) !== C1.FRAMEBUFFER_COMPLETE) {
-        ctx._errors.push(C1.INVALID_OPERATION);
+        ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
         return;
       }
       if (drawFbo !== null && computeFramebufferStatus(ctx, drawFbo) !== C1.FRAMEBUFFER_COMPLETE) {
-        ctx._errors.push(C1.INVALID_OPERATION);
+        ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
         return;
       }
       // Identical source/dest image for any mask bit → INVALID_OPERATION
@@ -1348,7 +1423,9 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       if ((mask & C1.COLOR_BUFFER_BIT) !== 0) {
         const readKey = attachmentImageKey(ctx, readFbo, readFbo === null ? BACK : s.readBuffer);
         if (readKey !== null) {
-          const dbList = drawFbo === null ? [BACK] : s.drawBuffers;
+          // Draw-buffer list comes from the DRAW framebuffer's OWN state
+          // (per-FBO; attachmentImageKey maps COLOR_ATTACHMENT0 → default FB).
+          const dbList = getDrawBufferList(ctx, drawFbo);
           for (const db of dbList) {
             if (db === NONE) continue;
             if (sameImage(readKey, attachmentImageKey(ctx, drawFbo, db))) {
@@ -1394,6 +1471,39 @@ const everBoundRenderbuffers = new WeakSet<WebGLRenderbuffer>();
 
 /** isFramebuffer "has been bound at least once" marker (spec + CTS misc/is-object.html). */
 const everBoundFramebuffers = new WeakSet<WebGLFramebuffer>();
+
+/**
+ * W2 draw-buffer state is FRAMEBUFFER OBJECT state (GLES3 §4.1.2 / WebGL2
+ * §5.5.5), not context state. Lazily initialized on first bind to the spec
+ * default [COLOR_ATTACHMENT0, NONE × (MAX_DRAW_BUFFERS-1)].
+ */
+const perFboDrawBuffers = new WeakMap<WebGLFramebuffer, GLenum[]>();
+
+/**
+ * The draw-buffer list of the given DRAW framebuffer (null = default
+ * framebuffer → [COLOR_ATTACHMENT0]). Custom FBOs are lazily initialized to the
+ * spec default on first access. Used by bindFramebuffer/deleteFramebuffer (to
+ * keep s.drawBuffers synced to the bound draw framebuffer) and by
+ * blitFramebuffer's identical-image check.
+ *
+ * NOTE on the default-framebuffer representation: the spec value is BACK, but
+ * s.drawBuffers is consumed by draw.ts as ATTACHMENT INDICES (db - COLOR_ATTACHMENT0
+ * → surface index; draw.ts buildOutputMaps/executeClear/executeBlitFramebuffer/
+ * executeClearBuffer) — a BACK entry would compute a negative index and silently
+ * drop the write. getters.ts maps any non-NONE first element to BACK for the
+ * default framebuffer, so [COLOR_ATTACHMENT0] is observably identical
+ * (getParameter(DRAW_BUFFER0) → BACK).
+ */
+function getDrawBufferList(ctx: WebGLRenderingContext, fbo: WebGLFramebuffer | null): GLenum[] {
+  if (fbo === null) return [COLOR_ATTACHMENT0];
+  let list = perFboDrawBuffers.get(fbo);
+  if (list === undefined) {
+    list = new Array<GLenum>(ctx._state.limits.MAX_DRAW_BUFFERS).fill(NONE);
+    list[0] = COLOR_ATTACHMENT0;
+    perFboDrawBuffers.set(fbo, list);
+  }
+  return list;
+}
 
 /** W2 default-framebuffer attachment parameter values. */
 function defaultFbAttachmentParameter(ctx: WebGLRenderingContext, pname: GLenum): any {
