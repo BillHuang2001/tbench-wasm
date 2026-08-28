@@ -2597,6 +2597,12 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
   ): void {
     const ctx = this;
     if (isLost(ctx)) return;
+    // WebGL1 IDL: the ArrayBufferView argument is NON-NULLABLE → null/undefined
+    // must throw TypeError before any GL validation (WebGL2 keeps its
+    // null-legal path, which validates in compressedTexImage2DImpl).
+    if (ctx._version === 1 && (data === null || data === undefined)) {
+      throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
+    }
     compressedTexImage2DImpl(ctx, target, level, internalformat, width, height, border, data, arguments[7], arguments[8]);
   };
 
@@ -2613,6 +2619,12 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
   ): void {
     const ctx = this;
     if (isLost(ctx)) return;
+    // WebGL1 IDL: the ArrayBufferView argument is NON-NULLABLE → null/undefined
+    // must throw TypeError before any GL validation (WebGL2 keeps its
+    // null-legal path, which validates in compressedTexSubImage2DImpl).
+    if (ctx._version === 1 && (data === null || data === undefined)) {
+      throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
+    }
     compressedTexSubImage2DImpl(ctx, target, level, xoffset, yoffset, width, height, format, data, arguments[8], arguments[9]);
   };
 
