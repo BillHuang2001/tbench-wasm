@@ -81,6 +81,43 @@ interface Job {
   url: string;
   suite: string;
   webglVersion: 1 | 2;
+  /** True when the manifest marks this test --slow. */
+  slow?: boolean;
+}
+
+/**
+ * Per-test timeout overrides keyed by EXACT relative URL (as parsed from the
+ * manifests). These pages legitimately run far longer than the default idle
+ * timeout even with continuous progress, so they get their own (larger)
+ * budgets. PRIMARY slow-test mechanism — the manifests mark only 3 context
+ * tests --slow, none of which are the problem pages below.
+ */
+const SLOW_TEST_TIMEOUTS: Record<string, number> = {
+  "conformance/reading/read-pixels-test.html": 1_800_000, // ~23 min real runtime
+  "conformance/rendering/rendering-stencil-large-viewport.html": 600_000, // ~3 min
+  "conformance/attribs/gl-vertex-attrib-zero-issues.html": 600_000, // ~64s marginal flake
+};
+
+/** Generic budget for tests marked --slow in the manifests. */
+const SLOW_FLAG_TIMEOUT_MS = 600_000;
+
+/** Hard wall-clock cap for any slow/overridden test (35 min). */
+const MAX_SLOW_TOTAL_MS = 2_100_000;
+
+/** Per-job timeout resolution: idle timeout + optional wall-clock cap. */
+interface JobTimeouts {
+  timeoutMs: number;
+  maxTotalMs?: number;
+}
+
+function resolveJobTimeouts(job: Job, baseTimeoutMs: number): JobTimeouts {
+  const overridden = SLOW_TEST_TIMEOUTS[job.url] !== undefined;
+  const slow = job.slow === true;
+  const effective = overridden ? SLOW_TEST_TIMEOUTS[job.url]! : slow ? SLOW_FLAG_TIMEOUT_MS : baseTimeoutMs;
+  if (overridden || slow) {
+    return { timeoutMs: effective, maxTotalMs: Math.min(effective, MAX_SLOW_TOTAL_MS) };
+  }
+  return { timeoutMs: effective };
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -121,7 +158,7 @@ export async function runConformance(opts: RunOptions): Promise<{ exitCode: numb
   for (const { spec, entries } of parsedSuites) {
     for (const entry of entries) {
       if (opts.filter && !opts.filter.test(entry.url)) continue;
-      queue.push({ url: entry.url, suite: spec.name, webglVersion: spec.webglVersion });
+      queue.push({ url: entry.url, suite: spec.name, webglVersion: spec.webglVersion, slow: entry.slow });
     }
   }
   if (opts.filter && queue.length === 0) {
@@ -161,8 +198,10 @@ export async function runConformance(opts: RunOptions): Promise<{ exitCode: numb
           if (i >= queue.length) return;
           const job = queue[i];
           try {
+            const { timeoutMs, maxTotalMs } = resolveJobTimeouts(job, opts.timeoutMs);
             const r = await runTestPage(context, makeTestUrl(server.baseUrl, job), {
-              timeoutMs: opts.timeoutMs,
+              timeoutMs,
+              maxTotalMs,
             });
             results[i] = { ...r, url: job.url, suite: job.suite };
           } catch (err) {
@@ -184,7 +223,10 @@ export async function runConformance(opts: RunOptions): Promise<{ exitCode: numb
     await Promise.all(Array.from({ length: Math.min(opts.workers, queue.length) }, () => worker()));
 
     const report = buildReport(opts, parsedSuites, queue, results, server, startedAt, Date.now() - startMs);
-    printSummary(report, opts, server);
+    const extendedUrls = queue
+      .filter((job) => SLOW_TEST_TIMEOUTS[job.url] !== undefined || job.slow === true)
+      .map((job) => job.url);
+    printSummary(report, opts, server, extendedUrls);
     fs.mkdirSync(path.dirname(path.resolve(opts.reportPath)), { recursive: true });
     fs.writeFileSync(opts.reportPath, JSON.stringify(report, null, 2) + "\n");
     console.log(`Report: ${opts.reportPath}`);
@@ -258,7 +300,7 @@ function buildReport(
   return report;
 }
 
-function printSummary(report: RunReport, opts: RunOptions, server: CtsServer): void {
+function printSummary(report: RunReport, opts: RunOptions, server: CtsServer, extendedTimeoutUrls: string[] = []): void {
   const s = report.summary;
   const suiteNames = opts.suites.map((sp) => sp.name).join(", ");
   console.log("\n=== WebGL CTS run ===");
@@ -273,6 +315,9 @@ function printSummary(report: RunReport, opts: RunOptions, server: CtsServer): v
   console.log(`Renderer: ${process.env.WEBGL_SOFTWARE_RENDERER ?? "./renderer.js"}`);
   console.log(`Suite version: ${report.meta.suiteVersion as string}`);
   console.log(`Workers: ${opts.workers} | Timeout: ${opts.timeoutMs}ms | Filter: ${opts.filter?.source ?? "none"} | Smoke: ${opts.smoke}`);
+  if (extendedTimeoutUrls.length > 0) {
+    console.log(`Slow-timeout overrides: ${extendedTimeoutUrls.length} tests (${extendedTimeoutUrls.join(", ")})`);
+  }
   console.log(`\nTotal: ${s.total} tests in ${(s.durationMs / 1000).toFixed(1)}s`);
   console.log(`  PASS    ${s.pass}`);
   console.log(`  FAIL    ${s.fail}`);

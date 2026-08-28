@@ -12,6 +12,16 @@ Headless-Chromium (Playwright) harness that executes the Khronos WebGL Conforman
 - `--workers <n>` (default 4), `--timeout <ms>` (default 60000, idle-based), `--smoke` (first 10 tests), `--report <path>` (default `tests/reports/conformance.json`), `--renderer <path>` (overrides `WEBGL_SOFTWARE_RENDERER`), `--cts <path>` (default `/testsuites/WebGL`, also `CTS_DIR`), `--host` (default `127.0.0.1`), `--port` (default 0 = auto).
 - Exit: 0 all pass; 1 any fail/timeout/error; 2 runner error. Count-assertion mismatch also exits 1/2 with a loud message.
 
+## Slow-test timeouts
+Per-test timeout accommodation in `runner.ts` (idle timeout + optional hard wall-clock cap; the JSON report schema is untouched — the summary only prints a console line):
+- **Per-page overrides** (`SLOW_TEST_TIMEOUTS`, keyed by EXACT relative URL — the PRIMARY mechanism; the CTS manifests mark only 3 context tests `--slow`, none of the problem pages):
+  - `conformance/reading/read-pixels-test.html` → 30 min (1,800,000 ms; ~23 min real runtime — 2406 fullscreen 1024² draws with implicit-LOD texture2D, page runs its test TWICE)
+  - `conformance/rendering/rendering-stencil-large-viewport.html` → 10 min (600,000 ms; ~177-188s real runtime; passes 8/8 with `--timeout 420000`)
+  - `conformance/attribs/gl-vertex-attrib-zero-issues.html` → 10 min (600,000 ms; ~64s marginal perf flake)
+- **Generic `--slow` flag** (manifest-marked tests) → 10 min (600,000 ms).
+- **Hard wall-clock cap** for any slow/overridden test: `MAX_SLOW_TOTAL_MS = 2,100,000` (35 min) via `runTestPage`'s `maxTotalMs` option (times out with "timed out after Nms total (wall-clock cap)" even with continuous progress; same renderer-active gate as the idle timeout).
+- `--timeout` remains the base idle timeout for ALL other (non-slow) tests (default 60000 ms) — slow resolution is purely additive and per-job.
+
 ## Files
 - `list.ts` — faithful port of the official parser (`getFileList`/`getFileListImpl` from `sdk/tests/js/webgl-test-harness.js`) + `EXPECTED_COUNTS` + `assertSuiteCount`. Semantics: full-line comments only (`#`, `;`, `//` at col 0, lines ≤ 4 chars skipped); tokens split on `/\s+/`; `--slow` flag, `--min-version`/`--max-version` consume next token, unknown options throw; non-option tokens joined with a space = URL relative to the containing .txt; directives inherit into `.txt` subtrees as defaults (root default version "1.0"); leaves filtered by `compareVersion` (numeric dotted, "2.0.1 (beta)" → "2.0.1"); gated subtrees are recursed and leaves filtered individually. Filter version constant `DEFAULT_SUITE_VERSION = "2.0.1 (beta)"` (nothing is version-filtered at 2.0.1 in any graded list).
 - `server.ts` — no-cache static server (`Cache-Control: no-cache, no-store, must-revalidate` + `Pragma` + `Expires` on every response; MIME map incl. wasm), serving the CTS repo root so URLs are `/sdk/tests/<path>`. Binds BOTH `127.0.0.1` and `::1` on the same port (see cross-origin note).

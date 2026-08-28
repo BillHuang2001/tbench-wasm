@@ -43,6 +43,12 @@ export const RENDERER_INACTIVE_MSG =
 export interface RunPageOptions {
   /** Idle timeout: no observed progress for this long -> timeout-fail. */
   timeoutMs: number;
+  /**
+   * Optional wall-clock cap: when set, the page times out after this many ms
+   * total regardless of progress. Used by the runner for slow/overridden
+   * tests; undefined keeps the pure activity-based idle timeout behavior.
+   */
+  maxTotalMs?: number;
 }
 
 /** Poll interval for the in-page snapshot. */
@@ -246,6 +252,26 @@ export async function runTestPage(
         lastActivity = now;
         lastKey = key;
       }
+
+      // Wall-clock cap: for slow/overridden tests, a hard total-time ceiling
+      // independent of observed progress (same renderer-active gate semantics
+      // as the idle timeout branch below).
+      if (opts.maxTotalMs !== undefined && now - started > opts.maxTotalMs) {
+        const inactive = !snap.rendererActive;
+        return {
+          status: "timeout",
+          pass: snap.pass,
+          fail: snap.fail,
+          skip: snap.skip,
+          messages: inactive
+            ? [RENDERER_INACTIVE_MSG, ...messages, `timed out after ${opts.maxTotalMs}ms total (wall-clock cap)`]
+            : [...messages, `timed out after ${opts.maxTotalMs}ms total (wall-clock cap)`],
+          timeMs: now - started,
+          rendererMissing: false,
+          rendererActive: snap.rendererActive,
+        };
+      }
+
       if (now - lastActivity > opts.timeoutMs) {
         const inactive = !snap.rendererActive;
         return {
