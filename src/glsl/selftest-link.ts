@@ -67,6 +67,18 @@
  *      matrix-row-major-dynamic-indexing.html shaders (member-array dynamic
  *      index in instance-less AND instance-named blocks, row-major reads).
  *      Every check fails on the pre-cluster code (HEAD 826dbb6).
+ *  21. Cross-stage uniform PRECISION mismatch: link error at GLSL ES 1.00
+ *      (the exact CTS shader-with-global-variable-precision-mismatch.html
+ *      shaders — vec4 / int / struct member, linkSuccess:false), tolerated
+ *      at ES 3.00 (three.js viewMatrix highp VS × mediump FS); uniform TYPE
+ *      conflicts (vec3 vs vec4) and struct member type mismatches stay link
+ *      errors at both versions.
+ *  22. bindAttribLocation is reserved BEFORE automatic assignment (three.js
+ *      `attribute mat4 instanceMatrix;` declared before `attribute vec3
+ *      position;` + bindAttribLocation('position', 0) must link with distinct
+ *      locations); layout(location=) beats the binding for the same name;
+ *      two attributes bound to one location / a binding overlapping a
+ *      different attribute's layout location stay link errors.
  *
  * Run: npx tsx src/glsl/selftest-link.ts
  * Prints "OK" and exits 0 on success.
@@ -2596,6 +2608,309 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
       );
     }
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 21. Cross-stage uniform PRECISION mismatch: link error at GLSL ES   */
+/*     1.00 (CTS shader-with-global-variable-precision-mismatch.html   */
+/*     grades linkSuccess:false), tolerated at ES 3.00 (three.js       */
+/*     viewMatrix highp-VS x mediump-FS); type conflicts always error. */
+/* ------------------------------------------------------------------ */
+
+{
+  // GLSL ES 1.00 — the EXACT CTS page shaders: default-highp VS uniforms ×
+  // mediump FS uniforms MUST fail the link (the page grades linkSuccess:
+  // false for the float, int AND struct shapes). The VS `uniform int foo;`
+  // relies on the SPEC vertex default (highp int) — the replay in
+  // stageDefaultPrecisions diverges from semantics' mediump int seed on
+  // purpose.
+  const v100MismatchFails = (name: string, vsSrc: string, fsSrc: string): void => {
+    const vs = compile(vsSrc, 'VERTEX', 100);
+    const fs = compile(fsSrc, 'FRAGMENT', 100);
+    const l = linkProgram(vs, fs);
+    check(!l.ok && l.log.includes('precision mismatch'),
+      `${name} (${l.ok ? 'LINKED' : l.log})`);
+  };
+  v100MismatchFails('(a) v100 vec4: VS default highp x FS `precision mediump float;` fails',
+    `uniform vec4 foo;
+     void main() { gl_Position = foo; }`,
+    `precision mediump float;
+     uniform vec4 foo;
+     void main() { gl_FragColor = foo; }`);
+  v100MismatchFails('(b) v100 int: VS default highp int x FS default mediump int fails',
+    `uniform int foo;
+     void main() { gl_Position = vec4(foo, 0, 0, 1); }`,
+    `uniform int foo;
+     void main() { gl_FragColor = vec4(foo, 0, 0, 1); }`);
+  v100MismatchFails('(c) v100 struct foo{vec4 bar;}: VS highp member x FS mediump fails',
+    `struct foo { vec4 bar; };
+     uniform foo baz;
+     void main() { gl_Position = baz.bar; }`,
+    `precision mediump float;
+     struct foo { vec4 bar; };
+     uniform foo baz;
+     void main() { gl_FragColor = baz.bar; }`);
+
+  // three.js built-in materials declare `uniform mat4 viewMatrix;` in both
+  // stages WITHOUT an explicit precision; at ES 3.00 the VS defaults to
+  // highp and the FS to mediump (generatePrecision). ANGLE links such
+  // programs (only TYPE conflicts are link errors for uniforms), so the
+  // linker must not reject them at v300 — the Program model carries no
+  // precision anyway.
+  const vsHigh = compile(
+    `#version 300 es
+     precision highp float;
+     uniform mat4 viewMatrix;
+     out vec4 v;
+     void main(){ v = vec4(0.0); gl_Position = viewMatrix * vec4(0.0, 0.0, 0.0, 1.0); }`,
+    'VERTEX', 300,
+  );
+  const fsMed = compile(
+    `#version 300 es
+     precision mediump float;
+     uniform mat4 viewMatrix;
+     in vec4 v;
+     out vec4 fragColor;
+     void main(){ fragColor = v + vec4(1.0); }`,
+    'FRAGMENT', 300,
+  );
+  const l1 = linkProgram(vsHigh, fsMed);
+  check(l1.ok, `(d) v300 highp-VS x mediump-FS mat4 uniform links (${l1.ok ? '' : l1.log})`);
+
+  // Same v300 tolerance for the CTS shapes (vec4 / int / struct member).
+  const v300MismatchLinks = (name: string, vsSrc: string, fsSrc: string): void => {
+    const vs = compile(vsSrc, 'VERTEX', 300);
+    const fs = compile(fsSrc, 'FRAGMENT', 300);
+    const l = linkProgram(vs, fs);
+    check(l.ok, `${name} (${l.ok ? '' : l.log})`);
+  };
+  v300MismatchLinks('(e) v300 vec4: highp-VS x mediump-FS uniform links',
+    `#version 300 es
+     precision highp float;
+     uniform vec4 foo;
+     out vec4 v;
+     void main(){ v = foo; gl_Position = foo; }`,
+    `#version 300 es
+     precision mediump float;
+     uniform vec4 foo;
+     in vec4 v;
+     out vec4 fragColor;
+     void main(){ fragColor = foo + v; }`);
+  v300MismatchLinks('(f) v300 int: highp-VS x mediump-FS uniform links',
+    `#version 300 es
+     precision highp float;
+     precision highp int;
+     uniform int foo;
+     out vec4 v;
+     void main(){ v = vec4(1.0); gl_Position = vec4(foo, 0, 0, 1); }`,
+    `#version 300 es
+     precision mediump float;
+     precision mediump int;
+     uniform int foo;
+     in vec4 v;
+     out vec4 fragColor;
+     void main(){ fragColor = v + vec4(foo, 0, 0, 1); }`);
+  v300MismatchLinks('(g) v300 struct foo{vec4 bar;}: highp-VS x mediump-FS uniform links',
+    `#version 300 es
+     precision highp float;
+     struct foo { vec4 bar; };
+     uniform foo baz;
+     out vec4 v;
+     void main(){ v = baz.bar; gl_Position = baz.bar; }`,
+    `#version 300 es
+     precision mediump float;
+     struct foo { vec4 bar; };
+     uniform foo baz;
+     in vec4 v;
+     out vec4 fragColor;
+     void main(){ fragColor = v + baz.bar; }`);
+
+  // Genuine TYPE conflict at the same name stays a link error at BOTH
+  // versions.
+  const vs3 = compile(
+    `precision highp float; uniform vec3 x;
+     void main(){ gl_Position = vec4(x, 1.0); }`,
+    'VERTEX', 100,
+  );
+  const fs3 = compile(
+    `precision mediump float; uniform vec4 x;
+     void main(){ gl_FragColor = x; }`,
+    'FRAGMENT', 100,
+  );
+  const l3 = linkProgram(vs3, fs3);
+  check(!l3.ok && l3.log.includes('type conflict'),
+    `(h) v100 vec3 vs vec4 uniform type conflict still fails (${l3.ok ? 'LINKED' : l3.log})`);
+
+  const vs3b = compile(
+    `#version 300 es
+     precision highp float;
+     uniform vec3 x;
+     out vec4 v;
+     void main(){ v = vec4(x, 1.0); gl_Position = vec4(x, 1.0); }`,
+    'VERTEX', 300,
+  );
+  const fs3b = compile(
+    `#version 300 es
+     precision mediump float;
+     uniform vec4 x;
+     in vec4 v;
+     out vec4 fragColor;
+     void main(){ fragColor = x + v; }`,
+    'FRAGMENT', 300,
+  );
+  const l3b = linkProgram(vs3b, fs3b);
+  check(!l3b.ok && l3b.log.includes('type conflict'),
+    `(i) v300 vec3 vs vec4 uniform type conflict still fails (${l3b.ok ? 'LINKED' : l3b.log})`);
+
+  // Struct uniform member TYPE mismatch still fails at BOTH versions
+  // (member name/count/type identity is version-independent).
+  const vs4 = compile(
+    `precision highp float; struct S { vec4 v; }; uniform S u;
+     void main(){ gl_Position = u.v; }`,
+    'VERTEX', 100,
+  );
+  const fs4 = compile(
+    `precision mediump float; struct S { vec3 v; }; uniform S u;
+     void main(){ gl_FragColor = vec4(u.v, 1.0); }`,
+    'FRAGMENT', 100,
+  );
+  const l4 = linkProgram(vs4, fs4);
+  check(!l4.ok && l4.log.includes('member'),
+    `(j) v100 struct uniform member TYPE mismatch still fails (${l4.ok ? 'LINKED' : l4.log})`);
+
+  const vs4b = compile(
+    `#version 300 es
+     precision highp float;
+     struct S { vec4 v; }; uniform S u;
+     out vec4 v;
+     void main(){ v = u.v; gl_Position = u.v; }`,
+    'VERTEX', 300,
+  );
+  const fs4b = compile(
+    `#version 300 es
+     precision mediump float;
+     struct S { vec3 v; }; uniform S u;
+     in vec4 v;
+     out vec4 fragColor;
+     void main(){ fragColor = vec4(u.v, 1.0) + v; }`,
+    'FRAGMENT', 300,
+  );
+  const l4b = linkProgram(vs4b, fs4b);
+  check(!l4b.ok && l4b.log.includes('member'),
+    `(k) v300 struct uniform member TYPE mismatch still fails (${l4b.ok ? 'LINKED' : l4b.log})`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 22. bindAttribLocation reserved before automatic assignment         */
+/*     (three.js instanceMatrix + bindAttribLocation('position', 0))   */
+/* ------------------------------------------------------------------ */
+
+{
+  // three.js r185's vertex prefix declares `attribute mat4 instanceMatrix;`
+  // BEFORE `attribute vec3 position;` and calls
+  // gl.bindAttribLocation(program, 0, 'position') before linking. The
+  // automatic assignment must SKIP the bound location — otherwise the link
+  // fails with "attribute 'position' location 0 conflicts with
+  // 'instanceMatrix'" (the exact error observed on the instancing_dynamic /
+  // instancing_raycast / ssao / fxaa three.js pages).
+  const vs = compile(
+    `attribute mat4 instanceMatrix;
+     attribute vec3 position;
+     attribute vec3 normal;
+     attribute vec2 uv;
+     void main(){
+       vec4 p = instanceMatrix * vec4(position, 1.0);
+       gl_Position = p;
+     }`,
+    'VERTEX', 100,
+  );
+  const fs = compile(
+    `precision mediump float; void main(){ gl_FragColor = vec4(1.0); }`,
+    'FRAGMENT', 100,
+  );
+  const l = linkProgram(vs, fs, { attribBindings: new Map([['position', 0]]) });
+  check(l.ok, `(a) instanceMatrix + bound position links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const pos = l.program.attributes.find((a) => a.name === 'position');
+    const inst = l.program.attributes.find((a) => a.name === 'instanceMatrix');
+    check(pos !== undefined && pos.location === 0, `(a) bound position → 0 (got ${pos === undefined ? 'missing' : pos.location})`);
+    check(
+      inst !== undefined && inst.location !== 0 && inst.location + 4 <= 8,
+      `(a) instanceMatrix auto-assigned away from the bound 0 (got ${inst === undefined ? 'missing' : inst.location})`,
+    );
+  }
+
+  // Same config WITHOUT the binding: first-free in declaration order.
+  const l2 = linkProgram(vs, fs);
+  check(l2.ok, `(b) unbound control links (${l2.ok ? '' : l2.log})`);
+  if (l2.ok) {
+    const inst = l2.program.attributes.find((a) => a.name === 'instanceMatrix');
+    check(inst !== undefined && inst.location === 0, `(b) unbound instanceMatrix → 0 (got ${inst === undefined ? 'missing' : inst.location})`);
+  }
+
+  // Explicit layout(location=) beats bindAttribLocation for the same name
+  // (GLSL ES 3.00 §4.3.4).
+  const vs3 = compile(
+    `#version 300 es
+     layout(location = 2) in vec3 position;
+     void main(){ gl_Position = vec4(position, 1.0); }`,
+    'VERTEX', 300,
+  );
+  const fs3 = compile(
+    `#version 300 es
+     precision mediump float;
+     out vec4 o; void main(){ o = vec4(1.0); }`,
+    'FRAGMENT', 300,
+  );
+  const l3 = linkProgram(vs3, fs3, { attribBindings: new Map([['position', 0]]) });
+  check(l3.ok, `(c) layout(location=2) + binding 0 links (${l3.ok ? '' : l3.log})`);
+  if (l3.ok) {
+    const pos = l3.program.attributes.find((a) => a.name === 'position');
+    check(pos !== undefined && pos.location === 2, `(c) layout location 2 wins over binding (got ${pos === undefined ? 'missing' : pos.location})`);
+  }
+
+  // ES 3.00 instancing pattern (the real three.js path is `#version 300 es`
+  // + `#define attribute in`).
+  const vs4 = compile(
+    `#version 300 es
+     in mat4 instanceMatrix;
+     in vec3 position;
+     void main(){
+       gl_Position = instanceMatrix * vec4(position, 1.0);
+     }`,
+    'VERTEX', 300,
+  );
+  const l4 = linkProgram(vs4, fs3, { attribBindings: new Map([['position', 0]]) });
+  check(l4.ok, `(d) v300 instanceMatrix + bound position links (${l4.ok ? '' : l4.log})`);
+  if (l4.ok) {
+    const pos = l4.program.attributes.find((a) => a.name === 'position');
+    const inst = l4.program.attributes.find((a) => a.name === 'instanceMatrix');
+    check(pos !== undefined && pos.location === 0, `(d) v300 bound position → 0 (got ${pos === undefined ? 'missing' : pos.location})`);
+    check(inst !== undefined && inst.location !== 0, `(d) v300 instanceMatrix away from 0 (got ${inst === undefined ? 'missing' : inst.location})`);
+  }
+
+  // Two DIFFERENT attributes bound to the same location stay a link error.
+  const vs5 = compile(
+    `attribute vec3 aPos; attribute vec3 aNrm;
+     void main(){ gl_Position = vec4(aPos + aNrm, 1.0); }`,
+    'VERTEX', 100,
+  );
+  const l5 = linkProgram(vs5, fs, { attribBindings: new Map([['aPos', 0], ['aNrm', 0]]) });
+  check(!l5.ok && l5.log.includes('conflicts with'),
+    `(e) two attributes bound to 0 still fail (${l5.ok ? 'LINKED' : l5.log})`);
+
+  // A bindAttribLocation overlapping an explicit layout location of a
+  // DIFFERENT attribute stays a link error.
+  const vs6 = compile(
+    `#version 300 es
+     layout(location = 0) in vec3 aPos;
+     in vec3 aNrm;
+     void main(){ gl_Position = vec4(aPos + aNrm, 1.0); }`,
+    'VERTEX', 300,
+  );
+  const l6 = linkProgram(vs6, fs3, { attribBindings: new Map([['aNrm', 0]]) });
+  check(!l6.ok && l6.log.includes('conflicts with'),
+    `(f) binding overlapping another attrib's layout location still fails (${l6.ok ? 'LINKED' : l6.log})`);
 }
 
 /* ------------------------------------------------------------------ */

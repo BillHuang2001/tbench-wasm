@@ -1312,6 +1312,49 @@ okInfo(
 );
 
 /* ------------------------------------------------------------------ */
+/* Struct multi-declarator members (three.js FXAA LuminanceData)       */
+/* ------------------------------------------------------------------ */
+
+{
+  // GLSL ES struct_declarator_list: `float m, n, e, s, w;` declares FIVE
+  // members — three.js postprocessing_fxaa / materials_normalmap use this
+  // exact LuminanceData pattern. Must compile in v100 AND v300, both stages.
+  const lumSrc =
+    'precision mediump float;\nstruct LuminanceData { float m, n, e, s, w; vec3 rgb; float a; };\nfloat f() {\n  LuminanceData d;\n  return d.m + d.n + d.e + d.s + d.w + d.rgb.x + d.a;\n}';
+  okInfo(lumSrc, 100, 'VERTEX');
+  okInfo(lumSrc, 100, 'FRAGMENT');
+  const lum300 =
+    '#version 300 es\nprecision mediump float;\nstruct LuminanceData { float m, n, e, s, w; vec3 rgb; float a; };\nfloat f() {\n  LuminanceData d;\n  return d.m + d.n + d.e + d.s + d.w + d.rgb.x + d.a;\n}';
+  okInfo(lum300, 300, 'VERTEX');
+  okInfo(lum300, 300, 'FRAGMENT');
+
+  // A second multi-declarator line with a different type follows correctly.
+  okInfo(
+    'precision mediump float;\nstruct S { float m, n; vec3 rgb; float a; };\nfloat f() { S s; return s.m + s.n + s.rgb.x + s.a; }',
+    100,
+    'FRAGMENT',
+  );
+
+  // Array declarators: `float a[3], b;` — a is an array member, b scalar.
+  const arrInfo = okInfo(
+    'precision mediump float;\nstruct S { float a[3], b; };\nuniform S s;\nvoid main() { gl_FragColor = vec4(s.a[0] + s.b); }',
+    100,
+    'FRAGMENT',
+  );
+  const st = arrInfo.uniforms[0].type.kind === 'struct' ? arrInfo.uniforms[0].type : null;
+  check(st !== null && st.members.length === 2, 'array multi-declarator → 2 members');
+  checkType(st === null ? F : st.members[0].type, { kind: 'array', element: F, size: 3 }, 'a is float[3]');
+  checkType(st === null ? F : st.members[1].type, F, 'b is float');
+
+  // Multi-declarator interface-block members (v300, same grammar).
+  okInfo(
+    '#version 300 es\nprecision mediump float;\nlayout(std140) uniform Block { vec4 a, b; mat3 m, n; };\nfloat f() { return a.x + b.y + m[0][0] + n[0][1]; }',
+    300,
+    'FRAGMENT',
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Summary                                                             */
 /* ------------------------------------------------------------------ */
 

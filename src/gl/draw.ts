@@ -75,12 +75,13 @@ import {
   clearStencilSurface,
   blitColorSurface,
   blitDepthStencilSurface,
+  createTextureEnv,
   getPackConverter,
   getFormat,
   floatToHalf,
 } from '../raster';
 import type {
-  DrawCall, FramebufferTarget, SamplerState, Surface, TextureImage, TextureUnitBinding,
+  DrawCall, FramebufferTarget, SamplerState, Surface, TextureImage, TextureUnitBinding, TextureEnv,
   ColorMask, ScissorState,
 } from '../raster';
 import type { VertexExecCtx, AttribSource } from '../glsl/program';
@@ -1838,7 +1839,7 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
   const floatStore = (pm as unknown as { floatStore?: Float32Array | null }).floatStore ?? sc.emptyFloat;
   const intStore = (pm as unknown as { intStore?: Int32Array | null }).intStore ?? sc.emptyInt;
 
-  const vctx: VertexExecCtx = {
+  const vctx: VertexExecCtx & { tex: TextureEnv } = {
     attribs,
     attribIndices: ai,
     vertexId: 0,
@@ -1850,6 +1851,11 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
     blockIntStores,
     textures: env.images,
     samplerStates: env.samplerStates,
+    // VERTEX shaders can sample textures (GLSL ES allows it; three.js vertex
+    // shaders texelFetch morph/skinning textures) — the generated code calls
+    // ctx.tex.* exactly like fragment code, so the vertex ctx carries the same
+    // per-draw TextureEnv built from the program's sampler bindings.
+    tex: createTextureEnv(env.bindings),
     scratch: sc.scratch,
     intScratch: sc.intScratch,
     // gl_DepthRange builtin uniform: [near, far, far - near] (state already

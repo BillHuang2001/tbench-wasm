@@ -271,7 +271,7 @@ function emitType(path: string, t: GLSLType, cursor: number, st: AllocState): { 
 /** One merged default-block uniform (same name in both stages). */
 interface MergedUniform {
   /** The vertex-stage declaration when declared in both stages (the first
-   *  seen); the fragment twin is kept separately for precision/struct checks. */
+   *  seen); the fragment twin is kept separately for struct-identity checks. */
   decl: UniformDecl;
   fsDecl: UniformDecl | null;
   inVs: boolean;
@@ -279,8 +279,18 @@ interface MergedUniform {
 }
 
 /* ------------------------------------------------------------------ */
-/* Cross-stage precision + struct-identity matching                    */
+/* Cross-stage struct-identity + precision matching                    */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Unwrap every array layer of a type (struct arrays compare their element
+ * struct; nested arrays are legal in ES 3.00).
+ */
+function unwrapArrays(t: GLSLType): GLSLType {
+  let e = t;
+  while (e.kind === 'array') e = e.element;
+  return e;
+}
 
 /**
  * Replay the stage's `precision` statements to get the effective default
@@ -290,7 +300,8 @@ interface MergedUniform {
  * shader-with-global-variable-precision-mismatch.html depends on the spec
  * default (VS `uniform int foo;` = highp vs FS default mediump must fail).
  * Sampler defaults are never consulted (sampler precision is exempt from the
- * comparison).
+ * comparison). v100 only — at v300 precision is never compared (see
+ * mergeUniforms).
  */
 function stageDefaultPrecisions(shader: Shader): Map<string, Precision> {
   const m = new Map<string, Precision>();
@@ -351,33 +362,29 @@ function structMemberPrecisions(shader: Shader, structName: string): (Precision 
 }
 
 /**
- * Unwrap every array layer of a type (struct arrays compare their element
- * struct; nested arrays are legal in ES 3.00).
- */
-function unwrapArrays(t: GLSLType): GLSLType {
-  let e = t;
-  while (e.kind === 'array') e = e.element;
-  return e;
-}
-
-/**
  * Member-level structural identity for matched struct uniforms (GLSL ES 1.00
  * §4.2.4 — same name, same sequence of type names, same type definitions and
- * field names; the CTS also requires matching member precision). The top-level
- * `typeEquals` check only compares struct NAMES, so two same-named structs
- * with different members link today — this rejects them. `a` is the vertex
- * decl, `b` the fragment decl (both have the SAME struct name — typeEquals
- * passed). Returns an error string or null when the definitions agree.
+ * field names). The top-level `typeEquals` check only compares struct NAMES,
+ * so two same-named structs with different members link today — this rejects
+ * them. `a` is the vertex decl, `b` the fragment decl (both have the SAME
+ * struct name — typeEquals passed). Returns an error string or null when the
+ * definitions agree.
+ *
+ * Member PRECISION is NOT compared here — at GLSL ES 1.00 it is checked
+ * separately by structMemberPrecisionConflict (the CTS grades the mismatch as
+ * a link failure), while at ES 3.00 it is tolerated: three.js built-in
+ * materials declare shared uniforms without an explicit precision while the
+ * stages default to different precisions (highp vertex default vs mediump
+ * fragment default), and ANGLE links those successfully. Only TYPE conflicts
+ * are link errors for uniforms at both versions.
  */
-function structUniformConflict(a: UniformDecl, b: UniformDecl, vs: Shader, fs: Shader): string | null {
+function structUniformConflict(a: UniformDecl, b: UniformDecl): string | null {
   const sa = unwrapArrays(a.type);
   const sb = unwrapArrays(b.type);
   if (sa.kind !== 'struct' || sb.kind !== 'struct') return null; // typeEquals already rejected
   if (sa.members.length !== sb.members.length) {
     return `linker: uniform '${a.name}' struct '${sa.name}' member count mismatch`;
   }
-  const pa = structMemberPrecisions(vs, sa.name);
-  const pb = structMemberPrecisions(fs, sb.name);
   for (let i = 0; i < sa.members.length; i++) {
     const ma = sa.members[i];
     const mb = sb.members[i];
@@ -387,6 +394,24 @@ function structUniformConflict(a: UniformDecl, b: UniformDecl, vs: Shader, fs: S
     if (!typeEquals(ma.type, mb.type)) {
       return `linker: uniform '${a.name}' struct '${sa.name}' member '${ma.name}' type mismatch`;
     }
+  }
+  return null;
+}
+
+/** v100-only member-precision comparison for matched struct uniforms: every
+ *  member whose effective precision is known in BOTH stages must agree
+ *  (shader-with-global-variable-precision-mismatch.html grades the struct
+ *  case as linkSuccess:false). Runs AFTER structUniformConflict (identity),
+ *  so member count/name/type errors take precedence. */
+function structMemberPrecisionConflict(a: UniformDecl, b: UniformDecl, vs: Shader, fs: Shader): string | null {
+  const sa = unwrapArrays(a.type);
+  const sb = unwrapArrays(b.type);
+  if (sa.kind !== 'struct' || sb.kind !== 'struct') return null; // typeEquals already rejected
+  const pa = structMemberPrecisions(vs, sa.name);
+  const pb = structMemberPrecisions(fs, sb.name);
+  for (let i = 0; i < sa.members.length; i++) {
+    const ma = sa.members[i];
+    const mb = sb.members[i];
     const precA = pa !== null && pa.length === sa.members.length ? pa[i] : null;
     const precB = pb !== null && pb.length === sb.members.length ? pb[i] : null;
     if (precA !== null && precB !== null && precA !== precB) {
@@ -414,13 +439,16 @@ function uniformPrecision(shader: Shader, name: string, type: GLSLType): Precisi
   return null;
 }
 
-/** Cross-stage precision consistency for one matched default-block uniform:
+/** Cross-stage precision consistency for one matched default-block uniform,
+ *  GLSL ES 1.00 ONLY (the caller gates on both stages being version 100):
  *  float/int/uint types compare their effective precision; structs compare
- *  member-by-member (name/type/precision); samplers and bools are exempt. */
+ *  member-by-member (see structMemberPrecisionConflict); samplers and bools
+ *  are exempt. At ES 3.00 the comparison is skipped entirely — precision
+ *  mismatches are tolerated (three.js viewMatrix highp-VS × mediump-FS). */
 function uniformPrecisionConflict(a: UniformDecl, b: UniformDecl, vs: Shader, fs: Shader): string | null {
   const ta = unwrapArrays(a.type);
   if (ta.kind === 'struct') {
-    return structUniformConflict(a, b, vs, fs);
+    return structMemberPrecisionConflict(a, b, vs, fs);
   }
   const pa = uniformPrecision(vs, a.name, a.type);
   const pb = uniformPrecision(fs, b.name, b.type);
@@ -431,9 +459,12 @@ function uniformPrecisionConflict(a: UniformDecl, b: UniformDecl, vs: Shader, fs
 }
 
 /** Combine vs + fs default-block uniforms by name; same name must be
- *  type-identical in both stages (GLSL link rule) and, when the type is
- *  float/int/uint or a struct, must carry the same precision (structs compare
- *  member-by-member — see uniformPrecisionConflict). */
+ *  type-identical in both stages (GLSL link rule) and, when the type is a
+ *  struct, the definitions must be member-identical (see
+ *  structUniformConflict). Cross-stage uniform PRECISION must match at GLSL
+ *  ES 1.00 (shader-with-global-variable-precision-mismatch.html grades
+ *  linkSuccess:false) but is tolerated at ES 3.00 — ANGLE links highp VS ×
+ *  mediump FS shared uniforms (three.js built-in materials rely on it). */
 function mergeUniforms(vs: Shader, fs: Shader): MergedUniform[] | { error: string } {
   const byName = new Map<string, MergedUniform>();
   const order: string[] = [];
@@ -448,8 +479,16 @@ function mergeUniforms(vs: Shader, fs: Shader): MergedUniform[] | { error: strin
       } else {
         ex.inFs = true;
         ex.fsDecl = decl;
-        // Both stages now known: cross-stage precision/struct-identity check.
-        return uniformPrecisionConflict(ex.decl, decl, vs, fs);
+        // Both stages now known: cross-stage struct-identity check (member
+        // precision is handled separately — see structUniformConflict).
+        const sc = structUniformConflict(ex.decl, decl);
+        if (sc !== null) return sc;
+        // GLSL ES 1.00: uniform precision must also match across stages (the
+        // CTS grades the mismatch as a link failure); at ES 3.00 precision
+        // mismatches are tolerated (three.js viewMatrix case). Versions are
+        // already equal (linkProgram rejects mismatches), so testing the
+        // vertex version is sufficient.
+        return vs.version === 100 ? uniformPrecisionConflict(ex.decl, decl, vs, fs) : null;
       }
       return null;
     }
@@ -1387,15 +1426,22 @@ interface AttribLayoutResult {
   infos: AttribInfo[];
 }
 
-/** Assign attribute locations: explicit layout(location=) first, then
- *  bindAttribLocation (names WITHOUT explicit locations only), then first-free
- *  in declaration order. A matC attribute occupies C consecutive locations;
- *  an array of N elements occupies N × elemLocations. */
+/** Assign attribute locations per GLSL ES 3.00 §4.3.4 precedence: explicit
+ *  layout(location=) first (it overrides bindAttribLocation for the same
+ *  name), then bindAttribLocation, then first-free — the AUTOMATIC pass skips
+ *  locations already claimed by explicit qualifiers or bindings (three.js
+ *  binds 'position' to 0 via bindAttribLocation while `attribute mat4
+ *  instanceMatrix;` is declared first: the auto assignment must not collide
+ *  with the binding). A matC attribute occupies C consecutive locations; an
+ *  array of N elements occupies N × elemLocations. */
 function layoutAttributes(vs: Shader, opts: LinkOptions, limits: LinkLimits): AttribLayoutResult | { error: string } {
   const occupied: { start: number; end: number; name: string }[] = [];
   const map = new Map<string, number>();
   const infos: AttribInfo[] = [];
   const bindings = opts.attribBindings;
+  /** Decided location per user attribute name (filled by the three phases;
+   *  emitted into map/infos in declaration order afterwards). */
+  const locs = new Map<string, number>();
 
   const claim = (name: string, start: number, end: number): string | null => {
     for (const o of occupied) {
@@ -1420,7 +1466,58 @@ function layoutAttributes(vs: Shader, opts: LinkOptions, limits: LinkLimits): At
       if (ok) return loc;
     }
   };
+  const slots = (a: { type: GLSLType; arraySize: number }): number => {
+    const elemLocations = a.type.kind === 'matrix' ? a.type.cols : 1;
+    return elemLocations * a.arraySize;
+  };
+  const checkBounds = (name: string, loc: number, need: number): string | null => {
+    if (loc < 0) return `linker: attribute '${name}' has a negative location`;
+    if (loc + need > limits.maxVertexAttribs) {
+      return `linker: attribute '${name}' exceeds maxVertexAttribs (${limits.maxVertexAttribs})`;
+    }
+    return null;
+  };
+  const isUserAttrib = (a: (typeof vs.info.attributes)[number]): boolean => a.builtin !== true && a.used;
 
+  // Phase 1: explicit layout(location=) qualifiers (highest precedence —
+  // GLSL ES 3.00 §4.3.4: the layout location wins over bindAttribLocation).
+  for (const a of vs.info.attributes) {
+    if (!isUserAttrib(a) || a.location === null) continue;
+    const need = slots(a);
+    const e = checkBounds(a.name, a.location, need);
+    if (e !== null) return { error: e };
+    const err = claim(a.name, a.location, a.location + need);
+    if (err !== null) return { error: err };
+    locs.set(a.name, a.location);
+  }
+  // Phase 2: bindAttribLocation targets (attributes WITHOUT an explicit
+  // location only). Two different attributes bound to the same location is a
+  // link error (as is a binding overlapping an explicit layout location).
+  for (const a of vs.info.attributes) {
+    if (!isUserAttrib(a) || a.location !== null) continue;
+    if (bindings === undefined || !bindings.has(a.name)) continue;
+    const need = slots(a);
+    const loc = bindings.get(a.name)!;
+    const e = checkBounds(a.name, loc, need);
+    if (e !== null) return { error: e };
+    const err = claim(a.name, loc, loc + need);
+    if (err !== null) return { error: err };
+    locs.set(a.name, loc);
+  }
+  // Phase 3: first-free for the rest — skips every location reserved in
+  // phases 1-2 (native behavior: bound locations are never auto-assigned).
+  for (const a of vs.info.attributes) {
+    if (!isUserAttrib(a) || a.location !== null) continue;
+    if (bindings !== undefined && bindings.has(a.name)) continue;
+    const need = slots(a);
+    const loc = firstFree(need);
+    const e = checkBounds(a.name, loc, need);
+    if (e !== null) return { error: e };
+    const err = claim(a.name, loc, loc + need);
+    if (err !== null) return { error: err };
+    locs.set(a.name, loc);
+  }
+  // Emit in declaration order (getActiveAttrib order + draw validation).
   for (const a of vs.info.attributes) {
     if (a.builtin === true) {
       // Built-in vertex inputs (gl_VertexID / gl_InstanceID / gl_DrawID,
@@ -1448,18 +1545,7 @@ function layoutAttributes(vs: Shader, opts: LinkOptions, limits: LinkLimits): At
       continue;
     }
     if (!a.used) continue; // inactive attributes consume no generic slots (native behavior; getActiveAttrib omits them)
-    const elemLocations = a.type.kind === 'matrix' ? a.type.cols : 1;
-    const need = elemLocations * a.arraySize;
-    let loc: number;
-    if (a.location !== null) loc = a.location;
-    else if (bindings !== undefined && bindings.has(a.name)) loc = bindings.get(a.name)!;
-    else loc = firstFree(need);
-    if (loc < 0) return { error: `linker: attribute '${a.name}' has a negative location` };
-    if (loc + need > limits.maxVertexAttribs) {
-      return { error: `linker: attribute '${a.name}' exceeds maxVertexAttribs (${limits.maxVertexAttribs})` };
-    }
-    const err = claim(a.name, loc, loc + need);
-    if (err !== null) return { error: err };
+    const loc = locs.get(a.name)!;
     map.set(a.name, loc);
     infos.push({
       name: a.name,

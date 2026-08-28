@@ -1104,7 +1104,18 @@ function readImageBitmapPixels(source: unknown, width: number, height: number): 
   }
 }
 
-/** Shared upload path: convert source pixels into a level. */
+/**
+ * Shared upload path: convert source pixels into a level.
+ *
+ * `explicitDims` distinguishes the two TexImageSource forms (WebGL2 spec
+ * §3.7.2): when the caller passed EXPLICIT width/height (WebGL2 9-arg
+ * texImage2D / texSubImage2D, 10/11-arg 3D forms), the width/height select a
+ * source SUB-RECTANGLE at (UNPACK_SKIP_PIXELS, UNPACK_SKIP_ROWS) of the
+ * ORIGINAL source — the source is never scaled. When the dims were INFERRED
+ * from the source (WebGL1 6-arg texImage2D / 7-arg texSubImage2D, WebGL2
+ * 6-arg), width/height are the element size and a source whose raster differs
+ * (SVG images with width/height attributes) is scaled to fit.
+ */
 function copyPixelsIntoLevel(
   ctx: WebGLRenderingContext,
   texture: WebGLTexture,
@@ -1121,6 +1132,7 @@ function copyPixelsIntoLevel(
   xoffset: number,
   yoffset: number,
   zoffset: number,
+  explicitDims: boolean,
 ): void {
   const img = texture._image as NonNullable<WebGLTexture['_image']>;
   const levelData = img.levels[level];
@@ -1163,7 +1175,11 @@ function copyPixelsIntoLevel(
         // width/height properties set on the element): resample to the target
         // level size before the copy (the WebGL spec sets the texture size
         // from the element properties, so the source must be scaled to fit).
-        if (im.width !== width || im.height !== height) {
+        // ONLY for inferred-dims uploads: explicit-dims (WebGL2 9-arg etc.)
+        // select a sub-rectangle of the ORIGINAL source — scaling before the
+        // sub-rect crop corrupts the rect (CTS conformance2 textures video/
+        // image/ sub-rectangle pages; WebGL2 spec §3.7.2).
+        if (!explicitDims && (im.width !== width || im.height !== height)) {
           im.data = scaleNearest(im.data, im.width, im.height, width, height);
           im.width = width;
           im.height = height;
@@ -1333,6 +1349,13 @@ export function uploadTexImage(
   type: GLenum,
   pixels: TexImageSourceArg,
   source?: unknown,
+  /**
+   * True when the caller passed explicit width/height (WebGL2 9-arg
+   * texImage2D / 10-arg texImage3D TexImageSource forms): the dims select a
+   * source sub-rectangle — never scale the source. False (default) for
+   * inferred-dims forms (WebGL1 6-arg / WebGL2 6-arg) and buffer/PBO uploads.
+   */
+  explicitDims = false,
 ): void {
   void border;
   if (texture._immutable) return;
@@ -1379,7 +1402,7 @@ export function uploadTexImage(
     img.depth = isCube ? 6 : depth;
   }
   recordLevelOrigin(texture, level, format, type);
-  copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, 0, 0, 0);
+  copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, 0, 0, 0, explicitDims);
   updateCompleteness(texture, ctx._version);
 }
 
@@ -1394,6 +1417,14 @@ export function uploadTexSubImage(
   format: GLenum, type: GLenum,
   pixels: TexImageSourceArg,
   source?: unknown,
+  /**
+   * True when the caller passed explicit width/height (WebGL2 9-arg
+   * texSubImage2D / 11-arg texSubImage3D TexImageSource forms): the dims
+   * select a source sub-rectangle — never scale the source. False (default)
+   * for inferred-dims forms (WebGL1 7-arg texSubImage2D) and buffer/PBO
+   * uploads.
+   */
+  explicitDims = false,
 ): void {
   const img = texture._image;
   if (!img) return;
@@ -1401,7 +1432,7 @@ export function uploadTexSubImage(
   if (!levelData) return;
   const spec = specForImage(img);
   if (!spec) return;
-  copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset);
+  copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset, explicitDims);
   updateCompleteness(texture, ctx._version);
 }
 

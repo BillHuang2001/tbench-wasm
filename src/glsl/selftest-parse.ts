@@ -288,6 +288,37 @@ void main() {
 }
 
 {
+  // Multi-declarator struct members (struct_declarator_list grammar):
+  // `float m, n, e, s, w;` declares FIVE members — the three.js FXAA
+  // LuminanceData pattern (postprocessing_fxaa / materials_normalmap).
+  const ast = parseOk('struct S {\n  float m, n, e, s, w;\n  vec3 rgb;\n  float a;\n};\n', 100);
+  const s = sdecl(ast.declarations[0]);
+  const names = s.members.map((m) => m.name).join(',');
+  check(s.members.length === 7, `multi-declarator member count: ${s.members.length}`);
+  check(names === 'm,n,e,s,w,rgb,a', `multi-declarator member names: ${names}`);
+  check(s.members[0].type.base.kind === 'type-name' && s.members[0].type.base.name === 'float', 'm type float');
+  check(s.members[5].type.base.kind === 'type-name' && s.members[5].type.base.name === 'vec3', 'rgb type vec3');
+  check(Object.keys(s.members[0].type.qualifiers).length === 0, 'multi-declarator members have no qualifiers');
+
+  // Array declarators: each declarator keeps its OWN dims (`float a[3], b;`).
+  const ast2 = parseOk('struct S {\n  float a[3], b;\n  vec2 c[2], d;\n};\n', 100);
+  const s2 = sdecl(ast2.declarations[0]);
+  check(s2.members.length === 4, `array declarator member count: ${s2.members.length}`);
+  check(s2.members[0].name === 'a' && s2.members[0].arrayDims.length === 1, 'a has dims');
+  check(s2.members[1].name === 'b' && s2.members[1].arrayDims.length === 0, 'b has no dims');
+  check(s2.members[2].name === 'c' && s2.members[2].arrayDims.length === 1, 'c has dims');
+  check(s2.members[3].name === 'd' && s2.members[3].arrayDims.length === 0, 'd has no dims');
+
+  // Multi-declarator members in interface blocks (same grammar, v300).
+  const ast3 = parseOk('#version 300 es\nuniform Block { vec4 a, b; mat3 m, n; };\n', 300);
+  const blk = iblock(ast3.declarations[0]);
+  check(
+    blk.members.length === 4 && blk.members[0].name === 'a' && blk.members[1].name === 'b' && blk.members[2].name === 'm' && blk.members[3].name === 'n',
+    'block multi-declarator members',
+  );
+}
+
+{
   // precision mediump int; — int base.
   const ast = parseOk('precision mediump int;\n', 100);
   const p = pdecl(ast.declarations[0]);

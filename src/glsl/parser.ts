@@ -792,16 +792,24 @@ export function nameAnonymousStruct(p: Parser): string {
   return `__anon_struct_${++p.anonStructSeq}`;
 }
 
-/** Struct / interface-block member list: `type name [dims] ;` */
+/** Struct / interface-block member list: `type name [dims] [, name [dims] ...] ;`
+ * (struct_declarator_list grammar — every comma-separated declarator is its
+ * own member, sharing the declared type). The TypeSpec is shallow-cloned per
+ * declarator so semantics' per-member `resolved` caching stays independent
+ * across differing array dims (`float a[3], b;`). */
 function parseStructMembers(p: Parser, block = false): StructMemberDecl[] {
   const members: StructMemberDecl[] = [];
   while (!p.atOp('}') && !p.atEof()) {
     const start = p.peek();
     const type = parseTypeSpec(p, { param: false, member: true, block });
-    const nameT = p.expectIdentifier();
-    const arrayDims = parseArrayDims(p, false);
+    for (;;) {
+      const nameT = p.expectIdentifier();
+      const arrayDims = parseArrayDims(p, false);
+      members.push({ kind: 'struct-member', name: nameT ? nameT.name : '', type: { ...type }, arrayDims, loc: locOf(start) });
+      if (!p.atOp(',')) break;
+      p.next();
+    }
     p.expectOp(';', "expected ';' after struct member");
-    members.push({ kind: 'struct-member', name: nameT ? nameT.name : '', type, arrayDims, loc: locOf(start) });
   }
   return members;
 }
