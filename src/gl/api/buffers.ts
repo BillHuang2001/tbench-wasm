@@ -2,15 +2,22 @@
  * src/gl/api/buffers.ts — buffer objects and data.
  *
  * Owns: createBuffer, deleteBuffer, isBuffer, bindBuffer, bufferData,
- * bufferSubData, getBufferParameter (+ WebGL2: bindBufferBase, bindBufferRange,
- * getIndexedParameter for UNIFORM_BUFFER/TRANSFORM_FEEDBACK_BUFFER, getBufferSubData).
+ * bufferSubData, getBufferParameter (+ WebGL2: copyBufferSubData, bindBufferBase,
+ * bindBufferRange, getIndexedParameter for UNIFORM_BUFFER/TRANSFORM_FEEDBACK_BUFFER,
+ * getBufferSubData).
  *
  * Behavior notes (implemented):
  *  - bindBuffer: target ∈ {ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER} (WebGL1) +
  *    {COPY_READ/WRITE_BUFFER, PIXEL_PACK/UNPACK_BUFFER, TRANSFORM_FEEDBACK_BUFFER,
- *    UNIFORM_BUFFER} (WebGL2). First bind fixes the buffer's target; rebinding to
- *    another target → INVALID_OPERATION (except TRANSFORM_FEEDBACK_BUFFER — see
- *    below). null unbinds (ELEMENT_ARRAY_BUFFER binding lives in the VAO state).
+ *    UNIFORM_BUFFER} (WebGL2). WebGL1: first bind fixes the buffer's target;
+ *    rebinding to the other target → INVALID_OPERATION. WebGL2: buffer TYPES
+ *    (spec §2.9.1) — the first bind fixes the type (ELEMENT_ARRAY_BUFFER →
+ *    element array, every other target incl. COPY_READ/WRITE_BUFFER → other
+ *    data); element-array buffers may (re)bind only ELEMENT_ARRAY_BUFFER,
+ *    COPY_READ_BUFFER or COPY_WRITE_BUFFER, other-data buffers any target except
+ *    ELEMENT_ARRAY_BUFFER (CTS buffer-copying-contents.html,
+ *    buffer-copying-restrictions.html, out-of-bounds-index-buffers-after-copying.html).
+ *    null unbinds (ELEMENT_ARRAY_BUFFER binding lives in the VAO state).
  *    WebGL2: bindBuffer(UNIFORM_BUFFER, b) is equivalent to
  *    bindBufferBase(UNIFORM_BUFFER, 0, b); bindBuffer(TRANSFORM_FEEDBACK_BUFFER, b)
  *    is equivalent to bindBufferBase(TRANSFORM_FEEDBACK_BUFFER, 0, b) (CTS
@@ -24,8 +31,24 @@
  *    {STREAM,STATIC,DYNAMIC}_DRAW (WebGL2 adds the *_READ/*_COPY usages) else
  *    INVALID_ENUM; negative size → INVALID_VALUE; no bound buffer →
  *    INVALID_OPERATION. Allocation failure (huge size) → OUT_OF_MEMORY.
+ *    WebGL2: bufferData(target, srcData, usage, srcOffset, srcLength) uploads
+ *    only the srcData sub-range (spec §3.7.1 — srcOffset/srcLength are in
+ *    ELEMENTS of srcData; srcLength 0/omitted = rest of the view; out-of-range
+ *    → INVALID_VALUE, buffer size unmodified). WebGL1 ignores extra args.
  *  - bufferSubData: offset+byteLength bounds vs buffer size (INVALID_VALUE);
- *    copies the view's bytes at offset.
+ *    copies the view's bytes at offset. WebGL2: the 5-arg form
+ *    (target, dstByteOffset, srcData, srcOffset, srcLength) slices srcData the
+ *    same way (spec §3.7.1); out-of-range src range → INVALID_VALUE.
+ *  - copyBufferSubData(readTarget, writeTarget, readOffset, writeOffset, size):
+ *    copies size bytes between the buffers bound to the two targets (WebGL2
+ *    spec §3.7.1 / GLES 3.0 §2.10.5). Invalid target → INVALID_ENUM; unbound
+ *    buffer → INVALID_OPERATION; buffer-type mismatch (element array ↔ other
+ *    data) → INVALID_OPERATION (spec "Copying Buffers"); buffer also bound to
+ *    an indexed TRANSFORM_FEEDBACK_BUFFER binding point → INVALID_OPERATION
+ *    (spec "Preventing undefined behavior with Transform Feedback");
+ *    negative offsets/size, range past either buffer's size, or overlapping
+ *    ranges on the same buffer → INVALID_VALUE. The actual byte copy is what
+ *    later draws/reads see (e.g. CTS out-of-bounds-index-buffers-after-copying).
  *  - deleteBuffer: marks _deleted, untracks, unbinds the buffer from all NON-TF
  *    binding points (context bindings, current + default VAO, all VAO objects,
  *    UBO bindings, pixel/copy buffers). A transform-feedback binding HOLDS A
@@ -340,6 +363,33 @@ function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: G
   }
 }
 
+/**
+ * WebGL2 bufferData/bufferSubData srcOffset/srcLength slicing (spec §3.7.1):
+ * copyLength is measured in ELEMENTS of srcData (bytes for DataView/ArrayBuffer);
+ * a srcLength of 0 (or omitted) means "the rest of the view" (length ≤ 0 never
+ * errors by itself). On validation failure pushes INVALID_VALUE and returns
+ * ok:false — no data is written and (for bufferData) the buffer size stays
+ * unmodified.
+ */
+function sliceSourceData(
+  ctx: WebGLRenderingContext,
+  data: ArrayBufferView | ArrayBuffer,
+  bytes: Uint8Array,
+  srcOffset: unknown,
+  srcLength: unknown,
+): { bytes: Uint8Array; ok: boolean } {
+  const view = data as { BYTES_PER_ELEMENT?: number; length?: number };
+  const elemSize = view.BYTES_PER_ELEMENT ?? 1;
+  const elemCount = view.length ?? (data as ArrayBuffer).byteLength;
+  const off = Math.trunc(Number(srcOffset));
+  const len = srcLength === undefined || srcLength === 0 ? elemCount - off : Math.trunc(Number(srcLength));
+  if (off < 0 || len < 0 || off > elemCount || off + len > elemCount) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return { bytes, ok: false };
+  }
+  return { bytes: new Uint8Array(bytes.buffer, bytes.byteOffset + off * elemSize, len * elemSize), ok: true };
+}
+
 export function installBuffersApi(proto: WebGLRenderingContext): void {
   proto.createBuffer = function (this: WebGLRenderingContext): WebGLBuffer | null {
     const ctx = this;
@@ -448,10 +498,34 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
     }
     const buf = validateBuffer(ctx, buffer);
     if (buf === null) return; // cross-context/deleted → INVALID_OPERATION pushed
-    if (buf._target === 0) buf._target = target; // first bind fixes the target
-    else if (buf._target !== target) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return;
+    if (ctx._version === 2) {
+      // WebGL2 buffer-type model (spec §2.9.1): the first bind fixes the buffer
+      // TYPE — ELEMENT_ARRAY_BUFFER → element array; every other target (incl.
+      // COPY_READ/WRITE_BUFFER) → other data. Element-array buffers may (re)bind
+      // only ELEMENT_ARRAY_BUFFER, COPY_READ_BUFFER or COPY_WRITE_BUFFER;
+      // other-data buffers may bind any target except ELEMENT_ARRAY_BUFFER
+      // (CTS buffer-copying-contents.html / buffer-copying-restrictions.html /
+      // out-of-bounds-index-buffers-after-copying.html rely on the COPY_* rebinds).
+      const isElementType = buf._target === C1.ELEMENT_ARRAY_BUFFER;
+      const isCopyTarget = target === C2.COPY_READ_BUFFER || target === C2.COPY_WRITE_BUFFER;
+      if (buf._target === 0) {
+        buf._target = target;
+      } else if (isElementType) {
+        if (target !== C1.ELEMENT_ARRAY_BUFFER && !isCopyTarget) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+      } else if (target === C1.ELEMENT_ARRAY_BUFFER) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+    } else {
+      // WebGL1: a buffer stays bound to exactly one target for its lifetime.
+      if (buf._target === 0) buf._target = target;
+      else if (buf._target !== target) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
     }
     everBoundBuffers.add(buf);
     const s = ctx._state;
@@ -500,16 +574,26 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
         : data instanceof ArrayBuffer
           ? new Uint8Array(data)
           : new Uint8Array((data as ArrayBufferView).buffer, (data as ArrayBufferView).byteOffset, (data as ArrayBufferView).byteLength);
+      // WebGL2: bufferData(target, srcData, usage, srcOffset, srcLength)
+      // uploads ONLY the srcData sub-range (spec §3.7.1) — the wasm CTS pages
+      // pass ~4GB views and expect just the tail to be uploaded. WebGL1 has no
+      // such overload and ignores extra arguments.
+      let slice = bytes;
+      if (ctx._version === 2 && arguments.length > 3) {
+        const r = sliceSourceData(ctx, data, bytes, arguments[3], arguments[4]);
+        if (!r.ok) return;
+        slice = r.bytes;
+      }
       let copy: ArrayBuffer;
       try {
-        copy = new ArrayBuffer(bytes.byteLength);
+        copy = new ArrayBuffer(slice.byteLength);
       } catch {
         ctx._errors.push(C1.OUT_OF_MEMORY);
         return;
       }
-      new Uint8Array(copy).set(bytes);
+      new Uint8Array(copy).set(slice);
       buf._data = copy;
-      buf._size = bytes.byteLength;
+      buf._size = slice.byteLength;
     } else {
       const raw = Number(size); // WebIDL ToNumber (Symbol → TypeError, like WebIDL)
       const n = Number.isFinite(raw) ? Math.trunc(raw) : 0; // NaN/±Infinity → 0 (long long)
@@ -549,12 +633,20 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
     const src = requireBufferData(data, 'data'); // throws TypeError for wrong types
     const bytes =
       src instanceof ArrayBuffer ? new Uint8Array(src) : new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
-    if (offset + bytes.byteLength > buf._size) {
+    // WebGL2: bufferSubData(target, dstByteOffset, srcData, srcOffset, srcLength)
+    // copies ONLY the srcData sub-range (spec §3.7.1); WebGL1 ignores extras.
+    let slice = bytes;
+    if (ctx._version === 2 && arguments.length > 3) {
+      const r = sliceSourceData(ctx, src, bytes, arguments[3], arguments[4]);
+      if (!r.ok) return;
+      slice = r.bytes;
+    }
+    if (offset + slice.byteLength > buf._size) {
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
-    if (bytes.byteLength > 0 && buf._data !== null) {
-      new Uint8Array(buf._data).set(bytes, offset);
+    if (slice.byteLength > 0 && buf._data !== null) {
+      new Uint8Array(buf._data).set(slice, offset);
     }
   };
 
@@ -753,10 +845,6 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
       }
-      if (target === C2.PIXEL_PACK_BUFFER) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
       const buf = boundBufferForTarget(ctx, target);
       if (buf === null) {
         ctx._errors.push(C1.INVALID_OPERATION);
@@ -794,6 +882,87 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       if (byteLen > 0 && buf._data !== null) {
         new Uint8Array(view.buffer, view.byteOffset + dstOff * elemSize, byteLen).set(
           new Uint8Array(buf._data, srcByteOffset, byteLen),
+        );
+      }
+    };
+
+    // copyBufferSubData (WebGL2 spec §3.7.1 / GLES 3.0 §2.10.5). NOTE: not
+    // declared in the webgl2.ts class body, so cast the assignment (same
+    // pattern as the getActiveUniforms alias in api/programs.ts). The method
+    // must exist on OUR prototype — otherwise calls resolve through the
+    // chainToNative re-chain to the NATIVE method and throw "Illegal
+    // invocation" (killed buffer-copying-*, get-buffer-sub-data-validity and
+    // out-of-bounds-index-buffers-after-copying before this was implemented).
+    (p2 as unknown as {
+      copyBufferSubData: (
+        readTarget: GLenum,
+        writeTarget: GLenum,
+        readOffset: GLintptr,
+        writeOffset: GLintptr,
+        size: GLsizeiptr,
+      ) => void;
+    }).copyBufferSubData = function (
+      this: WebGL2RenderingContext,
+      readTarget: GLenum,
+      writeTarget: GLenum,
+      readOffset: GLintptr,
+      writeOffset: GLintptr,
+      size: GLsizeiptr,
+    ): void {
+      const ctx = this;
+      if (isLost(ctx)) return;
+      if (!isValidBufferTarget(ctx, readTarget) || !isValidBufferTarget(ctx, writeTarget)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const readBuffer = boundBufferForTarget(ctx, readTarget);
+      const writeBuffer = boundBufferForTarget(ctx, writeTarget);
+      if (readBuffer === null || writeBuffer === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      // Transform-feedback double-bind rule (spec "Preventing undefined
+      // behavior with Transform Feedback"): a buffer bound to an indexed TF
+      // binding point and used through any other binding point fails
+      // (CTS transform_feedback/simultaneous_binding.html).
+      if (
+        (readBuffer._tfRangeBindings.length > 0 && readTarget !== C2.TRANSFORM_FEEDBACK_BUFFER) ||
+        (writeBuffer._tfRangeBindings.length > 0 && writeTarget !== C2.TRANSFORM_FEEDBACK_BUFFER)
+      ) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      // Buffer-type rule (spec "Copying Buffers"): copying between an
+      // element-array buffer and an other-data buffer is INVALID_OPERATION
+      // (CTS buffer-copying-restrictions.html, buffer-copying-contents.html).
+      const readIsElement = readBuffer._target === C1.ELEMENT_ARRAY_BUFFER;
+      const writeIsElement = writeBuffer._target === C1.ELEMENT_ARRAY_BUFFER;
+      if (readIsElement !== writeIsElement) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (readOffset < 0 || writeOffset < 0 || size < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (readOffset + size > readBuffer._size) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (writeOffset + size > writeBuffer._size) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (readBuffer === writeBuffer && readOffset < writeOffset + size && writeOffset < readOffset + size) {
+        // Same buffer, overlapping ranges (CTS buffer-copying-contents.html).
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (size > 0 && readBuffer._data !== null && writeBuffer._data !== null) {
+        // The copied bytes are what subsequent draws/reads see: _data is the
+        // single source of truth for index/attrib fetch and getBufferSubData.
+        new Uint8Array(writeBuffer._data, writeOffset, size).set(
+          new Uint8Array(readBuffer._data, readOffset, size),
         );
       }
     };
