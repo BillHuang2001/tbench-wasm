@@ -521,15 +521,20 @@ function toPixelFormatInfo(spec: FormatSpec): PixelFormatInfo {
 // Level allocation
 // ---------------------------------------------------------------------------
 
-/** Allocate a zero-filled level record (6 views for cube, else 1). */
+/**
+ * Allocate a zero-filled level record. View layout (raster sampler contract,
+ * sampler-raw.ts readTexel): 2D → data[0] (w×h); cube → data[face] for the 6
+ * faces (each w×h); 3D/2D_ARRAY → data[z] per slice/layer (each w×h) —
+ * NOT one contiguous w×h×d view. stencilData stays one flat w×h×d plane.
+ */
 function allocLevel(spec: FormatSpec, w: number, h: number, d: number, isCube: boolean): TextureLevel {
-  const perFace = w * h * (isCube ? 1 : d);
-  const count = perFace * spec.bytesPerPixel / spec.bytesPerElement;
+  const perFace = w * h;
+  const count = (perFace * spec.bytesPerPixel) / spec.bytesPerElement;
   const views: ArrayBufferView[] = [];
-  const n = isCube ? 6 : 1;
+  const n = isCube ? 6 : d;
   for (let i = 0; i < n; i++) views.push(new spec.ctor(count));
   const level: TextureLevel = { width: w, height: h, depth: d, data: views };
-  if (spec.isStencil) level.stencilData = new Uint8Array(perFace * (isCube ? 1 : 1));
+  if (spec.isStencil) level.stencilData = new Uint8Array(perFace * (isCube ? 1 : d));
   return level;
 }
 
@@ -953,6 +958,18 @@ function copyPixelsIntoLevel(
         // (The CTS tags each bitmap with its creation option; native ImageBitmap
         // objects without the tag default to premultiplied storage.)
         const isImageBitmap = typeof (source as { close?: unknown }).close === 'function';
+        const flipY = isImageBitmap ? false : ctx._state.pixelStore.unpack.flipY;
+        // WebGL2 source-rectangle selection (WebGL2 spec §3.7.2 "Pixel store
+        // parameters for uploads from TexImageSource"): UNPACK_SKIP_PIXELS and
+        // UNPACK_SKIP_ROWS determine the origin of the subrect; the width and
+        // height arguments determine its size. UNPACK_FLIP_Y_WEBGL flips the
+        // ENTIRE source before the crop (CTS sub-rectangle cases). copyRows
+        // flips within the copied rect, so express the crop origin in
+        // pre-flip source rows: a crop of `height` rows at flipped row
+        // `skipRows` starts at original row (im.height - skipRows - height).
+        const s = ctx._state.pixelStore.unpack;
+        const skipPixels = s.skipPixels | 0;
+        const skipRows = s.skipRows | 0;
         // Packed `type` args (4444/5551/565) must drop the low bits exactly
         // like the buffer path does — round-trip through the packed encode.
         const packedType =
@@ -974,23 +991,46 @@ function copyPixelsIntoLevel(
         const p: CopyParams = {
           src: dv,
           srcRowBytes: im.width * 4,
-          srcSkipPixels: 0,
+          srcSkipPixels: skipPixels,
           srcBpp: 4,
           srcFormat: C.RGBA,
           srcType: C.UNSIGNED_BYTE,
-          domain: spec.isInteger ? 2 : spec.isFloat && !spec.isDepth ? 1 : 0,
-          flipY: isImageBitmap ? false : ctx._state.pixelStore.unpack.flipY,
+          // The DOM source is ALWAYS normalized UNSIGNED_BYTE RGBA (decoded by
+          // present/image), regardless of the destination internalformat. So
+          // domain must be 0 (normalized: u8 values divided by 255) even for
+          // FLOAT/HALF_FLOAT destinations — domain 1 (raw) would store e.g.
+          // 127 as 127.0 instead of 127/255. Integer destinations keep domain 2.
+          domain: spec.isInteger ? 2 : 0,
+          flipY,
           premultiply: isImageBitmap
             ? (source as { premultiply?: unknown }).premultiply === false ? false : true
-            : ctx._state.pixelStore.unpack.premultiplyAlpha,
+            : s.premultiplyAlpha,
           write: packedWrite,
           dstBpp,
           dstStencil: levelData.stencilData,
         };
-        // DOM sources ignore ROW_LENGTH/SKIP_* (WebGL2 spec §3.7); the decoded
-        // image is tightly packed RGBA8. depth is always 1 here (the API layer
-        // rejects DOM sources for 3D/2D_ARRAY targets).
-        copyRows(p, views[0], levelData.width, xoffset, yoffset, width, height, 0, 0);
+        // DOM sources ignore ROW_LENGTH/SKIP_IMAGES (WebGL2 spec §3.7); the
+        // decoded image is tightly packed RGBA8. The DOM 3D overloads treat the
+        // 2D source as `depth` horizontal bands of `height` rows each (band
+        // stride UNPACK_IMAGE_HEIGHT when set) — band z fills slice
+        // (zoffset + z), mirroring the client-data path below. With
+        // UNPACK_FLIP_Y the source is flipped BEFORE band extraction (WebGL2
+        // spec §3.7.2; CTS tex-3d-* sub-rectangle cases): band z occupies
+        // flipped rows [skipRows + z*imageHeight, +height), i.e. original rows
+        // [im.height - skipRows - z*imageHeight - height, ...); copyRows then
+        // flips within the band. 3D/2D_ARRAY levels are per-layer view arrays
+        // (allocLevel), so each band writes into its own view; for 2D/cube
+        // targets depth is 1 and zoffset is 0, so this reduces to the original
+        // single-band path.
+        const imageHeight = s.imageHeight > 0 ? s.imageHeight : height;
+        for (let z = 0; z < depth; z++) {
+          const srcRow0 = flipY
+            ? im.height - skipRows - z * imageHeight - height
+            : skipRows + z * imageHeight;
+          const view = views[zoffset + z];
+          if (view === undefined) break; // defensive: zoffset+depth beyond the level
+          copyRows(p, view, levelData.width, xoffset, yoffset, width, height, srcRow0, 0);
+        }
         updateCompleteness(texture, ctx._version);
         return;
       }
@@ -1049,9 +1089,13 @@ function copyPixelsIntoLevel(
   const srcImageHeight = s.imageHeight > 0 ? s.imageHeight : height;
   const srcSkipImages = s.skipImages;
   for (let z = 0; z < depth; z++) {
-    const view = views[0];
+    // Per-slice views (allocLevel): layer (zoffset + z) of the level — this
+    // also honors zoffset for depth > 1 (previously the slice was addressed
+    // by a texel offset that dropped zoffset).
+    const view = views[zoffset + z];
+    if (view === undefined) break; // defensive: zoffset+depth beyond the level
     const srcRow0 = s.skipRows + (srcSkipImages + z) * srcImageHeight;
-    copyRows(p, view, levelData.width, xoffset, yoffset, width, height, srcRow0, z * levelData.width * levelData.height);
+    copyRows(p, view, levelData.width, xoffset, yoffset, width, height, srcRow0, 0);
   }
 }
 
@@ -1292,13 +1336,15 @@ export function copyTexSubImage(
   if (spec.isStencil) tmp.stencilData = new Uint8Array(width * height);
   copyFromReadSurface(ctx, tmp, -1, spec, x, y, width, height);
   const face = cubeFaceIndex(target);
-  const view = levelData.data[face >= 0 ? face : 0];
+  // Per-layer views (allocLevel): cube face → data[face], 3D/2D_ARRAY →
+  // data[zoffset], 2D → data[0]. Each view is one w×h plane.
+  const view = levelData.data[face >= 0 ? face : zoffset];
   const srcView = tmp.data[0];
   const elemsPerTexel = spec.bytesPerPixel / spec.bytesPerElement;
   for (let dy = 0; dy < height; dy++) {
     for (let dx = 0; dx < width; dx++) {
       const srcElem = ((dy * width + dx) * spec.bytesPerPixel) / spec.bytesPerElement;
-      const dstElem = (zoffset * levelData.width * levelData.height + (yoffset + dy) * levelData.width + xoffset + dx) * spec.bytesPerPixel / spec.bytesPerElement;
+      const dstElem = ((yoffset + dy) * levelData.width + xoffset + dx) * spec.bytesPerPixel / spec.bytesPerElement;
       for (let e = 0; e < elemsPerTexel; e++) {
         (view as unknown as { [i: number]: number })[dstElem + e] = (srcView as unknown as { [i: number]: number })[srcElem + e];
       }
@@ -1359,9 +1405,12 @@ export function generateMipmap(ctx: WebGLRenderingContext, texture: WebGLTexture
     const prev = img.levels[l - 1];
     const faceCount = isCube ? 6 : 1;
     for (let f = 0; f < faceCount; f++) {
-      const srcView = prev.data[f];
-      const dstView = levelData.data[f];
       for (let z = 0; z < (isCube ? 1 : nd); z++) {
+        // Per-layer views (allocLevel): cube face f / 3D slice z / 2D_ARRAY
+        // layer z; the 2×2 box filter operates within one plane (3D depth is
+        // halved by taking the lower slices — existing approximation).
+        const srcView = prev.data[isCube ? f : z];
+        const dstView = levelData.data[isCube ? f : z];
         for (let y = 0; y < nh; y++) {
           for (let x = 0; x < nw; x++) {
             let accR = 0, accG = 0, accB = 0, accA = 0, n = 0;
@@ -1369,12 +1418,12 @@ export function generateMipmap(ctx: WebGLRenderingContext, texture: WebGLTexture
               for (let dx = 0; dx < 2; dx++) {
                 const sx = Math.min(w - 1, x * 2 + dx);
                 const sy = Math.min(h - 1, y * 2 + dy);
-                const srcOff = ((z * h + sy) * w + sx) * spec.bytesPerPixel;
+                const srcOff = (sy * w + sx) * spec.bytesPerPixel;
                 spec.unpack(srcView, srcOff, out);
                 accR += out[0]; accG += out[1]; accB += out[2]; accA += out[3]; n++;
               }
             }
-            const dstOff = ((z * nh + y) * nw + x) * spec.bytesPerPixel;
+            const dstOff = (y * nw + x) * spec.bytesPerPixel;
             spec.pack(dstView, dstOff, accR / n, accG / n, accB / n, accA / n);
           }
         }

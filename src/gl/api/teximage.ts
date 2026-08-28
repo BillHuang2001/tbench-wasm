@@ -10,13 +10,22 @@
  * mutation is delegated to the teximage.ts engine module. Overload rules:
  *  - texImage2D: 6 args → (target, level, internalformat, format, type, source)
  *    DOM form; else the 9-arg buffer form (pixels optional; null allocates).
- *  - texImage3D: 6 args → DOM form (rejected: DOM sources are 2D-only, spec);
- *    else the 10-arg buffer form.
+ *  - texImage3D: 10 args with a DOM source → DOM form with explicit dims
+ *    (target, level, internalformat, w, h, d, border, format, type, source —
+ *    the 2D image fills the z=0 slice); else the 10-arg buffer form (number
+ *    pixels = PBO offset, view = client data). The 6-arg DOM form is NOT in
+ *    the spec and is rejected (INVALID_OPERATION).
  *  - texSubImage2D: 7 args → DOM form; else 9-arg buffer form.
- *  - texSubImage3D: 8 args → DOM form (rejected, 2D-only rule); else 11-arg.
+ *  - texSubImage3D: 11 args with a DOM source → DOM form with explicit dims
+ *    (target, level, xoffset, yoffset, zoffset, w, h, d, format, type,
+ *    source — one slice at zoffset); else the 11-arg buffer form. The 8-arg
+ *    DOM form is NOT in the spec and is rejected (INVALID_OPERATION).
  *  - WebGL2: buffer-form pixels may be a NUMBER (byte offset into
  *    PIXEL_UNPACK_BUFFER — must be bound; flipY/premultiplyAlpha must be off;
- *    offset+required ≤ buffer size).
+ *    offset+required ≤ buffer size). The buffer form also accepts trailing
+ *    srcOffset (and optional srcLength) numeric arguments AFTER an
+ *    ArrayBufferView — the upload reads starting at element srcOffset of the
+ *    view, in the view's element units (spec §3.7.2; applySrcOffset slices).
  * Validation highlights: border must be 0 (INVALID_VALUE); internalformat vs
  * format/type compatibility per WebGL1 tables + extension-gated formats
  * (WEBGL_depth_texture / OES_texture_float(_linear) / OES_texture_half_float /
@@ -748,6 +757,46 @@ function validatePixelsSize(
   return true;
 }
 
+/**
+ * WebGL2 srcOffset/srcLength overloads (spec §3.7.2): the extra numeric
+ * arguments after the ArrayBufferView select a sub-range of the view, in
+ * ELEMENTS of the view's element type (not bytes). srcOffset/srcLength are
+ * converted WebIDL-style (unsigned long long: NaN → 0, negatives wrap to
+ * huge — so offset=-1 becomes a huge offset and errors). Returns the sliced
+ * view, or null after pushing INVALID_OPERATION (offset beyond the view, or
+ * srcOffset+srcLength beyond the view). The too-short effective-length check
+ * is left to validatePixelsSize, which pushes INVALID_OPERATION (the CTS
+ * views-with-offsets probe expects exactly that for effective < required).
+ */
+function applySrcOffset(
+  ctx: WebGLRenderingContext,
+  view: ArrayBufferView,
+  srcOffsetArg: unknown,
+  srcLengthArg: unknown,
+): ArrayBufferView | null {
+  // `length`/`subarray` aren't on the TS ArrayBufferView base type (DataView
+  // excluded); typed arrays all have them (the callers only pass views).
+  const v = view as unknown as { length: number; subarray(begin: number, end: number): ArrayBufferView };
+  const off = Number(srcOffsetArg) >>> 0;
+  if (off > v.length) {
+    // Effective length would be negative (covers the CTS offset=-1 probe).
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return null;
+  }
+  let effLen = v.length - off;
+  if (srcLengthArg !== undefined) {
+    const srcLen = Number(srcLengthArg) >>> 0;
+    if (srcLen > 0) {
+      if (off + srcLen > v.length) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
+      effLen = srcLen;
+    }
+  }
+  return v.subarray(off, off + effLen);
+}
+
 /** WebGL2 PBO (pixels = byte offset) pre-checks: bound, flipY/premultiply, offset. */
 function w2ValidatePbo(ctx: WebGLRenderingContext, pixels: number): boolean {
   const buf = ctx._state.pixelUnpackBuffer;
@@ -782,6 +831,15 @@ function w2ValidatePbo(ctx: WebGLRenderingContext, pixels: number): boolean {
  * images use `naturalWidth`/`naturalHeight`; canvas/ImageBitmap/ImageData use
  * `.width`/`.height`. Returns null for anything without numeric dims.
  */
+/** True when `pixels` is a DOM TexImageSource (WebGL2 9-arg overload), not a
+ * buffer view / ArrayBuffer / PBO offset / null. */
+function isDomSource(pixels: unknown): boolean {
+  return (
+    typeof pixels === 'object' && pixels !== null &&
+    !ArrayBuffer.isView(pixels) && !(pixels instanceof ArrayBuffer)
+  );
+}
+
 function sourceDims(source: unknown): { width: number; height: number } | null {
   if (source === null || typeof source !== 'object') return null;
   const s = source as Record<string, unknown>;
@@ -821,24 +879,74 @@ function texImage2DDOM(
   const tex = commonTexImageValidation(ctx, target, level, dims.width, dims.height, 1, 0, false);
   if (tex === null) return;
   if (ctx._version === 2) {
-    if (!(internalformat in W2_DOM)) {
-      ctx._errors.push(C1.INVALID_ENUM);
-      return;
-    }
-    const entry = W2_DOM[internalformat];
-    if (entry.format !== format) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return;
-    }
-    if (!entry.types.includes(type)) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return;
-    }
+    if (!w2ValidateDomFormatType(ctx, internalformat, format, type)) return;
   } else if (!w1ValidateFormatType(ctx, internalformat, format, type, null)) {
     return;
   }
   uploadTexImage(
     ctx, tex, target, level, internalformat, dims.width, dims.height, 1, 0, format, type,
+    source as unknown as TexImageSourceArg, source,
+  );
+}
+
+/**
+ * WebGL2 (internalformat, format, type) validation for TexImageSource
+ * uploads (both the 6-arg form and the 9-arg form with explicit dimensions).
+ */
+function w2ValidateDomFormatType(
+  ctx: WebGLRenderingContext,
+  internalformat: GLint,
+  format: GLenum,
+  type: GLenum,
+): boolean {
+  if (!(internalformat in W2_DOM)) {
+    ctx._errors.push(C1.INVALID_ENUM);
+    return false;
+  }
+  const entry = W2_DOM[internalformat];
+  if (entry.format !== format) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return false;
+  }
+  if (!entry.types.includes(type)) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 9-arg DOM form (WebGL2 only): (target, level, internalformat, w, h, border,
+ * format, type, source). The width/height arguments specify the texture level
+ * size; UNPACK_SKIP_PIXELS/UNPACK_SKIP_ROWS select a sub-rectangle of the
+ * source (WebGL2 spec §3.7.2 — "In WebGL 1, the width and height are always
+ * inferred from the source. In WebGL 2, they can also be explicitly
+ * specified.").
+ */
+function texImage2DDOMWithDims(
+  ctx: WebGLRenderingContext,
+  target: GLenum,
+  level: GLint,
+  internalformat: GLint,
+  width: GLsizei,
+  height: GLsizei,
+  border: GLint,
+  format: GLenum,
+  type: GLenum,
+  source: unknown,
+): void {
+  // WebIDL: GLsizei/GLint are `long` — convert via ToInt32 (truncate toward
+  // zero). The CTS passes e.g. bitmap.width/2 = 128.5 for a 257px source and
+  // relies on the conversion to 128 (WebGL2 spec §3.7.2); the copy math
+  // requires integer dimensions.
+  width = width | 0;
+  height = height | 0;
+  border = border | 0;
+  const tex = commonTexImageValidation(ctx, target, level, width, height, 1, border, false);
+  if (tex === null) return;
+  if (!w2ValidateDomFormatType(ctx, internalformat, format, type)) return;
+  uploadTexImage(
+    ctx, tex, target, level, internalformat, width, height, 1, border, format, type,
     source as unknown as TexImageSourceArg, source,
   );
 }
@@ -966,6 +1074,49 @@ function texImage3DBuffer(
   uploadTexImage(ctx, tex, target, level, internalformat, width, height, depth, border, format, type, pixels);
 }
 
+/**
+ * 10-arg DOM form (WebGL2 only): (target, level, internalformat, w, h, d,
+ * border, format, type, source). The width/height/depth arguments specify the
+ * texture level size; UNPACK_SKIP_PIXELS/UNPACK_SKIP_ROWS select a
+ * sub-rectangle of the source (WebGL2 spec §3.7.2). DOM sources are 2D — the
+ * engine divides the source into `depth` horizontal bands filling the level's
+ * slices (slice stride UNPACK_IMAGE_HEIGHT or height).
+ */
+function texImage3DDOMWithDims(
+  ctx: WebGLRenderingContext,
+  target: GLenum,
+  level: GLint,
+  internalformat: GLint,
+  width: GLsizei,
+  height: GLsizei,
+  depth: GLsizei,
+  border: GLint,
+  format: GLenum,
+  type: GLenum,
+  source: unknown,
+): void {
+  // WebIDL: GLint/GLsizei are `long` — convert via ToInt32 (truncate toward
+  // zero). Same rationale as the 2D cluster: the CTS passes fractional dims
+  // (e.g. canvas.width/2 = 128.5 for a 257px source) and relies on the
+  // conversion to 128; the copy math requires integer dimensions.
+  level = level | 0;
+  width = width | 0;
+  height = height | 0;
+  depth = depth | 0;
+  border = border | 0;
+  const tex = commonTexImageValidation(ctx, target, level, width, height, depth, border, true);
+  if (tex === null) return;
+  if (source === null || source === undefined) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return;
+  }
+  if (!w2ValidateDomFormatType(ctx, internalformat, format, type)) return;
+  uploadTexImage(
+    ctx, tex, target, level, internalformat, width, height, depth, border, format, type,
+    source as unknown as TexImageSourceArg, source,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // texSubImage2D / texSubImage3D
 // ---------------------------------------------------------------------------
@@ -1072,6 +1223,42 @@ function texSubImage2DDOM(
   );
 }
 
+/**
+ * 9-arg DOM form (WebGL2 only): (target, level, xoffset, yoffset, w, h,
+ * format, type, source). The width/height arguments (together with
+ * UNPACK_SKIP_PIXELS/UNPACK_SKIP_ROWS) specify a sub-rectangle of the source.
+ */
+function texSubImage2DDOMWithDims(
+  ctx: WebGLRenderingContext,
+  target: GLenum,
+  level: GLint,
+  xoffset: GLint,
+  yoffset: GLint,
+  width: GLsizei,
+  height: GLsizei,
+  format: GLenum,
+  type: GLenum,
+  source: unknown,
+): void {
+  if (source === null || source === undefined) {
+    throw new TypeError(`Argument is not of type 'TexImageSource'`);
+  }
+  // WebIDL: GLint/GLsizei are `long` — convert via ToInt32 (truncate toward
+  // zero); the CTS passes bitmap.width/2 = 128.5 for odd-sized sources and
+  // relies on the conversion to 128.
+  xoffset = xoffset | 0;
+  yoffset = yoffset | 0;
+  width = width | 0;
+  height = height | 0;
+  const tex = commonTexSubValidation(ctx, target, level, xoffset, yoffset, 0, width, height, 1, false);
+  if (tex === null) return;
+  if (!w2ValidateSubFormatType(ctx, tex._image!.internalFormat, format, type)) return;
+  uploadTexSubImage(
+    ctx, tex, target, level, xoffset, yoffset, 0, width, height, 1, format, type,
+    source as unknown as TexImageSourceArg, source,
+  );
+}
+
 /** 9-arg buffer path for texSubImage2D. */
 function texSubImage2DBuffer(
   ctx: WebGLRenderingContext,
@@ -1152,6 +1339,51 @@ function texSubImage3DDOM(
   ctx._errors.push(C1.INVALID_OPERATION);
 }
 
+/**
+ * 11-arg DOM form (WebGL2 only): (target, level, xoffset, yoffset, zoffset,
+ * w, h, d, format, type, source). The width/height/depth arguments (together
+ * with UNPACK_SKIP_PIXELS/UNPACK_SKIP_ROWS) specify a sub-rectangle of the
+ * source. DOM sources are 2D — the engine divides the source into `depth`
+ * horizontal bands filling slices zoffset..zoffset+depth-1; other slices keep
+ * their existing contents.
+ */
+function texSubImage3DDOMWithDims(
+  ctx: WebGLRenderingContext,
+  target: GLenum,
+  level: GLint,
+  xoffset: GLint,
+  yoffset: GLint,
+  zoffset: GLint,
+  width: GLsizei,
+  height: GLsizei,
+  depth: GLsizei,
+  format: GLenum,
+  type: GLenum,
+  source: unknown,
+): void {
+  if (source === null || source === undefined) {
+    // WebIDL: the TexImageSource overload is non-nullable → throw TypeError
+    // (mirrors the 2D texSubImage2DDOMWithDims convention; unreachable via
+    // dispatch, which requires isDomSource(arguments[10])).
+    throw new TypeError(`Argument is not of type 'TexImageSource'`);
+  }
+  // WebIDL: GLint/GLsizei are `long` — convert via ToInt32 (truncate toward
+  // zero), same rationale as the 2D DOM-with-dims path.
+  xoffset = xoffset | 0;
+  yoffset = yoffset | 0;
+  zoffset = zoffset | 0;
+  width = width | 0;
+  height = height | 0;
+  depth = depth | 0;
+  const tex = commonTexSubValidation(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, true);
+  if (tex === null) return;
+  if (!w2ValidateSubFormatType(ctx, tex._image!.internalFormat, format, type)) return;
+  uploadTexSubImage(
+    ctx, tex, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type,
+    source as unknown as TexImageSourceArg, source,
+  );
+}
+
 /** 11-arg buffer path for texSubImage3D. */
 function texSubImage3DBuffer(
   ctx: WebGLRenderingContext,
@@ -1190,8 +1422,20 @@ function texSubImage3DBuffer(
 // copyTexImage2D / copyTexSubImage2D / copyTexSubImage3D
 // ---------------------------------------------------------------------------
 
-/** WebGL2 copyTexImage2D internalformats (sized color-renderable; 32F gated). */
+/**
+ * WebGL2 copyTexImage2D internalformats — the full GLES 3.0 / WebGL2 list:
+ * the unsized WebGL1-compat formats plus all sized color formats (incl. the
+ * 32F floats, RGB32F and RGB10_A2UI). Renderability of the SOURCE attachment
+ * is a separate FBO-completeness concern (the source FBO is incomplete without
+ * EXT_color_buffer_float, which surfaces as the accepted
+ * INVALID_FRAMEBUFFER_OPERATION — CTS ext-color-buffer-float.html).
+ */
 const W2_COPY_INTERNALFORMATS: number[] = [
+  C1.RGBA,
+  C1.RGB,
+  C1.ALPHA,
+  C1.LUMINANCE,
+  C1.LUMINANCE_ALPHA,
   C2.R8,
   C2.RG8,
   C2.RGB8,
@@ -1200,11 +1444,17 @@ const W2_COPY_INTERNALFORMATS: number[] = [
   C1.RGB5_A1,
   C1.RGB565,
   C2.RGB10_A2,
+  C2.RGB10_A2UI,
+  C2.SRGB8,
   C2.SRGB8_ALPHA8,
   C2.R16F,
   C2.RG16F,
   C2.RGB16F,
   C2.RGBA16F,
+  C2.R32F,
+  C2.RG32F,
+  C2.RGB32F,
+  C2.RGBA32F,
   C2.R11F_G11F_B10F,
   C2.R8I, C2.R8UI, C2.R16I, C2.R16UI, C2.R32I, C2.R32UI,
   C2.RG8I, C2.RG8UI, C2.RG16I, C2.RG16UI, C2.RG32I, C2.RG32UI,
@@ -1213,11 +1463,8 @@ const W2_COPY_INTERNALFORMATS: number[] = [
 ];
 
 function isW2CopyInternalFormatValid(ctx: WebGLRenderingContext, fmt: GLenum): boolean {
-  if (W2_COPY_INTERNALFORMATS.includes(fmt)) return true;
-  if (fmt === C2.R32F || fmt === C2.RG32F || fmt === C2.RGBA32F) {
-    return ctx._extensions.has('EXT_color_buffer_float');
-  }
-  return false;
+  void ctx;
+  return W2_COPY_INTERNALFORMATS.includes(fmt);
 }
 
 /** Component count of an internal format (copyTexImage2D src/dest rules). */
@@ -1276,6 +1523,63 @@ function w1CopyDestAllowed(srcFmt: GLenum, destFmt: GLenum): boolean {
     case C1.ALPHA: return kind === 'alpha' || kind === 'rgba';
     default: return true; // sized dests (extension formats) are unconstrained in W1
   }
+}
+
+/**
+ * Per-component size class of a format, for the WebGL2 copyTexImage2D rule
+ * (spec "Color conversion in copyTex{Sub}Image2D"; CTS copy-texture-image.html):
+ * a SIZED dest's component sizes must exactly match the source's. Classes match
+ * the CTS expectations — 8-bit normalized (incl. sRGB), 4/5/565/10-10-10-2
+ * normalized, float16, float32, R11F, 32-bit int, 8/16-bit int, 32-bit uint,
+ * 8/16-bit uint (incl. RGB10_A2UI). Unsized formats map to their effective
+ * 8-bit storage (RGBA→RGBA8 etc. — WebGL2 converts unsized texImage2D
+ * internalformats to sized); as a DEST they are exempt from the rule (handled
+ * by w2CopyDestSizeClassMatch). Returns null for unknown formats.
+ */
+function copySizeClass(fmt: GLenum): string | null {
+  switch (fmt) {
+    case C2.R8: case C2.RG8: case C2.RGB8: case C2.RGBA8:
+    case C2.SRGB8: case C2.SRGB8_ALPHA8:
+    case C1.RGBA: case C1.RGB: case C1.LUMINANCE: case C1.LUMINANCE_ALPHA: case C1.ALPHA:
+      return 'unorm8';
+    case C1.RGBA4: case C1.RGB5_A1: case C1.RGB565: case C2.RGB10_A2:
+      return 'unorm-small';
+    case C2.R16F: case C2.RG16F: case C2.RGB16F: case C2.RGBA16F:
+      return 'float16';
+    case C2.R32F: case C2.RG32F: case C2.RGB32F: case C2.RGBA32F:
+      return 'float32';
+    case C2.R11F_G11F_B10F:
+      return 'r11';
+    case C2.R32I: case C2.RG32I: case C2.RGB32I: case C2.RGBA32I:
+      return 'int32';
+    case C2.R8I: case C2.R16I: case C2.RG8I: case C2.RG16I:
+    case C2.RGB8I: case C2.RGB16I: case C2.RGBA8I: case C2.RGBA16I:
+      return 'int8or16';
+    case C2.R32UI: case C2.RG32UI: case C2.RGB32UI: case C2.RGBA32UI:
+      return 'uint32';
+    case C2.R8UI: case C2.R16UI: case C2.RG8UI: case C2.RG16UI:
+    case C2.RGB10_A2UI: case C2.RGB8UI: case C2.RGB16UI:
+    case C2.RGBA8UI: case C2.RGBA16UI:
+      return 'uint8or16';
+    default:
+      return null;
+  }
+}
+
+/** WebGL2 copyTexImage2D dest/source size-class rule (see copySizeClass). */
+function w2CopyDestSizeClassMatch(srcFmt: GLenum, destFmt: GLenum): boolean {
+  // Unsized dest formats are exempt: the size-matching requirement applies only
+  // "if internalformat is sized" (WebGL2 spec).
+  switch (destFmt) {
+    case C1.RGBA: case C1.RGB: case C1.LUMINANCE: case C1.LUMINANCE_ALPHA: case C1.ALPHA:
+      return true;
+  }
+  const srcClass = copySizeClass(srcFmt);
+  const destClass = copySizeClass(destFmt);
+  // Unknown formats: don't block here (the source FBO completeness check and
+  // the component-count rule above govern).
+  if (srcClass === null || destClass === null) return true;
+  return srcClass === destClass;
 }
 
 /**
@@ -1390,8 +1694,14 @@ function copyTexImage2DImpl(
   }
   if (srcFmt !== 0) {
     if (ctx._version === 2) {
-      // W2: the destination may not have more components than the source.
+      // W2: components can be dropped but not added, and a sized dest's
+      // component sizes must exactly match the source's (spec "Color conversion
+      // in copyTex{Sub}Image2D"; CTS copy-texture-image.html).
       if (internalFormatComponents(internalformat) > internalFormatComponents(srcFmt)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (!w2CopyDestSizeClassMatch(srcFmt, internalformat)) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
@@ -1753,7 +2063,19 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       texImage2DDOM(ctx, target, level, internalformat, width as GLenum, height as GLenum, border);
       return;
     }
-    texImage2DBuffer(ctx, target, level, internalformat, width, height, border, format, type, pixels ?? null);
+    if (ctx._version === 2 && arguments.length === 9 && isDomSource(pixels)) {
+      // WebGL2 DOM form with explicit dimensions:
+      // (target, level, internalformat, width, height, border, format, type, source)
+      texImage2DDOMWithDims(ctx, target, level, internalformat, width, height, border, format, type, pixels);
+      return;
+    }
+    let bufPixels: TexImageSourceArg = pixels ?? null;
+    if (ctx._version === 2 && arguments.length >= 10 && ArrayBuffer.isView(bufPixels)) {
+      // WebGL2 srcOffset/srcLength overload: (…, view, srcOffset[, srcLength]).
+      bufPixels = applySrcOffset(ctx, bufPixels, arguments[9], arguments[10]);
+      if (bufPixels === null) return;
+    }
+    texImage2DBuffer(ctx, target, level, internalformat, width, height, border, format, type, bufPixels);
   };
 
   proto.texSubImage2D = function (
@@ -1775,7 +2097,19 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       texSubImage2DDOM(ctx, target, level, xoffset, yoffset, width as GLenum, height as GLenum, format);
       return;
     }
-    texSubImage2DBuffer(ctx, target, level, xoffset, yoffset, width, height, format, type, pixels ?? null);
+    if (ctx._version === 2 && arguments.length === 9 && isDomSource(pixels)) {
+      // WebGL2 DOM form with explicit dimensions:
+      // (target, level, xoffset, yoffset, width, height, format, type, source)
+      texSubImage2DDOMWithDims(ctx, target, level, xoffset, yoffset, width, height, format, type, pixels);
+      return;
+    }
+    let bufPixels: TexImageSourceArg = pixels ?? null;
+    if (ctx._version === 2 && arguments.length >= 10 && ArrayBuffer.isView(bufPixels)) {
+      // WebGL2 srcOffset/srcLength overload: (…, view, srcOffset[, srcLength]).
+      bufPixels = applySrcOffset(ctx, bufPixels, arguments[9], arguments[10]);
+      if (bufPixels === null) return;
+    }
+    texSubImage2DBuffer(ctx, target, level, xoffset, yoffset, width, height, format, type, bufPixels);
   };
 
   proto.copyTexImage2D = function (
@@ -1865,7 +2199,19 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
         texImage3DDOM(ctx, target, level, internalformat, width as GLenum, height as GLenum, border);
         return;
       }
-      texImage3DBuffer(ctx, target, level, internalformat, width, height, depth, border, format, type, pixels ?? null);
+      if (arguments.length === 10 && isDomSource(pixels)) {
+        // WebGL2 DOM form with explicit dimensions:
+        // (target, level, internalformat, width, height, depth, border, format, type, source)
+        texImage3DDOMWithDims(ctx, target, level, internalformat, width, height, depth, border, format, type, pixels);
+        return;
+      }
+      let bufPixels: TexImageSourceArg = pixels ?? null;
+      if (arguments.length >= 11 && ArrayBuffer.isView(bufPixels)) {
+        // WebGL2 srcOffset/srcLength overload: (…, view, srcOffset[, srcLength]).
+        bufPixels = applySrcOffset(ctx, bufPixels, arguments[10], arguments[11]);
+        if (bufPixels === null) return;
+      }
+      texImage3DBuffer(ctx, target, level, internalformat, width, height, depth, border, format, type, bufPixels);
     };
 
     p.texSubImage3D = function (
@@ -1889,7 +2235,19 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
         texSubImage3DDOM(ctx, target, level, xoffset, yoffset, zoffset, width as GLenum, height as GLenum, depth);
         return;
       }
-      texSubImage3DBuffer(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels ?? null);
+      if (arguments.length === 11 && isDomSource(pixels)) {
+        // WebGL2 DOM form with explicit dimensions:
+        // (target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, source)
+        texSubImage3DDOMWithDims(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
+        return;
+      }
+      let bufPixels: TexImageSourceArg = pixels ?? null;
+      if (arguments.length >= 12 && ArrayBuffer.isView(bufPixels)) {
+        // WebGL2 srcOffset/srcLength overload: (…, view, srcOffset[, srcLength]).
+        bufPixels = applySrcOffset(ctx, bufPixels, arguments[11], arguments[12]);
+        if (bufPixels === null) return;
+      }
+      texSubImage3DBuffer(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, bufPixels);
     };
 
     p.texStorage2D = function (
