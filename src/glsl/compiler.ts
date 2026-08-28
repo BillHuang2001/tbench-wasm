@@ -107,6 +107,13 @@ export interface AttributeDecl {
    *  Inactive attributes consume no generic slots at link (native behavior)
    *  and are omitted from getActiveAttrib/getAttribLocation. */
   used: boolean;
+  /** True for the SYNTHETIC built-in vertex-input entries (gl_VertexID /
+   *  gl_InstanceID / gl_DrawID, version 300 only — pushed by scanUses AFTER
+   *  all user attributes when the shader READS them). The linker reports them
+   *  as ACTIVE attributes with location -1 (WebGL2 spec) and keeps them out
+   *  of attribLocations (reads come from ctx.vertexId/instanceId/drawId,
+   *  never ctx.attribs[loc]). */
+  builtin?: boolean;
 }
 
 /**

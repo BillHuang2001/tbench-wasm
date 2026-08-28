@@ -931,6 +931,23 @@ function handleVersion(args: PToken[], line: number, st: State): void {
   st.versionSeen = true;
 }
 
+/**
+ * GLSL extension names that are KNOWN to the implementation but unavailable
+ * (the context's extension registry — src/gl/extensions/index.ts — exposes
+ * them with status 'null', so they never reach `opts.extensions`). Per GLSL
+ * ES §3.4 an `#extension X : enable` of an unsupported extension is normally
+ * only a warning, but the CTS page nv-shader-noperspective-interpolation.html
+ * GRADES on the failure: with the extension unavailable, shaders using its
+ * qualifier (`noperspective` — core ESSL 3.00) must fail to compile, and
+ * `enable` of the extension must be a compile error. Keep this list MINIMAL —
+ * only extensions whose CTS pages demand the error; `enable` of any other
+ * unsupported name stays a silent no-op (see handleExtension). `require` of
+ * ANY unsupported name is already an error.
+ */
+const KNOWN_UNAVAILABLE_GLSL_EXTENSIONS: ReadonlySet<string> = new Set([
+  'GL_NV_shader_noperspective_interpolation',
+]);
+
 function handleExtension(args: PToken[], line: number, st: State): void {
   if (args.length !== 3 || args[1].text !== ':') {
     st.errors.push({ line: remap(st, line), message: 'invalid #extension directive' });
@@ -970,12 +987,17 @@ function handleExtension(args: PToken[], line: number, st: State): void {
       st.extState.set(name, behavior);
     }
   } else if (behavior === 'enable') {
-    // `enable` of an unsupported extension is a warning per GLSL ES §3.4 (the
-    // preprocessor has no warning channel, so accept silently) and the
-    // extension is NOT enabled: no macro, no enabled-extensions entry.
+    // `enable` of an unsupported extension is normally a warning per GLSL ES
+    // §3.4 (the preprocessor has no warning channel, so accept silently) and
+    // the extension is NOT enabled: no macro, no enabled-extensions entry.
+    // EXCEPTION: KNOWN_UNAVAILABLE_GLSL_EXTENSIONS — a compile error, because
+    // their CTS pages (nv-shader-noperspective-interpolation.html) demand
+    // that enabling an unsupported extension fails the shader.
     if (st.opts.extensions && st.opts.extensions.has(name)) {
       st.macros.set(name, simpleMacro(name, '1'));
       st.extState.set(name, behavior);
+    } else if (KNOWN_UNAVAILABLE_GLSL_EXTENSIONS.has(name)) {
+      st.errors.push({ line: remap(st, line), message: `extension '${name}' is not supported` });
     }
   } else if (behavior === 'warn') {
     st.extState.set(name, 'warn');

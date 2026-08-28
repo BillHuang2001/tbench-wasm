@@ -1074,6 +1074,7 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return null;
       const s = ctx._state;
       let max: number;
+      let blendPname = false;
       switch (target) {
         case C2.UNIFORM_BUFFER_BINDING:
         case C2.UNIFORM_BUFFER_START:
@@ -1085,6 +1086,28 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
         case C2.TRANSFORM_FEEDBACK_BUFFER_SIZE:
           max = s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
           break;
+        case C1.BLEND_EQUATION_RGB:
+        case C1.BLEND_EQUATION_ALPHA:
+        case C1.BLEND_SRC_RGB:
+        case C1.BLEND_SRC_ALPHA:
+        case C1.BLEND_DST_RGB:
+        case C1.BLEND_DST_ALPHA:
+        case C1.COLOR_WRITEMASK:
+          // OES_draw_buffers_indexed pnames: legal ONLY once the extension is
+          // enabled. CTS oes-draw-buffers-indexed.html runInvalidEnumsTest
+          // queries them BEFORE getExtension and expects INVALID_ENUM + null;
+          // the extension check must therefore NOT populate the cache (use
+          // ctx._extensions.has, never getExtension — self-enabling probe).
+          if (!ctx._extensions.has('OES_draw_buffers_indexed')) {
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+          }
+          // Index bound is MAX_DRAW_BUFFERS (8), NOT MAX_COLOR_ATTACHMENTS:
+          // the page checks index -1 (→ 0xFFFFFFFF via GLuint) and 8 →
+          // INVALID_VALUE.
+          max = s.limits.MAX_DRAW_BUFFERS;
+          blendPname = true;
+          break;
         default:
           ctx._errors.push(C1.INVALID_ENUM);
           return null;
@@ -1092,6 +1115,21 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       if (index < 0 || index >= max) {
         ctx._errors.push(C1.INVALID_VALUE);
         return null;
+      }
+      if (blendPname) {
+        const be = s.blendPerDrawBuffer.get(index);
+        switch (target) {
+          case C1.BLEND_EQUATION_RGB: return be?.eqRGB ?? s.blend.eqRGB;
+          case C1.BLEND_EQUATION_ALPHA: return be?.eqAlpha ?? s.blend.eqAlpha;
+          case C1.BLEND_SRC_RGB: return be?.srcRGB ?? s.blend.srcRGB;
+          case C1.BLEND_SRC_ALPHA: return be?.srcAlpha ?? s.blend.srcAlpha;
+          case C1.BLEND_DST_RGB: return be?.dstRGB ?? s.blend.dstRGB;
+          case C1.BLEND_DST_ALPHA: return be?.dstAlpha ?? s.blend.dstAlpha;
+          default: { // COLOR_WRITEMASK — fresh plain boolean array
+            const m = s.colorMaskPerDrawBuffer.get(index) ?? s.colorMask;
+            return [m[0], m[1], m[2], m[3]];
+          }
+        }
       }
       switch (target) {
         case C2.UNIFORM_BUFFER_BINDING:

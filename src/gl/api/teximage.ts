@@ -98,7 +98,7 @@ function boundTextureForTarget(ctx: WebGLRenderingContext, target: GLenum): WebG
   // state.ts texture-unit slots are typed with the DOM WebGLTexture interface;
   // they always hold renderer WebGLTexture instances (bindTexture writes them).
   if (target === C1.TEXTURE_2D) return unit.texture2D as unknown as WebGLTexture | null;
-  if (isCubeFace(target)) return unit.textureCube as unknown as WebGLTexture | null;
+  if (target === C1.TEXTURE_CUBE_MAP || isCubeFace(target)) return unit.textureCube as unknown as WebGLTexture | null;
   if (target === C2.TEXTURE_3D) return unit.texture3D as unknown as WebGLTexture | null;
   if (target === C2.TEXTURE_2D_ARRAY) return unit.texture2DArray as unknown as WebGLTexture | null;
   return null;
@@ -110,7 +110,7 @@ function dimLimit(
   target: GLenum,
 ): { maxW: number; maxH: number; maxD: number; maxDim: number } {
   const lim = ctx._state.limits;
-  if (isCubeFace(target)) return { maxW: lim.MAX_CUBE_MAP_TEXTURE_SIZE, maxH: lim.MAX_CUBE_MAP_TEXTURE_SIZE, maxD: 1, maxDim: lim.MAX_CUBE_MAP_TEXTURE_SIZE };
+  if (target === C1.TEXTURE_CUBE_MAP || isCubeFace(target)) return { maxW: lim.MAX_CUBE_MAP_TEXTURE_SIZE, maxH: lim.MAX_CUBE_MAP_TEXTURE_SIZE, maxD: 1, maxDim: lim.MAX_CUBE_MAP_TEXTURE_SIZE };
   if (target === C2.TEXTURE_3D) return { maxW: lim.MAX_3D_TEXTURE_SIZE, maxH: lim.MAX_3D_TEXTURE_SIZE, maxD: lim.MAX_3D_TEXTURE_SIZE, maxDim: lim.MAX_3D_TEXTURE_SIZE };
   if (target === C2.TEXTURE_2D_ARRAY) return { maxW: lim.MAX_TEXTURE_SIZE, maxH: lim.MAX_TEXTURE_SIZE, maxD: lim.MAX_ARRAY_TEXTURE_LAYERS, maxDim: lim.MAX_TEXTURE_SIZE };
   return { maxW: lim.MAX_TEXTURE_SIZE, maxH: lim.MAX_TEXTURE_SIZE, maxD: 1, maxDim: lim.MAX_TEXTURE_SIZE };
@@ -530,9 +530,16 @@ function isNorm16Format(fmt: GLenum): boolean {
   return NORM16_FORMATS.includes(fmt);
 }
 
-/** W2 texImage internalformat validity (norm16 gated on EXT_texture_norm16). */
+/**
+ * W2 texImage internalformat validity (norm16 gated on EXT_texture_norm16).
+ * Uses the `_extensions` enabled-cache, NOT `getExtension(...) !== null`:
+ * calling getExtension() from validation code POPULATES the singleton cache
+ * as a side effect, self-enabling the extension before the page requests it
+ * (CTS ext-render-snorm.html checks getSupportedExtensions()/getExtension()
+ * ordering; see also api/webgl2.ts anisotropyEnabled).
+ */
 function w2InternalformatValid(ctx: WebGLRenderingContext, fmt: GLenum): boolean {
-  if (isNorm16Format(fmt)) return ctx.getExtension('EXT_texture_norm16') !== null;
+  if (isNorm16Format(fmt)) return ctx._extensions.has('EXT_texture_norm16');
   return fmt in W2_COMBOS;
 }
 
@@ -840,6 +847,75 @@ function isDomSource(pixels: unknown): boolean {
   );
 }
 
+/** True when the source element holds an SVG image (data:image/svg+xml or a *.svg URL). */
+function isSvgSource(s: Record<string, unknown>): boolean {
+  const src = String((s as { currentSrc?: unknown }).currentSrc ?? (s as { src?: unknown }).src ?? '');
+  return /image\/svg\+xml/i.test(src) || /\.svg(\?|#|$)/i.test(src);
+}
+
+/**
+ * Parse the width/height attributes of the root <svg> element out of a data:
+ * URI source. Per the SVG spec those attributes ARE the image's intrinsic
+ * dimensions; an SVG without them (e.g. a viewBox-only document) has NO
+ * intrinsic dimensions. Returns {width, height} with 0 for missing attributes,
+ * or null when the source is not a synchronously parseable data: URI.
+ */
+function parseSvgRootDims(s: Record<string, unknown>): { width: number; height: number } | null {
+  const src = String((s as { currentSrc?: unknown }).currentSrc ?? (s as { src?: unknown }).src ?? '');
+  const m = /^data:image\/svg\+xml(?:;[^,]*)?,(.*)$/is.exec(src);
+  if (!m) return null;
+  let markup: string;
+  try { markup = decodeURIComponent(m[1]); } catch { markup = m[1]; }
+  const tag = /<svg\b[^>]*>/i.exec(markup);
+  if (!tag) return null;
+  const attr = (name: string): number | null => {
+    const am = new RegExp(`\\b${name}\\s*=\\s*["'][^"']*["']`, 'i').exec(tag[0]);
+    if (!am) return null;
+    const n = parseFloat(am[0].replace(/^[^=]*=\s*["']?/, ''));
+    return Number.isFinite(n) ? n : null;
+  };
+  const w = attr('width');
+  const h = attr('height');
+  return { width: w ?? 0, height: h ?? 0 };
+}
+
+/**
+ * Upload dimensions for an SVG HTMLImageElement. WebGL spec "Texture Upload
+ * Width and Height": for SVG images the texture size is the CURRENT VALUE OF
+ * THE WIDTH/HEIGHT PROPERTIES of the HTMLImageElement. Those IDL properties
+ * reflect the width/height content attributes of the IMG element with the
+ * default being the image's intrinsic dimensions; an SVG without width/height
+ * attributes has NO intrinsic dimensions (Chromium's naturalWidth of 150 is
+ * the CSS default USED size, not an intrinsic size), so the value is 0. The
+ * 2025 CTS test tex-image-svg-image-no-natural-width-and-height.html relies
+ * on exactly this: unset → 0×0 (the follow-up texSubImage2D then fails with
+ * INVALID_VALUE), set (image.width=100) → 100×100.
+ */
+function svgImageDims(s: Record<string, unknown>): { width: number; height: number } {
+  const getAttr = (name: string): number | null => {
+    if (typeof s.getAttribute === 'function') {
+      const v = (s as { getAttribute(n: string): string | null }).getAttribute(name);
+      if (v !== null && v !== '') {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+    }
+    return null;
+  };
+  let w = getAttr('width');
+  let h = getAttr('height');
+  if (w === null || h === null) {
+    // No img-element attribute for at least one axis: fall back to the SVG
+    // document's root width/height (its intrinsic dimensions). For sources we
+    // cannot parse (non-data: URIs), the element's width/height properties
+    // already carry the intrinsic size when the SVG has width/height attrs.
+    const root = parseSvgRootDims(s);
+    if (w === null) w = root !== null ? root.width : (typeof s.width === 'number' ? s.width : 0);
+    if (h === null) h = root !== null ? root.height : (typeof s.height === 'number' ? s.height : 0);
+  }
+  return { width: w, height: h };
+}
+
 function sourceDims(source: unknown): { width: number; height: number } | null {
   if (source === null || typeof source !== 'object') return null;
   const s = source as Record<string, unknown>;
@@ -847,6 +923,7 @@ function sourceDims(source: unknown): { width: number; height: number } | null {
     return typeof s.videoHeight === 'number' ? { width: s.videoWidth, height: s.videoHeight } : null;
   }
   if (typeof s.naturalWidth === 'number') {
+    if (isSvgSource(s)) return svgImageDims(s);
     return typeof s.naturalHeight === 'number' ? { width: s.naturalWidth, height: s.naturalHeight } : null;
   }
   if (typeof s.width === 'number' && typeof s.height === 'number') return { width: s.width, height: s.height };
@@ -1215,6 +1292,26 @@ function texSubImage2DDOM(
     if (!origin || origin.format !== format || origin.type !== type) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
+    }
+  }
+  // SVG image with NO intrinsic dimensions (no width/height attributes on the
+  // <img> element or the SVG root): per WebGL spec "Texture Upload Width and
+  // Height" the upload size is the current value of the element's width/height
+  // properties — 0 here (see svgImageDims). When the level was previously
+  // allocated with explicit nonzero dims (callers commonly pass
+  // image.width/image.height, which Chromium reports as the CSS default used
+  // size 150 instead of the spec's 0 — crbug.com/41357911), re-allocate the
+  // level at the spec size 0×0 so the texture really is 0×0. The 2025 CTS
+  // tex-image-svg-image-no-natural-width-and-height.html relies on exactly
+  // this: a follow-up 1×1 texSubImage2D into such a texture must fail with
+  // INVALID_VALUE ("texture size should be 0x0").
+  if (dims.width === 0 && dims.height === 0 && isSvgSource(source as Record<string, unknown>)) {
+    const img = tex._image;
+    const lv = img ? img.levels[level] : undefined;
+    if (lv && (lv.width !== 0 || lv.height !== 0) && !tex._immutable) {
+      uploadTexImage(
+        ctx, tex, target, level, img!.internalFormat ?? format, 0, 0, 1, 0, format, type, null,
+      );
     }
   }
   uploadTexSubImage(

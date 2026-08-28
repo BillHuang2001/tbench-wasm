@@ -6,10 +6,12 @@
  * of `.v` that drops `.pre` reads an UNASSIGNED temp (undefined/NaN/falsy).
  * This file pins the fixed consumers: ternary (non-dual), convertValue-based
  * re-attach paths (bitwise binary, compound assign, array ctor, struct ctor,
- * decl-init), and the non-dual builtins distance/normalize/faceforward/
+ * decl-init), the non-dual builtins distance/normalize/faceforward/
  * refract/outerProduct/determinant/uaddCarry/usubBorrow/umulExtended/
- * imulExtended/modf (+ dual-mode modf). Every shader calls a USER FUNCTION so
- * the operand carries an inliner IIFE pre, then materializes.
+ * imulExtended/modf (+ dual-mode modf), and walkObject member/index-of-call-
+ * result materialization (materializeSharedPre identity dedup). Every shader
+ * calls a USER FUNCTION so the operand carries an inliner IIFE pre, then
+ * materializes.
  *
  * Each case compiles a real shader (compileShader → annotated AST), emits
  * `main` (installUserFunctions + emitStatements), runs the generated JS via
@@ -607,6 +609,116 @@ void main() {
   check(
     ctx.out.color[0][1] === 1 && ctx.out.color[0][2] === 2 && ctx.out.color[0][3] === 0,
     `dual multi-comp ternary values (got [${ctx.out.color[0].join(',')}])`,
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* walkObject: member/index of a multi-component CALL RESULT runs the  */
+/* callee side effects EXACTLY ONCE (materializeSharedPre dedup)       */
+/* ------------------------------------------------------------------ */
+
+// (r1) STRUCT member of a call result, f().x — the struct-returning call
+// carries ONE shared IIFE pre array on every component; walkObject must
+// materialize it once (2-component struct; pre-fix fold-per-component ran
+// the callee twice → counter 2).
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+struct S { float x; float y; };
+int g_counter = 0;
+S f() { g_counter = g_counter + 1; return S(1.0, 2.0); }
+out vec4 color;
+void main() {
+  float x = f().x;
+  color = vec4(float(g_counter), x, 0.0, 1.0);
+}`,
+    'FRAGMENT',
+    300,
+    { structNames: ['S'] },
+  );
+  check(
+    ctx.out.color[0][0] === 1,
+    `struct member of call result runs callee once (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(ctx.out.color[0][1] === 1, `struct member of call result value (got ${ctx.out.color[0][1]})`);
+}
+
+// (r2) SWIZZLE of a vec4 call result, f().z — 4 components share one IIFE
+// pre; pre-fix ran the callee 4 times (counter 4).
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+int g_counter = 0;
+vec4 f() { g_counter = g_counter + 1; return vec4(1.0, 2.0, 3.0, 4.0); }
+out vec4 color;
+void main() {
+  float x = f().z;
+  color = vec4(float(g_counter), x, 0.0, 1.0);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  check(
+    ctx.out.color[0][0] === 1,
+    `swizzle of call result runs callee once (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(ctx.out.color[0][1] === 3, `swizzle of call result value (got ${ctx.out.color[0][1]})`);
+}
+
+// (r3) DYNAMIC index of a vec4 call result, f()[i] — walkObject materializes
+// the result into a synth flat local, then the dynamic component index spills
+// it into scratch via spillSynthLocal; the shared pre must still run once.
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+int g_counter = 0;
+vec4 f() { g_counter = g_counter + 1; return vec4(1.0, 2.0, 3.0, 4.0); }
+out vec4 color;
+void main() {
+  int i = 1;
+  float x = f()[i];
+  color = vec4(float(g_counter), x, 0.0, 1.0);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  check(
+    ctx.out.color[0][0] === 1,
+    `dynamic index of call result runs callee once (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(ctx.out.color[0][1] === 2, `dynamic index of call result value (got ${ctx.out.color[0][1]})`);
+}
+
+// (r4) DUAL mode: struct member of a call result — the materialized (v, dx,
+// dy) temp triples share one pre buffer (identity-deduped); the callee must
+// run once and the member's dual planes must be readable via dFdx.
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+struct S { float x; float y; };
+int g_counter = 0;
+S f() { g_counter = g_counter + 1; return S(1.0, 2.0); }
+out vec4 color;
+void main() {
+  float x = f().x;
+  float dx = dFdx(x);
+  color = vec4(float(g_counter), x, dx, 1.0);
+}`,
+    'FRAGMENT',
+    300,
+    { derivatives: true, structNames: ['S'] },
+  );
+  check(
+    ctx.out.color[0][0] === 1,
+    `dual struct member of call result runs callee once (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === 1 && ctx.out.color[0][2] === 0,
+    `dual struct member of call result values (got [${ctx.out.color[0].join(',')}])`,
   );
 }
 

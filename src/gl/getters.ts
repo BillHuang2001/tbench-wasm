@@ -45,6 +45,7 @@ import { getClipControl, isClipDistanceEnabled } from './extensions/clip-state';
 import {
   ALIASED_LINE_WIDTH_RANGE,
   ALIASED_POINT_SIZE_RANGE,
+  getFormat,
   type FramebufferTarget,
   type PixelFormatInfo,
   type Surface,
@@ -109,12 +110,18 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
 
     // ---- Simple numbers ----
     case C.ACTIVE_TEXTURE: return C.TEXTURE0 + s.activeTexture;
-    case C.BLEND_SRC_RGB: return s.blend.srcRGB;
-    case C.BLEND_SRC_ALPHA: return s.blend.srcAlpha;
-    case C.BLEND_DST_RGB: return s.blend.dstRGB;
-    case C.BLEND_DST_ALPHA: return s.blend.dstAlpha;
-    case C.BLEND_EQUATION_RGB: return s.blend.eqRGB;
-    case C.BLEND_EQUATION_ALPHA: return s.blend.eqAlpha;
+    // Blend state: non-indexed getParameter reads draw buffer 0's
+    // per-drawbuffer entry (OES_draw_buffers_indexed — the non-indexed
+    // setters mirror their values into every entry, and the indexed setters
+    // override buffer 0's entry; CTS oes-draw-buffers-indexed.html
+    // "non-indexed getParamter get state from draw buffer 0"), with the base
+    // state as fallback (no extension / WebGL1).
+    case C.BLEND_SRC_RGB: { const b0 = s.blendPerDrawBuffer.get(0); return b0?.srcRGB ?? s.blend.srcRGB; }
+    case C.BLEND_SRC_ALPHA: { const b0 = s.blendPerDrawBuffer.get(0); return b0?.srcAlpha ?? s.blend.srcAlpha; }
+    case C.BLEND_DST_RGB: { const b0 = s.blendPerDrawBuffer.get(0); return b0?.dstRGB ?? s.blend.dstRGB; }
+    case C.BLEND_DST_ALPHA: { const b0 = s.blendPerDrawBuffer.get(0); return b0?.dstAlpha ?? s.blend.dstAlpha; }
+    case C.BLEND_EQUATION_RGB: { const b0 = s.blendPerDrawBuffer.get(0); return b0?.eqRGB ?? s.blend.eqRGB; }
+    case C.BLEND_EQUATION_ALPHA: { const b0 = s.blendPerDrawBuffer.get(0); return b0?.eqAlpha ?? s.blend.eqAlpha; }
     case C.DEPTH_CLEAR_VALUE: return s.clearDepth;
     case C.STENCIL_CLEAR_VALUE: return s.clearStencil;
     case C.LINE_WIDTH: return s.lineWidth;
@@ -236,7 +243,7 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
     case C.DEPTH_RANGE: return new Float32Array(s.depth.range);
     case C.SCISSOR_BOX: return new Int32Array([s.scissor.x, s.scissor.y, s.scissor.w, s.scissor.h]);
     case C.VIEWPORT: return new Int32Array([s.viewport.x, s.viewport.y, s.viewport.w, s.viewport.h]);
-    case C.COLOR_WRITEMASK: return [s.colorMask[0], s.colorMask[1], s.colorMask[2], s.colorMask[3]];
+    case C.COLOR_WRITEMASK: { const m = s.colorMaskPerDrawBuffer.get(0) ?? s.colorMask; return [m[0], m[1], m[2], m[3]]; }
     case C.ALIASED_POINT_SIZE_RANGE:
       return new Float32Array([ALIASED_POINT_SIZE_RANGE[0], ALIASED_POINT_SIZE_RANGE[1]]);
     case C.ALIASED_LINE_WIDTH_RANGE:
@@ -409,12 +416,14 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
     case C.COMPRESSED_TEXTURE_FORMATS: return new Uint32Array(0); // no compressed formats
     case C.SUBPIXEL_BITS: return 8;
     case C.IMPLEMENTATION_COLOR_READ_FORMAT:
-    case C.IMPLEMENTATION_COLOR_READ_TYPE:
+    case C.IMPLEMENTATION_COLOR_READ_TYPE: {
       if (drawFramebufferIncomplete(ctx)) {
         ctx._errors.push(C.INVALID_OPERATION);
         return null;
       }
-      return pname === C.IMPLEMENTATION_COLOR_READ_FORMAT ? C.RGBA : C.UNSIGNED_BYTE;
+      const pair = implementationColorReadPair(ctx);
+      return pname === C.IMPLEMENTATION_COLOR_READ_FORMAT ? pair.format : pair.type;
+    }
 
     // ---- FBO-dependent bits (draw framebuffer) ----
     case C.SAMPLE_BUFFERS: return 0; // single-sampled drawing buffer, always
@@ -517,6 +526,69 @@ function drawFramebufferIncomplete(ctx: WebGLRenderingContext): boolean {
   } catch {
     return true; // framebuffer-util stub (parallel agent) — cannot resolve yet
   }
+}
+
+/**
+ * (format, type) pair for IMPLEMENTATION_COLOR_READ_FORMAT/TYPE — the pair
+ * readPixels must accept for the bound READ buffer's color attachment (CTS
+ * read-pixels-from-fbo-test.html queries it and reads with it, expecting
+ * NO_ERROR + correct colors). Resolution mirrors readPixelsComboOK
+ * (api/draw.ts): the READ framebuffer's READ_BUFFER attachment.
+ *
+ *  - Default framebuffer / no attachment / unknown format → RGBA/UNSIGNED_BYTE
+ *    (the universally-accepted pair for normalized attachments).
+ *  - Normalized formats (R8..SRGB8_ALPHA8, RGB565, RGBA4, RGB5_A1, RGB10_A2):
+ *    RGBA/UNSIGNED_BYTE — readComboOK's universalRGBA rule accepts it for
+ *    EVERY normalized color attachment.
+ *  - Integer formats: *_INTEGER by channel count (RED/RG/RGB/RGBA_INTEGER)
+ *    with the channel-width-matched type (1 → BYTE|UNSIGNED_BYTE,
+ *    2 → SHORT|UNSIGNED_SHORT, 4 → INT|UNSIGNED_INT; signed → signed type).
+ *    Every such pair is accepted by readComboOK's per-format width-matched
+ *    rule (RGB10_A2UI is packed 10/10/10/2 — only the universal
+ *    RGBA_INTEGER/UNSIGNED_INT rule accepts it, so it is special-cased).
+ *  - Float formats: RGBA/FLOAT only when the color-buffer-float extension is
+ *    enabled (readComboOK gates it); otherwise RGBA/UNSIGNED_BYTE (the CTS
+ *    float cases are TODO/not graded).
+ */
+function implementationColorReadPair(ctx: WebGLRenderingContext): { format: number; type: number } {
+  const s = ctx._state;
+  const fbo = s.readFramebuffer;
+  if (fbo === null) return { format: C.RGBA, type: C.UNSIGNED_BYTE };
+  const rb = s.version === 2 ? s.readBuffer : C.COLOR_ATTACHMENT0;
+  const att = fbo._attachments.get(rb);
+  if (!att) return { format: C.RGBA, type: C.UNSIGNED_BYTE };
+  const internalFormat = att.type === 'renderbuffer'
+    ? att.renderbuffer._internalformat
+    : (att.texture._image?.internalFormat ?? 0);
+  let info = att.type === 'renderbuffer'
+    ? (att.renderbuffer._surface?.info ?? null)
+    : (att.texture._image?.info ?? null);
+  if (!info) info = getFormat(internalFormat);
+  if (info?.isInteger) {
+    if (internalFormat === C.RGB10_A2UI) return { format: C.RGBA_INTEGER, type: C.UNSIGNED_INT };
+    const fmt = info.components >= 4 ? C.RGBA_INTEGER :
+      info.components === 3 ? C.RGB_INTEGER :
+      info.components === 2 ? C.RG_INTEGER : C.RED_INTEGER;
+    const perComp = info.bytesPerPixel / info.components; // 1 | 2 | 4
+    const type = perComp <= 1
+      ? (info.isSigned ? C.BYTE : C.UNSIGNED_BYTE)
+      : perComp <= 2
+        ? (info.isSigned ? C.SHORT : C.UNSIGNED_SHORT)
+        : (info.isSigned ? C.INT : C.UNSIGNED_INT);
+    return { format: fmt, type };
+  }
+  if (info?.isFloat) {
+    if ((internalFormat === C.R16F || internalFormat === C.RG16F || internalFormat === C.RGBA16F) &&
+        (ctx._extensions.has('EXT_color_buffer_float') || ctx._extensions.has('EXT_color_buffer_half_float'))) {
+      return { format: C.RGBA, type: C.FLOAT };
+    }
+    if ((internalFormat === C.R32F || internalFormat === C.RG32F || internalFormat === C.RGBA32F) &&
+        ctx._extensions.has('EXT_color_buffer_float')) {
+      return { format: C.RGBA, type: C.FLOAT };
+    }
+    return { format: C.RGBA, type: C.UNSIGNED_BYTE };
+  }
+  return { format: C.RGBA, type: C.UNSIGNED_BYTE };
 }
 
 /**

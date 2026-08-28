@@ -1209,11 +1209,56 @@ function buildOutputMaps(
   const colorMask: ColorMask[] = new Array(n);
   const drawBuffers: number[] = new Array(n).fill(-1);
   for (let l = 0; l < n; l++) {
-    colorMask[l] = s.colorMaskPerDrawBuffer.get(l) ?? s.colorMask;
-    const db = l < s.drawBuffers.length ? s.drawBuffers[l] : C1.COLOR_ATTACHMENT0;
+    // GLES 3.0 §4.2.1: "the draw buffer for fragment colors beyond n is set
+    // to NONE" — the fallback for outputs past the drawBuffers() list is NONE
+    // (not COLOR_ATTACHMENT0), so such outputs write nowhere.
+    const db = l < s.drawBuffers.length ? s.drawBuffers[l] : C1.NONE;
     drawBuffers[l] = db === C1.NONE ? -1 : db - C1.COLOR_ATTACHMENT0;
+    // colorMask is keyed by DRAW BUFFER index (the attachment index in the
+    // identity mapping — OES_draw_buffers_indexed colorMaskiOES(i, ...) writes
+    // the entry for draw buffer i), not by output location: with
+    // drawBuffers[l] = COLOR_ATTACHMENTi, output l lands on draw buffer i.
+    colorMask[l] = db === C1.NONE ? s.colorMask : (s.colorMaskPerDrawBuffer.get(drawBuffers[l]) ?? s.colorMask);
   }
   return { colorMask, drawBuffers };
+}
+
+/**
+ * Per-drawbuffer blend state array for the DrawCall (OES_draw_buffers_indexed).
+ * Field contract for the raster agent: `dc.blendPerDrawBuffer[d]` =
+ * { enabled, srcRGB, dstRGB, srcAlpha, dstAlpha, eqRGB, eqAlpha, color } for
+ * draw buffer d ∈ 0..MAX_DRAW_BUFFERS-1. Buffer 0's `enabled` ALWAYS follows
+ * the global BLEND cap (spec: draw buffer 0 is governed by enable/disable
+ * (BLEND)); buffers > 0 use the extension's per-buffer enable entry when
+ * present, falling back to the global cap. Funcs/equations fall back to the
+ * base blend state per field. The raster currently blends only output location
+ * 0 via `dc.blend` — this array makes per-output blending data available
+ * (raster-owned consumption).
+ */
+function buildBlendPerDrawBuffer(ctx: WebGLRenderingContext): Array<{
+  enabled: boolean; srcRGB: number; dstRGB: number; srcAlpha: number; dstAlpha: number;
+  eqRGB: number; eqAlpha: number; color: [number, number, number, number];
+}> {
+  const s = ctx._state;
+  const enables = (s as unknown as { blendEnablePerDrawBuffer?: Map<number, boolean> }).blendEnablePerDrawBuffer;
+  const arr = new Array<{
+    enabled: boolean; srcRGB: number; dstRGB: number; srcAlpha: number; dstAlpha: number;
+    eqRGB: number; eqAlpha: number; color: [number, number, number, number];
+  }>(s.limits.MAX_DRAW_BUFFERS);
+  for (let d = 0; d < s.limits.MAX_DRAW_BUFFERS; d++) {
+    const be = s.blendPerDrawBuffer.get(d);
+    arr[d] = {
+      enabled: d === 0 ? s.caps.BLEND : (enables?.get(d) ?? s.caps.BLEND),
+      srcRGB: be?.srcRGB ?? s.blend.srcRGB,
+      dstRGB: be?.dstRGB ?? s.blend.dstRGB,
+      srcAlpha: be?.srcAlpha ?? s.blend.srcAlpha,
+      dstAlpha: be?.dstAlpha ?? s.blend.dstAlpha,
+      eqRGB: be?.eqRGB ?? s.blend.eqRGB,
+      eqAlpha: be?.eqAlpha ?? s.blend.eqAlpha,
+      color: s.blend.color,
+    };
+  }
+  return arr;
 }
 
 function buildDrawCall(
@@ -1241,7 +1286,7 @@ function buildDrawCall(
     eqAlpha: blend0?.eqAlpha ?? s.blend.eqAlpha,
     color: s.blend.color,
   };
-  return {
+  const dc: DrawCall = {
     mode: req.mode,
     count: req.count,
     first: 0, // records packed from index 0 (instanced runs at i*count + j)
@@ -1287,6 +1332,10 @@ function buildDrawCall(
     uniforms: floatStore,
     uniformBlocks,
   };
+  // Per-drawbuffer blend state (OES_draw_buffers_indexed) — consumed by the
+  // raster agent for per-output blending (see buildBlendPerDrawBuffer).
+  (dc as unknown as { blendPerDrawBuffer: unknown }).blendPerDrawBuffer = buildBlendPerDrawBuffer(ctx);
+  return dc;
 }
 
 /* ================================================================== */
@@ -1674,6 +1723,34 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
 
   if (req.count === 0 || req.instanceCount === 0) return; // nothing to do, no error
 
+  // WebGL2 (GLES 3.0 §4.2.1 + OES_draw_buffers_indexed): a draw is
+  // INVALID_OPERATION when any draw buffer with an attached buffer has NO
+  // defined fragment-shader output at its index, UNLESS all 4 channels of the
+  // draw buffer's effective color mask (per-drawbuffer entry, else the global
+  // mask) are false (CTS oes-draw-buffers-indexed.html testColorMaskDrawNoOp:
+  // colorMask(1,1,1,1) + shader writing only `validOutput` → INVALID_OPERATION;
+  // colorMask(0,0,0,0) → NO_ERROR; colorMaskiOES(invalidOutput, nonzero) →
+  // INVALID_OPERATION; those buffers NONE → NO_ERROR). WebGL1 has no
+  // multi-draw-buffer/undefined-output rule — skipped (the check also runs
+  // before vertex evaluation so the draw is a pure no-op on error).
+  if (s.version === 2) {
+    const declared = new Set<number>();
+    const outs = pm.fragment?.outputs;
+    if (outs && outs.length > 0) {
+      for (const o of outs) declared.add(o.location);
+    } else {
+      declared.add(0); // no outputs declared → location 0 is the only candidate
+    }
+    for (let i = 0; i < s.drawBuffers.length; i++) {
+      if (s.drawBuffers[i] === C1.NONE) continue;
+      if (declared.has(i)) continue;
+      const m = s.colorMaskPerDrawBuffer.get(i) ?? s.colorMask;
+      if (m[0] || m[1] || m[2] || m[3]) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+    }
+  }
   // Transform feedback capture pre-check: when the active TF's bound buffers
   // cannot hold this draw's capture (cumulative across the session), the draw
   // generates INVALID_OPERATION and captures NOTHING (GLES 3.0 §2.15.2; CTS
@@ -1979,6 +2056,21 @@ function makeLocalPack(surf: Surface, format: GLenum, type: GLenum): ((src: Arra
         const d8 = dst as Uint8Array;
         d8[d] = v & 0xff; d8[d + 1] = (v >> 8) & 0xff;
       };
+    case C2.UNSIGNED_INT_2_10_10_10_REV:
+      // RGBA packed 2/10/10/10 (R in bits 0-9, G 10-19, B 20-29, A 30-31).
+      // CTS read-pixels-from-fbo-test.html "Special case RGB10_A2" reads with
+      // this pair; raster's getPackConverter has no RGBA case for it, so the
+      // local pack must (otherwise executeReadPixels errors INVALID_OPERATION).
+      return (_src, so, dst, d) => {
+        decodeSurfaceTexel(surf, so, tmp);
+        const v = (
+          (Math.min(1023, Math.max(0, Math.round(tmp[0] * 1023)))) |
+          (Math.min(1023, Math.max(0, Math.round(tmp[1] * 1023))) << 10) |
+          (Math.min(1023, Math.max(0, Math.round(tmp[2] * 1023))) << 20) |
+          (Math.min(3, Math.max(0, Math.round(tmp[3] * 3))) << 30)
+        ) >>> 0;
+        (dst as Uint32Array)[d >> 2] = v;
+      };
     case C1.FLOAT: {
       const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
       return (_src, so, dst, d) => {
@@ -2210,6 +2302,28 @@ function clearColorIntLocal(
   const x1 = scissor ? Math.min(w, scissor.x + scissor.w) : w;
   const y1 = scissor ? Math.min(h, scissor.y + scissor.h) : h;
   const d = surf.data as unknown as { constructor: new (...a: never[]) => unknown };
+  // Packed integer storage (e.g. RGB10_A2UI: one u32 texel holding 10/10/10/2
+  // bits): per-component element writes would overwrite neighboring texels.
+  // Detect: one element per texel (element size == bytesPerPixel) with more
+  // than one component. Decode-merge-encode via the format registry instead.
+  const elBytes = (surf.data as unknown as { BYTES_PER_ELEMENT: number }).BYTES_PER_ELEMENT;
+  const packedInt = surf.info !== null && surf.info.isInteger && elBytes === surf.info.bytesPerPixel && surf.info.components > 1;
+  if (packedInt) {
+    const info = surf.info;
+    const out = new Float32Array(4);
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const off = (y * w + x) * bpp;
+        info.decode(surf.data, off, out);
+        if (mask[0]) out[0] = values[0] ?? 0;
+        if (mask[1]) out[1] = values[1] ?? 0;
+        if (mask[2]) out[2] = values[2] ?? 0;
+        if (mask[3]) out[3] = values[3] ?? 1;
+        info.encode(surf.data, off, out[0], out[1], out[2], out[3]);
+      }
+    }
+    return;
+  }
   for (let y = y0; y < y1; y++) {
     for (let x = x0; x < x1; x++) {
       const off = (y * w + x) * bpp;
