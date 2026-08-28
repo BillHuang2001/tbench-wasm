@@ -44,7 +44,15 @@
  *    floor(λ) + frac(λ) blend between d and d+1.
  *  - EXT_texture_filter_anisotropic (2D + mipmap min filter only):
  *    ρ = max(ρx,ρy) / min(maxAnisotropy, max(ρx,ρy)/min(ρx,ρy)), guarded when
- *    min(ρx,ρy) == 0 (→ max(ρx,ρy)/maxAnisotropy).
+ *    min(ρx,ρy) == 0 (→ max(ρx,ρy)/maxAnisotropy). The reduced ρ selects the
+ *    mip level(s) EXACTLY as an isotropic sample would (λ′ = log2(ρ/N) —
+ *    A/B-verified optimal), then N-tap anisotropic filtering replaces the
+ *    single bilinear tap with N equally-weighted bilinear taps along the
+ *    major footprint axis (N = pow2ceil(min(ceil(ρmax/ρmin), maxAnisotropy));
+ *    tap offsets ((i+0.5)/N − 0.5)·2^λ / size₀; same level pair + same f for
+ *    every tap under LINEAR_MIPMAP_LINEAR; explicit-LOD textureLod bypasses
+ *    AF; shadow samplers compare per tap). See sampler-aniso.ts for the full
+ *    conventions and spec citations.
  *  - Shadow samplers: compare the (quantized for fixed-point depth) reference
  *    against the depth texel with compareFunc → 0/1 per tap; LINEAR averages
  *    the per-tap results.
@@ -76,6 +84,7 @@ import {
 } from './gl-enums';
 import type { SampleCoord, SamplerState, TextureImage, TextureLevel } from './types';
 import { readTexel, writeDefault } from './sampler-raw';
+import { anisoGate, anisoTapParams, pow2ceilN, sample2DAnisoTaps } from './sampler-aniso';
 export { readTexel, texelFetch } from './sampler-raw';
 
 /* ================================================================== */
@@ -192,12 +201,6 @@ function quantizeShadowRef(ref: number, internalFormat: GLenum): number {
   return ref;
 }
 
-/** True when minFilter selects among mip levels (anisotropy requires this). */
-function isMipmapMinFilter(f: GLenum): boolean {
-  return f === NEAREST_MIPMAP_NEAREST || f === LINEAR_MIPMAP_NEAREST ||
-    f === NEAREST_MIPMAP_LINEAR || f === LINEAR_MIPMAP_LINEAR;
-}
-
 /* ================================================================== */
 /* Per-(image, state) sampling plan (loop-invariant hoist)             */
 /* ================================================================== */
@@ -272,7 +275,7 @@ const _plan: SamplePlan = { base: 0, hi: 0, single: false, oneTexel: false, posF
 function lodGtZero(img: TextureImage, state: SamplerState, coord: SampleCoord, bias: number): boolean | null {
   if (state.minLod > 0) return true;
   if (state.maxLod <= 0) return false;
-  if (state.maxAnisotropy > 1 && img.target === TEXTURE_2D && isMipmapMinFilter(state.minFilter)) return null;
+  if (anisoGate(img, state)) return null;
   const dx = coord.dx;
   const dy = coord.dy;
   let rhoX = 0;
@@ -314,7 +317,11 @@ function lodGtZero(img: TextureImage, state: SamplerState, coord: SampleCoord, b
  * Implicit LOD: ρx = max over axes of |∂coord_i/∂x|·size_i (ρy likewise),
  * ρ = max(ρx, ρy), λ = clamp(log2(ρ) + bias, minLod, maxLod). Bias is added
  * unclamped (GLES has no GL_MAX_TEXTURE_LOD_BIAS). Zero/absent derivatives →
- * ρ = 0 → λ = minLod. Anisotropy applies to 2D with a mipmap min filter.
+ * ρ = 0 → λ = minLod. Anisotropy applies to 2D with a mipmap min filter:
+ * ρ is reduced by min(maxAniso, ρ/min(ρx,ρy)) (λ′ = log2(ρ/N) per the EXT
+ * spec — A/B-verified optimal, do NOT change), and the N-tap parameters for
+ * the filter stage are recorded in anisoTapParams (see sampler-aniso.ts for
+ * the N convention and tap formula).
  */
 function computeLod(img: TextureImage, state: SamplerState, coord: SampleCoord, bias: number): number {
   const dx = coord.dx;
@@ -343,13 +350,19 @@ function computeLod(img: TextureImage, state: SamplerState, coord: SampleCoord, 
     }
   }
   let rho = rhoX > rhoY ? rhoX : rhoY;
-  if (state.maxAnisotropy > 1 && img.target === TEXTURE_2D && isMipmapMinFilter(state.minFilter)) {
+  if (anisoGate(img, state)) {
+    anisoTapParams.majorU = rhoX >= rhoY;
     if (rhoX === 0 || rhoY === 0) {
       rho = rho / state.maxAnisotropy;
+      anisoTapParams.n = rho === 0 ? 0 : pow2ceilN(state.maxAnisotropy);
     } else {
       const mn = rhoX < rhoY ? rhoX : rhoY;
-      rho = rho / Math.min(state.maxAnisotropy, rho / mn);
+      const ratio = rho / mn;
+      anisoTapParams.n = pow2ceilN(Math.min(Math.ceil(ratio), state.maxAnisotropy));
+      rho = rho / Math.min(state.maxAnisotropy, ratio);
     }
+  } else {
+    anisoTapParams.n = 0;
   }
   const b = bias;
   let lambda = Math.log2(rho) + b;
@@ -653,11 +666,14 @@ function filterCube(
  * Chooses the level(s) + per-level filter from λ and the filter state and
  * dispatches to the target-specific filter. `shadow`/`refQ` drive the
  * depth-compare path (2D, 2D_ARRAY, cube). Only multi-level images reach here
- * (plan.single is short-circuited by the sample* entry points).
+ * (plan.single is short-circuited by the sample* entry points). `aniso` is
+ * the implicit-LOD anisotropy gate (computeLod filled anisoTapParams right
+ * before); explicit-LOD callers pass false.
  */
 function sampleLevels(
   img: TextureImage, state: SamplerState, plan: SamplePlan, lambda: number,
   coord: SampleCoord, shadow: boolean, refQ: number, out: Float32Array,
+  aniso: boolean,
 ): void {
   const isInteger = img.info.isInteger;
   let filter: GLenum;
@@ -699,13 +715,18 @@ function sampleLevels(
   }
 
   const target = img.target;
+  // N-tap anisotropy: minification (λ > 0) with an active gate and a
+  // non-isotropic footprint. All taps use the SAME level pair selected above.
+  const anisoTaps = aniso && anisoTapParams.n >= 2 && lambda > 0;
   // Single-texel fast path: when only level0 is used and it is 1×1, every
   // filter/wrap maps all taps to the one texel — read it directly (identical
   // result; covers non-mip min filters with λ > 0 and _MIPMAP_NEAREST levels).
   // NOT for cube (the face is still selected by the direction, and LINEAR is
   // seamless across faces — readTexel would only read face 0) or shadow
-  // (depth compare must still run).
-  if (!shadow && level1 < 0 && target !== TEXTURE_CUBE_MAP) {
+  // (depth compare must still run), or the aniso tap loop (N taps at shifted
+  // UVs — all identical for a 1×1 level, but bypassing keeps the average
+  // exact instead of relying on N·x/N round-trips).
+  if (!shadow && !anisoTaps && level1 < 0 && target !== TEXTURE_CUBE_MAP) {
     const l0 = img.levels[level0];
     if (l0.width === 1 && l0.height === 1 && (target !== TEXTURE_3D || l0.depth === 1)) {
       const z = target === TEXTURE_2D_ARRAY ? clampLayer(coord.v[2], l0.depth) : 0;
@@ -739,6 +760,11 @@ function sampleLevels(
   } else {
     // 2D / 2D_ARRAY.
     const layer = target === TEXTURE_2D_ARRAY ? coord.v[2] : 0;
+    if (anisoTaps) {
+      sample2DAnisoTaps(filter2D, img, state, plan, filter, level0, level1, f,
+        coord.v[0], coord.v[1], layer, shadow, refQ, lambda, out);
+      return;
+    }
     if (level1 >= 0) {
       filter2D(img, state, plan, filter, level0, coord.v[0], coord.v[1], layer, shadow, refQ, _mipA);
       filter2D(img, state, plan, filter, level1, coord.v[0], coord.v[1], layer, shadow, refQ, _mipB);
@@ -761,13 +787,16 @@ function readSingleTexel(img: TextureImage, plan: SamplePlan, coord: SampleCoord
 
 /**
  * Single-level sampling (plan.single): the level is always plan.base — only
- * the mag-vs-min filter choice depends on λ (its sign, precomputed by the
- * caller). A 1×1 base level short-circuits entirely (every filter/wrap maps
- * all taps to the one texel).
+ * the mag-vs-min filter choice depends on λ (its sign). A 1×1 base level
+ * short-circuits entirely (every filter/wrap maps all taps to the one texel).
+ * `lambda` is the full λ on the anisotropy path (taps need the level-λ texel
+ * scale) and any value with the correct sign otherwise; `aniso` is the
+ * implicit-LOD gate (false for explicit LOD).
  */
 function sampleSingleLevel(
-  img: TextureImage, state: SamplerState, plan: SamplePlan, lambdaGT0: boolean,
+  img: TextureImage, state: SamplerState, plan: SamplePlan, lambda: number,
   coord: SampleCoord, shadow: boolean, refQ: number, out: Float32Array,
+  aniso: boolean,
 ): void {
   if (!shadow && plan.oneTexel) {
     readSingleTexel(img, plan, coord, out);
@@ -776,13 +805,20 @@ function sampleSingleLevel(
   const target = img.target;
   // Integer textures: NEAREST taps only (parity with sampleLevels; filter3D
   // has no isInteger guard).
-  const filter = img.info.isInteger ? NEAREST : (lambdaGT0 ? plan.posFilter : state.magFilter);
+  const filter = img.info.isInteger ? NEAREST : (lambda > 0 ? plan.posFilter : state.magFilter);
   if (target === TEXTURE_CUBE_MAP) {
     filterCube(img, state, filter, plan.base, coord.v, shadow, refQ, out);
   } else if (target === TEXTURE_3D) {
     filter3D(img, state, filter, plan.base, coord.v[0], coord.v[1], coord.v[2], out);
   } else {
     const layer = target === TEXTURE_2D_ARRAY ? coord.v[2] : 0;
+    if (aniso && anisoTapParams.n >= 2 && lambda > 0) {
+      // Minification at the single level: N taps along the major axis at
+      // plan.base (level selection is trivial — no mip blend, level1 = −1).
+      sample2DAnisoTaps(filter2D, img, state, plan, filter, plan.base, -1, 0,
+        coord.v[0], coord.v[1], layer, shadow, refQ, lambda, out);
+      return;
+    }
     filter2D(img, state, plan, filter, plan.base, coord.v[0], coord.v[1], layer, shadow, refQ, out);
   }
 }
@@ -792,22 +828,29 @@ export function sampleTextureP(
   img: TextureImage, state: SamplerState, plan: SamplePlan,
   coord: SampleCoord, bias: number, out: Float32Array,
 ): void {
+  const aniso = anisoGate(img, state);
   if (plan.single) {
     if (plan.oneTexel) {
       readSingleTexel(img, plan, coord, out);
       return;
     }
-    const gt0 = lodGtZero(img, state, coord, bias);
-    sampleSingleLevel(img, state, plan,
-      gt0 === null ? computeLod(img, state, coord, bias) > 0 : gt0,
-      coord, false, 0, out);
+    let lambda: number;
+    if (aniso) {
+      // The gate makes lodGtZero's early returns (minLod > 0 / maxLod <= 0)
+      // unsound for the tap path: the full λ AND anisoTapParams are needed.
+      lambda = computeLod(img, state, coord, bias);
+    } else {
+      const gt0 = lodGtZero(img, state, coord, bias);
+      lambda = gt0 === null ? computeLod(img, state, coord, bias) : (gt0 ? 1 : -1);
+    }
+    sampleSingleLevel(img, state, plan, lambda, coord, false, 0, out, aniso);
     return;
   }
   const lambda = computeLod(img, state, coord, bias);
-  sampleLevels(img, state, plan, lambda, coord, false, 0, out);
+  sampleLevels(img, state, plan, lambda, coord, false, 0, out, aniso);
 }
 
-/** Explicit-LOD sample with a precomputed plan (TextureEnv path). */
+/** Explicit-LOD sample with a precomputed plan (TextureEnv path). AF does NOT apply: the EXT spec defines N from the pixel-footprint derivatives, which an explicit LOD has none of (ANGLE/hardware likewise apply AF only on implicit-LOD lookups). */
 export function sampleTextureLodP(
   img: TextureImage, state: SamplerState, plan: SamplePlan,
   coord: SampleCoord, lod: number, out: Float32Array,
@@ -820,10 +863,10 @@ export function sampleTextureLodP(
       readSingleTexel(img, plan, coord, out);
       return;
     }
-    sampleSingleLevel(img, state, plan, lambda > 0, coord, false, 0, out);
+    sampleSingleLevel(img, state, plan, lambda, coord, false, 0, out, false);
     return;
   }
-  sampleLevels(img, state, plan, lambda, coord, false, 0, out);
+  sampleLevels(img, state, plan, lambda, coord, false, 0, out, false);
 }
 
 /** Shadow sample with a precomputed plan (TextureEnv path). */
@@ -832,15 +875,25 @@ export function sampleTextureShadowP(
   coord: SampleCoord, ref: number, bias: number, out: Float32Array,
 ): void {
   const refQ = quantizeShadowRef(ref, img.internalFormat);
+  const aniso = anisoGate(img, state);
   if (plan.single) {
-    const gt0 = lodGtZero(img, state, coord, bias);
-    sampleSingleLevel(img, state, plan,
-      gt0 === null ? computeLod(img, state, coord, bias) > 0 : gt0,
-      coord, true, refQ, out);
+    if (plan.oneTexel) {
+      readSingleTexel(img, plan, coord, out);
+      return;
+    }
+    let lambda: number;
+    if (aniso) {
+      // Full λ + fresh anisoTapParams (see sampleTextureP).
+      lambda = computeLod(img, state, coord, bias);
+    } else {
+      const gt0 = lodGtZero(img, state, coord, bias);
+      lambda = gt0 === null ? computeLod(img, state, coord, bias) : (gt0 ? 1 : -1);
+    }
+    sampleSingleLevel(img, state, plan, lambda, coord, true, refQ, out, aniso);
     return;
   }
   const lambda = computeLod(img, state, coord, bias);
-  sampleLevels(img, state, plan, lambda, coord, true, refQ, out);
+  sampleLevels(img, state, plan, lambda, coord, true, refQ, out, aniso);
 }
 
 /**
