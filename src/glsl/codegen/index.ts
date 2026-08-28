@@ -99,6 +99,8 @@ export interface CodegenLayout {
   attribLocations: Map<string, number>;
   /** Fragment outputs: name → location ('gl_FragColor', 'gl_FragData', user outs). */
   outputLocations: Map<string, number>;
+  /** Fragment output name → dual-source index (0/1); absent = 0 (primary). */
+  outputIndices?: Map<string, number>;
   /** Shader capability flags (ShaderInfo.uses) — `derivatives` drives dual mode. */
   uses: ShaderUses;
   /**

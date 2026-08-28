@@ -441,7 +441,7 @@ export type GlobalInfo =
     }
   | { kind: 'attrib'; location: number }
   | { kind: 'varying'; key: string }
-  | { kind: 'output'; location: number }
+  | { kind: 'output'; location: number; index: number }
   | { kind: 'builtin'; builtin: BuiltinVariable }
   | { kind: 'const'; value: number };
 
@@ -657,10 +657,15 @@ export function attribRead(type: GLSLType, location: number, declComps: number, 
   return isUintType(type) ? wrapUint(s) : s;
 }
 
-/** Fragment output access: ctx.out.color[loc][c]. */
-export function outputAccess(type: GLSLType, location: number, dyn: DynTerm | null, c: number): string {
+/**
+ * Fragment output access: ctx.out.color[loc][c] for the PRIMARY output
+ * (index 0) and ctx.out.secondary[loc][c] for the dual-source SECONDARY
+ * (index 1 — GL_EXT_blend_func_extended / layout(index=1); raster supplies
+ * the optional secondary array when the program has index-1 outputs).
+ */
+export function outputAccess(type: GLSLType, location: number, index: number, dyn: DynTerm | null, c: number): string {
   const L = dyn ? `${location} + (${dyn.temp}) * ${dyn.stride}` : String(location);
-  return `ctx.out.color[${L}][${c}]`;
+  return index === 1 ? `ctx.out.secondary[${L}][${c}]` : `ctx.out.color[${L}][${c}]`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1138,7 +1143,7 @@ export class CodegenEnv {
       }
     }
     const ol = layout.outputLocations.get(name);
-    if (ol !== undefined) return { kind: 'output', location: ol };
+    if (ol !== undefined) return { kind: 'output', location: ol, index: layout.outputIndices?.get(name) ?? 0 };
     const version = layout.version;
     const bt =
       builtinVariables(version).find((b) => b.name === name) ??
@@ -1394,8 +1399,8 @@ export function globalPathRef(env: CodegenEnv, info: GlobalInfo, type: GLSLType)
       );
     }
     case 'output': {
-      const read = (c: number): string => outputAccess(type, info.location, null, c);
-      const write = (c: number): string => outputAccess(type, info.location, null, c);
+      const read = (c: number): string => outputAccess(type, info.location, info.index, null, c);
+      const write = (c: number): string => outputAccess(type, info.location, info.index, null, c);
       return mkPath(type, true, read, write);
     }
     case 'builtin':
