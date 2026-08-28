@@ -1173,10 +1173,16 @@ export class CodegenEnv {
       case 'scalar':
         switch (type.base) {
           case 'float': {
-            if (Number.isInteger(v) && Number.isFinite(v)) return `${v}.0`;
+            const s = String(v);
+            // Integer-valued floats get a `.0` suffix so JS keeps them float —
+            // but never when the string form already carries an exponent:
+            // "1e+100.0" is a JS SyntaxError inside new Function, while
+            // "1e+100" alone is a valid JS numeric literal (CTS
+            // float_literal.vert / overflow_leak.vert use 1E100 literals).
+            if (Number.isInteger(v) && Number.isFinite(v) && !/[eE]/.test(s)) return `${s}.0`;
             if (v === Infinity) return 'Infinity';
             if (v === -Infinity) return '-Infinity';
-            return String(v);
+            return s;
           }
           case 'uint':
             return String(v >>> 0);
