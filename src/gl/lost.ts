@@ -248,6 +248,14 @@ export function initContextResources(ctx: ContextLike): void {
   }
   // The persistent default VAO (pure state function — cannot throw).
   ctx._defaultVAO = defaultVAOState(ctx._state.limits.MAX_VERTEX_ATTRIBS);
+  // The ACTIVE VAO contents must BE the default VAO object — NOT a duplicate
+  // (createDefaultState() created its own fresh VAO). App frameworks cache
+  // the default VAO's element-array-buffer binding by object identity
+  // (Babylon.js); when state.vao is a DIFFERENT object with a null EAB they
+  // skip the EAB rebind → silent INVALID_OPERATION → black frames. Aliasing
+  // also keeps pre-VAO attrib setup written into state.vao visible when the
+  // default VAO is re-bound.
+  ctx._state.vao = ctx._defaultVAO;
   // Default framebuffer (drawing buffer) — null on stub throw (callers guard).
   const w = Math.max(1, ctx._drawingBufferWidth);
   const h = Math.max(1, ctx._drawingBufferHeight);
