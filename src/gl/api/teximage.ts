@@ -1287,6 +1287,26 @@ function texSubImage2DDOM(
       return;
     }
   }
+  // SVG image with NO intrinsic dimensions (no width/height attributes on the
+  // <img> element or the SVG root): per WebGL spec "Texture Upload Width and
+  // Height" the upload size is the current value of the element's width/height
+  // properties — 0 here (see svgImageDims). When the level was previously
+  // allocated with explicit nonzero dims (callers commonly pass
+  // image.width/image.height, which Chromium reports as the CSS default used
+  // size 150 instead of the spec's 0 — crbug.com/41357911), re-allocate the
+  // level at the spec size 0×0 so the texture really is 0×0. The 2025 CTS
+  // tex-image-svg-image-no-natural-width-and-height.html relies on exactly
+  // this: a follow-up 1×1 texSubImage2D into such a texture must fail with
+  // INVALID_VALUE ("texture size should be 0x0").
+  if (dims.width === 0 && dims.height === 0 && isSvgSource(source as Record<string, unknown>)) {
+    const img = tex._image;
+    const lv = img ? img.levels[level] : undefined;
+    if (lv && (lv.width !== 0 || lv.height !== 0) && !tex._immutable) {
+      uploadTexImage(
+        ctx, tex, target, level, img!.internalFormat ?? format, 0, 0, 1, 0, format, type, null,
+      );
+    }
+  }
   uploadTexSubImage(
     ctx, tex, target, level, xoffset, yoffset, 0, dims.width, dims.height, 1, format, type,
     source as unknown as TexImageSourceArg, source,
