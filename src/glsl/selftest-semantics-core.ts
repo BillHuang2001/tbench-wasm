@@ -237,8 +237,21 @@ expectErr(
 expectErr('void main() { if (1) {} }', 100, 'VERTEX', undefined, /boolean/);
 expectErr('void main() { break; }', 100, 'VERTEX', undefined, /break/);
 expectErr('void main() { continue; }', 100, 'VERTEX', undefined, /continue/);
-expectOk('void main() { while (true) { break; } }', 100, 'VERTEX');
+// WebGL 1.0 §6.26: while loops are DISALLOWED in ESSL 1.00 (optional in
+// GLSL ES 1.00 Appendix A) — pinned here (previously expected to compile).
+expectErr('void main() { while (true) { break; } }', 100, 'VERTEX', undefined, /while/);
+expectErr('void main() { do { break; } while (true); }', 100, 'VERTEX', undefined, /do-while/);
+// ... but ESSL 3.00 (WebGL 2.0) keeps while/do-while.
+expectOk('#version 300 es\nvoid main() { while (true) { break; } }', 300, 'VERTEX');
+expectOk('#version 300 es\nvoid main() { do { break; } while (true); }', 300, 'VERTEX');
+// WebGL 1.0 §6.26: for-loop conditions must be `index op constant-expression`
+// (const RHS); a non-const local RHS fails while literal/const RHS passes.
+expectErr('void main() { int n = 3; for (int i = 0; i < n; i++) { } }', 100, 'VERTEX', undefined, /constant expression/);
+expectOk('void main() { const int n = 3; for (int i = 0; i < n; i++) { } }', 100, 'VERTEX');
+expectOk('void main() { for (int i = 0; i < 3 + 3; i++) { } }', 100, 'VERTEX');
 expectOk('void main() { for (int i = 0; i < 3; i++) { continue; } }', 100, 'VERTEX');
+// ESSL 3.00 for-conditions are unrestricted (uniform/any expression OK).
+expectOk('#version 300 es\nuniform int u_n; void main() { for (int i = 0; i < u_n; i++) { } }', 300, 'VERTEX');
 expectOk('#version 300 es\nvoid main() { switch (1) { case 1: break; default: break; } }', 300, 'VERTEX');
 expectErr('#version 300 es\nvoid main() { switch (1.0) { } }', 300, 'VERTEX', undefined, /switch/);
 expectErr('#version 300 es\nvoid main() { case 1: }', 300, 'VERTEX', undefined, /case/);

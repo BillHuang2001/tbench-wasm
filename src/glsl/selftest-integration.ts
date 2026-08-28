@@ -927,21 +927,25 @@ let uboDual: Program | null = null;
       void main() { int m = 5; int r = twice(m++); gl_Position = vec4(float(r), float(m), 0.0, 1.0); }`);
     check(pos[0] === 10 && pos[1] === 6, `twice(m++): r=10, m=6 (got ${pos[0]}, ${pos[1]})`);
   }
-  // Postfix in loop conditions (while + do-while bodies).
+  // Postfix in loop conditions (while + do-while bodies). NOTE: WebGL 1.0
+  // §6.26 disallows while/do-while in ESSL 1.00 (semantics-stmt.ts), so these
+  // run as ESSL 3.00 to keep covering the postfix-in-condition lowering.
   {
-    const pos = runVertexPos(`void main() {
-      int s = 0; int i = 0;
-      while (i++ < 4) s += i;
-      gl_Position = vec4(float(s), float(i), 0.0, 1.0);
-    }`);
+    const pos = runVertexPos(`#version 300 es
+      void main() {
+        int s = 0; int i = 0;
+        while (i++ < 4) s += i;
+        gl_Position = vec4(float(s), float(i), 0.0, 1.0);
+      }`, 300);
     check(pos[0] === 10 && pos[1] === 5, `while (i++ < 4): s=10, i=5 (got ${pos[0]}, ${pos[1]})`);
   }
   {
-    const pos = runVertexPos(`void main() {
-      int s = 0; int i = 0;
-      do { s += i; } while (i++ < 4);
-      gl_Position = vec4(float(s), float(i), 0.0, 1.0);
-    }`);
+    const pos = runVertexPos(`#version 300 es
+      void main() {
+        int s = 0; int i = 0;
+        do { s += i; } while (i++ < 4);
+        gl_Position = vec4(float(s), float(i), 0.0, 1.0);
+      }`, 300);
     check(pos[0] === 10 && pos[1] === 5, `do { s+=i; } while (i++ < 4): s=10, i=5 (got ${pos[0]}, ${pos[1]})`);
   }
   // Float postfix/prefix.

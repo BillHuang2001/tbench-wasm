@@ -11,6 +11,12 @@
  * (accepted — stage/qualifier rules are the follow-up's declaration work),
  * and empty statements.
  *
+ * WEBGL 1.0 LOOP RESTRICTIONS (WebGL 1.0 spec §6.26, GLSL ES 1.00 Appendix A):
+ * in ESSL 1.00 shaders (declared version 100) `while` and `do-while` are
+ * disallowed and `for` conditions must be of the form `index op
+ * constant-expression` (a comparison whose RHS folds to a compile-time
+ * constant). ESSL 3.00 shaders (WebGL 2.0) are unrestricted.
+ *
  * The `fn` argument carries the enclosing function's return type. Depth
  * counters live on SemContext (loopDepth / breakableDepth / switchDepth) so
  * nested functions (none in GLSL) would not interfere; they are reset per
@@ -66,6 +72,24 @@ export function analyzeStatement(s: Stmt, scope: Scope, ctx: SemContext, fn: { r
       if (s.cond !== null) {
         analyzeExpr(s.cond, inner, ctx);
         requireBool(s.cond, ctx, `'for' : condition must be a boolean expression`);
+        if (ctx.version === 100) {
+          // WebGL 1.0 §6.26: for loops must conform to the GLSL ES 1.00
+          // Appendix A structural constraints — the condition must be of the
+          // form `index op constant-expression`. Const-folding (analyzeExpr
+          // above) annotates `constValue` on the RHS when it is a literal, a
+          // const-qualified variable, or a foldable constant expression, so
+          // `i < 5 + 5` / `i < constVar` pass while `i < u_numIterations`
+          // (uniform) and `i < nonConstVar` (non-const local) fail. ESSL 3.00
+          // (WebGL 2.0) shaders are unrestricted.
+          const c = s.cond;
+          const constCond =
+            c.kind === 'binary' &&
+            (c.op === '<' || c.op === '>' || c.op === '<=' || c.op === '>=' || c.op === '==' || c.op === '!=') &&
+            c.right.constValue !== undefined;
+          if (!constCond) {
+            ctx.error(c.loc.line, `'for' : loop condition must be a comparison with a constant expression (WebGL 1.0)`);
+          }
+        }
       }
       if (s.update !== null) analyzeExpr(s.update, inner, ctx);
       analyzeStatement(s.body, inner, ctx, fn);
@@ -74,6 +98,9 @@ export function analyzeStatement(s: Stmt, scope: Scope, ctx: SemContext, fn: { r
       return;
     }
     case 'while': {
+      // WebGL 1.0 §6.26: while loops are disallowed in ESSL 1.00 (they are
+      // only OPTIONAL in GLSL ES 1.00 Appendix A). ESSL 3.00 keeps them.
+      if (ctx.version === 100) ctx.error(s.loc.line, `'while' : not supported in WebGL 1.0`);
       analyzeExpr(s.cond, scope, ctx);
       requireBool(s.cond, ctx, `'while' : condition must be a boolean expression`);
       ctx.loopDepth++;
@@ -84,6 +111,9 @@ export function analyzeStatement(s: Stmt, scope: Scope, ctx: SemContext, fn: { r
       return;
     }
     case 'do-while': {
+      // WebGL 1.0 §6.26: do-while loops are disallowed in ESSL 1.00 (only
+      // optional in GLSL ES 1.00 Appendix A). ESSL 3.00 keeps them.
+      if (ctx.version === 100) ctx.error(s.loc.line, `'do-while' : not supported in WebGL 1.0`);
       ctx.loopDepth++;
       ctx.breakableDepth++;
       analyzeStatement(s.body, scope, ctx, fn);

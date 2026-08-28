@@ -206,22 +206,33 @@ function runFragment(src: string): RunResult {
 /* 3. while + do-while                                                 */
 /* ------------------------------------------------------------------ */
 
+// NOTE: WebGL 1.0 §6.26 disallows while/do-while in ESSL 1.00 shaders
+// (semantics-stmt.ts rejects them at version 100). These codegen checks
+// therefore run as ESSL 3.00 (`#version 300 es`) — where the statements are
+// legal — so the statement-lowering path stays covered.
+
 {
   const r = runVertex(
-    `void main() { float s = 0.0; int i = 0; while (i < 4) { s = s +float(i); i++; } gl_Position.x = s; }`,
+    `#version 300 es
+     void main() { float s = 0.0; int i = 0; while (i < 4) { s = s +float(i); i++; } gl_Position.x = s; }`,
+    { version: 300 },
   );
   check(r.ctx.out.position[0] === 6, `while loop: s === 6 (got ${r.ctx.out.position[0]})`);
 }
 {
   const r = runVertex(
-    `void main() { float s = 0.0; int i = 0; do { s = s +float(i); i++; } while (i < 4); gl_Position.x = s; }`,
+    `#version 300 es
+     void main() { float s = 0.0; int i = 0; do { s = s +float(i); i++; } while (i < 4); gl_Position.x = s; }`,
+    { version: 300 },
   );
   check(r.ctx.out.position[0] === 6, `do-while loop: s === 6 (got ${r.ctx.out.position[0]})`);
 }
 {
   // do-while runs its body at least once even when the cond is false.
   const r = runVertex(
-    `void main() { float s = 0.0; int i = 0; do { s = s +1.0; } while (i > 5); gl_Position.x = s; }`,
+    `#version 300 es
+     void main() { float s = 0.0; int i = 0; do { s = s +1.0; } while (i > 5); gl_Position.x = s; }`,
+    { version: 300 },
   );
   check(r.ctx.out.position[0] === 1, `do-while runs once on false cond: s === 1 (got ${r.ctx.out.position[0]})`);
 }
