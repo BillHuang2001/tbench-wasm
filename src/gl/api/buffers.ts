@@ -94,14 +94,20 @@
  *    transform_feedback/simultaneous_binding.html, switching-objects.html,
  *    transform_feedback.html runGetBufferSubDataTest).
  *  - getIndexedParameter: UNIFORM_BUFFER_BINDING/START/SIZE (from
- *    state.uniformBuffers/uniformBufferRanges), TRANSFORM_FEEDBACK_BUFFER_BINDING/
- *    START/SIZE (from the BOUND transform feedback object's _buffers/
- *    _bufferRanges — indexed TF bindings are per-object state per GLES 3.0
- *    §6.24; null/0 when no TF object is bound — CTS runTFBufferBindingTest);
- *    invalid target → INVALID_ENUM, index OOB → INVALID_VALUE.
+ *    state.uniformBuffers/uniformBufferRanges; bindBufferBase whole-buffer
+ *    bindings report SIZE 0 — the stored-zero GLES model, bound-buffer-size
+ *    -change-test), TRANSFORM_FEEDBACK_BUFFER_BINDING/START/SIZE (from the
+ *    BOUND transform feedback object's _buffers/_bufferRanges — indexed TF
+ *    bindings are per-object state per GLES 3.0 §6.24; with NO object bound
+ *    the DEFAULT TF object's bindings apply, read from the buffers'
+ *    _tfRangeBindings global mirror — CTS runTFBufferBindingTest,
+ *    bound-buffer-size-change-test, buffer-overflow-test); invalid target →
+ *    INVALID_ENUM, index OOB → INVALID_VALUE.
  *  - getBufferSubData: reads bytes from the bound buffer into dstBuffer at
  *    dstOffset (elements); PIXEL_PACK_BUFFER target → INVALID_OPERATION;
- *    negative args → INVALID_VALUE; range overflow → INVALID_OPERATION.
+ *    negative args → INVALID_VALUE; dstOffset (or dstOffset+length) beyond the
+ *    dst view and srcByteOffset+byteLength beyond the buffer size →
+ *    INVALID_VALUE (WebGL2 spec §3.7.2; CTS get-buffer-sub-data.html).
  *  - getBufferParameter: BUFFER_SIZE / BUFFER_USAGE (+ BUFFER_MAPPED → false on
  *    WebGL2).
  *
@@ -383,6 +389,35 @@ function boundBufferForTarget(ctx: WebGLRenderingContext, target: GLenum): WebGL
     default:
       return null;
   }
+}
+
+/**
+ * The indexed TRANSFORM_FEEDBACK_BUFFER binding at `index` from the GLOBAL
+ * mirror — the DEFAULT TF object's (name 0) indexed bindings, recorded by
+ * bindBufferBase/bindBufferRange while NO TF object was bound (setTfBinding;
+ * the mirror IS the default object's state per api/webgl2.ts syncTfBuffers).
+ * getIndexedParameter(TRANSFORM_FEEDBACK_BUFFER_*) must reflect them when no
+ * TF object is bound (GLES 3.0 §6.24 — the default object's state persists;
+ * CTS bound-buffer-size-change-test / buffer-overflow-test bind TF ranges
+ * without ever binding a TF object and query them). At most one buffer holds
+ * an entry for a given index (setTfBinding clears superseded entries via
+ * clearTfBinding), so the first hit is the binding. bindBufferBase while a TF
+ * OBJECT is bound writes that object only — the mirror stays untouched, so
+ * runTFBufferBindingTest (transform_feedback.html) still sees null here after
+ * unbinding the object. Returns null when nothing is bound at the index.
+ */
+function tfMirrorBindingAtIndex(
+  ctx: WebGLRenderingContext,
+  index: number,
+): { buffer: WebGLBuffer; offset: number; size: number; base: boolean } | null {
+  for (const obj of ctx._resources.all) {
+    if (obj instanceof WebGLBuffer) {
+      for (const e of obj._tfRangeBindings) {
+        if (e.index === index) return { buffer: obj, offset: e.offset, size: e.size, base: e.base };
+      }
+    }
+  }
+  return null;
 }
 
 /**
@@ -1137,22 +1172,46 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
         case C2.UNIFORM_BUFFER_START:
           return s.uniformBufferRanges[index].offset;
         case C2.UNIFORM_BUFFER_SIZE:
+          // bindBufferBase (whole-buffer) bindings report size 0 — the GLES
+          // state model stores a zero-size whole-buffer range for base
+          // bindings; the draw-side effective range follows the buffer's data
+          // store (CTS bound-buffer-size-change-test expects 0 both before and
+          // after bufferData resizes). Explicit bindBufferRange sizes are
+          // reported as bound.
+          if (genericBindingState(ctx).baseUniformIndices.has(index)) return 0;
           return s.uniformBufferRanges[index].size;
         case C2.TRANSFORM_FEEDBACK_BUFFER_BINDING: {
           // Indexed TF buffer bindings are transform-feedback-OBJECT state
           // (GLES 3.0 §6.24): the query reflects the BOUND object; with no
-          // object bound nothing is bound → null (CTS transform_feedback.html
-          // runTFBufferBindingTest line 122).
+          // object bound the DEFAULT TF object's (name 0) bindings apply —
+          // they live in the global mirror (CTS transform_feedback.html
+          // runTFBufferBindingTest line 122 expects null for a binding made
+          // while a NAMED object was bound and then unbound — the mirror was
+          // never written there; bound-buffer-size-change-test /
+          // buffer-overflow-test bind while NO object is bound and expect the
+          // mirror).
           const tf = s.transformFeedback;
-          return tf ? (tf._buffers[index] ?? null) : null;
+          if (tf) return tf._buffers[index] ?? null;
+          return tfMirrorBindingAtIndex(ctx, index)?.buffer ?? null;
         }
         case C2.TRANSFORM_FEEDBACK_BUFFER_START: {
           const tf = s.transformFeedback;
-          return tf ? (tf._bufferRanges[index]?.offset ?? 0) : 0;
+          if (tf) return tf._bufferRanges[index]?.offset ?? 0;
+          return tfMirrorBindingAtIndex(ctx, index)?.offset ?? 0;
         }
         default: { // TRANSFORM_FEEDBACK_BUFFER_SIZE
           const tf = s.transformFeedback;
-          return tf ? (tf._bufferRanges[index]?.size ?? 0) : 0;
+          if (tf) {
+            const r = tf._bufferRanges[index];
+            // Whole-buffer (base) bindings report 0 — same stored-zero model
+            // as UNIFORM_BUFFER_SIZE (the draw-side capture capacity follows
+            // the data store via the base marker; CTS bound-buffer-size-change
+            // -test / buffer-overflow-test grade the 0/base and fixed/range
+            // values).
+            return r ? (r.base ? 0 : r.size) : 0;
+          }
+          const m = tfMirrorBindingAtIndex(ctx, index);
+          return m ? (m.base ? 0 : m.size) : 0;
         }
       }
     };
@@ -1197,13 +1256,19 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
       const elemCount = view.length ?? view.byteLength;
       const dstOff = dstOffset === undefined ? 0 : dstOffset;
       const len = length === undefined ? elemCount - dstOff : length;
-      if (dstOff + len > elemCount) {
-        ctx._errors.push(C1.INVALID_OPERATION);
+      // Per WebGL2 spec §3.7.2 (and the CTS get-buffer-sub-data.html /
+      // get-buffer-sub-data-validity.html pages): dstOffset beyond the view,
+      // dstOffset+length past the end, and srcByteOffset+byteLength past the
+      // buffer size are ALL INVALID_VALUE. An omitted length means "to the end
+      // of the view" — a dstOffset past the end makes the remaining length
+      // negative (also INVALID_VALUE, not a silent no-op).
+      if (len < 0 || dstOff + len > elemCount) {
+        ctx._errors.push(C1.INVALID_VALUE);
         return;
       }
       const byteLen = len * elemSize;
       if (srcByteOffset + byteLen > buf._size) {
-        ctx._errors.push(C1.INVALID_OPERATION);
+        ctx._errors.push(C1.INVALID_VALUE);
         return;
       }
       if (byteLen > 0 && buf._data !== null) {
