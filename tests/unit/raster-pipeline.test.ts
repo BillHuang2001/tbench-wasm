@@ -522,6 +522,73 @@ describe("blending (SRC_ALPHA / ONE_MINUS_SRC_ALPHA, FUNC_ADD)", () => {
 });
 
 /* ================================================================== */
+/* 5b. Dual-source blending (WEBGL_blend_func_extended SRC1 factors)   */
+/* ================================================================== */
+
+describe("dual-source blending (SRC1 factors, WEBGL_blend_func_extended)", () => {
+  // Both cases mirror the CTS page conformance2/extensions/
+  // webgl-blend-func-extended.html runBlendingTests: white clear, then blend
+  // with SRC1_* factors reading the fragment's SECONDARY color. The fragment
+  // writes ctx.out.secondary[0] directly — the rasterizer ALWAYS allocates
+  // the parallel secondary scratch (rasterizer.ts createRasterState) and
+  // passes it into blendColor as the src1 argument.
+  const white = prog((ctx) => { ctx.out.color[0].set([1, 1, 1, 1]); });
+
+  it("'Multiply destination by SRC1 and add SRC0' → [96,128,159,191]", () => {
+    const s = createSurface(GL.RGBA8, 4, 4);
+    const target = fb(s);
+    const v = fullScreenTriangle();
+    draw(dc({ count: 3, vertices: v, program: white, fb: target }));
+    // gl.blendFunc(gl.ONE, ext.SRC1_COLOR_WEBGL): dst = white, src =
+    // (0.25,0.375,0.5,0.625), src1 = (0.125,0.125,0.125,0.125). Linear result
+    // src + src1·dst = (0.375,0.5,0.625,0.75) → round(·255) = [96,128,159,191].
+    draw(dc({
+      count: 3, vertices: v,
+      program: prog((ctx) => {
+        ctx.out.color[0].set([0.25, 0.375, 0.5, 0.625]);
+        ctx.out.secondary![0].set([0.125, 0.125, 0.125, 0.125]);
+      }),
+      fb: target,
+      blend: {
+        enabled: true,
+        srcRGB: GL.ONE, dstRGB: GL.SRC1_COLOR,
+        srcAlpha: GL.ONE, dstAlpha: GL.SRC1_COLOR,
+        eqRGB: GL.FUNC_ADD, eqAlpha: GL.FUNC_ADD,
+        color: [0, 0, 0, 0],
+      },
+    }));
+    expectAllPx(s, [96, 128, 159, 191]);
+  });
+
+  it("'Per-channel color interpolation using SRC1' → [143,171,199,227]", () => {
+    const s = createSurface(GL.RGBA8, 4, 4);
+    const target = fb(s);
+    const v = fullScreenTriangle();
+    draw(dc({ count: 3, vertices: v, program: white, fb: target }));
+    // gl.blendFunc(ext.SRC1_COLOR_WEBGL, ext.ONE_MINUS_SRC1_COLOR_WEBGL):
+    // src = (0.125,0.125,0.125,0.125), src1 = (0.5,0.375,0.25,0.125). Linear
+    // result src1·src + (1−src1)·dst = (0.5625,0.671875,0.78125,0.890625) →
+    // round(·255) = [143,171,199,227].
+    draw(dc({
+      count: 3, vertices: v,
+      program: prog((ctx) => {
+        ctx.out.color[0].set([0.125, 0.125, 0.125, 0.125]);
+        ctx.out.secondary![0].set([0.5, 0.375, 0.25, 0.125]);
+      }),
+      fb: target,
+      blend: {
+        enabled: true,
+        srcRGB: GL.SRC1_COLOR, dstRGB: GL.ONE_MINUS_SRC1_COLOR,
+        srcAlpha: GL.SRC1_COLOR, dstAlpha: GL.ONE_MINUS_SRC1_COLOR,
+        eqRGB: GL.FUNC_ADD, eqAlpha: GL.FUNC_ADD,
+        color: [0, 0, 0, 0],
+      },
+    }));
+    expectAllPx(s, [143, 171, 199, 227]);
+  });
+});
+
+/* ================================================================== */
 /* 6. Instancing                                                      */
 /* ================================================================== */
 

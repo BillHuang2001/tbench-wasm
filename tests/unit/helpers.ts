@@ -14,6 +14,11 @@ export const GL = {
   ONE: 0x0001,
   SRC_ALPHA: 0x0302,
   ONE_MINUS_SRC_ALPHA: 0x0303,
+  // Dual-source blend factors (WEBGL_blend_func_extended, GLES 3.0 table 4.2)
+  SRC1_COLOR: 0x88f9,
+  ONE_MINUS_SRC1_COLOR: 0x88fa,
+  SRC1_ALPHA: 0x8589,
+  ONE_MINUS_SRC1_ALPHA: 0x88fb,
   FUNC_ADD: 0x8006,
   FUNC_SUBTRACT: 0x800a,
   LESS: 0x0201,
