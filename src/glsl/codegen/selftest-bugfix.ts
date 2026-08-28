@@ -32,7 +32,7 @@
 import { compileShader } from '../compiler.js';
 import { CodegenEnv } from './env.js';
 import { emitStatements } from './statements.js';
-import { installUserFunctions } from './functions.js';
+import { installUserFunctions, installUserGlobals } from './functions.js';
 import { R } from './runtime.js';
 import type { CodegenLayout, UniformSlot } from './index.js';
 import type { TranslationUnit, FunctionDefinition } from '../ast.js';
@@ -106,10 +106,13 @@ function runMain(
   // fragment.ts flips dual mode from layout.uses.derivatives — the selftest
   // drives the env directly, so mirror that here.
   if (opts.derivatives) env.dual = true;
-  installUserFunctions(r.shader.ast, env);
   if (opts.structNames) for (const s of opts.structNames) env.structNames.add(s);
+  // File-scope non-const globals first (mirror fragment.ts/vertex.ts): their
+  // scratch init lines run before main's statements.
+  const globalInit = installUserGlobals(r.shader.ast, env);
+  installUserFunctions(r.shader.ast, env);
   const stmts = emitStatements(mainFn.body.body, env);
-  const body = [...(env.temps.length ? [`var ${env.temps.join(', ')};`] : []), ...stmts].join('\n');
+  const body = [...(env.temps.length ? [`var ${env.temps.join(', ')};`] : []), ...globalInit, ...stmts].join('\n');
   const fn = new Function('ctx', 'R', body);
   const ctx: Record<string, any> = {
     discarded: false,
@@ -697,6 +700,87 @@ void main() {
     ctx.out.position[0] === 5 && ctx.out.position[1] === 6 &&
       ctx.out.position[2] === 7 && ctx.out.position[3] === 8,
     `vec4 a whole read vertex 1 (got [${ctx.out.position.join(',')}])`,
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* (e) Tricky loop conditions — `bool(V[func()][k]++)` (CTS              */
+/*     conformance2/glsl3/tricky-loop-conditions.html). Postfix ++ on a  */
+/*     scalar lvalue obtained by double-indexing a local array of        */
+/*     vectors with a FUNCTION-CALL index. The parse fix (pre-name array */
+/*     dims + postfix on indexed lvalue) and the codegen fix (scratch-   */
+/*     backed locals with an existing dyn must not dyn-spill) are both   */
+/*     exercised. The shaders mirror the CTS for-loop-condition          */
+/*     template: func() increments sideEffectCounter and returns 0 on    */
+/*     its first call, 1 afterwards; the condition must call it EXACTLY  */
+/*     once per iteration. Green output ⟺ V[0][k]==2, V[1][k]==5 and     */
+/*     sideEffectCounter==3 (the CTS passCondition, evaluated in-shader).*/
+/* ------------------------------------------------------------------ */
+
+// (e1) static inner index: V[func()][0]++
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+out vec4 color;
+int sideEffectCounter = 0;
+int func() {
+  sideEffectCounter++;
+  return sideEffectCounter > 1 ? 1 : 0;
+}
+void main() {
+  vec4[2] V;
+  V[0] = vec4(1.0);
+  V[1] = vec4(3.0);
+  for (int i = 1; bool(V[func()][0]++); ++i)
+  {
+    if (i >= 3) { break; }
+  }
+  color = (abs(V[0][0] - 2.0) < 0.01 && abs(V[1][0] - 5.0) < 0.01 && sideEffectCounter == 3) ? vec4(0, 1.0, 0, 1.0) : vec4(1.0, 0, 0, 1.0);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  const c = ctx.out.color[0];
+  check(
+    c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+    `bool(V[func()][0]++) loop: green (V[0][0]==2, V[1][0]==5, counter==3) — got [${c.join(',')}]`,
+  );
+}
+
+// (e2) dynamic inner index: V[func()][u_zero + 1]++ with u_zero = 0
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+out vec4 color;
+int sideEffectCounter = 0;
+uniform int u_zero;
+int func() {
+  sideEffectCounter++;
+  return sideEffectCounter > 1 ? 1 : 0;
+}
+void main() {
+  vec4[2] V;
+  V[0] = vec4(1.0);
+  V[1] = vec4(3.0);
+  for (int i = 1; bool(V[func()][u_zero + 1]++); ++i)
+  {
+    if (i >= 3) { break; }
+  }
+  color = (abs(V[0][1] - 2.0) < 0.01 && abs(V[1][1] - 5.0) < 0.01 && sideEffectCounter == 3) ? vec4(0, 1.0, 0, 1.0) : vec4(1.0, 0, 0, 1.0);
+}`,
+    'FRAGMENT',
+    300,
+    {
+      uniformSlots: { u_zero: { store: 'int', slot: 0, stride: 0 } },
+      intUniforms: { 0: 0 },
+    },
+  );
+  const c = ctx.out.color[0];
+  check(
+    c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+    `bool(V[func()][u_zero + 1]++) loop: green (V[0][1]==2, V[1][1]==5, counter==3) — got [${c.join(',')}]`,
   );
 }
 
