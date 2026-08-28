@@ -306,6 +306,9 @@ export interface UnaryExpr extends ExprBase {
   kind: 'unary';
   op: UnaryOp;
   operand: Expr;
+  /** True for POSTFIX `x++` / `x--` (expression result = OLD value of the
+   *  operand); absent/false = prefix (`++x`, result = NEW value). */
+  postfix?: boolean;
 }
 
 export type BinaryOp =

@@ -806,6 +806,7 @@ void main() { gl_Position = vec4(0.0); }
   lit(cond === null ? null : cond.right, 10, 'int');
   const upd = asUnary(for1.update, '++');
   id(upd === null ? null : upd.operand, 'i');
+  check(upd !== null && upd.postfix === true, 'for update is POSTFIX ++');
 
   // nested if / else-if / else
   const if1 = (for1.body as CompoundStmt).body[0] as IfStmt;
@@ -827,6 +828,7 @@ void main() { gl_Position = vec4(0.0); }
   const inc = (dow.body as CompoundStmt).body[0] as ExprStmt;
   const incU = asUnary(inc.expr, '++');
   id(incU === null ? null : incU.operand, 'x');
+  check(incU !== null && incU.postfix === true, 'do-while body ++ is POSTFIX');
   const dcond = asBin(dow.cond, '<');
   id(dcond === null ? null : dcond.left, 'x');
   lit(dcond === null ? null : dcond.right, 10, 'int');

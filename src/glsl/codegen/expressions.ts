@@ -1004,7 +1004,8 @@ function emitUnary(e: Extract<Expr, { kind: 'unary' }>, env: CodegenEnv): Value[
   const n = flatComponents(t);
   const op = e.op;
   if (op === '++' || op === '--') {
-    // GLSL ES: ++ / -- are PREFIX-only. Per-component on the lvalue.
+    // GLSL ES: prefix `++x` yields the NEW value, postfix `x++` the OLD.
+    // Both write the lvalue ±1. Per-component on the lvalue.
     const lv = emitLValue(e.operand, env);
     const delta = op === '++' ? '1' : '-1';
     const preludes = preludeLines(lv.prelude);
@@ -1012,21 +1013,43 @@ function emitUnary(e: Extract<Expr, { kind: 'unary' }>, env: CodegenEnv): Value[
     const out: Value[] = [];
     for (let c = 0; c < n; c++) {
       const target = lv.targets[c];
+      if (base === null || base === 'bool') throw new Error('codegen: cannot increment a bool');
+      const wrap = (rhs: string): string =>
+        base === 'float'
+          ? `${target} = ${rhs}`
+          : base === 'int'
+            ? `${target} = ((${rhs}) | 0)`
+            : `${target} = ((${rhs}) >>> 0)`;
       let s: string;
-      if (base === 'float') s = `(${target} = ${target} + ${delta})`;
-      else if (base === 'int') s = `(${target} = ((${target} + ${delta}) | 0))`;
-      else if (base === 'uint') s = `(${target} = ((${target} + ${delta}) >>> 0))`;
-      else throw new Error('codegen: cannot increment a bool');
+      if (e.postfix) {
+        // Postfix result = OLD value: snapshot the target BEFORE the write,
+        // then write old ± 1, then yield the snapshot:
+        // (t = target, target = t ± 1, t).
+        const t = env.allocTemp();
+        s = `(${t} = ${target}, ${wrap(`${t} + ${delta}`)}, ${t})`;
+      } else {
+        s = `(${wrap(`${target} + ${delta}`)})`;
+      }
       // Prelude (dyn-index temps / spill copy-in) runs BEFORE the write, the
       // spill copy-back AFTER it — and the expression's VALUE must be the
-      // incremented target. Semicolons are invalid inside parens, so fold
-      // copyBack as comma terms via a temp: (t = (target = target + 1), cb, t).
+      // increment result (old value for postfix, new for prefix). Semicolons
+      // are invalid inside parens, so fold copyBack as comma terms via a temp:
+      // (t = <inc expr>, cb, t).
       let v = s;
       if (post) {
         const t = env.allocTemp();
         v = `(${t} = ${s}, ${post}, ${t})`;
       }
-      out.push(preludes.length > 0 ? { v, pre: preludes } : { v });
+      const val: Value = preludes.length > 0 ? { v, pre: preludes } : { v };
+      // Dual mode, float leaf: the ±1 offset leaves the dx/dy planes
+      // untouched, so the CURRENT plane values are the derivatives of BOTH
+      // the old and the new value (missing planes = constant 0, as usual).
+      const dual = lv.dualTargets ? lv.dualTargets[c] : undefined;
+      if (env.dual && dual) {
+        val.dx = dual[0];
+        val.dy = dual[1];
+      }
+      out.push(val);
     }
     return out;
   }
