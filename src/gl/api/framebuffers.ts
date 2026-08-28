@@ -1424,6 +1424,15 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
+      // GLES3 §4.4.4: INVALID_VALUE when the width/height of the source or
+      // destination rectangle exceeds 2^31-1 (the coordinates are GLint, so the
+      // difference is exact in JS doubles). CTS
+      // blitframebuffer-size-overflow.html: sizes exactly 2^31-1 are legal.
+      if (Math.abs(srcX1 - srcX0) > 0x7fffffff || Math.abs(srcY1 - srcY0) > 0x7fffffff ||
+          Math.abs(dstX1 - dstX0) > 0x7fffffff || Math.abs(dstY1 - dstY0) > 0x7fffffff) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
       const readFbo = s.readFramebuffer;
       const drawFbo = s.drawFramebuffer;
       if (readFbo === drawFbo) {
