@@ -365,6 +365,14 @@ export interface IndexExpr extends ExprBase {
   kind: 'index';
   object: Expr;
   index: Expr;
+  /**
+   * `T[]` — ES 3.00 unsized array constructor callee (no size expression;
+   * `index` holds a placeholder literal). Only valid as a call callee;
+   * analyzeArrayConstructor derives the size from the argument count and
+   * rewrites `index` to a real literal; every other use is rejected by
+   * semantics.
+   */
+  unsized?: boolean;
 }
 
 /**

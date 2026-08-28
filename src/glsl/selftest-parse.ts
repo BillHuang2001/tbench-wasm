@@ -953,6 +953,25 @@ void main() { gl_Position = vec4(0.0); }
 }
 
 /* ------------------------------------------------------------------ */
+/* ES 3.00 unsized array constructor: float[](...)                     */
+/* ------------------------------------------------------------------ */
+
+{
+  const ast = parseOk('#version 300 es\nvoid main() {\n  vec3 v = float[](1.0, 2.0, 3.0);\n}\n', 300);
+  const st = fdef(ast.declarations[0]).body.body[0] as DeclStmt;
+  check(st.kind === 'decl-stmt', 'unsized array-ctor decl stmt');
+  const call = asCall(st.declarators[0].init);
+  check(call !== null && call.args.length === 3, 'unsized array ctor 3 args');
+  const callee = call === null ? null : asIndex(call.callee);
+  check(callee !== null && callee.unsized === true, 'unsized array ctor marker (unsized flag)');
+  id(callee === null ? null : callee.object, 'float');
+  lit(callee === null ? null : callee.index, -1, 'int');
+  // Non-identifier objects keep rejecting `[]` at parse time.
+  const errs = parseFail('#version 300 es\nvoid main() { vec3 v = vec4(1.0)[];\n}\n', 300);
+  check(errs.length > 0, '`vec4(1.0)[]` stays a parse error');
+}
+
+/* ------------------------------------------------------------------ */
 /* Statement forms: for/do-while/nested if-else/discard                */
 /* ------------------------------------------------------------------ */
 

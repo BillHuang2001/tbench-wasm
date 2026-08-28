@@ -1653,7 +1653,7 @@ function analyzeMatrixConstructor(
   e.resolvedType = t;
 }
 
-/** `T[size](...)` array constructor (ES 3.00 only). `callee` is the IndexExpr. */
+/** `T[size](...)` / `T[](...)` array constructor (ES 3.00 only). `callee` is the IndexExpr. */
 function analyzeArrayConstructor(e: CallExpr, callee: IndexExpr, scope: Scope, ctx: SemContext): void {
   if (ctx.version === 100) {
     ctx.error(e.loc.line, `'[' : array constructors require GLSL ES 3.00`);
@@ -1667,11 +1667,22 @@ function analyzeArrayConstructor(e: CallExpr, callee: IndexExpr, scope: Scope, c
     ctx.error(e.loc.line, `'${inner.name}' : cannot construct an array of this type`);
     return;
   }
-  analyzeExpr(callee.index, scope, ctx);
-  const sz = callee.index.constValue;
-  if (typeof sz !== 'number' || !Number.isInteger(sz) || sz <= 0) {
-    ctx.error(callee.index.loc.line, `'[' : array constructor size must be a constant positive integer`);
-    return;
+  let sz: number;
+  if (callee.unsized === true) {
+    // `T[](...)` — GLSL ES 3.00 §5.4.6: the size is the argument count.
+    // Rewrite the placeholder index to a real literal so downstream
+    // consumers (codegen, const folding) see an ordinary sized constructor.
+    sz = e.args.length;
+    callee.index = { kind: 'literal', value: sz, literalType: 'int', loc: callee.index.loc };
+    callee.unsized = false;
+  } else {
+    analyzeExpr(callee.index, scope, ctx);
+    const cv = callee.index.constValue;
+    if (typeof cv !== 'number' || !Number.isInteger(cv) || cv <= 0) {
+      ctx.error(callee.index.loc.line, `'[' : array constructor size must be a constant positive integer`);
+      return;
+    }
+    sz = cv;
   }
   if (e.args.length !== sz) {
     ctx.error(e.loc.line, `'${inner.name}[${sz}]' : constructor requires ${sz} argument(s)`);

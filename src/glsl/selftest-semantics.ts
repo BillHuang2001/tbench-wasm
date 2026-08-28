@@ -848,6 +848,40 @@ const a20 = errs('#version 300 es\nfloat[2][3] f() { return float[2][3](0.0); }\
 check(hasErr(a20, 2, "'[' : arrays of arrays are not allowed in function return types"), 'multi-dim return type → error line 2');
 
 /* ------------------------------------------------------------------ */
+/* ES 3.00 unsized array constructors `T[](...)`                       */
+/* ------------------------------------------------------------------ */
+
+// `T[](...)` ≡ `T[N](...)` with N = argument count (GLSL ES 3.00 §5.4.6) —
+// const-array-init.html / const-struct-from-array-as-function-parameter.html.
+const u1 = okInfo('#version 300 es\nprecision mediump float;\nconst vec4 c[2] = vec4[] (vec4(0.6), vec4(-0.6));\nout vec4 o;\nvoid main() { o = c[0] + c[1]; }', 300, 'FRAGMENT');
+check(u1 !== null, 'const global array init via unsized ctor vec4[](...)');
+const u2 = okInfo('#version 300 es\nprecision mediump float;\nconst vec4 c[2] = vec4[] (vec4(0.6), vec4(-0.6));\nconst vec4 d[2] = vec4[] (c[1], c[0]);\nout vec4 o;\nvoid main() { o = d[0] + d[1]; }', 300, 'FRAGMENT');
+check(u2 !== null, 'unsized ctor initializer reading const-array elements');
+const u3 = okInfo('#version 300 es\nstruct S { float member; };\nconst S s[2] = S[]( S(1.), S(2.));\nvoid main() { }', 300, 'VERTEX');
+check(u3 !== null, 'struct-array unsized ctor S[](...)');
+const u4 = okInfo('#version 300 es\nprecision mediump float;\nvoid main() { float a[2] = float[](1.0, 2.0); }', 300, 'FRAGMENT');
+check(u4 !== null, 'local unsized ctor float[](...)');
+// Sized-vs-unsized equivalence: the same const-array declaration works with
+// float[2](...) and float[](...) side by side.
+const u5 = okInfo('#version 300 es\nprecision mediump float;\nconst float a[2] = float[2](1.0, 2.0);\nconst float b[2] = float[](1.0, 2.0);\nout vec4 o;\nvoid main() { o = vec4(a[0], b[1], 0.0, 1.0); }', 300, 'FRAGMENT');
+check(u5 !== null, 'sized float[2](...) and unsized float[](...) const inits both accepted');
+// ES 1.00 has no array constructors at all — the unsized form fails too.
+const u6 = errs('void main() { float a[2] = float[](1.0, 2.0); gl_Position = vec4(a[0], a[1], 0.0, 1.0); }', 100, 'VERTEX');
+check(hasErr(u6, 1, "'[' : array constructors require GLSL ES 3.00"), 'ES 1.00 float[](...) → error line 1');
+// Wrong element type stays an error (per-arg convertibility).
+const u7 = errs('#version 300 es\nprecision mediump float;\nvoid main() { float a[2] = float[](1.0, vec2(2.0)); }', 300, 'FRAGMENT');
+check(hasErr(u7, 3, "cannot convert from 'vec2' to 'float'"), 'unsized ctor element type mismatch → error line 3');
+// Sized ctor arity error stays (regression).
+const u8 = errs('#version 300 es\nprecision mediump float;\nvoid main() { float a[2] = float[3](1.0, 2.0); }', 300, 'FRAGMENT');
+check(hasErr(u8, 3, "'float[3]' : constructor requires 3 argument(s)"), 'sized ctor arity error stays');
+// Bare `T[]` NOT followed by `(` is rejected (the marker never reaches codegen).
+const u9 = errs('#version 300 es\nprecision mediump float;\nout vec4 o;\nvoid main() { o = vec4[]; }', 300, 'FRAGMENT');
+check(hasErr(u9, 4, "'vec4' : type name used as a value"), 'bare T[] in expression → error line 4');
+// `a[]` on a VARIABLE is rejected by semantics (was a parse error before).
+const u10 = errs('#version 300 es\nprecision mediump float;\nout vec4 o;\nvoid main() { float a = 1.0; o = vec4(a[]); }', 300, 'FRAGMENT');
+check(hasErr(u10, 4, "'[' : cannot index a value of type 'float'"), '`a[]` on a variable → error line 4');
+
+/* ------------------------------------------------------------------ */
 /* Summary                                                             */
 /* ------------------------------------------------------------------ */
 
