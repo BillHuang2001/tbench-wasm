@@ -1,21 +1,26 @@
 /**
  * src/gl/extensions/draw-buffers-indexed.ts — OES_draw_buffers_indexed (WebGL2).
  *
- * Per-drawbuffer blend state + color masks. Storage (pinned in state.ts):
+ * Per-drawbuffer blend state + color masks + blend enable. Storage:
  *  - `state.blendPerDrawBuffer: Map<buf, {srcRGB,dstRGB,srcAlpha,dstAlpha,eqRGB,eqAlpha}>`
  *    — written by blendFunciOES/blendFuncSeparateiOES/blendEquationiOES/
  *    blendEquationSeparateiOES (entries created lazily, seeded from the base
  *    blend state).
  *  - `state.colorMaskPerDrawBuffer: Map<buf, [r,g,b,a]>` — written by
  *    colorMaskiOES.
- * The draw engine agent consumes both maps when assembling per-drawbuffer
- * state (its objective covers the DrawCall integration; the base `blend`/
- * `colorMask` remain the drawbuffer-0 default).
- *
- * enableiOES/disableiOES validate (target BLEND, index < MAX_DRAW_BUFFERS) and
- * are otherwise no-ops: the pinned State has no per-drawbuffer blend-enable
- * storage — a non-empty blendPerDrawBuffer entry is treated by the draw agent
- * as "per-drawbuffer blending active". Documented known gap (parallel agent).
+ *  - `state.blendEnablePerDrawBuffer: Map<buf, boolean>` — written by
+ *    enableiOES/disableiOES. Not declared in the pinned State type: this module
+ *    mirrors the map onto `ctx._state` (cast) so ctx._state-based consumers can
+ *    find it without importing this module.
+ * Per-buffer blend-enable model: buffer 0 always follows the global
+ * `caps.BLEND` (enableiOES/disableiOES with index 0 write the cap directly, so
+ * gl.isEnabled(gl.BLEND) and gl.enable/disable(gl.BLEND) already reflect buffer
+ * 0 — no api/state.ts changes needed); buffers i>0 use their explicit entry
+ * when present and fall back to `caps.BLEND` otherwise (see
+ * `blendEnableForDrawBuffer`). The draw engine and getIndexedParameter
+ * (api/buffers.ts, another agent) consume `state.blendPerDrawBuffer` /
+ * `state.colorMaskPerDrawBuffer` / `blendEnablePerDrawBuffer` with base-state
+ * fallback.
  *
  * Validation mirrors the WebGL2 parent methods (OES_draw_buffers_indexed is a
  * WebGL2 extension): buf < MAX_DRAW_BUFFERS → INVALID_VALUE; blend factors from
@@ -63,6 +68,26 @@ const BLEND_EQUATIONS: number[] = [
   C2.MAX,
 ];
 
+/** Per-draw-buffer blend enable (buffer i>0 overrides; buffer 0 always follows caps.BLEND). */
+const blendEnableMaps = new WeakMap<WebGLRenderingContext, Map<number, boolean>>();
+function blendEnableMap(ctx: WebGLRenderingContext): Map<number, boolean> {
+  let m = blendEnableMaps.get(ctx);
+  if (!m) {
+    m = new Map();
+    blendEnableMaps.set(ctx, m);
+    // Mirror onto ctx._state under a documented name so ctx._state-based consumers
+    // (draw engine, getIndexedParameter) can find it without importing this module.
+    (ctx._state as unknown as { blendEnablePerDrawBuffer?: Map<number, boolean> }).blendEnablePerDrawBuffer = m;
+  }
+  return m;
+}
+/** Effective blend enable for draw buffer i (buffer 0 always follows the global cap). */
+export function blendEnableForDrawBuffer(ctx: WebGLRenderingContext, buf: number): boolean {
+  const caps = ctx._state.caps.BLEND;
+  if (buf === 0) return caps;
+  return blendEnableMap(ctx).get(buf) ?? caps;
+}
+
 /** Per-drawbuffer blend entry (lazily seeded from the base blend state). */
 function blendEntry(ctx: WebGLRenderingContext, buf: number): {
   srcRGB: number; dstRGB: number; srcAlpha: number; dstAlpha: number; eqRGB: number; eqAlpha: number;
@@ -109,6 +134,9 @@ function factorOk(ctx: WebGLRenderingContext, f: number): boolean {
 
 /** OES_draw_buffers_indexed factory (WebGL2 — registry versions: [2]). */
 export function createOESDrawBuffersIndexed(ctx: WebGLRenderingContext): object {
+  // Prime the per-drawbuffer blend-enable map so ctx._state.blendEnablePerDrawBuffer
+  // exists as soon as the extension is enabled.
+  blendEnableMap(ctx);
   return buildExtension({}, {
     enableiOES: (target: number, index: number): void => {
       const gl = ctx;
@@ -117,10 +145,13 @@ export function createOESDrawBuffersIndexed(ctx: WebGLRenderingContext): object 
         gl._errors.push(C1.INVALID_ENUM);
         return;
       }
-      if (bufIndex(gl, index) < 0) return;
-      // No per-drawbuffer blend-enable storage in the pinned State — the
-      // presence of a blendPerDrawBuffer entry implies per-drawbuffer blending.
-      // (documented known gap; draw agent treats entries as active)
+      const b = bufIndex(gl, index);
+      if (b < 0) return;
+      if (b === 0) {
+        gl._state.caps.BLEND = true;
+      } else {
+        blendEnableMap(gl).set(b, true);
+      }
     },
 
     disableiOES: (target: number, index: number): void => {
@@ -130,8 +161,13 @@ export function createOESDrawBuffersIndexed(ctx: WebGLRenderingContext): object 
         gl._errors.push(C1.INVALID_ENUM);
         return;
       }
-      if (bufIndex(gl, index) < 0) return;
-      // No-op — see enableiOES.
+      const b = bufIndex(gl, index);
+      if (b < 0) return;
+      if (b === 0) {
+        gl._state.caps.BLEND = false;
+      } else {
+        blendEnableMap(gl).set(b, false);
+      }
     },
 
     blendEquationiOES: (buf: number, mode: number): void => {
