@@ -257,7 +257,8 @@ export function foldBinary(
         case '>': return a > c;
         case '<=': return a <= c;
         case '>=': return a >= c;
-        default: return a === c;
+        case '==': return a === c;
+        case '!=': return a !== c;
       }
     }
     default: {
