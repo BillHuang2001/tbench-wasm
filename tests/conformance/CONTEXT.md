@@ -61,7 +61,7 @@ Latest (bundle `ce8a79c` = wave-6/7/8/9 fixes, run 2026-08-28; both suites: 0 ti
 - 887-vs-835 count discrepancy (see above) — documented, do not "fix" the assertion to 887; the tree is the truth. If the parent's grading target stays 2,071, the runner's webgl1 suite yields 835 — reconcile via `CTS_EXPECTED_*` if the grader's tree differs.
 - Idle timeout is 60s; a legitimately slow single subtest that reports nothing for 60s will time out (same semantics as the official 20s watchdog, just more generous). Raise `--timeout` for deqp full runs if needed.
 - `success === undefined` (timeout marker) counts as a failure, mirroring js-test-pre.js truthiness semantics.
-- **JSON report `messages` array is always empty for subtest failures** (observed in baseline9/baseline4): the in-page shim collects `window.__softglCts.messages` (first 20, ≤500 chars) but they are never shipped into the result snapshot. To get per-subtest root causes for a failing page you must rerun it singly (`--filter '<path>' --workers 1`) and read the shim state in-page. Candidate harness improvement: wire `state.messages` into the snapshot.
+- **JSON report `messages` array is always empty for subtest failures** (observed in baseline9/baseline4): the in-page shim collects `window.__softglCts.messages` (first 20, ≤500 chars) but they are never shipped into the result snapshot. To get per-subtest root causes for a failing page, rerun it with `debug-page.ts <path>` (dumps shim messages + FAIL lines automatically) or singly (`--filter '<path>' --workers 1`) and read the shim state in-page. Candidate harness improvement: wire `state.messages` into the snapshot.
 
 ## Routing Table
 - `../unit/` → vitest unit tests for src modules (sibling — read-only; escalations to `./tests`)
