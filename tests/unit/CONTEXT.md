@@ -54,7 +54,7 @@ Import paths and export names below are the ACTUAL src APIs the tests compile ag
 - `state.test.ts` — GL spec defaults (caps, clear values, masks, blend/depth/cull/stencil/scissor/polygonOffset/sampleCoverage, dither, lineWidth, activeTexture, pixelStore, currentProgram, limits) + fresh-per-call independence + version-1-vs-2 differences (uniformBuffers sizing) — PASS today.
 - `present.test.ts` — NodeCanvasSurface dimensions via resize(), RGBA8 buffer size (w*h*4), present() no-op; createCanvasSurface structural factory tests (Node for non-canvas, Browser for getContext-bearing object).
 - `intercept.test.ts` — `buildInterceptScript` (renderer-present: embeds source, routes webgl/webgl2/experimental-webgl through `__createSoftwareWebGLContext`, falls through for '2d'; renderer-missing: RENDERER_NOT_FOUND stub that throws), `getRendererPath` env handling, `assertRendererExists`.
-- Not yet covered (add when APIs settle): ImageSource decoding, texture sampler (filter/wrap/LOD paths), glsl uniform blocks / UBO exec. `helpers.ts` is the home for a `makeContext()`-style harness once gl/ lands. (Blending math and raster primitive assembly are now covered end-to-end by `raster-pipeline.test.ts`.)
+- Not yet covered (add when APIs settle): ImageSource decoding, texture sampler main filter/wrap/LOD paths in sampler.ts (the AF N-tap stage IS covered by `sampler-aniso.test.ts`), glsl uniform blocks / UBO exec. `helpers.ts` is the home for a `makeContext()`-style harness once gl/ lands. (Blending math and raster primitive assembly are now covered end-to-end by `raster-pipeline.test.ts`.)
 
 ## Constraints
 - Never import the built `renderer.js` bundle; always import `src/` modules directly.
@@ -63,12 +63,23 @@ Import paths and export names below are the ACTUAL src APIs the tests compile ag
 - Never modify anything under `src/` from tests (the API Surface table is the coordination channel).
 
 ## Routing Table
-- `helpers.ts` → shared GL enum constants (incl. UNSIGNED_BYTE/FLOAT data types; raster-pipeline tests added LINES/TRIANGLES/LEQUAL/EQUAL/REPLACE/INCR_WRAP/STENCIL_INDEX8) + `expectArrayClose` (and future shared harnesses)
+- `helpers.ts` → shared GL enum constants (incl. UNSIGNED_BYTE/FLOAT data types; raster-pipeline tests added LINES/TRIANGLES/LEQUAL/EQUAL/REPLACE/INCR_WRAP/STENCIL_INDEX8; sampler-aniso tests added texture targets TEXTURE_2D/CUBE_MAP/3D/2D_ARRAY, filters NEAREST/LINEAR/mipmap 0x2700..0x2703, REPEAT/NONE) + `expectArrayClose` (and future shared harnesses)
 - `intercept.test.ts` → context-intercept harness helper tests (passes today)
 - `state.test.ts` → GL state container default tests (PASSES today)
 - `formats.test.ts` → pixel format registry + per-texel converter tests (20/20 PASS)
 - `raster.test.ts` → clip/signed-area/viewport-transform/record-layout tests (18/18 PASS)
-- `raster-pipeline.test.ts` → end-to-end `draw()` pipeline tests (11/11 PASS)
+- `raster-pipeline.test.ts` → end-to-end `draw()` pipeline tests (18/18 PASS)
+- `sampler-aniso.test.ts` → EXT_texture_filter_anisotropic N-tap filter tests (11/11 PASS)
+- `glsl.test.ts` → GLSL compiler/linker/Program model tests (18/18 PASS)
+- `math.test.ts` → vec/mat helper tests (11/11 PASS)
+- `present.test.ts` → Node canvas surface tests (5/5 PASS)
+/STENCIL_INDEX8) + `expectArrayClose` (and future shared harnesses)
+- `intercept.test.ts` → context-intercept harness helper tests (passes today)
+- `state.test.ts` → GL state container default tests (PASSES today)
+- `formats.test.ts` → pixel format registry + per-texel converter tests (20/20 PASS)
+- `raster.test.ts` → clip/signed-area/viewport-transform/record-layout tests (18/18 PASS)
+- `raster-pipeline.test.ts` → end-to-end `draw()` pipeline tests (18/18 PASS)
+- `sampler-aniso.test.ts` → EXT_texture_filter_anisotropic N-tap filter tests (11/11 PASS)
 - `glsl.test.ts` → GLSL compiler/linker/Program model tests (18/18 PASS)
 - `math.test.ts` → vec/mat helper tests (11/11 PASS)
 - `present.test.ts` → Node canvas surface tests (5/5 PASS)

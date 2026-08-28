@@ -62,6 +62,24 @@ export const GL = {
   // Data types (texImage2D / readPixels)
   UNSIGNED_BYTE: 0x1401,
   FLOAT: 0x1406,
+
+  // Texture targets
+  TEXTURE_2D: 0x0de1,
+  TEXTURE_CUBE_MAP: 0x8513,
+  TEXTURE_3D: 0x806f,
+  TEXTURE_2D_ARRAY: 0x8c1a,
+
+  // Texture filters (min/mag)
+  NEAREST: 0x2600,
+  LINEAR: 0x2601,
+  NEAREST_MIPMAP_NEAREST: 0x2700,
+  LINEAR_MIPMAP_NEAREST: 0x2701,
+  NEAREST_MIPMAP_LINEAR: 0x2702,
+  LINEAR_MIPMAP_LINEAR: 0x2703,
+
+  // Wrap modes
+  REPEAT: 0x2901,
+  NONE: 0x0000,
 } as const;
 
 /**
