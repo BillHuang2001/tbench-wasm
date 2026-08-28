@@ -52,7 +52,9 @@ import type {
   ScissorState, StencilFaceState, Surface,
 } from './types';
 import { getDepthData, getStencilData } from './surface';
-import { linearToSRGB, sRGBToLinear } from './formats';
+import {
+  linearToSRGB, readIntBits, readU32At, sRGBToLinear, writeIntBits, writeU32At,
+} from './formats';
 import type { GLenum } from './gl-enums';
 import {
   ALWAYS, CONSTANT_ALPHA, CONSTANT_COLOR, DECR, DECR_WRAP, DST_ALPHA,
@@ -69,6 +71,16 @@ import {
 interface DrawCallWithSampleCount extends DrawCall {
   sampleCountRef?: { value: number };
 }
+
+/* --- module scratch for integer-output bit reinterpretation (no per-fragment
+   allocation — hot path). `_f32[0] = v; _u32[0]` yields the float32 BIT
+   PATTERN of v (the same shape formats.ts writeCompAt uses for its float
+   branch). --- */
+const _f32 = new Float32Array(1);
+const _u32 = new Uint32Array(_f32.buffer);
+/** RGB10_A2UI packed-field layout: per component j, field shift + bit mask. */
+const _10A2_SHIFT = [22, 12, 2, 0];
+const _10A2_MASK = [0x3ff, 0x3ff, 0x3ff, 0x3];
 
 /* ================================================================== */
 /* Small spec helpers (exported for unit tests)                        */
@@ -414,6 +426,15 @@ export class FragmentOpsImpl implements FragmentOps {
     if (!src) return;
     const info = tgt.info;
     const off = (y * tgt.width + x) * info.bytesPerPixel;
+    // Integer color buffers (GLES 3.0 §4.1.7): the fragment output carries
+    // int/uint values as float32 BIT PATTERNS (glsl codegen u2f — the R32I
+    // fragment-output transport contract). Store the raw bits by
+    // bit-reinterpretation — no blending, no sRGB, no value clamp. The
+    // colorMask read-modify-write happens in bit space (writeIntColor).
+    if (info.isInteger) {
+      this.writeIntColor(tgt, off, src, this.colorMask[L]);
+      return;
+    }
     let r = src[0], g = src[1], b = src[2], a = src[3];
     const isSRGB = info.isSRGB;
     // Per-draw-buffer blend (OES_draw_buffers_indexed): when the DrawCall
@@ -423,7 +444,11 @@ export class FragmentOpsImpl implements FragmentOps {
     // buffers).
     const bEntry = this.blendPerDrawBuffer ? this.blendPerDrawBuffer[L] : undefined;
     const blendHere = bEntry ? bEntry.enabled : this.blend.enabled;
-    if (blendHere) {
+    // Blending does not apply to integer buffers (GLES 3.0 §4.1.7). The
+    // integer branch above already returned for isInteger targets — this gate
+    // is defensive (gl/ does NOT disable BLEND for integer attachments; the
+    // raster is the only place that can enforce the spec).
+    if (blendHere && !info.isInteger) {
       // Decode the destination (as-stored values; dstScratch keeps them for
       // the colorMask read-modify-write below), linearize for sRGB targets,
       // blend in linear space.
@@ -463,6 +488,46 @@ export class FragmentOpsImpl implements FragmentOps {
       if (!mask[3]) a = this.dstScratch[3];
     }
     info.encode(tgt.data, off, r, g, b, a);
+  }
+
+  /**
+   * Integer color-buffer write (integer branch of writeColor): bit-reinterpret
+   * each output component's float32 bit pattern into the target storage. Per
+   * GLES 3.0 §4.1.7 integer-conversion (wrap) semantics, signed and unsigned
+   * storage share the same bits: bpe=4 → full 32 bits, bpe=2 → low 16, bpe=1 →
+   * low 8. RGB10_A2UI (packed u32 — one texel per element, 4 components) packs
+   * per-component 10/10/10/2-bit fields from the 32-bit patterns. colorMask:
+   * masked channels keep their CURRENT STORED BITS (raw read via the
+   * formats.ts bit accessors — a value decode would lose the bit pattern).
+   */
+  private writeIntColor(
+    tgt: Surface, off: number, src: Float32Array, mask: ColorMask | undefined,
+  ): void {
+    const info = tgt.info;
+    const n = info.components;
+    const bpe = info.storage === 'u8' || info.storage === 'i8' ? 1
+      : info.storage === 'u16' || info.storage === 'i16' ? 2 : 4;
+    // Packed integer format (RGB10_A2UI — the only one): components are not
+    // contiguous bpe-wide slots (one u32 per texel, 10/10/10/2-bit fields).
+    if (info.bytesPerPixel !== n * bpe) {
+      let packed = 0;
+      for (let j = 0; j < 4; j++) {
+        _f32[0] = src[j];
+        let bits = _u32[0] & _10A2_MASK[j];
+        if (mask && !mask[j]) {
+          bits = (readU32At(tgt.data, off) >> _10A2_SHIFT[j]) & _10A2_MASK[j];
+        }
+        packed |= bits << _10A2_SHIFT[j];
+      }
+      writeU32At(tgt.data, off, packed >>> 0);
+      return;
+    }
+    for (let j = 0; j < n; j++) {
+      _f32[0] = src[j];
+      let bits = _u32[0];
+      if (mask && !mask[j]) bits = readIntBits(tgt.data, off + j * bpe, bpe);
+      writeIntBits(tgt.data, off + j * bpe, bpe, bits);
+    }
   }
 }
 

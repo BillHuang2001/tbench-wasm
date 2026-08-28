@@ -210,6 +210,27 @@ function writeU8At(data: ArrayBufferView, off: number, v: number): void {
   d[i] = (d[i] & ~(0xff << shift)) | ((v & 0xff) << shift);
 }
 
+/**
+ * Integer texel component access by storage width (GLES 3.0 §4.1.7
+ * integer-conversion wrap semantics: signed and unsigned storage share the
+ * same bits — only the read interpretation differs). `writeIntBits` stores
+ * the low `8·bpe` bits of a 32-bit pattern (bpe=4 → full 32 bits, bpe=2 →
+ * low 16, bpe=1 → low 8); `readIntBits` returns the raw stored bits as an
+ * unsigned number. Used by the fragment SHADER-OUTPUT path (raster
+ * writeColor) to bit-reinterpret int/uint outputs into integer surfaces —
+ * NOT the value-based `encode()` (which the clear and blit paths keep using).
+ */
+export function writeIntBits(data: ArrayBufferView, off: number, bpe: number, bits: number): void {
+  if (bpe === 1) writeU8At(data, off, bits);
+  else if (bpe === 2) writeU16At(data, off, bits & 0xffff);
+  else writeU32At(data, off, bits >>> 0);
+}
+export function readIntBits(data: ArrayBufferView, off: number, bpe: number): number {
+  if (bpe === 1) return readU8At(data, off) & 0xff;
+  if (bpe === 2) return readU16At(data, off) & 0xffff;
+  return readU32At(data, off);
+}
+
 /** Standard decode expansion: (c0..cN-1), missing g/b → 0, missing a → 1. */
 function stdExp(n: number): number[] {
   const exp = [0, 1, 2, 3].slice(0, n);
