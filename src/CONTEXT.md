@@ -92,6 +92,7 @@ raster/ does: primitive assembly (strip/fan/loop), homogeneous clipping (all 6 c
 - `failIfMajorPerformanceCaveat: true` — decide behavior per CTS `context-attributes.html` expectations (software implementations may return null; check the test).
 - Some CTS WebGL1 tests are gated `--min-version 2.0` in the list (suite-version gating) — they ARE part of the 887 and must run with `?webglVersion=1`.
 - deqp suite (885 pages) is optional; each page has millions of subtests (one has 33M reportResults calls) — never route results through the DOM; count in-process.
+- **Committed `renderer.js` may lag HEAD src/**: the bundle was last rebuilt at commit 32751d0; later merged branches (e.g. 229ba99 gl/draw.ts drawBuffers/blend/clear/readPixels changes, T1-A456 glsl fixes) are in src/ but NOT in the committed bundle (md5 d950a9cf855c5d3712ca7bb4ca5d7648). Tests that load `./renderer.js` exercise the 32751d0 snapshot, not HEAD src/. If a fix lands in src/ without a rebuild, rebuild via `scripts/build.mjs` (or verify with `git log 32751d0..HEAD -- src`). Line primitives are unaffected: `src/raster/lines.ts`/`rasterizer.ts`/`clip.ts` are unchanged since before the build.
 
 ## Routing Table
 - `util/` → math (matrices/vectors for glsl codegen support and raster), typed-array helpers, small utilities, logging (debug hooks)
