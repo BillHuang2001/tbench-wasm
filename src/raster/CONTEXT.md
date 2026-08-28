@@ -45,7 +45,7 @@ Pure-JS software rasterization for WebGL 1.0/2.0 (no GPU, zero deps, no per-frag
 - **Lines**: diamond-exit rule for width 1 (critical for three.js wireframe screenshots vs GPU references); width > 1 approximated as quads (must not crash).
 - **Points**: squares; size clamped to ALIASED_POINT_SIZE_RANGE at rasterization; pointCoord = (pixelCenter − (center − s/2))/s; half-open coverage so a size-1 point at an integer center still covers its pixel.
 - **Unwritten fragment outputs** treated as (0,0,0,1) (spec leaves undefined; ANGLE-compatible choice).
-- **Texture LOD**: λ = log₂(max ρx, ρy), ρx = max(|∂u/∂x|·w, |∂v/∂x|·h) (per-axis texel footprint); clamp to [minLod, maxLod] + bias; mip filter selects level(s). Anisotropy: ρ_aniso = max(ρx,ρy)/min(aniso, max(ρx,ρy)/min(ρx,ρy)). Incomplete textures → (0,0,0,1). Cube maps seamless.
+- **Texture LOD**: λ = log₂(max ρx, ρy), ρx = max(|∂u/∂x|·w, |∂v/∂x|·h) (per-axis texel footprint); clamp to [minLod, maxLod] + bias; mip filter selects level(s). Anisotropy: ρ_aniso = max(ρx,ρy)/min(aniso, max(ρx,ρy)/min(ρx,ρy)). Incomplete textures → (0,0,0,1). Cube maps seamless. **Cube LOD uses face-mapped (s,t) derivatives via the shared face-selection helper (`faceMap`/`cubeRho`) — magnitude-invariant; matches deqp's `computeCubeLodBoundsFromDerivates` (chain rule through |ma| incl. the |∂r_m/∂x| correction term).**
 - **formats decode/encode take an `out` param** (deviation from the illustrative `→ [r,g,b,a]` in contract §3 — required by the no-allocation rule). Decode is a correctness path only; the sampler reads raw typed arrays with format-class fast paths.
 
 ## Known Issues / Gotchas
