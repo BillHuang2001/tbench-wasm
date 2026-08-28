@@ -1530,6 +1530,19 @@ export function uploadTexSubImage(
   updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
 }
 
+/** Allocate one ETC2/EAC immutable level record (GLES3 Table 3.19): views
+ *  sized to the compressed block grid — ceil(w/4) × ceil(h/4) blocks of `bpb`
+ *  bytes each — per face (cube, all 6) or per layer (3D/2D_ARRAY, data[z]).
+ *  Storage is OPAQUE (nothing samples it; the raster has no compressed
+ *  decoder) — the views exist so completeness + draw paths stay well-formed. */
+function allocCompressedLevel(w: number, h: number, d: number, isCube: boolean, bpb: number): TextureLevel {
+  const bytes = Math.ceil(w / 4) * Math.ceil(h / 4) * bpb;
+  const views: ArrayBufferView[] = [];
+  const n = isCube ? 6 : d;
+  for (let i = 0; i < n; i++) views.push(new Uint8Array(bytes));
+  return { width: w, height: h, depth: isCube ? 6 : d, data: views };
+}
+
 /** texStorage2D/3D: allocate immutable mip chain. */
 export function allocateImmutableStorage(
   ctx: WebGLRenderingContext,
@@ -1543,8 +1556,10 @@ export function allocateImmutableStorage(
 ): void {
   void ctx;
   if (texture._immutable) return;
-  const spec = resolveStorageSpec(internalformat);
-  if (!spec) return;
+  const bpb = ETC2_BYTES_PER_BLOCK[internalformat];
+  const isCompressed = bpb !== undefined;
+  const spec = isCompressed ? null : resolveStorageSpec(internalformat);
+  if (!isCompressed && !spec) return;
   const img = ensureImage(texture, target);
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
   img.levels = [];
@@ -1552,7 +1567,9 @@ export function allocateImmutableStorage(
   let h = height;
   let d = depth;
   for (let l = 0; l < levels; l++) {
-    img.levels[l] = allocLevel(spec, w, h, d, isCube);
+    img.levels[l] = isCompressed
+      ? allocCompressedLevel(w, h, d, isCube, bpb as number)
+      : allocLevel(spec as FormatSpec, w, h, d, isCube);
     w = Math.max(1, w >> 1);
     h = Math.max(1, h >> 1);
     // The mip pyramid halves depth only for TEXTURE_3D; TEXTURE_2D_ARRAY
@@ -1561,10 +1578,10 @@ export function allocateImmutableStorage(
   }
   texture._immutable = true;
   texture._internalFormat = internalformat;
-  texture._compressed = false;
+  texture._compressed = isCompressed;
   img.immutable = true;
   img.internalFormat = internalformat;
-  img.info = toPixelFormatInfo(spec);
+  img.info = isCompressed ? PLACEHOLDER_INFO : toPixelFormatInfo(spec as FormatSpec);
   img.target = canonTarget(target);
   img.width = width;
   img.height = height;
@@ -1719,13 +1736,17 @@ export function copyTexSubImage(
 }
 
 /**
- * ETC2/EAC formats (WebGL2 core; GLES3 Table 3.19) → bytes per 4×4 block.
- * These are the ONLY compressed formats the renderer accepts (stored raw —
- * the raster has no compressed sampler, and no graded CTS page samples a
- * compressed texture; the sole exercise is views-with-offsets' error +
- * storage semantics). All other compressed formats stay INVALID_ENUM (api).
+ * Accepted compressed formats → bytes per 4×4 block (the api layer's single
+ * source of truth for compressed-format validation). ETC2/EAC (WebGL2 core;
+ * GLES3 Table 3.19) plus COMPRESSED_RGB_ETC1_WEBGL (WEBGL_compressed_texture_etc1,
+ * 2D-only; its extension spec makes sub-image updates immutable →
+ * INVALID_OPERATION at the api layer). Stored raw — the raster has no
+ * compressed sampler, and no graded CTS page samples a compressed texture;
+ * the sole exercise is error + storage semantics. All other compressed
+ * formats stay INVALID_ENUM (api).
  */
 export const ETC2_BYTES_PER_BLOCK: Readonly<Record<number, number>> = {
+  [CExt.COMPRESSED_RGB_ETC1_WEBGL]: 8,
   [CExt.COMPRESSED_R11_EAC]: 8,
   [CExt.COMPRESSED_SIGNED_R11_EAC]: 8,
   [CExt.COMPRESSED_RG11_EAC]: 16,
@@ -1738,7 +1759,7 @@ export const ETC2_BYTES_PER_BLOCK: Readonly<Record<number, number>> = {
   [CExt.COMPRESSED_SRGB8_ALPHA8_ETC2_EAC]: 16,
 };
 
-/** Byte count of one ETC2 image (width/height are multiples of 4 — api-enforced). */
+/** Byte count of one ETC1/ETC2 compressed image (width/height are multiples of 4 — api-enforced). */
 export function etc2ImageBytes(fmt: number, width: number, height: number): number {
   const bpb = ETC2_BYTES_PER_BLOCK[fmt];
   if (!bpb) return 0;
