@@ -962,6 +962,34 @@ export function emitLValue(e: Expr, env: CodegenEnv): LValue {
   };
 }
 
+/**
+ * Dedupe SHARED pre arrays by array identity across components. A
+ * multi-component user-call result carries ONE `[iife]` pre array on EVERY
+ * component (functions.ts) — consumers that fold each component's pre inline
+ * (materialize, binary/unary/comma/ctor paths) would re-run the callee once
+ * per component. Each DISTINCT pre array is kept on the FIRST component
+ * carrying it only; later components drop it (their v/dx/dy strings reference
+ * the temps the first component's pre sets — emission order is 0..n-1, so the
+ * first component's fold always runs first). Values with no pre or with
+ * per-component-unique pres pass through unchanged. SAFE ONLY for consumers
+ * that use each component exactly once (ctor/unary/comma operands) — the
+ * caller must guarantee this.
+ */
+export function dedupeSharedPre(vals: Value[]): Value[] {
+  const seen = new Set<string[]>();
+  const out: Value[] = [];
+  for (const v of vals) {
+    const p = v.pre;
+    if (p && p.length > 0 && seen.has(p)) {
+      out.push({ ...v, pre: undefined });
+      continue;
+    }
+    if (p && p.length > 0) seen.add(p);
+    out.push(v);
+  }
+  return out;
+}
+
 /** Split an LValue.prelude ('; '-joined statements, trailing ';') into
  *  individual statement strings (trailing ';' stripped) — emit as Value.pre
  *  so the statement/expression emitters run them BEFORE the value. */
@@ -1159,7 +1187,13 @@ function emitUnary(e: Extract<Expr, { kind: 'unary' }>, env: CodegenEnv): Value[
     }
     return out;
   }
-  const vals = emitExpr(e.operand, env);
+  // BUG (shared-pre re-run): dedupe the operand's pre arrays by identity — a
+  // multi-component call result carries ONE [iife] on every component; the
+  // per-component fold below would re-run the callee once per component
+  // (`vec2 v = -f();` ran f twice). Only the first component keeps the shared
+  // pre (folded inline into its v / attached for dual-mode consumers); later
+  // components read the call's retTemps directly.
+  const vals = dedupeSharedPre(emitExpr(e.operand, env));
   return vals.map((v) => {
     const x = v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v;
     switch (op) {
@@ -2118,7 +2152,10 @@ function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Va
 function emitComma(e: Extract<Expr, { kind: 'comma' }>, env: CodegenEnv): Value[] {
   const n = e.exprs.length;
   if (n === 0) throw new Error('codegen: empty comma expression');
-  const last = emitExpr(e.exprs[n - 1], env);
+  // BUG (shared-pre re-run): dedupe the LAST operand's pre arrays by identity
+  // — its components BECOME the comma result, and folding a shared [iife] per
+  // component (below) would re-run the callee once per component.
+  const last = dedupeSharedPre(emitExpr(e.exprs[n - 1], env));
   const pre: string[] = [];
   for (let i = 0; i < n - 1; i++) {
     // BUG (expression-list-in-declarator-initializer): emit EVERY flat
@@ -2127,7 +2164,10 @@ function emitComma(e: Extract<Expr, { kind: 'comma' }>, env: CodegenEnv): Value[
     // b.y; taking only [0] left b.y unassigned → the final value read NaN).
     // The intermediate result is discarded, so each component's pres fold
     // inline and the whole sequence lands in one temp as a comma term.
-    const vals = emitExpr(e.exprs[i], env);
+    // BUG (shared-pre re-run): the dedupe keeps a shared pre array (a
+    // multi-component call result's ONE [iife]) on the FIRST component only —
+    // folding it per component ran the callee n times.
+    const vals = dedupeSharedPre(emitExpr(e.exprs[i], env));
     const t = env.allocTemp();
     const terms: string[] = [];
     for (const v of vals) {
@@ -2136,14 +2176,40 @@ function emitComma(e: Extract<Expr, { kind: 'comma' }>, env: CodegenEnv): Value[
     pre.push(`${t} = (${terms.join(', ')})`);
   }
   if (pre.length === 0) return last;
+  if (env.dual) {
+    // ONE shared pre array (the intermediate terms + the last expr's deduped
+    // pre) attached to ONLY component 0 — statement emitters dedupe by array
+    // identity (run once), and expression-context consumers fold each
+    // component's pre INLINE in 0..n-1 order, so comp0's fold runs the
+    // intermediates + the last expr's IIFE first and later components read
+    // the temps it sets. A shared array on EVERY component would re-run the
+    // intermediate side effects per component in expression contexts (same
+    // comp0-only convention as emitArith's sharedPre / emitTernary's hoist).
+    const shared: string[] = [...pre];
+    const seen = new Set<string[]>();
+    for (const v of last) {
+      if (v.pre && v.pre.length > 0 && !seen.has(v.pre)) {
+        seen.add(v.pre);
+        shared.push(...v.pre);
+      }
+    }
+    const arr = shared.length > 0 ? shared : undefined;
+    return last.map((v, c) => {
+      const out: Value = { v: `(${v.v})`, dx: v.dx, dy: v.dy };
+      if (c === 0 && arr) out.pre = arr;
+      return out;
+    });
+  }
+  // Non-dual: the prelude is embedded in the v string of component 0 (its
+  // evaluation runs the intermediate effects and sets the last expr's
+  // retTemps; later components read the temps — 0..n-1 emission order
+  // guarantees the first component's v ran first). Any DISTINCT pre still on
+  // later components (dedupeSharedPre above kept only shared arrays on comp0)
+  // folds inline per component.
   const prelude = `(${pre.join(', ')}, `;
-  // Dual mode: the comma's value is the LAST expr — propagate its duals.
-  // The prelude terms + the last expr's pre attach to the Value (embedding
-  // the prelude in the v string would strand side effects when only dx/dy
-  // are consumed).
-  return last.map((v) => {
-    if (env.dual) return { v: `(${v.v})`, dx: v.dx, dy: v.dy, pre: [...pre, ...(v.pre ?? [])] };
-    const s = `${prelude}${v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v})`;
+  return last.map((v, c) => {
+    const x = v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v;
+    const s = c === 0 ? `${prelude}${x})` : `(${x})`;
     return { v: s };
   });
 }
