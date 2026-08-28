@@ -291,12 +291,15 @@ function presentIfDefault(ctx: WebGLRenderingContext): void {
  * setImmediate → microtask → setTimeout (same-task draw→readPixels sequences
  * survive). A canvas NOT connected to the document is never composited, so
  * preserve:false must NOT clear it (CTS buffer-offscreen-test's detached gl2
- * canvas keeps its content); OffscreenCanvas has no isConnected (undefined) →
- * still clears (its control canvas composites).
+ * canvas keeps its content). OffscreenCanvas has no isConnected member
+ * (undefined) and its content is consumed by the page (texImage2D sources,
+ * transferToImageBitmap) rather than composited — treat it as detached too,
+ * otherwise the frame-boundary clear wipes source canvases to opaque black
+ * (CTS webgl_canvas/tex-2d-rgba-rgba-unsigned_byte.html alpha:false subtests).
  */
 function schedulePreserveClear(ctx: WebGLRenderingContext): void {
   const canvas = ctx._canvas as { isConnected?: boolean };
-  if (canvas.isConnected === false) return;
+  if (canvas.isConnected === false || canvas.isConnected === undefined) return;
   const sc = getScratch(ctx);
   if (sc.preserveClearPending) return;
   sc.preserveClearPending = true;
@@ -969,6 +972,52 @@ function buildTextureEnv(
   return { images, samplerStates, bindings };
 }
 
+/**
+ * WebGL texture feedback-loop check: true when a COMPLETE texture attached to
+ * the bound DRAW framebuffer is also bound to a sampler unit referenced by the
+ * program's sampler uniforms (unit resolution mirrors buildTextureEnv). Per
+ * the WebGL spec such a draw is a no-op + INVALID_OPERATION regardless of the
+ * drawBuffers settings (even all-NONE — CTS
+ * rendering/rendering-sampling-feedback-loop.html); INCOMPLETE attached
+ * textures are ignored (sampling returns (0,0,0,1) — the same page's
+ * "incomplete texture" case). Only units the program actually samples matter
+ * (a texture bound to an inactive unit is fine — CTS feedback-loop.html).
+ */
+function textureFeedbackLoop(ctx: WebGLRenderingContext, pm: ProgramModel): boolean {
+  const s = ctx._state;
+  const fbo = s.drawFramebuffer;
+  if (!fbo || fbo._attachments.size === 0) return false;
+  const numUnits = s.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS;
+  const intStore = (pm as unknown as { intStore?: Int32Array | null }).intStore;
+  const uniforms = pm.uniforms ?? [];
+  if (!intStore) return false;
+  for (const u of uniforms) {
+    if (!u.sampler) continue;
+    // Sampler arrays: elements packed contiguously at intStore[u.location + e]
+    // (same convention as buildTextureEnv).
+    const size = u.size ?? 1;
+    for (let e = 0; e < size; e++) {
+      const unit = intStore[u.location + e] ?? 0;
+      if (unit < 0 || unit >= numUnits) continue;
+      const key = samplerTargetKey(u.type);
+      const unitState = s.textureUnits[unit];
+      const tex = unitState[key] as unknown as WebGLTexture | null;
+      if (!tex || !tex._image) continue;
+      // Completeness at draw time (MIN_FILTER/level chain — same recompute as
+      // buildTextureEnv; cheap per draw).
+      updateCompleteness(tex, ctx._version);
+      if (!tex._image.complete) continue;
+      // The sampled texture is complete: a feedback loop exists iff the SAME
+      // texture object is attached to the bound draw framebuffer (any
+      // attachment point in WebGL1 — CTS feedback-loop.html).
+      for (const att of fbo._attachments.values()) {
+        if (att.type === 'texture' && att.texture === tex) return true;
+      }
+    }
+  }
+  return false;
+}
+
 /** Build the per-output-location color masks + draw-buffer → attachment map. */
 function buildOutputMaps(
   ctx: WebGLRenderingContext,
@@ -1213,15 +1262,25 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
     const eb = vao.elementArrayBuffer;
     const t = req.indexType!;
     const ts = t === C1.UNSIGNED_BYTE ? 1 : t === C1.UNSIGNED_SHORT ? 2 : 4;
-    if (!eb || !eb._data || req.firstOrOffset % ts !== 0 || req.firstOrOffset + req.count * ts > eb._size) {
+    if (!eb) {
       pushError(ctx, C1.INVALID_OPERATION);
       return;
     }
-    indices = t === C1.UNSIGNED_BYTE
-      ? new Uint8Array(eb._data, req.firstOrOffset, req.count)
-      : t === C1.UNSIGNED_SHORT
-        ? new Uint16Array(eb._data, req.firstOrOffset, req.count)
-        : new Uint32Array(eb._data, req.firstOrOffset, req.count);
+    // count=0: no elements are read — an unsized element buffer or an offset
+    // past the end is NOT an error, only a missing element buffer is (CTS
+    // draw-elements-out-of-bounds.html expects NO_ERROR for count=0).
+    if (req.count > 0 && (!eb._data || req.firstOrOffset % ts !== 0 || req.firstOrOffset + req.count * ts > eb._size)) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return;
+    }
+    if (req.count > 0) {
+      // eb._data is non-null here (count > 0 passed the guard above).
+      indices = t === C1.UNSIGNED_BYTE
+        ? new Uint8Array(eb._data!, req.firstOrOffset, req.count)
+        : t === C1.UNSIGNED_SHORT
+          ? new Uint16Array(eb._data!, req.firstOrOffset, req.count)
+          : new Uint32Array(eb._data!, req.firstOrOffset, req.count);
+    }
   }
 
   const tf = s.transformFeedback;
@@ -1245,6 +1304,16 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
   const fb = resolveDrawTarget(ctx);
   if (!fb) {
     pushError(ctx, C1.INVALID_FRAMEBUFFER_OPERATION);
+    return;
+  }
+
+  // Texture feedback-loop detection: drawing while a COMPLETE texture attached
+  // to the bound draw framebuffer is also sampled by the program is a no-op +
+  // INVALID_OPERATION (spec; CTS renderbuffers/feedback-loop.html +
+  // rendering/rendering-sampling-feedback-loop.html). Runs here so it covers
+  // arrays/elements/instanced/multi-draw; aborts before vertex evaluation.
+  if (textureFeedbackLoop(ctx, pm)) {
+    pushError(ctx, C1.INVALID_OPERATION);
     return;
   }
 
@@ -1568,6 +1637,12 @@ export function executeReadPixels(
 ): void {
   const s = ctx._state;
   if (width === 0 || height === 0) return;
+  // A page-driven canvas.width/height change with no intervening draw/clear
+  // leaves _defaultFB stale (handleCanvasResize reallocates + clears); sync it
+  // BEFORE resolving the read surface — every other pipeline entry
+  // (draw/clear/blit/clearBuffer) does the same (CTS
+  // renderbuffer*-initialization.html read back the pre-resize buffer).
+  ensureCanvasSize(ctx);
   const surf = resolveReadColor(ctx);
   if (!surf) {
     pushError(ctx, C1.INVALID_OPERATION);
@@ -1970,7 +2045,15 @@ export function validateDrawElements(
     if (count > range[1] - range[0] + 1) { pushError(ctx, C1.INVALID_OPERATION); return null; }
   }
   const eb = s.vao.elementArrayBuffer;
-  if (!eb || !eb._data || offset + count * ts > eb._size) {
+  if (!eb) {
+    pushError(ctx, C1.INVALID_OPERATION);
+    return null;
+  }
+  // count=0: no elements are read — an unsized element buffer or an offset
+  // past the end is NOT an error (CTS draw-elements-out-of-bounds.html
+  // expects NO_ERROR for count=0 on a fresh/empty buffer and for count=0 with
+  // an offset past the end).
+  if (count > 0 && (!eb._data || offset + count * ts > eb._size)) {
     pushError(ctx, C1.INVALID_OPERATION);
     return null;
   }
