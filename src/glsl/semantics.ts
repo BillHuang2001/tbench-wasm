@@ -932,6 +932,23 @@ function detectRecursion(ctx: SemContext): void {
 /* ------------------------------------------------------------------ */
 
 /**
+ * Builtin variables the standalone `invariant <name>;` statement may name
+ * (GLSL ES 1.00 §4.6.1): vertex outputs gl_Position/gl_PointSize, fragment
+ * built-in varyings gl_FragCoord/gl_PointCoord, and fragment outputs
+ * gl_FragColor/gl_FragData (CTS fragcolor-fragdata-invariant.html declares
+ * the latter two invariant). Every other builtin variable (gl_FrontFacing,
+ * gl_FragDepthEXT, gl_VertexID, gl_InstanceID, ...) is a compile error.
+ */
+const INVARIANT_BUILTIN_ALLOWLIST = new Set([
+  'gl_Position',
+  'gl_PointSize',
+  'gl_FragCoord',
+  'gl_PointCoord',
+  'gl_FragColor',
+  'gl_FragData',
+]);
+
+/**
  * Run the CORE semantic analysis over a parsed shader: register builtins,
  * pre-pass all global declarations (structs, variables, function signatures,
  * interface blocks), analyze every function body, and detect recursion.
@@ -971,8 +988,25 @@ export function analyzeProgram(ast: TranslationUnit, ctx: SemContext): void {
         // Default precision statements take effect from their point onward.
         ctx.defaultPrecisions.set(d.base, d.precision);
         break;
+      case 'invariant-decl': {
+        // GLSL ES 1.00 §4.6.1 / 3.00 §4.6: the standalone `invariant <name>;`
+        // statement must FOLLOW the declaration of the named variable (CTS
+        // shaders-with-invariance cases 7/8 — `invariant v_varying;` before
+        // `varying vec4 v_varying;` must fail compilation), and may name only
+        // the invariant-capable builtin variables (cases 9-14 pass; case 16
+        // `invariant gl_FrontFacing;` must fail). Builtins are pre-registered
+        // in the global scope before this pre-pass, so "declared earlier" is
+        // exactly "found in the global scope here".
+        const sym = global.lookup(d.name);
+        if (sym === undefined) {
+          ctx.error(d.loc.line, `'${d.name}' : invariant declaration must follow the variable declaration`);
+        } else if (sym.kind === 'builtin-var' && !INVARIANT_BUILTIN_ALLOWLIST.has(d.name)) {
+          ctx.error(d.loc.line, `'${d.name}' : invariant cannot be applied to this built-in variable`);
+        }
+        break;
+      }
       default:
-        break; // extension-decl / invariant-decl: no scope effect
+        break; // extension-decl: no scope effect
     }
   }
 

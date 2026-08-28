@@ -26,6 +26,10 @@
  *    paths) incl. the #extension-in-source + opts.extensions contract;
  *  - version rules (#version 300 es in a 100 context, uint in 100,
  *    attribute/varying keywords in 300);
+ *  - standalone `invariant <name>;` rules (GLSL ES 1.00 §4.6.1: must FOLLOW
+ *    the variable's declaration; only the invariant-capable builtins
+ *    gl_Position/gl_PointSize/gl_FragCoord/gl_PointCoord/gl_FragColor/
+ *    gl_FragData may be named — gl_FrontFacing and unknown names are errors);
  *  - compileShader result shape (error lines, infoLog '', extensions set,
  *    version/type) and the direct analyze() entry.
  */
@@ -618,6 +622,65 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   check(m6.length > 0, 'radians(bool): neither user overload nor builtin matches → error');
   // Fragment variant of the ogles CorrectBuiltInOveride pattern.
   okInfo('precision mediump float;\nint radians(int x) { return x; }\nvoid main() { int f = 45; f = radians(f); gl_FragColor = vec4(1.0); }', 100, 'FRAGMENT');
+}
+
+/* ------------------------------------------------------------------ */
+/* 14. Standalone `invariant <name>;` declarations                     */
+/* ------------------------------------------------------------------ */
+
+{
+  // GLSL ES 1.00 §4.6.1 / 3.00 §4.6: the short-form `invariant <name>;`
+  // statement must FOLLOW the declaration of the named variable (CTS
+  // shaders-with-invariance cases 7/8). Wrong order → compile error at the
+  // invariant statement's line; correct order compiles. Pins the semantics
+  // case in analyzeProgram's global pre-pass (global.lookup order check).
+  const w1 = errs(
+    'invariant v_varying;\nvarying vec4 v_varying;\nvoid main() { gl_Position = v_varying; }',
+    100,
+    'VERTEX',
+  );
+  check(hasErr(w1, 1, "'v_varying' : invariant declaration must follow the variable declaration"), '1.00 VS wrong-order invariant → error line 1');
+  const w2 = errs(
+    'precision mediump float;\ninvariant v_varying;\nvarying vec4 v_varying;\nvoid main() { gl_FragColor = v_varying; }',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(w2, 2, "'v_varying' : invariant declaration must follow the variable declaration"), '1.00 FS wrong-order invariant → error line 2');
+  const w3 = errs(
+    '#version 300 es\ninvariant v;\nout vec4 v;\nvoid main() { v = vec4(1.0); }',
+    300,
+    'VERTEX',
+  );
+  check(hasErr(w3, 2, "'v' : invariant declaration must follow the variable declaration"), '3.00 wrong-order invariant → error line 2');
+  // Unknown name (no declaration at all) is the same wrong-order error.
+  const w4 = errs('invariant nope;\nvoid main() { gl_Position = vec4(1.0); }', 100, 'VERTEX');
+  check(hasErr(w4, 1, "'nope' : invariant declaration must follow the variable declaration"), 'invariant on undeclared name → error line 1');
+
+  // Correct order: `varying vec4 v_varying;` THEN `invariant v_varying;`
+  // (CTS shaders-with-invariance cases 5/6, invariant-does-not-leak case 1).
+  okInfo('varying vec4 v_varying;\ninvariant v_varying;\nvoid main() { gl_Position = v_varying; }', 100, 'VERTEX');
+  okInfo('precision mediump float;\nvarying vec4 v_varying;\ninvariant v_varying;\nvoid main() { gl_FragColor = v_varying; }', 100, 'FRAGMENT');
+
+  // Invariant-capable builtins (CTS shaders-with-invariance cases 9-14 +
+  // fragcolor-fragdata-invariant.html): gl_Position/gl_PointSize (VS),
+  // gl_FragCoord/gl_PointCoord (FS), gl_FragColor/gl_FragData (FS outputs).
+  okInfo('invariant gl_Position;\nvoid main() { gl_Position = vec4(0.0); }', 100, 'VERTEX');
+  okInfo('invariant gl_PointSize;\nvoid main() { gl_PointSize = 1.0; gl_Position = vec4(0.0); }', 100, 'VERTEX');
+  okInfo('precision mediump float;\ninvariant gl_FragCoord;\nvoid main() { gl_FragColor = gl_FragCoord; }', 100, 'FRAGMENT');
+  okInfo('precision mediump float;\ninvariant gl_PointCoord;\nvoid main() { gl_FragColor = vec4(gl_PointCoord, 0.0, 0.0); }', 100, 'FRAGMENT');
+  okInfo('precision mediump float;\ninvariant gl_FragColor;\ninvariant gl_FragData;\nvoid main() { gl_FragColor = vec4(1.0); }', 100, 'FRAGMENT');
+  okInfo('#version 300 es\ninvariant gl_Position;\nvoid main() { gl_Position = vec4(1.0); }', 300, 'VERTEX');
+
+  // Other builtins cannot be invariant (CTS shaders-with-invariance case 16:
+  // `invariant gl_FrontFacing;` must fail compilation).
+  const b1 = errs(
+    'precision mediump float;\ninvariant gl_FrontFacing;\nvoid main() { gl_FragColor = gl_FrontFacing ? vec4(1.0) : vec4(0.0, 0.0, 0.0, 1.0); }',
+    100,
+    'FRAGMENT',
+  );
+  check(hasErr(b1, 2, "'gl_FrontFacing' : invariant cannot be applied to this built-in variable"), 'invariant gl_FrontFacing → error line 2');
+  const b2 = errs('precision mediump float;\ninvariant gl_FragDepthEXT;\nvoid main() { gl_FragColor = vec4(1.0); }', 100, 'FRAGMENT', ['GL_EXT_frag_depth']);
+  check(b2.length > 0, 'invariant on other builtin (gl_FragDepthEXT) → error');
 }
 
 /* ------------------------------------------------------------------ */
