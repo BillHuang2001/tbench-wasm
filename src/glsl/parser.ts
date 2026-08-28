@@ -45,7 +45,7 @@ import type { ExtensionDirective } from './preprocessor.js';
 import type { CompileError } from './compiler.js';
 import type { Precision, SamplerKind, StorageClass, TypeQualifiers, LayoutQualifiers } from './types.js';
 import type {
-  ExternalDecl, Expr, FunctionPrototype, GlobalVarDecl, InterfaceBlockDecl,
+  ExternalDecl, Expr, FunctionDefinition, FunctionPrototype, GlobalVarDecl, InterfaceBlockDecl,
   InvariantDecl, ParamDecl, PrecisionDecl, StructDecl, StructDefinition,
   StructMemberDecl, TranslationUnit, TypeName, TypeSpec, VarDeclarator,
 } from './ast.js';
@@ -73,6 +73,22 @@ export class Parser {
   private readonly tokens: Token[];
   private pos = 0;
   private readonly eofLine: number;
+
+  /**
+   * Enclosing function definition while its body is being parsed (null at
+   * global scope). GLSL has no nested functions, so a plain field suffices.
+   */
+  currentFn: FunctionDefinition | null = null;
+
+  /**
+   * Precision statements parsed INSIDE function bodies, keyed by their
+   * enclosing function definition. `parse()` hoists each to just before that
+   * definition: the semantics pre-pass processes `precision-decl` only at
+   * global scope and snapshots the default precisions per function
+   * definition, so the hoist is what makes in-body precision statements take
+   * effect for the remainder of the body (ANGLE accepts them there).
+   */
+  fnPrecisionDecls: { fn: FunctionDefinition; decl: PrecisionDecl }[] = [];
 
   constructor(tokens: Token[], version: 100 | 300) {
     this.tokens = tokens;
@@ -178,6 +194,19 @@ export function parse(
     const decl = parseExternalDecl(p);
     if (decl !== null) declarations.push(decl);
   }
+  // Hoist precision statements that appeared inside function bodies to just
+  // before their enclosing function definition (the ESSL Appendix A
+  // `declaration` production includes `PRECISION precision_qualifier
+  // type_specifier_no_prec SEMICOLON`, so they are legal declaration
+  // statements — ANGLE accepts them in bodies). The semantics pre-pass only
+  // processes precision-decls at global scope, so without the hoist an
+  // in-body statement would never take effect (fragment float declarations
+  // would then fail the "No precision specified" check).
+  for (const h of p.fnPrecisionDecls) {
+    const idx = declarations.indexOf(h.fn);
+    if (idx >= 0) declarations.splice(idx, 0, h.decl);
+    else declarations.push(h.decl);
+  }
   if (p.errors.length > 0) return { ok: false, errors: p.errors };
   const ast: TranslationUnit = {
     kind: 'translation-unit',
@@ -210,7 +239,7 @@ function parseExternalDecl(p: Parser): ExternalDecl | null {
 }
 
 /** `precision <highp|mediump|lowp> <float|int|sampler-kind>;` */
-function parsePrecisionDecl(p: Parser): PrecisionDecl {
+export function parsePrecisionDecl(p: Parser): PrecisionDecl {
   const start = p.next(); // 'precision'
   let precision: Precision = 'highp';
   const pt = p.peek();
@@ -278,8 +307,12 @@ function parseInvariantDecl(p: Parser): ExternalDecl {
       loc: locOf(start),
     };
     if (p.atOp('{')) {
-      const body = parseCompound(p);
-      return { kind: 'function-definition', prototype, body, loc: locOf(start) };
+      const savedFn = p.currentFn;
+      const def: FunctionDefinition = { kind: 'function-definition', prototype, body: { kind: 'compound', body: [], loc: locOf(start) }, loc: locOf(start) };
+      p.currentFn = def;
+      def.body = parseCompound(p);
+      p.currentFn = savedFn;
+      return def;
     }
     p.expectOp(';');
     return prototype;
@@ -329,6 +362,16 @@ function parseDeclarationOrFunction(p: Parser): ExternalDecl | null {
   }
   const nameT = p.peek();
   if (nameT.kind !== 'identifier') {
+    // Empty first declarator (`float;`, `float, a = 0.0;`) — legal per the
+    // ESSL grammar (`single_declaration` = `fully_specified_type`; see
+    // parseDeclarators). Only `,`/`;` may follow the type here; anything
+    // else keeps the old "expected identifier" error.
+    if (nameT.kind === 'op' && (nameT.text === ',' || nameT.text === ';')) {
+      const declarators = parseDeclarators(p, false);
+      p.expectOp(';', "expected ';' after declaration");
+      const decl: GlobalVarDecl = { kind: 'global-var-decl', type, declarators, loc: locOf(start) };
+      return decl;
+    }
     p.error(nameT.line, `expected identifier, found ${describeToken(nameT)}`);
     recoverTopLevel(p);
     return null;
@@ -347,8 +390,12 @@ function parseDeclarationOrFunction(p: Parser): ExternalDecl | null {
       loc: locOf(start),
     };
     if (p.atOp('{')) {
-      const body = parseCompound(p);
-      return { kind: 'function-definition', prototype, body, loc: locOf(start) };
+      const savedFn = p.currentFn;
+      const def: FunctionDefinition = { kind: 'function-definition', prototype, body: { kind: 'compound', body: [], loc: locOf(start) }, loc: locOf(start) };
+      p.currentFn = def;
+      def.body = parseCompound(p);
+      p.currentFn = savedFn;
+      return def;
     }
     p.expectOp(';', "expected ';' after function prototype");
     return prototype;
@@ -666,11 +713,41 @@ function parseStructMembers(p: Parser, block = false): StructMemberDecl[] {
 /**
  * `name [dims] [= init] [, ...]`. `allowUnsized` permits `[]` (function
  * parameters only); elsewhere an unsized array declaration is an error.
+ *
+ * An EMPTY first declarator is legal per the ESSL grammar
+ * (`single_declaration: fully_specified_type`, and
+ * `init_declarator_list: single_declaration | init_declarator_list COMMA
+ * init_declarator`) — `float;`, `float, a = 0.0;` and `struct S {...}, a;`
+ * all compile (conformance/glsl/misc/empty-declaration.html). The empty slot
+ * exists only in FIRST position: every element after a comma is a real
+ * declarator, so `float a, ;` still errors. No AST node is produced for the
+ * empty slot (nothing is declared). In-struct members use a different
+ * grammar (struct_declarator_list requires a name) and are NOT affected.
  */
 export function parseDeclarators(p: Parser, allowUnsized: boolean): VarDeclarator[] {
   const out: VarDeclarator[] = [];
+  let first = true;
   for (;;) {
-    const nameT = p.expectIdentifier();
+    const t = p.peek();
+    if (t.kind !== 'identifier') {
+      if (first && t.kind === 'op' && (t.text === ',' || t.text === ';')) {
+        first = false;
+        if (t.text === ';') break; // `float;` — nothing follows
+        p.next(); // `float, a = 0.0;` — consume the comma, parse on
+        continue;
+      }
+      // Not a legal empty declarator — report the identifier error (recovery
+      // skips to the next `,`/`;` so the enclosing declaration stays clean).
+      p.error(t.line, `expected identifier, found ${describeToken(t)}`);
+      first = false;
+      if (p.atOp(',')) {
+        p.next();
+        continue;
+      }
+      break;
+    }
+    first = false;
+    p.next();
     const arrayDims = parseArrayDims(p, allowUnsized);
     let init: Expr | null = null;
     if (p.atOp('=')) {
@@ -679,10 +756,10 @@ export function parseDeclarators(p: Parser, allowUnsized: boolean): VarDeclarato
     }
     out.push({
       kind: 'var-declarator',
-      name: nameT ? nameT.name : '',
+      name: t.name,
       arrayDims,
       init,
-      loc: locOf(nameT ?? p.peek()),
+      loc: locOf(t),
     });
     if (!p.atOp(',')) break;
     p.next();

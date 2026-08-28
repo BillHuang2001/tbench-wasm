@@ -385,6 +385,42 @@ expectErr('void main() { struct S { float x; }; { struct S { float y; }; } }', 1
 expectOk('void main() { struct sign { float x; }; sign s; s.x = 1.0; }', 100, 'VERTEX');
 
 /* ------------------------------------------------------------------ */
+/* 20. Empty declarators + in-body precision statements (CTS pages)     */
+/* ------------------------------------------------------------------ */
+
+// Empty declarators (conformance/glsl/misc/empty-declaration.html): the
+// parser produces no VarDeclarator for the empty slot, so semantics has
+// nothing to declare — OLD BEHAVIOR (bug): the parser rejected these.
+expectOk('void main() { float; gl_Position = vec4(0.0); }', 100, 'VERTEX');
+expectOk('void main() { float, a = 0.0; gl_Position = vec4(a); }', 100, 'VERTEX');
+expectOk('struct S { float member; }, a; void main() { a.member = 0.0; gl_Position = vec4(a.member); }', 100, 'VERTEX');
+expectOk('float;', 100, 'VERTEX'); // global-scope empty declarator too
+
+// In-body precision statements (conformance/glsl/misc/
+// ternary-operators-in-initializers.html): the parsed PrecisionDecl is
+// hoisted to just before the enclosing function definition, so the fragment
+// float-declaration default-precision check sees it — OLD BEHAVIOR (bug):
+// "syntax error, unexpected 'precision'" at parse time.
+expectOk(
+  'void main() { precision mediump float; float i = 2.0, j = (i > 1.0) ? 1.0 : 0.0; gl_FragColor = vec4(0.0, j, 0.0, 1.0); }',
+  100,
+  'FRAGMENT',
+);
+// Without the in-body precision statement the same float declaration still
+// fails (no default float precision in fragment shaders) — the hoist is what
+// makes the statement effective, it must not silently swallow the check.
+expectErr(
+  'void main() { float i = 2.0; gl_FragColor = vec4(0.0, i, 0.0, 1.0); }',
+  100,
+  'FRAGMENT',
+  undefined,
+  /No precision specified/,
+);
+// Same pattern in ES 3.00 and in vertex shaders (int default is built-in).
+expectOk('#version 300 es\nvoid main() { precision mediump float; vec2 i = vec2(2.0); }', 300, 'FRAGMENT');
+expectOk('void main() { precision mediump float; float i = 2.0; gl_Position = vec4(i); }', 100, 'VERTEX');
+
+/* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
 
