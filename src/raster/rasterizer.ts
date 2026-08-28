@@ -272,6 +272,7 @@ export function createRasterState(dc: DrawCall): RasterState {
     fragCoord: new Float32Array(4),
     frontFacing: true, // driver sets it per primitive
     pointCoord: new Float32Array(2),
+    depthRange: new Float32Array([dc.depthRange.near, dc.depthRange.far, dc.depthRange.far - dc.depthRange.near]),
     uniforms: dcx.uniforms,
     intUniforms,
     blockStores,

@@ -103,6 +103,13 @@ export interface FragmentExecCtx {
   frontFacing: boolean;
   /** [s, t] in 0..1 for POINTS primitives; zero otherwise. */
   pointCoord: Float32Array;
+  /**
+   * Builtin gl_DepthRange state: [near, far, far − near] (GLSL ES 1.00 §7.6
+   * / 3.00 §7.7), from the current DrawCall.depthRange. Codegen lowers
+   * gl_DepthRange.near/far/diff to `ctx.depthRange[0/1/2]`; raster fills it
+   * per draw (absent only if a caller builds the ctx without it).
+   */
+  depthRange?: Float32Array;
   /** Default-block float/matrix uniform store (program.floatStore). */
   uniforms: Float32Array;
   /** Default-block int/uint/bool/sampler uniforms (program.intStore).
