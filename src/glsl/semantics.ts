@@ -725,12 +725,40 @@ function builtinSigExact(s: BuiltinSignature, params: ParamInfo[]): boolean {
   return true;
 }
 
+/**
+ * Resolve a function's return type, applying ES 3.00 array dims
+ * (`float[2] f()`). On success the FULL type (array-wrapped when
+ * `d.returnDims` is non-empty) is cached on `d.returnType.resolved` — codegen
+ * reads `fn.prototype.returnType.resolved` (codegen/functions.ts inlineCall),
+ * so the overwrite is part of the cross-module contract: the resolvedType
+ * annotation on the return TypeSpec ALWAYS carries the wrapped array type.
+ * Returns null (error recorded) on failure. Array returns are
+ * single-dimension only (arrays of arrays are illegal — GLSL ES 3.00 §4.1.9);
+ * unsized `[]` returns are rejected at parse time, so allowUnsized=false is
+ * safe here.
+ */
+function resolveReturnType(d: FunctionPrototype, scope: Scope, ctx: SemContext): GLSLType | null {
+  const base = resolveTypeSpec(d.returnType, scope, ctx);
+  if (base === null) return null;
+  if (d.returnDims.length === 0) {
+    if (d.returnType.qualifiers.precision === undefined) checkFloatPrecision(ctx, d.loc.line, base, d.name);
+    return base;
+  }
+  if (d.returnDims.length > 1) {
+    ctx.error(d.loc.line, `'[' : arrays of arrays are not allowed in function return types`);
+    return null;
+  }
+  const t = wrapArrayDims(base, d.returnDims, scope, ctx, false, d.loc.line);
+  d.returnType.resolved = t;
+  if (d.returnType.qualifiers.precision === undefined) checkFloatPrecision(ctx, d.loc.line, t, d.name);
+  return t;
+}
+
 /** Register a function prototype (no body). Duplicate prototypes are OK; new
  * signatures become overloads; colliding builtin names error. */
 function registerPrototype(d: FunctionPrototype, scope: Scope, ctx: SemContext): void {
-  const retType = resolveTypeSpec(d.returnType, scope, ctx);
+  const retType = resolveReturnType(d, scope, ctx);
   if (retType === null) return;
-  if (d.returnType.qualifiers.precision === undefined) checkFloatPrecision(ctx, d.loc.line, retType, d.name);
   const params = resolveParams(d.params, scope, ctx);
   const existing = scope.lookupLocal(d.name);
   if (existing === undefined) {
@@ -769,9 +797,8 @@ function registerPrototype(d: FunctionPrototype, scope: Scope, ctx: SemContext):
  */
 function registerDefinition(d: FunctionDefinition, scope: Scope, ctx: SemContext): FnSymbol | null {
   const proto = d.prototype;
-  const retType = resolveTypeSpec(proto.returnType, scope, ctx);
+  const retType = resolveReturnType(proto, scope, ctx);
   if (retType === null) return null;
-  if (proto.returnType.qualifiers.precision === undefined) checkFloatPrecision(ctx, d.loc.line, retType, proto.name);
   const params = resolveParams(proto.params, scope, ctx);
   const existing = scope.lookupLocal(proto.name);
   if (existing === undefined) {

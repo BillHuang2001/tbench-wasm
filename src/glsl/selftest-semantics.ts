@@ -761,6 +761,71 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
 }
 
 /* ------------------------------------------------------------------ */
+/* 16. ES 3.00 arrays: returns, ==/!=, assignment, .length()           */
+/*     (CTS conformance2/glsl3/{array-as-return-value,array-equality,  */
+/*      array-in-complex-expression,array-complex-indexing,            */
+/*      array-length-side-effects}.html — semantics-level only;        */
+/*      runtime emit is codegen's concern)                             */
+/* ------------------------------------------------------------------ */
+
+// Array return types (`float[2] f()`) — accepted at 300 (parser rejects 100).
+const a1 = okInfo('#version 300 es\nint[2] f() { return int[2](1, 2); }\nvoid main() { }', 300, 'VERTEX');
+check(a1 !== null, 'int[2] return type accepted (ES 3.00)');
+const a2 = okInfo('#version 300 es\nfloat[2] f() { return float[2](1.0, 2.0); }\nvoid main() { }', 300, 'VERTEX');
+check(a2 !== null, 'float[2] return type accepted (ES 3.00, vertex)');
+// Return-value/type mismatch → convertible(vt, int[2]) fails.
+const a3 = errs('#version 300 es\nint[2] f() { return 1.0; }\nvoid main() { }', 300, 'VERTEX');
+check(hasErr(a3, 2, "cannot convert from 'float' to 'int[2]'"), 'array return type mismatch → error line 2');
+// Returning a returned array (array-as-return-value fshaderReturnReturnedArray).
+const a3b = okInfo('#version 300 es\nint[2] foo() { return int[2](1, 2); }\nint[2] bar() { return foo(); }\nvoid main() { }', 300, 'VERTEX');
+check(a3b !== null, 'returning a returned array accepted (ES 3.00)');
+// Array param + array-arg call (array-as-return-value fshaderReturnedArrayAsParameter).
+const a4 = okInfo('#version 300 es\nbool isSuccess(int[2] a) { return a[0] == 1; }\nvoid main() { bool b = isSuccess(int[2](1, 2)); gl_Position = vec4(float(b)); }', 300, 'VERTEX');
+check(a4 !== null, 'array param + array-arg call accepted (ES 3.00)');
+// Array ==/!= at 300 (locals).
+const a5 = okInfo('#version 300 es\nvoid main() { int a[2] = int[2](1, 2); int b[2] = int[2](1, 2); bool c = (a == b) && (a != b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+check(a5 !== null, 'array ==/!= accepted (ES 3.00 locals)');
+// Size mismatch → 'cannot be compared'.
+const a6 = errs('#version 300 es\nvoid main() { int a[2]; int b[3]; bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+check(hasErr(a6, 2, "'==' : operands of type 'int[2]' and 'int[3]' cannot be compared"), 'array == size mismatch → error line 2');
+// ES 1.00 array == stays rejected.
+const a7 = errs('void main() { int a[2]; int b[2]; bool c = (a == b); gl_Position = vec4(float(c)); }', 100, 'VERTEX');
+check(hasErr(a7, 1, "'==' : operands of type 'int[2]' and 'int[2]' cannot be compared"), 'ES 1.00 array == → error line 1');
+// Array assignment: 300 accepted, 100 rejected.
+const a8 = okInfo('#version 300 es\nvoid main() { int a[3]; int b[3]; a = b; gl_Position = vec4(1.0); }', 300, 'VERTEX');
+check(a8 !== null, 'array assignment accepted (ES 3.00)');
+const a9 = errs('void main() { int a[3]; int b[3]; a = b; gl_Position = vec4(1.0); }', 100, 'VERTEX');
+check(hasErr(a9, 1, "'=' : cannot assign to an array in GLSL ES 1.00"), 'ES 1.00 array assignment → error line 1');
+// .length() on every array-valued expression form (array-length-side-effects).
+const a10 = okInfo('#version 300 es\nvoid main() { int a[3]; int n = a.length(); gl_Position = vec4(float(n)); }', 300, 'VERTEX');
+check(a10 !== null, 'a.length() accepted');
+const a11 = okInfo('#version 300 es\nint[2] f() { return int[2](1, 2); }\nvoid main() { int n = (f()).length(); gl_Position = vec4(float(n)); }', 300, 'VERTEX');
+check(a11 !== null, '(f()).length() accepted');
+const a12 = okInfo('#version 300 es\nvoid main() { int a[3]; int b[3]; int c = (a = b).length(); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+check(a12 !== null, '(a = b).length() accepted');
+const a13 = okInfo('#version 300 es\nvoid main() { int a = (int[1](0)).length(); gl_Position = vec4(float(a)); }', 300, 'VERTEX');
+check(a13 !== null, '(int[1](0)).length() accepted');
+// Array-of-struct equality at 300: plain S accepted; S-with-array-member rejected.
+const a14 = okInfo('#version 300 es\nstruct S { int x; };\nvoid main() { S a[3]; S b[3]; bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+check(a14 !== null, 'S[3] == S[3] accepted (S without arrays)');
+const a15 = errs('#version 300 es\nstruct S { int f[2]; };\nvoid main() { S a[3]; S b[3]; bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+check(hasErr(a15, 3, "'==' : cannot compare structs containing an array"), 'S[3] == S[3] with S containing an array → error line 3');
+// Indexing an array-valued expression result (array-complex-indexing).
+const a16 = okInfo('#version 300 es\nvoid main() { float a[2] = float[2](0.0, 0.0); float b[2] = float[2](2.0, 1.0); float c = (a = b)[0]; gl_Position = vec4(c); }', 300, 'VERTEX');
+check(a16 !== null, '(a = b)[0] indexing accepted');
+// Complex-expression contexts (array-in-complex-expression): short-circuit
+// && / || / ternary / comma with array == operands.
+const a17 = okInfo('#version 300 es\nint g = 0;\nint[2] plus() { ++g; return int[2](g, g); }\nbool minus() { --g; return false; }\nvoid main() { int a[2] = int[2](0, 0); minus() && (a == plus()); gl_Position = vec4(float(g)); }', 300, 'VERTEX');
+check(a17 !== null, '&& short-circuit with array == accepted');
+const a18 = okInfo('#version 300 es\nint g = 0;\nint[2] plus() { ++g; return int[2](g, g); }\nvoid main() { int a[2] = int[2](0, 0); (g == 0) ? true : (a == plus()); gl_Position = vec4(float(g)); }', 300, 'VERTEX');
+check(a18 !== null, 'ternary with array == arm accepted');
+const a19 = okInfo('#version 300 es\nint[2] func(int param) { return int[2](param, param); }\nvoid main() { int a[2]; int j = 0; bool result = ((++j), (a == func(j))); gl_Position = vec4(float(result)); }', 300, 'VERTEX');
+check(a19 !== null, 'comma sequence with array == accepted');
+// Multi-dim return types are illegal (arrays of arrays — GLSL ES 3.00 §4.1.9).
+const a20 = errs('#version 300 es\nfloat[2][3] f() { return float[2][3](0.0); }\nvoid main() { }', 300, 'VERTEX');
+check(hasErr(a20, 2, "'[' : arrays of arrays are not allowed in function return types"), 'multi-dim return type → error line 2');
+
+/* ------------------------------------------------------------------ */
 /* Summary                                                             */
 /* ------------------------------------------------------------------ */
 
