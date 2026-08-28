@@ -1155,6 +1155,7 @@ function mergeUses(vs: Shader, fs: Shader): ShaderUses {
     instanceId: vs.info.uses.instanceId || fs.info.uses.instanceId,
     drawId: vs.info.uses.drawId || fs.info.uses.drawId,
     derivatives: vs.info.uses.derivatives || fs.info.uses.derivatives,
+    depthRange: vs.info.uses.depthRange || fs.info.uses.depthRange,
   };
 }
 
@@ -1277,12 +1278,53 @@ export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkRes
 
   const limits = resolveLimits(vs.version, opts);
 
+  // Capability merge first: the gl_DepthRange allocation below is usage-gated.
+  const uses = mergeUses(vs, fs);
+
   const merged = mergeUniforms(vs, fs);
   if ('error' in merged) return { ok: false, log: merged.error };
   const sb = checkSamplerBindings(merged, limits);
   if (sb !== null) return { ok: false, log: sb };
   const ul = layoutUniforms(merged, limits);
   if ('error' in ul) return { ok: false, log: ul.error };
+
+  // Builtin uniform gl_DepthRange (GLSL ES 1.00 §7.6 / 3.00 §7.7): when EITHER
+  // stage reads it, expose the struct members as ACTIVE UNIFORMS backed by 3
+  // REAL float-store slots appended AFTER all user uniforms (existing uniform
+  // offsets unchanged — the allocation uses the same float-index convention as
+  // the vec4-slot layout: `location` = index into floatStore, gl/ writes at
+  // byte location*4). codegen keeps reading ctx.depthRange (draw-time state);
+  // these entries exist so getActiveUniform / getUniformLocation / getUniform
+  // report the builtin and return the CURRENT glDepthRangef values. The store
+  // is zero-initialized by `new Float32Array` in the assembly below. Usage
+  // gating is REQUIRED: never report the builtin when neither shader reads it
+  // (active-uniform enumeration stays exactly as before).
+  let depthRangeSlots: [number, number, number] | null = null;
+  const depthRangeUniforms: UniformInfo[] = [];
+  if (uses.depthRange) {
+    const base = ul.floatMax; // one float per member (near, far, far − near)
+    depthRangeSlots = [base, base + 1, base + 2];
+    const mk = (name: string, slot: number): UniformInfo => ({
+      name,
+      location: slot,
+      type: 0x1406, // GL_FLOAT
+      size: 1,
+      components: 1,
+      integral: false,
+      blockIndex: -1,
+      sampler: false,
+    });
+    const near = mk('gl_DepthRange.near', base);
+    const far = mk('gl_DepthRange.far', base + 1);
+    const diff = mk('gl_DepthRange.diff', base + 2);
+    depthRangeUniforms.push(near, far, diff);
+    // uniformMap entries carry the name (gl/ resolves getUniformLocation via
+    // `uniformMap.get(nm)` then matches `.name` against program.uniforms).
+    ul.uniformMap.set('gl_DepthRange.near', near);
+    ul.uniformMap.set('gl_DepthRange.far', far);
+    ul.uniformMap.set('gl_DepthRange.diff', diff);
+    ul.floatMax = base + 3; // floatStore grows to include the 3 slots
+  }
 
   const bl = layoutBlocks(vs, fs, limits);
   if ('error' in bl) return { ok: false, log: bl.error };
@@ -1299,7 +1341,6 @@ export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkRes
   const ol = layoutOutputs(fs, limits);
   if ('error' in ol) return { ok: false, log: ol.error };
 
-  const uses = mergeUses(vs, fs);
   const structNames = [...new Set([...collectStructNames(vs.ast), ...collectStructNames(fs.ast)])];
   const layout: CodegenLayout = {
     version: vs.version,
@@ -1334,7 +1375,7 @@ export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkRes
     ok: true,
     program: {
       attributes: al.infos,
-      uniforms: [...ul.uniforms, ...bl.uniformInfos],
+      uniforms: [...ul.uniforms, ...bl.uniformInfos, ...depthRangeUniforms],
       uniformBlocks: bl.infos,
       varyings: vl.infos,
       vertex: { run: (ctx) => vertexFn(ctx, R) },
@@ -1351,6 +1392,7 @@ export function linkProgram(vs: Shader, fs: Shader, opts?: LinkOptions): LinkRes
       uniformMap: ul.uniformMap,
       floatStore: new Float32Array(ul.floatMax),
       intStore: new Int32Array(ul.intMax),
+      depthRangeSlots,
       scratchSize: Math.max(vsRes.scratchSize, fsRes.scratchSize),
       intScratchSize: Math.max(vsRes.intScratchSize, fsRes.intScratchSize),
       transformFeedbackVaryings: tf.varyings,

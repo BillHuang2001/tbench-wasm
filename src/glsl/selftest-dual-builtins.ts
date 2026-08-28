@@ -58,6 +58,7 @@ function dualUses(): ShaderUses {
     instanceId: false,
     drawId: false,
     derivatives: true,
+    depthRange: false,
   };
 }
 

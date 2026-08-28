@@ -117,6 +117,7 @@ function baseLayout(version: 100 | 300, extraUniforms?: [string, { store: 'float
       instanceId: false,
       drawId: false,
       derivatives: false,
+      depthRange: false,
     },
   };
 }

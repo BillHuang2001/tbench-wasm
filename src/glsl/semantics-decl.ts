@@ -76,6 +76,7 @@ function analyzeDeclarations(ast: TranslationUnit, ctx: SemContext): ShaderInfo 
       instanceId: false,
       drawId: false,
       derivatives: false,
+      depthRange: false,
     },
   };
   ctx.initDefaultPrecisions(); // replay precision statements in order
@@ -437,6 +438,13 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
         break;
       case 'gl_DrawID':
         uses.drawId = true;
+        break;
+      case 'gl_DepthRange':
+        // Builtin struct uniform (1.00 §7.6 / 3.00 §7.7, BOTH stages). Member
+        // reads (gl_DepthRange.near) visit the base identifier here (the
+        // `member` case descends into the object), so one case covers direct
+        // struct uses and member reads alike.
+        uses.depthRange = true;
         break;
       default:
         break;

@@ -200,6 +200,21 @@ export interface Program {
   intStore: Int32Array;
 
   /**
+   * Builtin uniform gl_DepthRange reflection (GLSL ES 1.00 §7.6 / 3.00 §7.7):
+   * float-store indices of [near, far, far − near] — the members
+   * 'gl_DepthRange.near/far/diff' are ACTIVE UNIFORMS in `uniforms` +
+   * `uniformMap` (GL_FLOAT, size 1) backed by these REAL slots, appended after
+   * all user uniforms. gl/ MUST write the CURRENT depth range into them
+   * (float write at index `depthRangeSlots[i]`, byte `slot*4`) at link/adopt
+   * time and on every glDepthRangef so getUniform returns live values.
+   * codegen does NOT read these slots (it lowers member reads to
+   * `ctx.depthRange[i]` — draw-time state filled per draw); the slots exist
+   * purely for the reflection API. null when neither shader reads
+   * gl_DepthRange (no entries, no slots).
+   */
+  depthRangeSlots: [number, number, number] | null;
+
+  /**
    * Scratch buffer sizes (in elements) the generated code needs for local
    * arrays / complex builtin temporaries. gl/ allocates ctx.scratch /
    * ctx.intScratch of at least this size per draw and reuses them across

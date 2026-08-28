@@ -192,6 +192,13 @@ export interface ShaderUses {
   drawId: boolean;
   /** Fragment uses dFdx/dFdy/fwidth or any implicit-LOD texture function (→ dual-number codegen). */
   derivatives: boolean;
+  /**
+   * Either stage reads gl_DepthRange (builtin struct uniform, GLSL ES 1.00
+   * §7.6 / 3.00 §7.7). The linker then exposes the members as ACTIVE UNIFORMS
+   * ('gl_DepthRange.near/far/diff', GL_FLOAT, size 1) backed by 3 float-store
+   * slots appended after the user uniforms.
+   */
+  depthRange: boolean;
 }
 
 /** Resolved declaration summaries in source order — the linker's input. */

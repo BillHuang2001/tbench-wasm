@@ -36,6 +36,10 @@
  *      t@16, t.x@16, t.y@24, size 48.
  *  14. limits: maxUniformBlockSize / maxVertexUniformBlocks /
  *      maxCombinedUniformBlocks exceeded → link errors.
+ *  18. gl_DepthRange builtin uniform reflection: usage-gated active-uniform
+ *      entries ('gl_DepthRange.near/far/diff', GL_FLOAT, size 1) backed by 3
+ *      real float-store slots appended after user uniforms (1.00 vertex /
+ *      3.00 both-stages / 1.00 fragment-only / not-used cases).
  *
  * Run: npx tsx src/glsl/selftest-link.ts
  * Prints "OK" and exits 0 on success.
@@ -1410,6 +1414,206 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
   );
   const l = linkProgram(vs2, fs2);
   check(l.ok, `struct-decl pair links without ctors (${l.ok ? '' : l.log})`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 18. gl_DepthRange builtin uniform reflection                        */
+/* ------------------------------------------------------------------ */
+
+{
+  // floatStore length of the (a) using program — compared in (d) for the
+  // store-size accounting check (blocks are sibling scopes).
+  let usingFloatLen = -1;
+
+  // (a) ES 1.00 VERTEX-stage use: the shader reads all three members. The
+  // linker must expose them as active uniforms (GL_FLOAT, size 1) with REAL
+  // float-store slots appended after the (empty) user-uniform block, and the
+  // linked program must RUN (codegen reads ctx.depthRange, unchanged).
+  const vs = compile(
+    `attribute vec4 aPos;
+     varying float vNear;
+     varying float vFar;
+     varying float vDiff;
+     void main() {
+       vNear = gl_DepthRange.near;
+       vFar = gl_DepthRange.far;
+       vDiff = gl_DepthRange.diff;
+       gl_Position = aPos;
+     }`,
+    'VERTEX',
+    100,
+  );
+  const fs = compile(
+    `precision mediump float;
+     varying float vNear;
+     varying float vFar;
+     varying float vDiff;
+     void main() { gl_FragColor = vec4(vNear, vFar, vDiff, 1.0); }`,
+    'FRAGMENT',
+    100,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `1.00 gl_DepthRange vertex pair links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    // Exactly the 3 builtin entries (no user uniforms): names, GL_FLOAT, size
+    // 1, components 1, non-integral, default block, non-sampler.
+    check(
+      p.uniforms.length === 3 &&
+        JSON.stringify(p.uniforms.map((u) => u.name)) ===
+          JSON.stringify(['gl_DepthRange.near', 'gl_DepthRange.far', 'gl_DepthRange.diff']) &&
+        p.uniforms.every((u) => u.type === FLOAT && u.size === 1 && u.components === 1 && !u.integral && u.blockIndex === -1 && !u.sampler),
+      `3 gl_DepthRange entries with correct names/type/size/components/integral/blockIndex (got ${JSON.stringify(p.uniforms)})`,
+    );
+    check(
+      p.uniformMap.has('gl_DepthRange.near') && p.uniformMap.has('gl_DepthRange.far') && p.uniformMap.has('gl_DepthRange.diff'),
+      `uniformMap has the 3 member names (keys: ${JSON.stringify([...p.uniformMap.keys()])})`,
+    );
+    const s = p.depthRangeSlots;
+    check(s !== null && s[0] < s[1] && s[1] < s[2], `depthRangeSlots non-null ascending (got ${JSON.stringify(s)})`);
+    if (s !== null) {
+      check(p.floatStore.length >= s[2] + 1, `floatStore sized for the last slot (len ${p.floatStore.length}, need ${s[2] + 1})`);
+      check(p.floatStore[s[0]] === 0 && p.floatStore[s[1]] === 0 && p.floatStore[s[2]] === 0,
+        'the 3 slots are zero-initialized');
+      // uniformMap entries point at the slots (gl: getUniformLocation → find by
+      // name → read floatStore[location]).
+      check(
+        p.uniformMap.get('gl_DepthRange.near')!.location === s[0] &&
+          p.uniformMap.get('gl_DepthRange.far')!.location === s[1] &&
+          p.uniformMap.get('gl_DepthRange.diff')!.location === s[2],
+        `uniformMap locations == depthRangeSlots (near ${p.uniformMap.get('gl_DepthRange.near')!.location}, far ${p.uniformMap.get('gl_DepthRange.far')!.location}, diff ${p.uniformMap.get('gl_DepthRange.diff')!.location})`,
+      );
+      // Slot write-through (simulates gl/ writing the current depth range on
+      // link/adopt and on glDepthRangef; getUniform reads these indices).
+      // Values chosen exactly representable in float32 (0.1/0.9 are not).
+      p.floatStore[s[0]] = 0.5;
+      p.floatStore[s[1]] = 1.0;
+      p.floatStore[s[2]] = 0.25;
+      check(
+        p.floatStore[s[0]] === 0.5 && p.floatStore[s[1]] === 1.0 && p.floatStore[s[2]] === 0.25,
+        'write-through: values sit at the depthRangeSlots indices',
+      );
+    }
+    // Run: codegen still lowers member reads to ctx.depthRange (draw-time
+    // state), so the program executes with a ctx-provided depthRange.
+    const dr = new Float32Array([0.25, 0.75, 0.5]);
+    const vctx = vertexCtx(p, { attribs: [new Float32Array([1, 2, 3, 4])], attribIndices: new Int32Array([0]), depthRange: dr });
+    p.vertex.run(vctx);
+    const vg = vctx.out.varyings;
+    check(vg[0] === 0.25 && vg[1] === 0.75 && vg[2] === 0.5,
+      `vertex run reads gl_DepthRange.near/far/diff (got [${Array.from(vg.slice(0, 3)).join(', ')}])`);
+    const fctx = fragmentCtx(p, [vg.slice(0, 1), vg.slice(1, 2), vg.slice(2, 3)], { depthRange: dr });
+    p.fragment.run(fctx);
+    check(
+      fctx.out.color[0][0] === 0.25 && fctx.out.color[0][1] === 0.75 && fctx.out.color[0][2] === 0.5,
+      `fragment run: color [0.25,0.75,0.5,...] (got [${Array.from(fctx.out.color[0]).join(', ')}])`,
+    );
+    usingFloatLen = p.floatStore.length;
+  }
+
+  // (b) ES 3.00 with BOTH stages using the builtin (vertex reads diff,
+  // fragment reads near) — one shared set of 3 entries per program.
+  const vs3 = compile(
+    `#version 300 es
+     in vec4 aPos;
+     out float vD;
+     void main() { vD = gl_DepthRange.diff; gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fs3 = compile(
+    `#version 300 es
+     precision mediump float;
+     in float vD;
+     out vec4 o;
+     void main() { o = vec4(gl_DepthRange.near + vD); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l3 = linkProgram(vs3, fs3);
+  check(l3.ok, `3.00 both-stage gl_DepthRange pair links (${l3.ok ? '' : l3.log})`);
+  if (l3.ok) {
+    const p = l3.program;
+    check(
+      p.uniforms.length === 3 && p.uniforms.every((u) => u.type === FLOAT && u.size === 1) &&
+        p.depthRangeSlots !== null,
+      `3.00 both-stage use → 3 entries + slots (got ${JSON.stringify(p.uniforms.map((u) => u.name))}, slots ${JSON.stringify(p.depthRangeSlots)})`,
+    );
+    const dr = new Float32Array([0.25, 0.75, 0.5]);
+    const vctx = vertexCtx(p, { attribs: [new Float32Array([1, 2, 3, 4])], attribIndices: new Int32Array([0]), depthRange: dr });
+    p.vertex.run(vctx);
+    const fctx = fragmentCtx(p, [vctx.out.varyings], { depthRange: dr });
+    p.fragment.run(fctx);
+    check(fctx.out.color[0][0] === 0.75, `3.00 run: near + diff = 0.75 (got ${fctx.out.color[0][0]})`);
+  }
+
+  // (c) FRAGMENT-only use (1.00): entries present, program runs.
+  const vsc = compile(
+    `attribute vec4 aPos;
+     void main() { gl_Position = aPos; }`,
+    'VERTEX',
+    100,
+  );
+  const fsc = compile(
+    `precision mediump float;
+     void main() { gl_FragColor = vec4(gl_DepthRange.far); }`,
+    'FRAGMENT',
+    100,
+  );
+  const lc = linkProgram(vsc, fsc);
+  check(lc.ok, `fragment-only gl_DepthRange pair links (${lc.ok ? '' : lc.log})`);
+  if (lc.ok) {
+    const p = lc.program;
+    check(
+      p.uniforms.length === 3 && p.uniforms[1].name === 'gl_DepthRange.far' && p.depthRangeSlots !== null,
+      `fragment-only use → 3 entries + slots (got ${JSON.stringify(p.uniforms.map((u) => u.name))})`,
+    );
+    const fctx = fragmentCtx(p, [], { depthRange: new Float32Array([0.25, 0.75, 0.5]) });
+    p.fragment.run(fctx);
+    check(fctx.out.color[0][0] === 0.75, `fragment-only run: gl_DepthRange.far = 0.75 (got ${fctx.out.color[0][0]})`);
+  }
+
+  // (d) NOT using gl_DepthRange: no entries, no slots, store unaffected —
+  // uniform enumeration identical to before (empty here).
+  const vsd = compile(
+    `attribute vec4 aPos;
+     varying float vNear;
+     varying float vFar;
+     varying float vDiff;
+     void main() {
+       vNear = 0.1;
+       vFar = 0.9;
+       vDiff = 0.8;
+       gl_Position = aPos;
+     }`,
+    'VERTEX',
+    100,
+  );
+  const fsd = compile(
+    `precision mediump float;
+     varying float vNear;
+     varying float vFar;
+     varying float vDiff;
+     void main() { gl_FragColor = vec4(vNear, vFar, vDiff, 1.0); }`,
+    'FRAGMENT',
+    100,
+  );
+  const ld = linkProgram(vsd, fsd);
+  check(ld.ok, `non-using pair links (${ld.ok ? '' : ld.log})`);
+  if (ld.ok) {
+    const p = ld.program;
+    check(p.uniforms.length === 0, `no gl_DepthRange entries when unused (got ${JSON.stringify(p.uniforms)})`);
+    check(p.depthRangeSlots === null, `depthRangeSlots === null when unused (got ${JSON.stringify(p.depthRangeSlots)})`);
+    check(![...p.uniformMap.keys()].some((k) => k.startsWith('gl_DepthRange')), `uniformMap has no gl_DepthRange names when unused`);
+    // Store-size accounting: the using program (a) has exactly 3 more floats
+    // than this otherwise-uniform-identical non-using program.
+    if (usingFloatLen >= 0) {
+      check(
+        usingFloatLen === p.floatStore.length + 3,
+        `depthRange program floatStore is 3 floats larger (using ${usingFloatLen} vs not-using ${p.floatStore.length})`,
+      );
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */

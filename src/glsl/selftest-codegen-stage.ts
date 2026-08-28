@@ -60,6 +60,7 @@ function uses(): ShaderUses {
     instanceId: false,
     drawId: false,
     derivatives: false,
+    depthRange: false,
   };
 }
 

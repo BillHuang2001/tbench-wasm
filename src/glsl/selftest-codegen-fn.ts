@@ -63,6 +63,7 @@ function baseLayout(version: 100 | 300): CodegenLayout {
       instanceId: false,
       drawId: false,
       derivatives: false,
+      depthRange: false,
     },
   };
 }

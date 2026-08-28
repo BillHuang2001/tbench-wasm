@@ -67,7 +67,7 @@ function baseLayout(version: 100 | 300): CodegenLayout {
     uses: {
       pointSize: false, fragCoord: false, frontFacing: false, pointCoord: false,
       fragDepth: false, vertexId: false, instanceId: false, derivatives: false,
-      drawId: false,
+      drawId: false, depthRange: false,
     },
   };
 }
