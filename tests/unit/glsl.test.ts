@@ -403,7 +403,9 @@ describe("fragment program execution", () => {
       compileOk(FRAG_SIMPLE, { type: "FRAGMENT", version: 100 }),
     );
     // GL_FLOAT_VEC4 = 0x8b52; WebGL1 programs have exactly one output.
-    expect(program.fragment.outputs).toEqual([{ location: 0, type: 0x8b52 }]);
+    // (Output entries carry an `index` for dual-source blending support —
+    // gl_FragColor is blend index 0; see src/glsl/program.ts.)
+    expect(program.fragment.outputs).toEqual([{ location: 0, index: 0, type: 0x8b52 }]);
 
     const ctx = makeFragmentCtx(program);
     program.fragment.run(ctx);

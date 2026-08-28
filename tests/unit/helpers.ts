@@ -62,6 +62,32 @@ export const GL = {
   // Data types (texImage2D / readPixels)
   UNSIGNED_BYTE: 0x1401,
   FLOAT: 0x1406,
+
+  // Texture targets
+  TEXTURE_2D: 0x0de1,
+  TEXTURE_CUBE_MAP: 0x8513,
+  TEXTURE_3D: 0x806f,
+  TEXTURE_2D_ARRAY: 0x8c1a,
+
+  // Texture parameter names (texParameteri keys)
+  TEXTURE_MAG_FILTER: 0x2800,
+  TEXTURE_MIN_FILTER: 0x2801,
+  TEXTURE_WRAP_S: 0x2802,
+  TEXTURE_WRAP_T: 0x2803,
+  TEXTURE_BASE_LEVEL: 0x813c,
+  TEXTURE_MAX_LEVEL: 0x813d,
+
+  // Min/mag filters
+  NEAREST: 0x2600,
+  LINEAR: 0x2601,
+  NEAREST_MIPMAP_NEAREST: 0x2700,
+  LINEAR_MIPMAP_NEAREST: 0x2701,
+  NEAREST_MIPMAP_LINEAR: 0x2702,
+  LINEAR_MIPMAP_LINEAR: 0x2703,
+
+  // Wrap modes
+  CLAMP_TO_EDGE: 0x812f,
+  REPEAT: 0x2901,
 } as const;
 
 /**
