@@ -92,6 +92,17 @@ export class Parser {
    */
   fnPrecisionDecls: { fn: FunctionDefinition; decl: PrecisionDecl }[] = [];
 
+  /**
+   * Case-label context (GLSL ES 3.10 §6.2: case/default labels may appear
+   * only IMMEDIATELY within the switch statement's body — never nested
+   * inside blocks). `inSwitchBody` is true while parsing the direct
+   * statements of a switch body compound; every nested compound inside it
+   * increments `switchBlockNesting`. A case label is legal exactly when
+   * `inSwitchBody && switchBlockNesting === 0` (parser-stmt.ts enforces).
+   */
+  inSwitchBody = false;
+  switchBlockNesting = 0;
+
   constructor(tokens: Token[], version: 100 | 300) {
     this.tokens = tokens;
     this.version = version;
@@ -845,7 +856,7 @@ export function parseDeclarators(p: Parser, allowUnsized: boolean): VarDeclarato
  * Array dimension brackets. An unsized `[]` pushes `null` (per the AST
  * contract: `[null]` = unsized) and errors unless `allowUnsized`.
  */
-function parseArrayDims(p: Parser, allowUnsized: boolean): Expr[] {
+export function parseArrayDims(p: Parser, allowUnsized: boolean): Expr[] {
   const dims: (Expr | null)[] = [];
   while (p.atOp('[')) {
     const open = p.next();

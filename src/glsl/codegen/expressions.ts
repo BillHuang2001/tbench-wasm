@@ -691,13 +691,26 @@ function walk(e: Expr, env: CodegenEnv): P {
           if (p.local.synth) {
             // BUG 1: call-result object — scratch spill (see the array branch).
             spillSynthLocal(p, env, 1);
+            p.dyn = { temp: t, stride: 0, elemSlots: 1 };
+          } else if (p.local.kind === 'scratch') {
+            // Scratch-backed local (array / struct-with-array): already
+            // index-addressable — no spill needed. An existing dyn (outer
+            // element index, e.g. `V[func()][i]` on vec4[2]) folds into a
+            // combined offset temp; otherwise the index temp strides 1.
+            if (p.dyn) {
+              const j = env.allocTemp();
+              p.pre.push(`${j} = (${p.dyn.temp}) * ${p.dyn.elemSlots} + ${t}`);
+              p.dyn = { temp: j, stride: 0, elemSlots: 1 };
+            } else {
+              p.dyn = { temp: t, stride: 0, elemSlots: 1 };
+            }
           } else {
             const ds = env.ensureDynScratch(p.local.name);
             p.pre.unshift(...ds.copyIn);
             p.post.push(...ds.copyOut);
             p.local = { ...p.local, kind: 'scratch', scratchBase: ds.base, elemSlots: 1, int: ds.int };
+            p.dyn = { temp: t, stride: 0, elemSlots: 1 };
           }
-          p.dyn = { temp: t, stride: 0, elemSlots: 1 };
         } else if (p.storage) {
           p.dyn = { temp: t, stride: storageElemStride(p, 1), elemSlots: 0 };
         }
@@ -739,13 +752,26 @@ function walk(e: Expr, env: CodegenEnv): P {
           if (p.local.synth) {
             // BUG 1: call-result object — scratch spill (see the array branch).
             spillSynthLocal(p, env, rows);
+            p.dyn = { temp: t, stride: 0, elemSlots: rows };
+          } else if (p.local.kind === 'scratch') {
+            // Scratch-backed local: already index-addressable — no spill.
+            // An existing dyn (outer element index, e.g. `M[func()][i]` on
+            // mat4[2]) folds into a combined offset temp; otherwise the index
+            // temp strides `rows` (column-major layout).
+            if (p.dyn) {
+              const j = env.allocTemp();
+              p.pre.push(`${j} = (${p.dyn.temp}) * ${p.dyn.elemSlots} + ${t}`);
+              p.dyn = { temp: j, stride: 0, elemSlots: rows };
+            } else {
+              p.dyn = { temp: t, stride: 0, elemSlots: rows };
+            }
           } else {
             const ds = env.ensureDynScratch(p.local.name);
             p.pre.unshift(...ds.copyIn);
             p.post.push(...ds.copyOut);
             p.local = { ...p.local, kind: 'scratch', scratchBase: ds.base, elemSlots: rows, int: ds.int };
+            p.dyn = { temp: t, stride: 0, elemSlots: rows };
           }
-          p.dyn = { temp: t, stride: 0, elemSlots: rows };
         } else if (p.storage) {
           p.dyn = { temp: t, stride: storageElemStride(p, rows), elemSlots: 0 };
         }

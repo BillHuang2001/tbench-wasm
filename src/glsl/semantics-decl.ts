@@ -22,7 +22,7 @@
  */
 import type {
   CallExpr, Expr, FunctionDefinition, GlobalVarDecl, IdentifierExpr,
-  InterfaceBlockDecl, Stmt, StructDecl, TranslationUnit, TypeSpec, VarDeclarator,
+  IndexExpr, InterfaceBlockDecl, Stmt, StructDecl, TranslationUnit, TypeSpec, VarDeclarator,
 } from './ast.js';
 import type { GLSLType, Precision, StorageClass, TypeQualifiers } from './types.js';
 import { isFloat, isIntegral, typeName } from './types.js';
@@ -717,6 +717,27 @@ function baseIdentifier(e: Expr): IdentifierExpr | null {
   }
 }
 
+/**
+ * ESSL 3.00 §4.1.7: arrays of samplers may be indexed ONLY with constant
+ * integral expressions (literals, const variables, folded const exprs).
+ * ES 1.00 additionally permits constant-INDEX expressions (loop-invariant
+ * indices), so the rule is version-300-only (CTS sampler-array-indexing:
+ * `texture(u_tex[i], ...)` with a loop variable must fail to compile).
+ * Runs as part of the post-analysis scanUses walk — resolvedType and
+ * constValue are already annotated on every node.
+ */
+function checkSamplerArrayIndex(e: IndexExpr, ctx: SemContext): void {
+  if (ctx.version !== 300) return;
+  const ot = e.object.resolvedType;
+  if (ot === undefined) return; // unresolved (error already reported)
+  let t = ot;
+  while (t.kind === 'array') t = t.element;
+  if (t.kind !== 'sampler') return;
+  if (e.index.constValue === undefined) {
+    ctx.error(e.index.loc.line, 'sampler arrays may only be indexed with constant integral expressions');
+  }
+}
+
 /** Scan every expression of the shader for stage-specific builtin use. Only
  * SUCCESSFULLY resolved identifiers/calls count (error-recovery nodes don't
  * set resolvedType). ES 1.00 fragment outputs are finalized here too. */
@@ -898,10 +919,12 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
         visit(e.callee);
         for (const a of e.args) visit(a);
         return;
-      case 'index':
+      case 'index': {
         visit(e.object);
         visit(e.index);
+        checkSamplerArrayIndex(e, ctx);
         return;
+      }
       case 'member': {
         // Varying-interface-block member access: entries are keyed
         // '<instance>.<member>' — reconstruct the key from the object chain

@@ -31,10 +31,11 @@ import type {
 } from './ast.js';
 import {
   parseExpression, parseAssignmentExpr,
-  DECL_KEYWORDS, RESERVED_100, TYPE_KEYWORDS, locOf,
+  DECL_KEYWORDS, RESERVED_100, TYPE_KEYWORDS, locOf, EOF,
 } from './parser-expr.js';
 import {
   parseTypeSpec, parseDeclarators, parsePrecisionDecl, nameAnonymousStruct, skipBalanced,
+  parseArrayDims,
 } from './parser.js';
 
 /** Parse one statement (always returns a node; errors are collected). */
@@ -100,12 +101,21 @@ export function parseStatement(p: Parser): Stmt {
           recoverStatement(p);
           return { kind: 'empty', loc: locOf(t) };
         }
+        // GLSL ES 3.10 §6.2: case labels may only appear immediately within
+        // the switch body — a label nested inside a block (`case 1: { case
+        // 0: ... }`) is a compile error (CTS switch-case.html).
+        if (p.inSwitchBody && p.switchBlockNesting > 0) {
+          p.error(t.line, "'case' : case label nested inside a block within a switch statement");
+        }
         return parseCaseLabelStmt(p);
       case 'default':
         if (p.version === 100) {
           p.error(t.line, "'default' is reserved in GLSL ES 1.00");
           recoverStatement(p);
           return { kind: 'empty', loc: locOf(t) };
+        }
+        if (p.inSwitchBody && p.switchBlockNesting > 0) {
+          p.error(t.line, "'default' : default label nested inside a block within a switch statement");
         }
         return parseCaseLabelStmt(p);
       default:
@@ -121,9 +131,22 @@ export function parseStatement(p: Parser): Stmt {
   return parseExprStmt(p);
 }
 
-/** `{ stmt* }` */
-export function parseCompound(p: Parser): CompoundStmt {
+/**
+ * `{ stmt* }`. `isSwitchBody` marks the compound that IS a switch body:
+ * its direct statements may carry case labels; any nested compound inside
+ * a switch body increments `switchBlockNesting` so nested labels error
+ * (parseStatement 'case'/'default').
+ */
+export function parseCompound(p: Parser, isSwitchBody = false): CompoundStmt {
   const open = p.next(); // '{'
+  const savedIn = p.inSwitchBody;
+  const savedNesting = p.switchBlockNesting;
+  if (isSwitchBody) {
+    p.inSwitchBody = true;
+    p.switchBlockNesting = 0;
+  } else if (p.inSwitchBody) {
+    p.switchBlockNesting++;
+  }
   const body: Stmt[] = [];
   while (!p.atOp('}') && !p.atEof()) {
     body.push(parseStatement(p));
@@ -133,6 +156,8 @@ export function parseCompound(p: Parser): CompoundStmt {
   } else {
     p.next(); // '}'
   }
+  p.inSwitchBody = savedIn;
+  p.switchBlockNesting = savedNesting;
   return { kind: 'compound', body, loc: locOf(open) };
 }
 
@@ -212,7 +237,9 @@ function parseSwitchStmt(p: Parser): SwitchStmt {
   p.expectOp(')');
   let body: Stmt;
   if (p.atOp('{')) {
-    body = parseCompound(p);
+    // The body compound's DIRECT statements may carry case labels; nested
+    // blocks inside it may not (parseCompound tracks the nesting).
+    body = parseCompound(p, true);
   } else {
     p.error(p.peek().line, 'switch body must be a compound statement');
     body = parseStatement(p);
@@ -259,7 +286,23 @@ function parseDeclStmt(p: Parser): DeclStmt {
       return { kind: 'decl-stmt', type, declarators: [], loc: locOf(start) };
     }
   }
+  // GLSL ES 3.00: array dims may precede the declarator name (`vec4[2] V;` —
+  // ANGLE/CTS accept; tricky-loop-conditions.html). Invalid in 1.00 —
+  // report and skip. Pre-name dims are TYPE-level: they prefix EVERY
+  // declarator's own dims (`vec4[2] a, b;` declares two vec4[2]).
+  let preNameDims: Expr[] = [];
+  if (p.atOp('[')) {
+    if (p.version === 100) {
+      p.error(p.peek().line, 'array dimensions before the name require GLSL ES 3.00');
+      skipBalanced(p, '[', ']');
+    } else {
+      preNameDims = parseArrayDims(p, false);
+    }
+  }
   const declarators = parseDeclarators(p, false);
+  if (preNameDims.length > 0) {
+    for (const d of declarators) d.arrayDims = preNameDims.concat(d.arrayDims);
+  }
   p.expectOp(';', "expected ';' after declaration");
   return { kind: 'decl-stmt', type, declarators, loc: locOf(start) };
 }
@@ -276,15 +319,19 @@ function parseExprStmt(p: Parser): ExprStmt {
  * Lookahead: does the current statement start a declaration? Type/qualifier
  * keywords do, except type keywords followed by `(` or `[` (constructor
  * calls: `vec4(1.0)`, `float[3](...)`). `identifier identifier` (struct
- * type + name) is also a declaration.
+ * type + name) is also a declaration. A `type [` is a declaration UNLESS
+ * the brackets belong to an array-constructor call (`float[3](...)` — the
+ * balanced group is followed by `(`): `vec4[2] V;` is an array-typed
+ * declaration (ES 3.00 dims-before-name, tricky-loop-conditions.html).
  */
 export function startsDeclaration(p: Parser): boolean {
   const t = p.peek();
   if (t.kind === 'keyword') {
     if (!DECL_KEYWORDS.has(t.name)) return false;
     const t2 = p.peek(1);
-    if (TYPE_KEYWORDS.has(t.name) && t2.kind === 'op' && (t2.text === '(' || t2.text === '[')) {
-      return false;
+    if (TYPE_KEYWORDS.has(t.name)) {
+      if (t2.kind === 'op' && t2.text === '(') return false;
+      if (t2.kind === 'op' && t2.text === '[') return !isArrayCtorCall(p);
     }
     return true;
   }
@@ -293,6 +340,27 @@ export function startsDeclaration(p: Parser): boolean {
     return t2.kind === 'identifier' || (t2.kind === 'keyword' && DECL_KEYWORDS.has(t2.name));
   }
   return false;
+}
+
+/** At a `[` directly after a type keyword: is the balanced bracket group
+ *  followed by `(` (an array-constructor call → expression)? Any other
+ *  following token means the dims are a declaration type (`vec4[2] V;`). */
+function isArrayCtorCall(p: Parser): boolean {
+  let depth = 0;
+  for (let i = 0; ; i++) {
+    const t = p.peek(i);
+    if (t.kind === 'op' && t.text === '[') {
+      depth++;
+    } else if (t.kind === 'op' && t.text === ']') {
+      depth--;
+      if (depth === 0) {
+        const n = p.peek(i + 1);
+        return n.kind === 'op' && n.text === '(';
+      }
+    } else if (t.kind === 'op' && t.text === EOF) {
+      return false;
+    }
+  }
 }
 
 /** Skip to the next `;` (consumed) or `}` (left in place), then EOF. */
