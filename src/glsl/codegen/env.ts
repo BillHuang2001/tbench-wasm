@@ -719,9 +719,23 @@ export class CodegenEnv {
 
   /** Active inlined-call scopes (C3b): innermost last. Each frame holds the
    *  call's param LocalVars + the function's local names; resolveLocal
-   *  consults them top-down so same-named params/locals of nested calls
-   *  never collide (locals_ alone cannot hold two entries per GLSL name). */
+   *  consults the CURRENT function's frame (bodyDepth - 1) so same-named
+   *  params/locals of nested calls never collide (locals_ alone cannot hold
+   *  two entries per GLSL name) while caller frames stay invisible. */
   private paramFrames_: ParamFrame[] = [];
+
+  /**
+   * Inlined-callee BODY-emission depth (functions.ts increments it around
+   * emitStatements of each inlined body). The CURRENT function's frame is
+   * `paramFrames_[bodyDepth - 1]` (bodyDepth 0 = top-level main → no frame).
+   * GLSL scoping gives a function body ONLY its own params/locals + globals
+   * — NEVER the caller's locals — so frames at index < bodyDepth - 1 (caller
+   * frames) must not resolve anything. Frames at index >= bodyDepth are
+   * pushed solely for a nested call's ARG MATERIALIZATION (its body has not
+   * started; params/locals are not registered yet), so they resolve nothing
+   * either: a read there is an expression of the current function.
+   */
+  bodyDepth = 0;
 
   /** Push a frame for one inlined call (the inliner pops it after the body).
    *  `suffix` is the call site's JS-name suffix generator — frameLocal uses
@@ -814,28 +828,33 @@ export class CodegenEnv {
   }
 
   /**
-   * Resolve an identifier for READS: active param frames first (innermost
-   * frame's params, then its per-call-site locals — an inner local shadows
-   * an outer param), then declared locals. Declarations use lookupLocal
-   * (locals_ only — statements.ts's sibling re-declaration path must not
-   * see frames).
+   * Resolve an identifier for READS: the CURRENT function's scope only —
+   * its param frame (params first, then per-call-site locals — an inner
+   * local shadows an outer same-named param), then globals (locals_).
+   * Caller frames (index < bodyDepth - 1) are NEVER consulted: per GLSL
+   * scoping a function body sees only its own scope + globals, so a free
+   * name matching a caller's param/local resolves to the global instead
+   * (in-parameter-passed-as-inout-argument-and-global: callee G reads the
+   * global `p` while caller F's param `p` is live). Frames at index >=
+   * bodyDepth are pushed for a nested call's ARG MATERIALIZATION (its body
+   * has not started — params/locals are not yet registered), so they
+   * resolve nothing either; a read of a name the inner call DECLARES but
+   * has not materialized yet refers to the current function's scope
+   * (decl-before-use ⇒ `g(x)` inside f where g declares a local x: the arg
+   * x is f's x, read while g's frame is already active — the current
+   * function's frame is found directly, no outward walk needed).
    *
-   * Frame locals are materialized lazily (frameLocal) at their declaration
-   * statement, which precedes every read in valid GLSL (decl-before-use).
-   * A read of a name the innermost function DECLARES but has not materialized
-   * yet therefore refers to an ENCLOSING scope — the reachable case is
-   * nested-call argument materialization (`g(x)` inside f, where g declares a
-   * local x: the arg x is f's x, read while g's frame is already active) —
-   * so the search continues outward through the outer frames and locals_.
+   * Declarations use lookupLocal (locals_ only — statements.ts's sibling
+   * re-declaration path must not see frames).
    */
   resolveLocal(name: string): LocalVar | null {
-    for (let i = this.paramFrames_.length - 1; i >= 0; i--) {
-      const f = this.paramFrames_[i];
+    const cur = this.bodyDepth - 1;
+    if (cur >= 0) {
+      const f = this.paramFrames_[cur];
       const p = f.params.get(name);
       if (p) return p;
       const l = f.locals.get(name);
       if (l) return l;
-      if (f.localNames.has(name)) continue; // inner fn declares it; not yet materialized → outer scopes
     }
     return this.locals_.get(name) ?? null;
   }
@@ -946,24 +965,12 @@ export class CodegenEnv {
    * (Int32Array reads come back signed).
    */
   ensureDynScratch(name: string): { base: number; int: boolean; copyIn: string[]; copyOut: string[] } {
-    let lv = this.locals_.get(name);
-    if (!lv) {
-      // Frame params AND per-call-site locals (inlined calls) live outside
-      // locals_ — resolve them too.
-      for (let i = this.paramFrames_.length - 1; i >= 0; i--) {
-        const f = this.paramFrames_[i];
-        const p = f.params.get(name);
-        if (p) {
-          lv = p;
-          break;
-        }
-        const l = f.locals.get(name);
-        if (l) {
-          lv = l;
-          break;
-        }
-      }
-    }
+    // Same scope rule as resolveLocal (current function's frame, then
+    // globals): the callers always pass p.local.name, so this must find the
+    // var resolveLocal produced — never a same-named global shadowed by a
+    // current-frame param/local, and never a caller frame's var (a callee
+    // body cannot see caller locals).
+    const lv = this.resolveLocal(name);
     if (!lv) throw new Error(`codegen: unknown local '${name}'`);
     if (lv.kind === 'scratch') {
       throw new Error(`codegen: '${name}' is already scratch-backed (cannot dyn-spill)`);

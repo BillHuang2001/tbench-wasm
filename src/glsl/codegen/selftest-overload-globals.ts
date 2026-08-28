@@ -242,6 +242,62 @@ runVsCheck(
   }
 }
 
+/* B6. callee-body free name matching a CALLER PARAM resolves to the GLOBAL
+ *     (the exact in-parameter-passed-as-inout-argument-and-global shape: G's
+ *     `p += q` must accumulate into the global p, NOT into F's param p).
+ *     OLD BEHAVIOR (pinned by the failing CTS page): resolveLocal walked ALL
+ *     active param frames while emitting the inlined callee BODY, so G's `p`
+ *     resolved to F's param p — the write-back landed in F's discarded param
+ *     and the global stayed (0,0,0) → black frame. New rule: a callee body
+ *     sees only its own frame + globals; caller frames are invisible. */
+{
+  const prog = linkVs(
+    `vec3 p;
+     void G(inout vec3 q) { p += q; }
+     void F(in vec3 p) { G(p); }
+     void main() {
+       p = vec3(0.0);
+       F(vec3(0.0, 1.0, 0.0));
+       gl_Position = vec4(p, 1.0);
+     }`,
+    'global B6',
+  );
+  if (prog) {
+    const ctx = vertexCtx(prog);
+    prog.vertex.run(ctx);
+    near(
+      ctx.out.position[1],
+      1.0,
+      `global B6: callee free name vs caller PARAM → global (got y=${ctx.out.position[1]})`,
+    );
+  }
+}
+
+/* B7. same, but the caller's shadow is a LOCAL (frame.locals path) — the
+ *     callee body must still land on the global. */
+{
+  const prog = linkVs(
+    `vec3 p;
+     void G(inout vec3 q) { p += q; }
+     void F(in vec3 a) { vec3 p = a; G(p); }
+     void main() {
+       p = vec3(0.0);
+       F(vec3(0.0, 1.0, 0.0));
+       gl_Position = vec4(p, 1.0);
+     }`,
+    'global B7',
+  );
+  if (prog) {
+    const ctx = vertexCtx(prog);
+    prog.vertex.run(ctx);
+    near(
+      ctx.out.position[1],
+      1.0,
+      `global B7: callee free name vs caller LOCAL → global (got y=${ctx.out.position[1]})`,
+    );
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
