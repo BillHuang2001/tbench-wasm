@@ -188,16 +188,14 @@ function toUint32List(v: Uint32List): Uint32Array {
  * default.
  *
  * state.ts's VertexAttribState carries the three value arrays (constantF/
- * constantI/constantUI) but no "which one is current" flag; the flag is
- * attached lazily HERE (per attrib object) so state.ts stays untouched. Attrib
- * objects are never exposed to the page, so the extra field cannot trip the
- * CTS constants-and-properties enumeration. Absent flag ⇒ float.
+ * constantI/constantUI) and the `genericKind` flag ('f'|'i'|'ui' — which one
+ * is current); `setCurrentKind` below writes it. Absent flag ⇒ float (defensive;
+ * the field is initialized to 'f' by defaultVertexAttrib).
  */
 type CurrentKind = 'f' | 'i' | 'ui';
-type AttribWithKind = VertexAttribState & { _currentKind?: CurrentKind };
 
 function setCurrentKind(a: VertexAttribState, k: CurrentKind): void {
-  (a as AttribWithKind)._currentKind = k;
+  a.genericKind = k;
 }
 
 /**
