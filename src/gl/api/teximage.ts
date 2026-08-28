@@ -988,6 +988,20 @@ function sourceDims(source: unknown): { width: number; height: number } | null {
 // ---------------------------------------------------------------------------
 
 /** 6-arg DOM form: (target, level, internalformat, format, type, source). */
+/**
+ * WebGL2 spec §3.7.2/§3.7.3: TexImageSource (DOM element / video / VideoFrame)
+ * uploads with a PIXEL_UNPACK_BUFFER bound generate INVALID_OPERATION — the
+ * PBO path applies only to client ArrayBufferView/null data (CTS
+ * pbo-texture-uploads.html). Returns true when the upload may proceed.
+ */
+function domUploadPboGuard(ctx: WebGLRenderingContext): boolean {
+  if (ctx._state.pixelUnpackBuffer !== null) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return false;
+  }
+  return true;
+}
+
 function texImage2DDOM(
   ctx: WebGLRenderingContext,
   target: GLenum,
@@ -1001,6 +1015,7 @@ function texImage2DDOM(
     ctx._errors.push(C1.INVALID_VALUE);
     return;
   }
+  if (!domUploadPboGuard(ctx)) return;
   const dims = sourceDims(source);
   if (dims === null) {
     ctx._errors.push(C1.INVALID_VALUE);
@@ -1066,6 +1081,7 @@ function texImage2DDOMWithDims(
   type: GLenum,
   source: unknown,
 ): void {
+  if (!domUploadPboGuard(ctx)) return;
   // WebIDL: GLsizei/GLint are `long` — convert via ToInt32 (truncate toward
   // zero). The CTS passes e.g. bitmap.width/2 = 128.5 for a 257px source and
   // relies on the conversion to 128 (WebGL2 spec §3.7.2); the copy math
@@ -1160,6 +1176,7 @@ function texImage3DDOM(
   type: GLenum,
   source: unknown,
 ): void {
+  if (!domUploadPboGuard(ctx)) return;
   void internalformat;
   void format;
   void type;
@@ -1235,6 +1252,7 @@ function texImage3DDOMWithDims(
   type: GLenum,
   source: unknown,
 ): void {
+  if (!domUploadPboGuard(ctx)) return;
   // WebIDL: GLint/GLsizei are `long` — convert via ToInt32 (truncate toward
   // zero). Same rationale as the 2D cluster: the CTS passes fractional dims
   // (e.g. canvas.width/2 = 128.5 for a 257px source) and relies on the
@@ -1334,6 +1352,7 @@ function texSubImage2DDOM(
     // nullable pixels keep their INVALID_VALUE below.
     throw new TypeError(`Argument is not of type 'TexImageSource'`);
   }
+  if (!domUploadPboGuard(ctx)) return;
   const dims = sourceDims(source);
   if (dims === null) {
     ctx._errors.push(C1.INVALID_VALUE);
@@ -1402,6 +1421,7 @@ function texSubImage2DDOMWithDims(
   type: GLenum,
   source: unknown,
 ): void {
+  if (!domUploadPboGuard(ctx)) return;
   if (source === null || source === undefined) {
     throw new TypeError(`Argument is not of type 'TexImageSource'`);
   }
@@ -1496,6 +1516,7 @@ function texSubImage3DDOM(
   type: GLenum,
   source: unknown,
 ): void {
+  if (!domUploadPboGuard(ctx)) return;
   void format;
   void type;
   const tex = commonTexSubValidation(ctx, target, level, xoffset, yoffset, zoffset, 0, 0, 1, true);
@@ -1530,6 +1551,7 @@ function texSubImage3DDOMWithDims(
   type: GLenum,
   source: unknown,
 ): void {
+  if (!domUploadPboGuard(ctx)) return;
   if (source === null || source === undefined) {
     // WebIDL: the TexImageSource overload is non-nullable → throw TypeError
     // (mirrors the 2D texSubImage2DDOMWithDims convention; unreachable via
