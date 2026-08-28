@@ -11,8 +11,11 @@
  * covered by the conformance / visual-regression suites, not here.
  *
  * Real API (all re-exported from `../../src/raster/index`):
- * - Record layout: RECORD_OFFSET_X/Y/Z/W/POINT_SIZE, VARYINGS_OFFSET,
- *   RECORD_HEADER_FLOATS (5); computeVertexStride(varyings) → stride;
+ * - Record layout: RECORD_OFFSET_X/Y/Z/W/POINT_SIZE, the 16 clip/cull slots
+ *   (RECORD_OFFSET_CLIP_DISTANCE=5, RECORD_OFFSET_CULL_DISTANCE=13), then the
+ *   varyings at VARYINGS_OFFSET = RECORD_HEADER_FLOATS = 21 (21-float header
+ *   [x,y,z,w, pointSize, clipDist[8], cullDist[8], varyings...]);
+ *   computeVertexStride(varyings) → stride;
  *   writeVertexHeader(out, base, x, y, z, w, pointSize).
  * - clipPrimitive(buf, base, stride, count, scratch, out, outBase) → #verts
  *   written (0 = fully clipped). Clips ONE primitive (count 2|3) against the
@@ -34,6 +37,8 @@ import {
   RECORD_OFFSET_Z,
   RECORD_OFFSET_W,
   RECORD_OFFSET_POINT_SIZE,
+  RECORD_OFFSET_CLIP_DISTANCE,
+  RECORD_OFFSET_CULL_DISTANCE,
   VARYINGS_OFFSET,
   RECORD_HEADER_FLOATS,
   MAX_CLIPPED_VERTICES,
@@ -53,7 +58,7 @@ const FLOAT_VEC2 = 0x8b50;
 const FLOAT_VEC3 = 0x8b51;
 const FLOAT_VEC4 = 0x8b52;
 
-/** Two 2-component varyings → stride = 5 + 2 + 2 = 9. */
+/** Two 2-component varyings → stride = 21 + 2 + 2 = 25. */
 const TWO_VEC2_VARYINGS: readonly VaryingInfo[] = [
   { name: "v_a", type: FLOAT_VEC2, components: 2, flat: false },
   { name: "v_b", type: FLOAT_VEC2, components: 2, flat: false },
@@ -82,6 +87,22 @@ function writeRecord(
 /** Copies the record at `base` (stride floats) into a fresh number[]. */
 function readRecord(buf: Float32Array, base: number, stride: number): number[] {
   return Array.from(buf.subarray(base, base + stride));
+}
+
+/**
+ * Reads the LOGICAL record at `base` — header [x,y,z,w,pointSize] + varyings —
+ * skipping the 16 clip/cull slots that sit between pointSize and the varyings
+ * in the wave-16 layout (21-float header: [x,y,z,w, pointSize, clipDist[8],
+ * cullDist[8], varyings...]). Clip interpolates every record field linearly,
+ * so with zeroed inputs the slots stay 0 and carry no logical vertex info.
+ */
+function readLogicalRecord(buf: Float32Array, base: number, stride: number): number[] {
+  const out: number[] = [];
+  for (let i = RECORD_OFFSET_X; i <= RECORD_OFFSET_POINT_SIZE; i++) {
+    out.push(buf[base + i]);
+  }
+  for (let i = VARYINGS_OFFSET; i < stride; i++) out.push(buf[base + i]);
+  return out;
 }
 
 /** Header [x, y, z, w, pointSize] of the record at `base`. */
@@ -121,7 +142,7 @@ function expectVertices(
 ): void {
   expect(outCount).toBe(expected.length);
   const records = Array.from(
-    { length: outCount }, (_, i) => readRecord(out, i * stride, stride),
+    { length: outCount }, (_, i) => readLogicalRecord(out, i * stride, stride),
   );
   for (const want of expected) {
     const found = records.some((got) =>
@@ -144,7 +165,7 @@ function expectInsideClipVolume(out: Float32Array, outCount: number, stride: num
 }
 
 describe("signedArea2", () => {
-  const stride = computeVertexStride(TWO_VEC2_VARYINGS); // 9
+  const stride = computeVertexStride(TWO_VEC2_VARYINGS); // 25
 
   it("is positive for CCW winding and equals the signed area ×2", () => {
     const buf = makeRecordBuffer(3, stride);
@@ -184,7 +205,7 @@ describe("signedArea2", () => {
 
 describe("clipPrimitive", () => {
   it("passes a fully-inside triangle through unchanged (records copied verbatim)", () => {
-    const stride = computeVertexStride(TWO_VEC2_VARYINGS); // 9
+    const stride = computeVertexStride(TWO_VEC2_VARYINGS); // 25
     const buf = makeRecordBuffer(3, stride);
     writeRecord(buf, 0, 0, 0, 0, 1, 1, [10, 20, 30, 40]);
     writeRecord(buf, stride, 1, 0, 0, 1, 1, [11, 21, 31, 41]);
@@ -220,7 +241,7 @@ describe("clipPrimitive", () => {
   });
 
   it("interpolates varyings linearly in clip space for clipped vertices (long records)", () => {
-    const stride = computeVertexStride(TWO_VEC2_VARYINGS); // 9
+    const stride = computeVertexStride(TWO_VEC2_VARYINGS); // 25
     const buf = makeRecordBuffer(3, stride);
     writeRecord(buf, 0, 0, 0, 0, 1, 1, [10, 20, 30, 40]);
     writeRecord(buf, stride, -0.5, 0, 0, 1, 1, [11, 21, 31, 41]);
@@ -360,23 +381,26 @@ describe("record layout (computeVertexStride / writeVertexHeader)", () => {
     expect(RECORD_OFFSET_Z).toBe(2);
     expect(RECORD_OFFSET_W).toBe(3);
     expect(RECORD_OFFSET_POINT_SIZE).toBe(4);
-    expect(VARYINGS_OFFSET).toBe(5);
-    expect(RECORD_HEADER_FLOATS).toBe(5);
+    // 21-float header: [x,y,z,w, pointSize, clipDist[8], cullDist[8], varyings...]
+    expect(RECORD_OFFSET_CLIP_DISTANCE).toBe(5);
+    expect(RECORD_OFFSET_CULL_DISTANCE).toBe(13);
+    expect(VARYINGS_OFFSET).toBe(21);
+    expect(RECORD_HEADER_FLOATS).toBe(21);
     expect(MAX_CLIPPED_VERTICES).toBeGreaterThanOrEqual(7);
   });
 
   it("computeVertexStride sums the header and varying components", () => {
     expect(computeVertexStride([])).toBe(RECORD_HEADER_FLOATS);
-    expect(computeVertexStride(TWO_VEC2_VARYINGS)).toBe(9);
+    expect(computeVertexStride(TWO_VEC2_VARYINGS)).toBe(25);
     expect(computeVertexStride([
       { name: "v0", type: FLOAT_VEC3, components: 3, flat: false },
       { name: "v1", type: FLOAT_VEC4, components: 4, flat: true },
       { name: "v2", type: FLOAT, components: 1, flat: false },
-    ])).toBe(13);
+    ])).toBe(29);
   });
 
   it("writeVertexHeader places fields at the documented offsets (base 0 and non-zero base)", () => {
-    const stride = computeVertexStride(TWO_VEC2_VARYINGS); // 9
+    const stride = computeVertexStride(TWO_VEC2_VARYINGS); // 25
     const buf = makeRecordBuffer(2, stride);
     writeVertexHeader(buf, 0, 1.5, -2.5, 3.5, 4.5, 8);
     writeVertexHeader(buf, stride, -1, 2, -3, 4, 16);

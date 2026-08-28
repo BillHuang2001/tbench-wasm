@@ -9,8 +9,10 @@
  * these tests).
  *
  * Pipeline conventions relied on here (pinned in src/raster/CONTEXT.md):
- * - Vertex records are CLIP-space [x,y,z,w,pointSize,varyings...]; with the
- *   default viewport {0,0,4,4}, clip = win/2 − 1 (see winVert below).
+ * - Vertex records are CLIP-space with a 21-float header
+ *   [x,y,z,w, pointSize, clipDist[8], cullDist[8]] followed by the varyings
+ *   (VARYINGS_OFFSET = 21); with the default viewport {0,0,4,4},
+ *   clip = win/2 − 1 (see winVert below).
  * - winZ = near + (far−near)·(z/w·0.5+0.5) — depth is stored as Float32.
  * - Fragment colors are normalized floats; 8-bit targets encode via
  *   Math.round(c·255) (formats.ts P_U8).
@@ -93,9 +95,13 @@ function dc(partial: Partial<DrawCall>): DrawCall {
 }
 
 /** One clip-space vertex record for the default 4×4 viewport
- *  (clip = win/2 − 1). `z` is the CLIP z (winZ = z·0.5+0.5 for near=0,far=1). */
+ *  (clip = win/2 − 1). `z` is the CLIP z (winZ = z·0.5+0.5 for near=0,far=1).
+ *  21-float header: [x,y,z,w, pointSize, clipDist[8], cullDist[8]] — the
+ *  clip/cull slots are zero-filled (gl zeroes them per draw; unused here). */
 function winVert(x: number, y: number, z = 0, w = 1): number[] {
-  return [x / 2 - 1, y / 2 - 1, z, w, 1];
+  return [x / 2 - 1, y / 2 - 1, z, w, 1,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0];
 }
 
 /** Packs vertex records into the draw's Float32Array. */
@@ -369,8 +375,8 @@ void main() { gl_FragColor = v_color; }`, "FRAGMENT"),
 
     // Dense per-attribute arrays; attribIndices[loc] = fetch index (glsl
     // codegen reads attribs[loc][attribIndices[loc] * components + c]).
-    // NOTE: winVert() returns [x,y,z,w, pointSize] — the vertex-shader input
-    // is just the vec4 position, so slice off the pointSize element.
+    // NOTE: winVert() returns the full 21-float header — the vertex-shader
+    // input is just the vec4 position, so keep only the first four elements.
     const positions = new Float32Array([
       ...winVert(0, 0).slice(0, 4), ...winVert(4, 0).slice(0, 4),
       ...winVert(0, 4).slice(0, 4),
@@ -411,7 +417,11 @@ void main() { gl_FragColor = v_color; }`, "FRAGMENT"),
       ctx.attribIndices[locPos] = i;
       ctx.attribIndices[locCol] = i;
       program.vertex.run(ctx);
-      records.push([...ctx.out.position, ctx.out.pointSize, ...ctx.out.varyings]);
+      records.push([
+        ...ctx.out.position, ctx.out.pointSize,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // clip/cull slots
+        ...ctx.out.varyings,
+      ]);
     }
 
     const s = createSurface(GL.RGBA8, 4, 4);
@@ -648,9 +658,10 @@ describe("POINTS draw with per-vertex varyings (record stride)", () => {
     const s = createSurface(GL.RGBA8, 4, 4);
     // Two size-1 points centered at (1.5,1.5) and (2.5,2.5): half-open square
     // coverage [x−0.5, x+0.5) makes them cover pixels (1,1) and (2,2) exactly.
-    // Records are [x,y,z,w,ps, c0,c1,c2] (stride 8): the second point must be
-    // copied from srcBase = ia*stride, not ia (the buggy offset lands mid-way
-    // through the first point's record).
+    // Records are the 21-float header (clip/cull slots zero-filled) + 3 varying
+    // floats (stride 24 = VARYINGS_OFFSET + 3): the second point must be copied
+    // from srcBase = ia*stride, not ia (the buggy offset lands mid-way through
+    // the first point's record).
     draw(dc({
       mode: 0x0000, // POINTS
       count: 2,
