@@ -260,7 +260,7 @@ function evalConstBinary(
   // True linear-algebra products (codegen emitArith indexing).
   if (op === '*') {
     if (lt.kind === 'matrix' && rt.kind === 'matrix') {
-      // A (lt.cols × lt.rows) * B (rt.cols × rt.rows), legal iff lt.rows === rt.cols.
+      // A (lt.cols × lt.rows) * B (rt.cols × rt.rows), legal iff lt.cols === rt.rows.
       // result[c][r] = Σ_{s<lt.cols} A[s][r] * B[c][s]
       const aRows = lt.rows;
       const aCols = lt.cols;
