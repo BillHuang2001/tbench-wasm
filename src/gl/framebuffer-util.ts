@@ -20,18 +20,21 @@
  *
  * Completeness check order (GLES 3.0 §4.4.5, adapted to WebGL1/2):
  *   1. no attachments                    → FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT
- *   2. sample-count consistency          → FRAMEBUFFER_INCOMPLETE_MULTISAMPLE
- *   3. legal combination of images       → FRAMEBUFFER_UNSUPPORTED
+ *   2. per-attachment checks             → FRAMEBUFFER_INCOMPLETE_ATTACHMENT
+ *      (undefined texture level, cube map not cube-complete, zero-sized
+ *       renderbuffer, unallocated renderbuffer storage, and the attached
+ *       image's internal format not renderable at its attachment point) —
+ *       checked FIRST so an undefined image wins over sample-count/dimension
+ *       mismatches (CTS invalidate-framebuffer.html: multisampled color
+ *       renderbuffer + unallocated depth renderbuffer → INCOMPLETE_ATTACHMENT)
+ *   3. sample-count consistency          → FRAMEBUFFER_INCOMPLETE_MULTISAMPLE
+ *   4. legal combination of images       → FRAMEBUFFER_UNSUPPORTED
  *      (WebGL1: DEPTH+STENCIL / DEPTH+DS / STENCIL+DS concurrent attachment
  *       points — WebGL1 spec "Framebuffer Object Attachments" hard rule;
  *       WebGL2 (and WebGL1+WEBGL_draw_buffers): same image on more than one
  *       color attachment point; both versions: depth and stencil attachments
  *       that are not the same image.)
- *   4. dimension consistency             → FRAMEBUFFER_INCOMPLETE_DIMENSIONS
- *   5. per-attachment checks             → FRAMEBUFFER_INCOMPLETE_ATTACHMENT
- *      (undefined texture level, cube map not cube-complete, zero-sized
- *       renderbuffer, unallocated renderbuffer storage, and the attached
- *       image's internal format not renderable at its attachment point)
+ *   5. dimension consistency             → FRAMEBUFFER_INCOMPLETE_DIMENSIONS
  *   6. layered-attachment consistency    → FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS
  *
  * Renderability tables (documented decisions — CTS is the primary gate):
@@ -59,11 +62,14 @@
  *    RG8/RG8I/RG8UI, RG16I/RG16UI, RG32I/RG32UI, RGBA8I/RGBA8UI,
  *    RGBA16I/RGBA16UI, RGBA32I/RGBA32UI, plus the GLES3 RGB integer formats
  *    (RGB8I/RGB8UI/RGB16I/RGB16UI/RGB32I/RGB32UI — GLES3 Table 3.13; WebGL2
- *    only removes RGB8 among the unorm formats), plus unsized RGBA (resolves to
- *    RGBA8 — occlusion-query-scissor.html attaches texImage2D(RGBA) textures
- *    and renders to them). RGB8 is NOT color-renderable in WebGL2 (objective;
- *    matches the known WebGL2 deviation from GLES3) — see checkAttachment for
- *    the texture/renderbuffer split; unsized RGB (→ RGB8) behaves like RGB8.
+ *    only removes RGB8 among the unorm formats), plus the unsized RGBA and RGB
+ *    texture formats (RGBA resolves to RGBA8 — occlusion-query-scissor.html
+ *    attaches texImage2D(RGBA) textures and renders to them; unsized RGB
+ *    textures are color-renderable — invalidate-framebuffer.html requires
+ *    COMPLETE for a texImage2D(RGB) attachment). RGB8 is NOT color-renderable
+ *    in WebGL2 (objective; matches the known WebGL2 deviation from GLES3) —
+ *    see checkAttachment for the texture/renderbuffer split. Unsized RGB
+ *    renderbuffers cannot exist (renderbufferStorage(RGB) → INVALID_ENUM).
  *    EXT_color_buffer_float adds R16F/RG16F/RGBA16F/R32F/RG32F/RGBA32F/
  *    R11F_G11F_B10F; EXT_texture_norm16 adds R16_EXT/RG16_EXT/RGBA16_EXT;
  *    WEBGL_render_shared_exponent adds RGB9_E5. Snorm formats are not
@@ -129,7 +135,7 @@ const W1_COLOR_RENDERABLE = new Set<GLenum>([
 /** WebGL2 color-renderable core (GLES3 Table 3.13 minus RGB8; RGB10_A2UI included). */
 const W2_COLOR_RENDERABLE_CORE = new Set<GLenum>([
   0x8056 /* RGBA4 */, 0x8d62 /* RGB565 */, 0x8057 /* RGB5_A1 */,
-  0x8058 /* RGBA8 */, 0x1908 /* RGBA (unsized → RGBA8) */,
+  0x8058 /* RGBA8 */, 0x1908 /* RGBA (unsized → RGBA8) */, 0x1907 /* RGB (unsized) */,
   0x8059 /* RGB10_A2 */, 0x906f /* RGB10_A2UI */,
   0x8c43 /* SRGB8_ALPHA8 */,
   0x8229 /* R8 */, 0x8231 /* R8I */, 0x8232 /* R8UI */,
@@ -445,59 +451,18 @@ export function checkFramebufferStatus(ctx: WebGLRenderingContext, fbo: WebGLFra
   // ---- 1. attachment presence ----
   if (count === 0) return C1.FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
 
-  // ---- 2. sample-count consistency ----
-  let samples = -1;
-  const sampleEntries: FramebufferAttachment[] = [];
-  for (const { entry } of colorEntries) sampleEntries.push(entry);
-  if (depthEntry) sampleEntries.push(depthEntry);
-  if (stencilEntry) sampleEntries.push(stencilEntry);
-  if (dsEntry && version === 1) sampleEntries.push(dsEntry);
-  for (const entry of sampleEntries) {
-    const s = attachmentSamples(ctx, entry);
-    if (samples === -1) samples = s;
-    else if (samples !== s) return C2.FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
-  }
-
-  // ---- 3. legal combination of images (UNSUPPORTED) ----
-  if (version === 1) {
-    // WebGL1 spec: error to concurrently attach to DEPTH+DS, STENCIL+DS, DEPTH+STENCIL.
-    if ((depthEntry && dsEntry) || (stencilEntry && dsEntry) || (depthEntry && stencilEntry)) {
-      return C1.FRAMEBUFFER_UNSUPPORTED;
-    }
-  }
-  const drawBuffersAvail = version === 2 || hasExtension(ctx, 'WEBGL_draw_buffers');
-  if (colorEntries.length > 1 && drawBuffersAvail) {
-    for (let i = 0; i < colorEntries.length; i++) {
-      for (let j = i + 1; j < colorEntries.length; j++) {
-        if (sameImage(colorEntries[i].entry, colorEntries[j].entry)) {
-          return C1.FRAMEBUFFER_UNSUPPORTED;
-        }
-      }
-    }
-  }
+  // WebGL2: DEPTH_STENCIL_ATTACHMENT is an alias for DEPTH+STENCIL (same image
+  // on both points); WebGL1 treats it as an independent point.
   const depth = depthEntry ?? dsEntry;
   const stencil = stencilEntry ?? dsEntry;
-  if (depth && stencil && !sameImage(depth, stencil)) {
-    return C1.FRAMEBUFFER_UNSUPPORTED;
-  }
 
-  // ---- 4. dimension consistency ----
-  let dims: { width: number; height: number } | null = null;
-  const dimEntries: FramebufferAttachment[] = [];
-  for (const { entry } of colorEntries) dimEntries.push(entry);
-  if (depthEntry) dimEntries.push(depthEntry);
-  if (stencilEntry) dimEntries.push(stencilEntry);
-  if (dsEntry && version === 1) dimEntries.push(dsEntry);
-  for (const entry of dimEntries) {
-    const d = attachmentDims(entry);
-    if (!d) continue; // unresolvable image → caught by the per-attachment phase
-    if (dims === null) dims = d;
-    else if (dims.width !== d.width || dims.height !== d.height) {
-      return C1.FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
-    }
-  }
-
-  // ---- 5. per-attachment checks (level completeness + renderability) ----
+  // ---- 2. per-attachment checks (level completeness + renderability) ----
+  // GLES 3.0 §4.4.4.2 checks per-attachment image validity FIRST: an attachment
+  // with an undefined image (unallocated renderbuffer storage, undefined
+  // texture level, zero size) makes the FBO FRAMEBUFFER_INCOMPLETE_ATTACHMENT
+  // even when other conditions (e.g. a sample-count mismatch against another
+  // attachment) also fail — CTS invalidate-framebuffer.html hard-asserts this
+  // (multisampled color renderbuffer + unallocated depth renderbuffer → 36054).
   for (const { entry } of colorEntries) {
     const st = checkAttachment(ctx, entry, 'color');
     if (st !== null) return st;
@@ -526,6 +491,56 @@ export function checkFramebufferStatus(ctx: WebGLRenderingContext, fbo: WebGLFra
     if (stencil && stencil !== depth) {
       const st = checkAttachment(ctx, stencil, 'stencil');
       if (st !== null) return st;
+    }
+  }
+
+  // ---- 3. sample-count consistency ----
+  let samples = -1;
+  const sampleEntries: FramebufferAttachment[] = [];
+  for (const { entry } of colorEntries) sampleEntries.push(entry);
+  if (depthEntry) sampleEntries.push(depthEntry);
+  if (stencilEntry) sampleEntries.push(stencilEntry);
+  if (dsEntry && version === 1) sampleEntries.push(dsEntry);
+  for (const entry of sampleEntries) {
+    const s = attachmentSamples(ctx, entry);
+    if (samples === -1) samples = s;
+    else if (samples !== s) return C2.FRAMEBUFFER_INCOMPLETE_MULTISAMPLE;
+  }
+
+  // ---- 4. legal combination of images (UNSUPPORTED) ----
+  if (version === 1) {
+    // WebGL1 spec: error to concurrently attach to DEPTH+DS, STENCIL+DS, DEPTH+STENCIL.
+    if ((depthEntry && dsEntry) || (stencilEntry && dsEntry) || (depthEntry && stencilEntry)) {
+      return C1.FRAMEBUFFER_UNSUPPORTED;
+    }
+  }
+  const drawBuffersAvail = version === 2 || hasExtension(ctx, 'WEBGL_draw_buffers');
+  if (colorEntries.length > 1 && drawBuffersAvail) {
+    for (let i = 0; i < colorEntries.length; i++) {
+      for (let j = i + 1; j < colorEntries.length; j++) {
+        if (sameImage(colorEntries[i].entry, colorEntries[j].entry)) {
+          return C1.FRAMEBUFFER_UNSUPPORTED;
+        }
+      }
+    }
+  }
+  if (depth && stencil && !sameImage(depth, stencil)) {
+    return C1.FRAMEBUFFER_UNSUPPORTED;
+  }
+
+  // ---- 5. dimension consistency ----
+  let dims: { width: number; height: number } | null = null;
+  const dimEntries: FramebufferAttachment[] = [];
+  for (const { entry } of colorEntries) dimEntries.push(entry);
+  if (depthEntry) dimEntries.push(depthEntry);
+  if (stencilEntry) dimEntries.push(stencilEntry);
+  if (dsEntry && version === 1) dimEntries.push(dsEntry);
+  for (const entry of dimEntries) {
+    const d = attachmentDims(entry);
+    if (!d) continue; // unresolvable image → caught by the per-attachment phase
+    if (dims === null) dims = d;
+    else if (dims.width !== d.width || dims.height !== d.height) {
+      return C1.FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
     }
   }
 
@@ -586,12 +601,14 @@ function checkAttachment(
   switch (kind) {
     case 'color':
       if (!isColorRenderable(ctx, format)) {
-        // Objective-mandated WebGL2 deviation: RGB8 (and unsized RGB, which
-        // resolves to RGB8) is NOT color-renderable. For TEXTURE attachments
-        // the deviation reports FRAMEBUFFER_UNSUPPORTED; RGB8 RENDERBUFFERS are
+        // Objective-mandated WebGL2 deviation: RGB8 is NOT color-renderable
+        // (GLES3 Table 3.13 excludes it). For TEXTURE attachments the deviation
+        // reports FRAMEBUFFER_UNSUPPORTED; RGB8 RENDERBUFFERS are
         // color-renderable per GLES3 Table 3.13 → COMPLETE
-        // (read-pixels-from-rgb8-into-pbo-bug.html hard-asserts).
-        if (ctx._version === 2 && (format === 0x8051 /* RGB8 */ || format === 0x1907 /* RGB (unsized → RGB8) */)) {
+        // (read-pixels-from-rgb8-into-pbo-bug.html hard-asserts). Unsized RGB
+        // TEXTURES are color-renderable (CTS invalidate-framebuffer.html
+        // requires COMPLETE for a texImage2D(RGB) attachment).
+        if (ctx._version === 2 && format === 0x8051 /* RGB8 */) {
           return entry.type === 'texture' ? C1.FRAMEBUFFER_UNSUPPORTED : null;
         }
         return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;

@@ -544,8 +544,17 @@ function formatComponentBits(format: GLenum): [number, number, number, number, n
   const zero: [number, number, number, number, number, number] = [0, 0, 0, 0, 0, 0];
   switch (format) {
     case C1.RGBA8: case C2.SRGB8_ALPHA8: case CExt.SRGB_ALPHA_EXT:
+    case 0x1908 /* RGBA (unsized — 8-bit components) */:
       return [8, 8, 8, 8, 0, 0];
-    case C2.RGB8: case C2.SRGB8: return [8, 8, 8, 0, 0, 0];
+    case C2.RGB8: case C2.SRGB8:
+    case 0x1907 /* RGB (unsized — 8-bit components) */:
+      return [8, 8, 8, 0, 0, 0];
+    case 0x1909 /* LUMINANCE (unsized) */:
+      return [8, 0, 0, 0, 0, 0];
+    case 0x190a /* LUMINANCE_ALPHA (unsized) */:
+      return [8, 0, 0, 8, 0, 0];
+    case 0x1906 /* ALPHA (unsized) */:
+      return [0, 0, 0, 8, 0, 0];
     case C1.RGBA4: return [4, 4, 4, 4, 0, 0];
     case C1.RGB5_A1: return [5, 5, 5, 1, 0, 0];
     case C1.RGB565: return [5, 6, 5, 0, 0, 0];
@@ -573,7 +582,8 @@ function formatComponentBits(format: GLenum): [number, number, number, number, n
     case C2.RG32F: return [32, 32, 0, 0, 0, 0];
     case C2.RGB10_A2: return [10, 10, 10, 2, 0, 0];
     case CExt.RGB16_EXT: return [16, 16, 16, 0, 0, 0];
-    case C1.DEPTH_COMPONENT16: return [0, 0, 0, 0, 16, 0];
+    case C1.DEPTH_COMPONENT16: case 0x1902 /* DEPTH_COMPONENT (unsized — 16-bit) */:
+      return [0, 0, 0, 0, 16, 0];
     case C2.DEPTH_COMPONENT24: return [0, 0, 0, 0, 24, 0];
     case C2.DEPTH_COMPONENT32F: return [0, 0, 0, 0, 32, 0];
     case C2.DEPTH24_STENCIL8: case C1.DEPTH_STENCIL: return [0, 0, 0, 0, 24, 8];
@@ -994,35 +1004,19 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
           return null;
       }
     }
-    // WebGL2 pname table.
+    // WebGL2 pname table. Empty-attachment semantics follow Chromium + GLES 3.0
+    // §6.1.13: when the attachment point has NO image, only OBJECT_TYPE (→ NONE)
+    // and OBJECT_NAME (→ null, no error — WebGL2 spec) are legal; EVERY other
+    // pname — including pnames outside the table (WebIDL converts undefined
+    // constants to 0) — generates INVALID_OPERATION (CTS framebuffer-test.html
+    // passes gl.FRAMEBUFFER_DEPTH_SIZE (undefined → 0) on an empty attachment
+    // and expects INVALID_OPERATION).
     switch (pname) {
       case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
         return rec === null ? NONE : rec.type === 'renderbuffer' ? C1.RENDERBUFFER : TEXTURE;
       case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
         if (rec === null) return null;
         return rec.type === 'renderbuffer' ? rec.renderbuffer : rec.texture;
-      case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
-        if (rec === null) return 0;
-        return rec.type === 'renderbuffer' ? 0 : rec.level;
-      case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
-        if (rec === null) return 0;
-        return rec.type === 'renderbuffer' ? 0 : rec.face;
-      case C2.FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
-        if (rec === null) return 0;
-        return rec.type === 'renderbuffer' ? 0 : rec.layer;
-      case C2.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
-      case C2.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
-      case C2.FRAMEBUFFER_ATTACHMENT_RED_SIZE:
-      case C2.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
-      case C2.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
-      case C2.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
-      case C2.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
-      case C2.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
-        if (rec === null) {
-          ctx._errors.push(C1.INVALID_OPERATION); // CTS framebuffer-test.html
-          return null;
-        }
-        return attachmentParameterValue(ctx, rec, pname);
       case TEXTURE_SAMPLES_EXT:
         // WEBGL_multisampled_render_to_texture (WebGL2-only): sample count of a
         // texture attachment, 0 otherwise (extension spec).
@@ -1033,8 +1027,30 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         if (rec === null) return 0;
         return rec.type === 'texture' ? rec.texture._msaaSamples : 0;
       default:
-        ctx._errors.push(C1.INVALID_ENUM);
-        return null;
+        if (rec === null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return null;
+        }
+        switch (pname) {
+          case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+            return rec.type === 'renderbuffer' ? 0 : rec.level;
+          case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+            return rec.type === 'renderbuffer' ? 0 : rec.face;
+          case C2.FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+            return rec.type === 'renderbuffer' ? 0 : rec.layer;
+          case C2.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+          case C2.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+          case C2.FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+          case C2.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+          case C2.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+          case C2.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
+          case C2.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+          case C2.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+            return attachmentParameterValue(ctx, rec, pname);
+          default:
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+        }
     }
   };
 
@@ -1257,6 +1273,12 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       }
       if (samples > ctx._state.limits.MAX_SAMPLES) {
         ctx._errors.push(C1.INVALID_OPERATION); // WebGL2 spec + multisampled.ts factory
+        return;
+      }
+      // GLES 3.0 §4.4.2.3: the WebGL1-style unsized DEPTH_STENCIL format is not
+      // multisampleable (multisampled-depth-renderbuffer-initialization.html).
+      if (internalformat === C1.DEPTH_STENCIL && samples > 0) {
+        ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
       if (!isValidRenderbufferFormat(ctx, internalformat)) {
