@@ -1209,11 +1209,25 @@ function resolveTfVaryings(pm: ProgramModel): ResolvedTfState | null {
  * (`buf._data.byteLength - range.offset`), NOT the `range.size` snapshot taken
  * at bind time: CTS switching-objects.html does `bindBuffer(TF, buf)` →
  * `bufferData(TF, ...)` (grow) → draw, and the bind-time size would be stale.
- * An unallocated/too-small store yields 0.
+ * GLES 3.0 §2.15.2: a buffer with NO data store (never bufferData'd — e.g.
+ * bindBufferBase'd while the generic binding pointed elsewhere) gives
+ * UNDEFINED capture results, NO error (CTS too-small-buffers.html separate
+ * sections bind buffer 1 while the generic point still holds buffer 0); an
+ * unbound binding point captures nothing (varying skipped) — both yield
+ * Infinity so the draw proceeds. An explicit bindBufferRange on an
+ * unallocated store is a range that cannot exist → too small (the CTS
+ * brange-small cases expect INVALID_OPERATION).
  */
 function tfRangeCapacity(tf: WebGLTransformFeedback, bufIdx: number): number {
   const buf = tf._buffers[bufIdx];
-  if (!buf || !buf._data) return 0;
+  if (!buf) return Infinity; // unbound → varying not captured, no overflow
+  if (!buf._data) {
+    const range = tf._bufferRanges[bufIdx] ?? { offset: 0, size: 0 };
+    // bindBufferBase records size 0 for an unallocated buffer (whole-buffer
+    // binding → undefined results, no error); bindBufferRange records the
+    // explicit size (a range over a nonexistent store → too small).
+    return range.size > 0 ? 0 : Infinity;
+  }
   const range = tf._bufferRanges[bufIdx] ?? { offset: 0, size: buf._size };
   return Math.max(0, buf._data.byteLength - range.offset);
 }
@@ -2070,7 +2084,7 @@ function indexTypeSize(type: GLenum): number {
  * attached (INVALID_OPERATION). The engine's executeDraw re-checks these as a
  * safety net; the api layer checks first so error ordering is exact.
  */
-function validateCommonDraw(ctx: WebGLRenderingContext, mode: GLenum): boolean {
+function validateCommonDraw(ctx: WebGLRenderingContext, mode: GLenum, indexed: boolean = false): boolean {
   const s = ctx._state;
   const prog = s.currentProgram;
   if (prog !== null) ensureProgramLinked(ctx, prog); // KHR: finish any deferred link
@@ -2086,8 +2100,54 @@ function validateCommonDraw(ctx: WebGLRenderingContext, mode: GLenum): boolean {
     pushError(ctx, C1.INVALID_OPERATION);
     return false;
   }
+  // GLES 3.0 §2.15.2 double-bind rules (CTS
+  // transform_feedback/simultaneous_binding.html): a draw is INVALID_OPERATION
+  // when a buffer in the BOUND TF object's indexed binding points is also used
+  // by the draw through another binding point. Enabled vertex attribute array
+  // buffers (and the element-array buffer for indexed draws) and indexed
+  // UNIFORM_BUFFER binding points are forbidden REGARDLESS of whether TF is
+  // active (the test errors with TF disabled too — "Test ARRAY_BUFFER",
+  // "Test UNIFORM_BUFFER"); the other targets (ARRAY_BUFFER, COPY_READ/WRITE,
+  // PIXEL_PACK/UNPACK — "Test TF buffer bound to target unused by draw") are
+  // forbidden only while TF is active and not paused. The generic
+  // TRANSFORM_FEEDBACK_BUFFER point is legal (not part of the TF object, the
+  // test draws from it with TF enabled). DISABLED attribs pointing at a TF
+  // buffer are legal (not used by the draw), and an UNBOUND TF object's
+  // bindings are irrelevant — only s.transformFeedback (the bound object; the
+  // default TF is exposed there during default sessions) is checked.
   const vao = s.vao;
   const maxAttribs = s.limits.MAX_VERTEX_ATTRIBS;
+  if (tf) {
+    const tfBuffers = tf._buffers;
+    const tfActive = tf._active && !tf._paused;
+    for (let loc = 0; loc < maxAttribs; loc++) {
+      const a = vao.attribs[loc];
+      if (a.enabled && a.buffer && tfBuffers.includes(a.buffer)) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return false;
+      }
+    }
+    if (indexed && vao.elementArrayBuffer && tfBuffers.includes(vao.elementArrayBuffer)) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return false;
+    }
+    for (let i = 0; i < s.uniformBuffers.length; i++) {
+      const b = s.uniformBuffers[i];
+      if (b && tfBuffers.includes(b)) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return false;
+      }
+    }
+    if (tfActive &&
+        ((s.arrayBuffer && tfBuffers.includes(s.arrayBuffer)) ||
+         (s.copyReadBuffer && tfBuffers.includes(s.copyReadBuffer)) ||
+         (s.copyWriteBuffer && tfBuffers.includes(s.copyWriteBuffer)) ||
+         (s.pixelPackBuffer && tfBuffers.includes(s.pixelPackBuffer)) ||
+         (s.pixelUnpackBuffer && tfBuffers.includes(s.pixelUnpackBuffer)))) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return false;
+    }
+  }
   for (let loc = 0; loc < maxAttribs; loc++) {
     const a = vao.attribs[loc];
     if (a.enabled && !a.buffer) {
@@ -2189,7 +2249,7 @@ export function validateDrawElements(
     pushError(ctx, C1.INVALID_OPERATION);
     return null;
   }
-  if (!validateCommonDraw(ctx, mode)) return null;
+  if (!validateCommonDraw(ctx, mode, true)) return null;
   const req: DrawRequest = {
     mode, count, instanceCount, firstOrOffset: offset, indexed: true, indexType: type,
   };
