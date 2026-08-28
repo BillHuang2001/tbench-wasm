@@ -1815,7 +1815,10 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
       `member sampler array stays whole: one 'uni.sam[0]' size 2 (got ${JSON.stringify(p.uniforms.map((u) => ({ n: u.name, s: u.size, l: u.location })))})`,
     );
     const alias = p.uniformMap.get('uni.sam[1]');
-    check(alias !== undefined && alias === sam0!.location + 1, `uniformMap alias 'uni.sam[1]' → ${sam0!.location + 1} (got ${alias})`);
+    check(
+      alias !== undefined && alias.name === 'uni.sam[0]',
+      `uniformMap alias 'uni.sam[1]' → entry 'uni.sam[0]' (got ${alias === undefined ? 'undefined' : alias.name})`,
+    );
     if (sam0) {
       p.intStore[sam0.location] = 5;
       p.intStore[sam0.location + 1] = 9;
