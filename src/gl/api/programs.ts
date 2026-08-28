@@ -71,9 +71,12 @@
  *
  * Error semantics: WebIDL conversion failures throw TypeError; cross-context
  * objects → INVALID_OPERATION; DELETED shaders/programs that are no longer
- * attached/in-use → INVALID_VALUE for query methods (ES2 "not the name of an
- * object") and INVALID_OPERATION for lifecycle methods; deleted-but-attached
- * shaders and deleted-but-in-use programs remain valid until detached/unused.
+ * attached/in-use → INVALID_VALUE (ES2 "not the name of an object") and
+ * INVALID_OPERATION for lifecycle methods on fully-deleted objects;
+ * deleted-but-attached shaders and deleted-but-in-use programs remain valid
+ * until detached/unused — linkProgram/attachShader/detachShader/useProgram
+ * follow the same deferred-deletion rule (validateProgramQuery), so they keep
+ * working on a delete-marked program that is still current (CTS program-test).
  */
 
 import type { WebGLRenderingContext } from '../webgl1';
@@ -1045,7 +1048,10 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       }
       return;
     }
-    const p = validateProgram(ctx, program);
+    // Query-style validation: deletion is DEFERRED while the program is in use,
+    // so a delete-marked-but-current program is still a valid useProgram target
+    // (INVALID_VALUE only once it is fully deleted / no longer in use).
+    const p = validateProgramQuery(ctx, program);
     if (p === null) return;
     ensureProgramLinked(ctx, p); // trigger: only a linked program can be used
     if (!p._linkStatus || p._program === null) {
@@ -1055,7 +1061,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       return;
     }
     const prev = ctx._state.currentProgram;
-    if (prev !== null) {
+    if (prev !== null && prev !== p) {
       prev._inUse = false;
       if (prev._deleted) releaseProgram(ctx, prev);
     }
@@ -1066,7 +1072,10 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
   proto.attachShader = function (this: WebGLRenderingContext, program: WebGLProgram, shader: WebGLShader): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    const p = validateProgram(ctx, program);
+    // Query-style validation: attachShader must keep working on a delete-marked
+    // program that is still in use (CTS program-test: deleteProgram(current);
+    // attachShader must succeed — deletion is deferred while in use).
+    const p = validateProgramQuery(ctx, program);
     if (p === null) return;
     const s = validateShader(ctx, shader);
     if (s === null) return;
@@ -1087,7 +1096,8 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
   proto.detachShader = function (this: WebGLRenderingContext, program: WebGLProgram, shader: WebGLShader): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    const p = validateProgram(ctx, program);
+    // Query-style validation: same deferred-deletion rule as attachShader.
+    const p = validateProgramQuery(ctx, program);
     if (p === null) return;
     const s = validateShaderDetach(ctx, shader); // deleted-but-attached is legal here
     if (s === null) return;
@@ -1106,7 +1116,10 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
   proto.linkProgram = function (this: WebGLRenderingContext, program: WebGLProgram): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    const p = validateProgram(ctx, program);
+    // Query-style validation: relinking a delete-marked-but-in-use program is
+    // legal (CTS program-test L336: linkProgram after deleteProgram while the
+    // program is still current must be NO_ERROR).
+    const p = validateProgramQuery(ctx, program);
     if (p === null) return;
     if (khrEnabled(ctx)) {
       enqueueLink(ctx, p); // deferred: 1 chunk, COMPLETION_STATUS_KHR stays false meanwhile

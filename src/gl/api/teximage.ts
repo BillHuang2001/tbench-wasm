@@ -217,8 +217,13 @@ const W1_COMBOS: Record<number, { format: number; types: number[] }> = {
   [0x881a]: { format: C1.RGBA, types: [HALF_FLOAT_OES] }, // RGBA16F
   [0x8815]: { format: C1.RGB, types: [C1.FLOAT] }, // RGB32F
   [0x8814]: { format: C1.RGBA, types: [C1.FLOAT] }, // RGBA32F
-  [SRGB_EXT]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE] },
-  [SRGB_ALPHA_EXT]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE] },
+  // EXT_sRGB: the WebGL extension spec accepts SRGB_EXT/SRGB_ALPHA_EXT as BOTH
+  // internalformat and format, and CTS uploads with format == internalformat
+  // (ext-sRGB.html, texture-srgb-upload.html) — the combo format must be the
+  // SRGB enum itself (the internalformat !== format check below enforces the
+  // match). Storage resolves these to SRGB8/SRGB8_ALPHA8 (engine unsizedStorage).
+  [SRGB_EXT]: { format: SRGB_EXT, types: [C1.UNSIGNED_BYTE] },
+  [SRGB_ALPHA_EXT]: { format: SRGB_ALPHA_EXT, types: [C1.UNSIGNED_BYTE] },
 };
 
 function w1InternalformatValid(ctx: WebGLRenderingContext, fmt: GLenum): boolean {
@@ -245,6 +250,12 @@ function w1FormatValid(ctx: WebGLRenderingContext, fmt: GLenum): boolean {
   if (W1_FORMATS.includes(fmt)) return true;
   if (fmt === C1.DEPTH_COMPONENT || fmt === C1.DEPTH_STENCIL) {
     return ctx._extensions.has('WEBGL_depth_texture');
+  }
+  // EXT_sRGB adds SRGB_EXT/SRGB_ALPHA_EXT as `format` (mirror of the
+  // internalformat gating above) — CTS ext-sRGB.html / texture-srgb-upload.html
+  // upload with format == internalformat.
+  if (fmt === SRGB_EXT || fmt === SRGB_ALPHA_EXT) {
+    return ctx._extensions.has('EXT_sRGB');
   }
   return false;
 }
@@ -1026,8 +1037,10 @@ function texSubImage2DDOM(
   source: unknown,
 ): void {
   if (source === null || source === undefined) {
-    ctx._errors.push(C1.INVALID_VALUE);
-    return;
+    // WebIDL: the 7-arg DOM overload's TexImageSource is non-nullable → throw
+    // TypeError (CTS tex-sub-image-2d-bad-args.html). The 9-arg buffer form's
+    // nullable pixels keep their INVALID_VALUE below.
+    throw new TypeError(`Argument is not of type 'TexImageSource'`);
   }
   const dims = sourceDims(source);
   if (dims === null) {
@@ -1265,6 +1278,36 @@ function w1CopyDestAllowed(srcFmt: GLenum, destFmt: GLenum): boolean {
   }
 }
 
+/**
+ * Feedback-loop guard (CTS texture-copying-feedback-loops.html): copying into a
+ * texture level that is attached to the read framebuffer would read and write
+ * the same texels → the caller must generate INVALID_OPERATION. Same texture at
+ * a DIFFERENT level (or, for 3D/2D_ARRAY, a different layer) is legal. Returns
+ * true when a loop exists. `layer` null → 2D/cube face match (attachments made
+ * via framebufferTexture2D); a number → 3D/2D_ARRAY layer match (attachments
+ * made via framebufferTextureLayer, which record face = TEXTURE_2D_ARRAY).
+ */
+function copyFeedbackLoop(
+  ctx: WebGLRenderingContext,
+  tex: WebGLTexture,
+  level: GLint,
+  target: GLenum,
+  layer: number | null,
+): boolean {
+  const readFbo = ctx._state.readFramebuffer;
+  if (readFbo === null) return false; // the default framebuffer has no texture attachments
+  for (const att of readFbo._attachments.values()) {
+    if (att.type !== 'texture' || att.texture !== tex || att.level !== level) continue;
+    if (layer === null) {
+      const face = target === C1.TEXTURE_2D ? C1.TEXTURE_2D : target;
+      if (att.face === face) return true;
+    } else if (att.layer === layer) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function copyTexImage2DImpl(
   ctx: WebGLRenderingContext,
   target: GLenum,
@@ -1321,25 +1364,40 @@ function copyTexImage2DImpl(
     ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
     return;
   }
-  // Dest/source component rules (EXT_color_buffer_half_float CTS matrix).
+  // Feedback loop: dest texture+level(+face) attached to the read framebuffer
+  // (CTS texture-copying-feedback-loops.html).
+  if (copyFeedbackLoop(ctx, tex, level, target, null)) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
+  // Dest/source component rules (EXT_color_buffer_half_float CTS matrix). With
+  // the default framebuffer as the read source, derive its format from the
+  // alpha context attribute (alpha → RGBA, else RGB) — a dest format needing a
+  // component the backbuffer lacks (e.g. ALPHA/LUMINANCE_ALPHA/RGBA from an RGB
+  // backbuffer) is INVALID_OPERATION (CTS copy-tex-image-2d-formats.html).
   const readFbo = ctx._state.readFramebuffer;
+  let srcFmt = 0;
   if (readFbo !== null) {
     const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
     const att = readFbo._attachments.get(readPoint);
     if (att) {
-      const srcFmt = att.type === 'renderbuffer'
+      srcFmt = att.type === 'renderbuffer'
         ? att.renderbuffer._internalformat
         : (att.texture._image?.internalFormat ?? 0);
-      if (ctx._version === 2) {
-        // W2: the destination may not have more components than the source.
-        if (internalFormatComponents(internalformat) > internalFormatComponents(srcFmt)) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-      } else if (!w1CopyDestAllowed(srcFmt, internalformat)) {
+    }
+  } else {
+    srcFmt = ctx._attrs.alpha !== false ? C1.RGBA : C1.RGB;
+  }
+  if (srcFmt !== 0) {
+    if (ctx._version === 2) {
+      // W2: the destination may not have more components than the source.
+      if (internalFormatComponents(internalformat) > internalFormatComponents(srcFmt)) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
+    } else if (!w1CopyDestAllowed(srcFmt, internalformat)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
     }
   }
   // The engine wraps resolveReadSurface (framebuffer-util stub) in try/catch and
@@ -1398,6 +1456,11 @@ function copyTexSubImage2DImpl(
     ctx._errors.push(C1.INVALID_VALUE);
     return;
   }
+  // Feedback loop: dest texture+level(+face) attached to the read framebuffer.
+  if (copyFeedbackLoop(ctx, tex, level, target, null)) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
   try {
     copyTexSubImage(ctx, tex, target, level, xoffset, yoffset, 0, x, y, width, height);
   } catch {
@@ -1450,6 +1513,13 @@ function copyTexSubImage3DImpl(
   const levelData = tex._image!.levels[level];
   if (xoffset + width > levelData.width || yoffset + height > levelData.height || zoffset >= levelData.depth) {
     ctx._errors.push(C1.INVALID_VALUE);
+    return;
+  }
+  // Feedback loop: dest texture+level+layer attached to the read framebuffer
+  // (framebufferTextureLayer; CTS copy-texture-image-webgl-specific.html —
+  // same layer → INVALID_OPERATION, different layer/level → legal).
+  if (copyFeedbackLoop(ctx, tex, level, target, zoffset)) {
+    ctx._errors.push(C1.INVALID_OPERATION);
     return;
   }
   try {
