@@ -1325,8 +1325,14 @@ function copyPixelsIntoLevel(
     dstBpp,
     dstStencil: levelData.stencilData,
   };
-  const srcImageHeight = s.imageHeight > 0 ? s.imageHeight : height;
-  const srcSkipImages = s.skipImages;
+  // UNPACK_IMAGE_HEIGHT / UNPACK_SKIP_IMAGES apply ONLY to 3D/2D_ARRAY
+  // entrypoints (GLES 3.0 §3.8.3; the 2D texImage2D/texSubImage2D loops never
+  // set them — CTS tex-unpack-params.html computeImageSizes2D ignores them, so
+  // stale values from a previous 3D upload must not shift 2D sources). 2D/cube
+  // targets read a single image of `height` rows.
+  const is3DEntry = img.target === C.TEXTURE_3D || img.target === C.TEXTURE_2D_ARRAY;
+  const srcImageHeight = is3DEntry && s.imageHeight > 0 ? s.imageHeight : height;
+  const srcSkipImages = is3DEntry ? s.skipImages : 0;
   for (let z = 0; z < depth; z++) {
     // Per-slice views (allocLevel): layer (zoffset + z) of the level — this
     // also honors zoffset for depth > 1 (previously the slice was addressed
