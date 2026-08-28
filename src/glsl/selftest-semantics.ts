@@ -264,6 +264,50 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   check(info2.uniformBlocks[0].instanceName === 'inst' && info2.uniformBlocks[0].arraySize === 2, 'block array instance → arraySize 2');
 }
 
+{
+  // WebGL2 supports ONLY std140 uniform block layouts. Explicit `packed` /
+  // `shared` must FAIL COMPILATION (spec §'Only std140 layout supported in
+  // uniform blocks'; CTS conformance2/glsl3/uniform-block-layouts.html
+  // declares fShaderSuccess:false and grades the compile result). Sources are
+  // the CTS page's fragment shaders verbatim.
+  const packedSrc =
+    '#version 300 es\nprecision mediump float;\nout vec4 my_FragColor;\nlayout(packed) uniform foo { vec4 bar; };\nvoid main() { my_FragColor = bar; }';
+  const packedErrs = errs(packedSrc, 300, 'FRAGMENT');
+  // `packed` is a GLSL ES 1.00 future-reserved word, so it is rejected at the
+  // LEXER ('reserved word') before the block-layout check in semantics runs;
+  // either way compilation fails with a message mentioning packed.
+  check(
+    packedErrs.length > 0 && packedErrs.some((e) => e.message.includes('packed')),
+    'layout(packed) uniform block → compile error mentioning packed',
+  );
+
+  const sharedSrc =
+    '#version 300 es\nprecision mediump float;\nout vec4 my_FragColor;\nlayout(shared) uniform foo { vec4 bar; };\nvoid main() { my_FragColor = bar; }';
+  const sharedErrs = errs(sharedSrc, 300, 'FRAGMENT');
+  check(
+    hasErr(sharedErrs, 4, "'layout(shared)' : only 'std140' uniform block layouts are supported in WebGL"),
+    'layout(shared) uniform block → compile error at block line',
+  );
+
+  // Layout ids mixed with other qualifiers are still rejected.
+  const mixedErrs = errs('#version 300 es\nprecision mediump float;\nlayout(shared, binding=0) uniform foo { vec4 bar; };\nout vec4 c;\nvoid main() { c = bar; }', 300, 'FRAGMENT');
+  check(
+    hasErr(mixedErrs, 3, "'layout(shared)' : only 'std140' uniform block layouts are supported in WebGL"),
+    'layout(shared, binding=0) uniform block → compile error',
+  );
+
+  // Explicit std140, no layout qualifier (default is std140), binding-only,
+  // and std140+binding combinations all compile.
+  okInfo('#version 300 es\nprecision mediump float;\nlayout(std140) uniform foo { vec4 bar; };\nout vec4 c;\nvoid main() { c = bar; }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform foo { vec4 bar; };\nout vec4 c;\nvoid main() { c = bar; }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nlayout(binding=0) uniform foo { vec4 bar; };\nout vec4 c;\nvoid main() { c = bar; }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nlayout(std140, binding=0) uniform foo { vec4 bar; };\nout vec4 c;\nvoid main() { c = bar; }', 300, 'FRAGMENT');
+
+  // Varying interface blocks (vertex out / fragment in) are NOT affected.
+  okInfo('#version 300 es\nlayout(location=0) out vec4 c;\nout Block { vec4 p; } b;\nvoid main() { b.p = vec4(1.0); c = b.p; }', 300, 'VERTEX');
+  okInfo('#version 300 es\nprecision mediump float;\nin Block { vec4 p; } b;\nout vec4 c;\nvoid main() { c = b.p; }', 300, 'FRAGMENT');
+}
+
 /* ------------------------------------------------------------------ */
 /* 5. ShaderInfo — fragment outputs                                    */
 /* ------------------------------------------------------------------ */
