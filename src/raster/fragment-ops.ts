@@ -652,15 +652,17 @@ export function blitColorSurface(
   dstX: number, dstY: number, dstW: number, dstH: number,
   filter: 'nearest' | 'linear',
 ): void {
-  if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return;
+  // Negative srcW/srcH/dstW/dstH are legal (GLES 3.0 §4.3.2: the rect spans
+  // X0..X0+W, mirroring the image); only zero-size rects are degenerate.
+  if (srcW === 0 || srcH === 0 || dstW === 0 || dstH === 0) return;
   const sw = src.width, sh = src.height;
   const dw = dst.width, dh = dst.height;
-  // Iterate the destination rect clipped to dst bounds (rows map directly:
-  // both surfaces have row 0 = BOTTOM).
-  const x0 = Math.max(0, dstX);
-  const y0 = Math.max(0, dstY);
-  const x1 = Math.min(dw, dstX + dstW);
-  const y1 = Math.min(dh, dstY + dstH);
+  // Iterate the destination rect (sign-aware: [min(X,X+W), max(X,X+W))) clipped
+  // to dst bounds. Rows map directly: both surfaces have row 0 = BOTTOM.
+  const x0 = Math.max(0, Math.min(dstX, dstX + dstW));
+  const y0 = Math.max(0, Math.min(dstY, dstY + dstH));
+  const x1 = Math.min(dw, Math.max(dstX, dstX + dstW));
+  const y1 = Math.min(dh, Math.max(dstY, dstY + dstH));
   if (x0 >= x1 || y0 >= y1) return;
   const sInfo = src.info;
   const dInfo = dst.info;
