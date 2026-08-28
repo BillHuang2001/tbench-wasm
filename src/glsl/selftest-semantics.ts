@@ -269,7 +269,7 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   check(info2.uniforms[0].name === 'env' && info2.uniforms[0].binding === 3, 'layout(binding=3) recorded');
   checkType(info2.uniforms[0].type, { kind: 'sampler', sampler: 'samplerCube' } as GLSLType, 'samplerCube type');
   check(info2.uniforms[1].name === 'tex' && info2.uniforms[1].binding === null, 'second sampler binding null');
-  check(info2.uniforms[1].precision === 'highp', '3.00 vertex sampler defaults highp');
+  check(info2.uniforms[1].precision === 'lowp', '3.00 vertex sampler defaults lowp (ESSL 3.00 §4.5.4)');
 }
 
 /* ------------------------------------------------------------------ */
@@ -999,6 +999,57 @@ check(hasErr(u9, 4, "'vec4' : type name used as a value"), 'bare T[] in expressi
 // `a[]` on a VARIABLE is rejected by semantics (was a parse error before).
 const u10 = errs('#version 300 es\nprecision mediump float;\nout vec4 o;\nvoid main() { float a = 1.0; o = vec4(a[]); }', 300, 'FRAGMENT');
 check(hasErr(u10, 4, "'[' : cannot index a value of type 'float'"), '`a[]` on a variable → error line 4');
+
+/* ------------------------------------------------------------------ */
+/* ES 3.00 sampler precision + sampler-array indexing (CTS             */
+/* sampler-no-precision.html / sampler-array-indexing.html)            */
+/* ------------------------------------------------------------------ */
+
+// ESSL 3.00 §4.5.4: ONLY sampler2D/samplerCube have predeclared defaults
+// (lowp) — every other sampler kind needs an explicit qualifier or a
+// `precision <q> <kind>;` statement, in BOTH stages.
+const SAMPLER_KINDS_NO_DEFAULT = [
+  'sampler3D', 'samplerCubeShadow', 'sampler2DShadow', 'sampler2DArray',
+  'sampler2DArrayShadow', 'isampler2D', 'isampler3D', 'isamplerCube',
+  'isampler2DArray', 'usampler2D', 'usampler3D', 'usamplerCube',
+  'usampler2DArray',
+];
+for (const s of SAMPLER_KINDS_NO_DEFAULT) {
+  const ev = errs(`#version 300 es\nprecision mediump float;\nuniform ${s} u_s;\nvoid main() { gl_Position = vec4(0.0); }`, 300, 'VERTEX');
+  check(hasErr(ev, 3, `'u_s' : No precision specified for (${s})`), `v300 vertex ${s} no precision → error line 3`);
+  const ef = errs(`#version 300 es\nprecision mediump float;\nout vec4 c;\nuniform ${s} u_s;\nvoid main() { c = vec4(1.0); }`, 300, 'FRAGMENT');
+  check(hasErr(ef, 4, `'u_s' : No precision specified for (${s})`), `v300 fragment ${s} no precision → error line 4`);
+}
+// sampler2D/samplerCube keep their predeclared lowp defaults (no error).
+okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D u_s;\nvoid main() { gl_Position = vec4(0.0); }', 300, 'VERTEX');
+okInfo('#version 300 es\nprecision mediump float;\nout vec4 c;\nuniform sampler2D u_s;\nvoid main() { c = vec4(1.0); }', 300, 'FRAGMENT');
+okInfo('#version 300 es\nprecision mediump float;\nuniform samplerCube u_s;\nvoid main() { gl_Position = vec4(0.0); }', 300, 'VERTEX');
+okInfo('#version 300 es\nprecision mediump float;\nout vec4 c;\nuniform samplerCube u_s;\nvoid main() { c = vec4(1.0); }', 300, 'FRAGMENT');
+// An explicit `precision mediump sampler3D;` default statement is honored
+// (uniform resolves to mediump).
+const pv = okInfo('#version 300 es\nprecision mediump float;\nprecision mediump sampler3D;\nuniform sampler3D u_s;\nvoid main() { gl_Position = vec4(0.0); }', 300, 'VERTEX');
+check(pv.uniforms[0].precision === 'mediump', 'explicit `precision mediump sampler3D;` gives the uniform mediump');
+okInfo('#version 300 es\nprecision mediump float;\nprecision highp sampler2DArray;\nout vec4 c;\nuniform sampler2DArray u_s;\nvoid main() { c = vec4(1.0); }', 300, 'FRAGMENT');
+// An explicit per-declaration qualifier also satisfies the rule.
+okInfo('#version 300 es\nprecision mediump float;\nuniform highp sampler3D u_s;\nvoid main() { gl_Position = vec4(0.0); }', 300, 'VERTEX');
+// Sampler ARRAYS unwrap to their element for the precision rule.
+const ea = errs('#version 300 es\nprecision mediump float;\nuniform sampler3D u_s[2];\nvoid main() { gl_Position = vec4(0.0); }', 300, 'VERTEX');
+check(hasErr(ea, 3, "'u_s' : No precision specified for (sampler3D)"), 'v300 sampler ARRAY no precision → error on the array name');
+
+// ESSL 3.00 §4.1.7: sampler arrays may only be indexed with CONSTANT
+// integral expressions (v300 only — 1.00 stays lenient).
+const idxErr = errs(
+  '#version 300 es\nprecision mediump float;\nuniform sampler2D u_tex[2];\nvoid main() {\n  for (int i = 0; i < 2; i++) {\n    texture(u_tex[i], vec2(0));\n  }\n}',
+  300,
+  'FRAGMENT',
+);
+check(hasErr(idxErr, 6, 'sampler arrays may only be indexed with constant integral expressions'), 'v300 sampler array loop-index → error line 6');
+okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D u_tex[2];\nvoid main() {\n  texture(u_tex[0], vec2(0));\n  texture(u_tex[1], vec2(0));\n}', 300, 'FRAGMENT');
+okInfo(
+  'precision mediump float;\nuniform sampler2D u_tex[2];\nvarying vec2 uv;\nvoid main() {\n  for (int i = 0; i < 2; i++) {\n    gl_FragColor = texture2D(u_tex[i], uv);\n  }\n}',
+  100,
+  'FRAGMENT',
+);
 
 /* ------------------------------------------------------------------ */
 /* Summary                                                             */
