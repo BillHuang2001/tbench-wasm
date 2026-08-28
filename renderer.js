@@ -3044,12 +3044,12 @@
         for (let c = 0; c < n; c++) {
           quadV[base + c] = (l1 * buf[vary0 + c] * invW0 + l2 * buf[vary1 + c] * invW1 + l0 * buf[vary2 + c] * invW2) * w;
         }
-        quadW[slot] = w;
+        quadW[slot] = wDenom;
       } else {
         for (let c = 0; c < n; c++) {
           quadV[base + c] = l1 * buf[vary0 + c] + l2 * buf[vary1 + c] + l0 * buf[vary2 + c];
         }
-        quadW[slot] = 1;
+        quadW[slot] = wDenom;
       }
       quadDepth[slot] = l1 * z0 + l2 * z1 + l0 * z2 + polyOffset;
       quadPC[slot * 2] = 0;
@@ -3096,8 +3096,21 @@
   ];
   function diamondExit(ax, ay, bx, by) {
     const dx = bx - ax, dy = by - ay;
-    if (dx === 0 && Math.abs(ax) >= 0.5) return false;
-    if (dy === 0 && Math.abs(ay) >= 0.5) return false;
+    if (dx === 0) {
+      if (Math.abs(ax) > 0.5) return false;
+      if (Math.abs(ax) === 0.5) {
+        if (ax !== 0.5 || dy === 0) return false;
+        const t = -ay / dy;
+        return t >= 0 && t < 1;
+      }
+    } else if (dy === 0) {
+      if (Math.abs(ay) > 0.5) return false;
+      if (Math.abs(ay) === 0.5) {
+        if (ay !== 0.5 || dx === 0) return false;
+        const t = -ax / dx;
+        return t >= 0 && t < 1;
+      }
+    }
     let tLo = 0, tHi = 1;
     for (let k = 0; k < 4; k++) {
       const su = DIAMOND_NORMALS[k][0], sv = DIAMOND_NORMALS[k][1];
@@ -3191,12 +3204,12 @@
         for (let c = 0; c < n; c++) {
           quadV[base + c] = ((1 - t) * buf[vary0 + c] * invW0 + t * buf[vary1 + c] * invW1) * w;
         }
-        quadW[slot] = w;
+        quadW[slot] = wDenom;
       } else {
         for (let c = 0; c < n; c++) {
           quadV[base + c] = (1 - t) * buf[vary0 + c] + t * buf[vary1 + c];
         }
-        quadW[slot] = 1;
+        quadW[slot] = wDenom;
       }
       quadDepth[slot] = (1 - t) * z0 + t * z1;
       quadPC[slot * 2] = 0;
@@ -4615,6 +4628,7 @@
       frontFacing: true,
       // driver sets it per primitive
       pointCoord: new Float32Array(2),
+      depthRange: new Float32Array([dc.depthRange.near, dc.depthRange.far, dc.depthRange.far - dc.depthRange.near]),
       uniforms: dcx.uniforms,
       intUniforms,
       blockStores,
@@ -4699,7 +4713,6 @@
   }
 
   // src/gl/framebuffer-util.ts
-  var FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER = 36059;
   var COLOR_ATTACHMENT0 = 36064;
   var DEPTH_ATTACHMENT = 36096;
   var STENCIL_ATTACHMENT = 36128;
@@ -4712,12 +4725,8 @@
     36194,
     32855,
     32856,
-    32849,
     6408,
     6407,
-    6409,
-    6410,
-    6406,
     35907,
     34842
   ]);
@@ -5044,17 +5053,6 @@
       if (stencil && stencil !== depth) {
         const st = checkAttachment(ctx, stencil, "stencil");
         if (st !== null) return st;
-      }
-    }
-    if (colorEntries.length > 0 && drawBuffersAvail) {
-      const drawBuffers = ctx._state.drawBuffers;
-      for (let i = 0; i < drawBuffers.length; i++) {
-        const db = drawBuffers[i];
-        if (db === NONE2) continue;
-        const idx = db - COLOR_ATTACHMENT0;
-        if (idx < 0 || idx >= maxColor || !att.has(COLOR_ATTACHMENT0 + idx)) {
-          return FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER;
-        }
       }
     }
     if (version === 2) {
@@ -5492,6 +5490,9 @@
       }
     }
     if (!pixels || pixels.length < w * h * 4) pixels = new Uint8Array(w * h * 4);
+    if (ctx._attrs.alpha === false) {
+      for (let i = 3; i < w * h * 4; i += 4) pixels[i] = 255;
+    }
     const surf = makeSurface(RGBA8, w, h, pixels);
     if (ctx._attrs.alpha === false) {
       const base = surf.info;
@@ -5621,8 +5622,12 @@
     const x = Math.round(v2 * 255);
     return x < 0 ? 0 : x > 255 ? 255 : x;
   }
-  function clearDefaultFramebuffer(fb) {
+  function clearDefaultFramebuffer(ctx, fb) {
     fb.color.data.fill(0);
+    if (ctx._attrs.alpha === false) {
+      const d = fb.color.data;
+      for (let i = 3; i < d.length; i += 4) d[i] = 255;
+    }
     if (fb.depth) fb.depth.data.fill(1);
     if (fb.stencil) fb.stencil.data.fill(0);
   }
@@ -5648,7 +5653,7 @@
     }
     const fb = allocateDefaultFramebuffer(ctx, w, h);
     if (fb) {
-      clearDefaultFramebuffer(fb);
+      clearDefaultFramebuffer(ctx, fb);
       ctx._defaultFB = fb;
       if (surf) {
         try {
@@ -6007,6 +6012,15 @@
     const v2 = Math.round(clamp01(r) * 31) << 11 | Math.round(clamp01(g2) * 31) << 6 | Math.round(clamp01(b) * 31) << 1 | (a > 0.5 ? 1 : 0);
     data[off / 2] = v2;
   }
+  function quantizedPackedWrite(packFn, unpackFn, base) {
+    const tmp = new Uint16Array(1);
+    const out = new Float32Array(4);
+    return (dst, off, r, g2, b, a) => {
+      packFn(tmp, 0, r, g2, b, a);
+      unpackFn(tmp, 0, out);
+      base(dst, off, out[0], out[1], out[2], out[3]);
+    };
+  }
   function packedRGB10A2Unpack(data, off, out) {
     const v2 = data[off / 4];
     out[0] = (v2 >>> 22 & 1023) / 1023;
@@ -6291,10 +6305,12 @@
       case C.SHORT:
       case C.HALF_FLOAT:
       case CExt.HALF_FLOAT_OES:
+        return comps * 2;
       case C.UNSIGNED_SHORT_5_6_5:
       case C.UNSIGNED_SHORT_4_4_4_4:
       case C.UNSIGNED_SHORT_5_5_5_1:
-        return comps * 2;
+        return 2;
+      // packed types: 2 bytes/texel TOTAL regardless of component count
       default:
         return 4;
     }
@@ -6465,7 +6481,6 @@
       data[i + 2] = Math.round(linearToSrgb(bp) * 255);
     }
   }
-  var align4 = (v2) => v2 + 3 & ~3;
   function copyRows(p, dst, dstW, xoff, yoff, width, height, srcRow0, dstZOffset) {
     const out = new Float32Array(4);
     const srcBytes = p.src.byteLength;
@@ -6613,6 +6628,13 @@
             srgbToDisplayP3(im.data);
           }
           const dv2 = new DataView(im.data.buffer, im.data.byteOffset, im.data.byteLength);
+          const isImageBitmap = typeof source.close === "function";
+          const packedType = type === C.UNSIGNED_SHORT_4_4_4_4 ? packed4444Pack : type === C.UNSIGNED_SHORT_5_5_5_1 ? packed5551Pack : type === C.UNSIGNED_SHORT_5_6_5 ? packed565Pack : null;
+          const packedWrite = packedType ? quantizedPackedWrite(
+            packedType,
+            packedType === packed4444Pack ? packed4444Unpack : packedType === packed5551Pack ? packed5551Unpack : packed565Unpack,
+            spec.pack
+          ) : spec.pack;
           const p2 = {
             src: dv2,
             srcRowBytes: im.width * 4,
@@ -6621,9 +6643,9 @@
             srcFormat: C.RGBA,
             srcType: C.UNSIGNED_BYTE,
             domain: spec.isInteger ? 2 : spec.isFloat && !spec.isDepth ? 1 : 0,
-            flipY: ctx._state.pixelStore.unpack.flipY,
-            premultiply: ctx._state.pixelStore.unpack.premultiplyAlpha,
-            write: spec.pack,
+            flipY: isImageBitmap ? false : ctx._state.pixelStore.unpack.flipY,
+            premultiply: isImageBitmap ? source.premultiply === false ? false : true : ctx._state.pixelStore.unpack.premultiplyAlpha,
+            write: packedWrite,
             dstBpp,
             dstStencil: levelData.stencilData
           };
@@ -6631,7 +6653,14 @@
           updateCompleteness(texture, ctx._version);
           return;
         }
-      } catch {
+        if (res && !res.ok && res.reason && /security|taint|insecure/i.test(res.reason)) {
+          if (typeof DOMException !== "undefined") {
+            throw new DOMException(res.reason, "SecurityError");
+          }
+          throw Object.assign(new Error(res.reason), { name: "SecurityError" });
+        }
+      } catch (e) {
+        if (e && typeof e === "object" && e.name === "SecurityError") throw e;
       }
       return;
     }
@@ -6649,7 +6678,7 @@
     const s = ctx._state.pixelStore.unpack;
     const srcBpp = srcBytesPerTexel(format, type);
     const srcRowLength = s.rowLength > 0 ? s.rowLength : width;
-    const srcRowBytes = align4(srcRowLength * srcBpp);
+    const srcRowBytes = srcRowLength * srcBpp + s.alignment - 1 & ~(s.alignment - 1);
     const domain = spec.isInteger ? 2 : spec.isFloat && !spec.isDepth ? 1 : 0;
     const dv = new DataView(srcView.buffer, srcView.byteOffset + baseOffset, srcView.byteLength - baseOffset);
     const p = {
@@ -6661,8 +6690,7 @@
       srcType: type,
       domain,
       flipY: s.flipY,
-      premultiply: false,
-      // client arrays are not premultiplied by the API
+      premultiply: s.premultiplyAlpha,
       write: spec.pack,
       dstBpp,
       dstStencil: levelData.stencilData
@@ -12094,7 +12122,8 @@
         vertexId: false,
         instanceId: false,
         drawId: false,
-        derivatives: false
+        derivatives: false,
+        depthRange: false
       }
     };
     ctx.initDefaultPrecisions();
@@ -12396,6 +12425,9 @@
           break;
         case "gl_DrawID":
           uses.drawId = true;
+          break;
+        case "gl_DepthRange":
+          uses.depthRange = true;
           break;
         default:
           break;
@@ -13637,7 +13669,9 @@
       const copyOut = [];
       for (let k = 0; k < n; k++) {
         copyIn.push(`${store}[${base} + ${k}] = ${lv.compNames[k]}`);
-        copyOut.push(`${lv.compNames[k]} = (${store}[${base} + ${k}])${wrap}`);
+        copyOut.push(
+          wrap ? `${lv.compNames[k]} = ((${store}[${base} + ${k}])${wrap})` : `${lv.compNames[k]} = (${store}[${base} + ${k}])`
+        );
         if (dual) {
           const dx = `${lv.compNames[k]}_dx`;
           const dy = `${lv.compNames[k]}_dy`;
@@ -16478,8 +16512,8 @@
         const target = lv.targets[c];
         let s;
         if (base === "float") s = `(${target} = ${target} + ${delta})`;
-        else if (base === "int") s = `(${target} = (${target} + ${delta}) | 0)`;
-        else if (base === "uint") s = `(${target} = (${target} + ${delta}) >>> 0)`;
+        else if (base === "int") s = `(${target} = ((${target} + ${delta}) | 0))`;
+        else if (base === "uint") s = `(${target} = ((${target} + ${delta}) >>> 0))`;
         else throw new Error("codegen: cannot increment a bool");
         let v2 = s;
         if (post) {
@@ -16650,9 +16684,9 @@
         return emitExpr(e.left, env).map((a) => {
           const x = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
           if (op === "<<") {
-            return { v: lb === "uint" ? `((${x}) << ${shift}) >>> 0` : `((${x}) << ${shift}) | 0` };
+            return { v: lb === "uint" ? `(((${x}) << ${shift}) >>> 0)` : `(((${x}) << ${shift}) | 0)` };
           }
-          return { v: lb === "uint" ? `((${x}) >>> ${shift}) >>> 0` : `((${x}) >> ${shift}) | 0` };
+          return { v: lb === "uint" ? `(((${x}) >>> ${shift}) >>> 0)` : `(((${x}) >> ${shift}) | 0)` };
         });
       }
       case "&":
@@ -16679,7 +16713,7 @@
         return av.map((a, c) => {
           const x = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
           const y = bv[c].pre && bv[c].pre.length ? foldPre(bv[c].pre, bv[c].v) : bv[c].v;
-          return { v: isU ? `((${x}) ${op} (${y})) >>> 0` : `((${x}) ${op} (${y})) | 0` };
+          return { v: isU ? `(((${x}) ${op} (${y})) >>> 0)` : `(((${x}) ${op} (${y})) | 0)` };
         });
       }
       default:
@@ -16857,19 +16891,19 @@
       let s;
       switch (op) {
         case "+":
-          s = isU ? `((${x}) + (${y})) >>> 0` : isI ? `((${x}) + (${y})) | 0` : `(${x} + ${y})`;
+          s = isU ? `(((${x}) + (${y})) >>> 0)` : isI ? `(((${x}) + (${y})) | 0)` : `(${x} + ${y})`;
           break;
         case "-":
-          s = isU ? `((${x}) - (${y})) >>> 0` : isI ? `((${x}) - (${y})) | 0` : `(${x} - ${y})`;
+          s = isU ? `(((${x}) - (${y})) >>> 0)` : isI ? `(((${x}) - (${y})) | 0)` : `(${x} - ${y})`;
           break;
         case "*":
-          s = isU ? `(Math.imul(${x}, ${y})) >>> 0` : isI ? `((${x}) * (${y})) | 0` : `(${x} * ${y})`;
+          s = isU ? `((Math.imul(${x}, ${y})) >>> 0)` : isI ? `(((${x}) * (${y})) | 0)` : `(${x} * ${y})`;
           break;
         case "/":
-          s = isU ? `((${x}) / (${y})) >>> 0` : isI ? `((${x}) / (${y})) | 0` : `(${x} / ${y})`;
+          s = isU ? `(((${x}) / (${y})) >>> 0)` : isI ? `(((${x}) / (${y})) | 0)` : `(${x} / ${y})`;
           break;
         case "%":
-          s = isU ? `((${x}) % (${y})) >>> 0` : isI ? `((${x}) % (${y})) | 0` : `(${x} % ${y})`;
+          s = isU ? `(((${x}) % (${y})) >>> 0)` : isI ? `(((${x}) % (${y})) | 0)` : `(${x} % ${y})`;
           break;
         default:
           throw new Error(`codegen: bad arithmetic op '${op}'`);
@@ -16883,25 +16917,25 @@
     const isI = base === "int";
     switch (op) {
       case "+":
-        return isU ? `(${target} = ((${target}) + (${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) + (${rhs})) | 0)` : `(${target} = ${target} + ${rhs})`;
+        return isU ? `(${target} = (((${target}) + (${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) + (${rhs})) | 0))` : `(${target} = ${target} + ${rhs})`;
       case "-":
-        return isU ? `(${target} = ((${target}) - (${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) - (${rhs})) | 0)` : `(${target} = ${target} - ${rhs})`;
+        return isU ? `(${target} = (((${target}) - (${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) - (${rhs})) | 0))` : `(${target} = ${target} - ${rhs})`;
       case "*":
-        return isU ? `(${target} = (Math.imul(${target}, ${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) * (${rhs})) | 0)` : `(${target} = ${target} * ${rhs})`;
+        return isU ? `(${target} = ((Math.imul(${target}, ${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) * (${rhs})) | 0))` : `(${target} = ${target} * ${rhs})`;
       case "/":
-        return isU ? `(${target} = ((${target}) / (${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) / (${rhs})) | 0)` : `(${target} = ${target} / ${rhs})`;
+        return isU ? `(${target} = (((${target}) / (${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) / (${rhs})) | 0))` : `(${target} = ${target} / ${rhs})`;
       case "%":
-        return isU ? `(${target} = ((${target}) % (${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) % (${rhs})) | 0)` : `(${target} = ${target} % ${rhs})`;
+        return isU ? `(${target} = (((${target}) % (${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) % (${rhs})) | 0))` : `(${target} = ${target} % ${rhs})`;
       case "<<":
-        return isU ? `(${target} = ((${target}) << ((${rhs}) >>> 0)) >>> 0)` : `(${target} = ((${target}) << ((${rhs}) >>> 0)) | 0)`;
+        return isU ? `(${target} = (((${target}) << ((${rhs}) >>> 0)) >>> 0))` : `(${target} = (((${target}) << ((${rhs}) >>> 0)) | 0))`;
       case ">>":
-        return isU ? `(${target} = ((${target}) >>> ((${rhs}) >>> 0)) >>> 0)` : `(${target} = ((${target}) >> ((${rhs}) >>> 0)) | 0)`;
+        return isU ? `(${target} = (((${target}) >>> ((${rhs}) >>> 0)) >>> 0))` : `(${target} = (((${target}) >> ((${rhs}) >>> 0)) | 0))`;
       case "&":
-        return isU ? `(${target} = ((${target}) & (${rhs})) >>> 0)` : `(${target} = ((${target}) & (${rhs})) | 0)`;
+        return isU ? `(${target} = (((${target}) & (${rhs})) >>> 0))` : `(${target} = (((${target}) & (${rhs})) | 0))`;
       case "^":
-        return isU ? `(${target} = ((${target}) ^ (${rhs})) >>> 0)` : `(${target} = ((${target}) ^ (${rhs})) | 0)`;
+        return isU ? `(${target} = (((${target}) ^ (${rhs})) >>> 0))` : `(${target} = (((${target}) ^ (${rhs})) | 0))`;
       case "|":
-        return isU ? `(${target} = ((${target}) | (${rhs})) >>> 0)` : `(${target} = ((${target}) | (${rhs})) | 0)`;
+        return isU ? `(${target} = (((${target}) | (${rhs})) >>> 0))` : `(${target} = (((${target}) | (${rhs})) | 0))`;
       default:
         throw new Error(`codegen: bad compound op '${op}'`);
     }
@@ -17369,7 +17403,7 @@
       if (base === null || base === "bool") throw new Error("codegen: cannot increment a bool");
       for (const tgt of lv.targets) {
         out.push(
-          base === "float" ? `${tgt} = ${tgt} + ${delta};` : base === "int" ? `${tgt} = (${tgt} + ${delta}) | 0;` : `${tgt} = (${tgt} + ${delta}) >>> 0;`
+          base === "float" ? `${tgt} = ${tgt} + ${delta};` : base === "int" ? `${tgt} = ((${tgt} + ${delta}) | 0);` : `${tgt} = ((${tgt} + ${delta}) >>> 0);`
         );
       }
       if (lv.copyBack) out.push(lv.copyBack);
@@ -17423,25 +17457,25 @@
     const isI = base === "int";
     switch (op) {
       case "+":
-        return isU ? `(${target} = ((${target}) + (${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) + (${rhs})) | 0)` : `(${target} = ${target} + ${rhs})`;
+        return isU ? `(${target} = (((${target}) + (${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) + (${rhs})) | 0))` : `(${target} = ${target} + ${rhs})`;
       case "-":
-        return isU ? `(${target} = ((${target}) - (${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) - (${rhs})) | 0)` : `(${target} = ${target} - ${rhs})`;
+        return isU ? `(${target} = (((${target}) - (${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) - (${rhs})) | 0))` : `(${target} = ${target} - ${rhs})`;
       case "*":
-        return isU ? `(${target} = (Math.imul(${target}, ${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) * (${rhs})) | 0)` : `(${target} = ${target} * ${rhs})`;
+        return isU ? `(${target} = ((Math.imul(${target}, ${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) * (${rhs})) | 0))` : `(${target} = ${target} * ${rhs})`;
       case "/":
-        return isU ? `(${target} = ((${target}) / (${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) / (${rhs})) | 0)` : `(${target} = ${target} / ${rhs})`;
+        return isU ? `(${target} = (((${target}) / (${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) / (${rhs})) | 0))` : `(${target} = ${target} / ${rhs})`;
       case "%":
-        return isU ? `(${target} = ((${target}) % (${rhs})) >>> 0)` : isI ? `(${target} = ((${target}) % (${rhs})) | 0)` : `(${target} = ${target} % ${rhs})`;
+        return isU ? `(${target} = (((${target}) % (${rhs})) >>> 0))` : isI ? `(${target} = (((${target}) % (${rhs})) | 0))` : `(${target} = ${target} % ${rhs})`;
       case "<<":
-        return isU ? `(${target} = ((${target}) << ((${rhs}) >>> 0)) >>> 0)` : `(${target} = ((${target}) << ((${rhs}) >>> 0)) | 0)`;
+        return isU ? `(${target} = (((${target}) << ((${rhs}) >>> 0)) >>> 0))` : `(${target} = (((${target}) << ((${rhs}) >>> 0)) | 0))`;
       case ">>":
-        return isU ? `(${target} = ((${target}) >>> ((${rhs}) >>> 0)) >>> 0)` : `(${target} = ((${target}) >> ((${rhs}) >>> 0)) | 0)`;
+        return isU ? `(${target} = (((${target}) >>> ((${rhs}) >>> 0)) >>> 0))` : `(${target} = (((${target}) >> ((${rhs}) >>> 0)) | 0))`;
       case "&":
-        return isU ? `(${target} = ((${target}) & (${rhs})) >>> 0)` : `(${target} = ((${target}) & (${rhs})) | 0)`;
+        return isU ? `(${target} = (((${target}) & (${rhs})) >>> 0))` : `(${target} = (((${target}) & (${rhs})) | 0))`;
       case "^":
-        return isU ? `(${target} = ((${target}) ^ (${rhs})) >>> 0)` : `(${target} = ((${target}) ^ (${rhs})) | 0)`;
+        return isU ? `(${target} = (((${target}) ^ (${rhs})) >>> 0))` : `(${target} = (((${target}) ^ (${rhs})) | 0))`;
       case "|":
-        return isU ? `(${target} = ((${target}) | (${rhs})) >>> 0)` : `(${target} = ((${target}) | (${rhs})) | 0)`;
+        return isU ? `(${target} = (((${target}) | (${rhs})) >>> 0))` : `(${target} = (((${target}) | (${rhs})) | 0))`;
       default:
         throw new Error(`codegen: bad compound op '${op}'`);
     }
@@ -17479,7 +17513,7 @@
       if (base === null || base === "bool") throw new Error("codegen: cannot increment a bool");
       for (const tgt of lv.targets) {
         parts.push(
-          base === "float" ? `${tgt} = ${tgt} + ${delta}` : base === "int" ? `${tgt} = (${tgt} + ${delta}) | 0` : `${tgt} = (${tgt} + ${delta}) >>> 0`
+          base === "float" ? `${tgt} = ${tgt} + ${delta}` : base === "int" ? `${tgt} = ((${tgt} + ${delta}) | 0)` : `${tgt} = ((${tgt} + ${delta}) >>> 0)`
         );
       }
     }
@@ -19465,7 +19499,8 @@ ${inner.map((l) => "  " + l).join("\n")}
       vertexId: vs.info.uses.vertexId || fs.info.uses.vertexId,
       instanceId: vs.info.uses.instanceId || fs.info.uses.instanceId,
       drawId: vs.info.uses.drawId || fs.info.uses.drawId,
-      derivatives: vs.info.uses.derivatives || fs.info.uses.derivatives
+      derivatives: vs.info.uses.derivatives || fs.info.uses.derivatives,
+      depthRange: vs.info.uses.depthRange || fs.info.uses.depthRange
     };
   }
   function varyingBlockError(vs, fs) {
@@ -19541,12 +19576,38 @@ ${inner.map((l) => "  " + l).join("\n")}
     const vbe = varyingBlockError(vs, fs);
     if (vbe !== null) return { ok: false, log: vbe };
     const limits = resolveLimits(vs.version, opts);
+    const uses = mergeUses(vs, fs);
     const merged = mergeUniforms(vs, fs);
     if ("error" in merged) return { ok: false, log: merged.error };
     const sb = checkSamplerBindings(merged, limits);
     if (sb !== null) return { ok: false, log: sb };
     const ul = layoutUniforms(merged, limits);
     if ("error" in ul) return { ok: false, log: ul.error };
+    let depthRangeSlots = null;
+    const depthRangeUniforms = [];
+    if (uses.depthRange) {
+      const base = ul.floatMax;
+      depthRangeSlots = [base, base + 1, base + 2];
+      const mk = (name, slot) => ({
+        name,
+        location: slot,
+        type: 5126,
+        // GL_FLOAT
+        size: 1,
+        components: 1,
+        integral: false,
+        blockIndex: -1,
+        sampler: false
+      });
+      const near = mk("gl_DepthRange.near", base);
+      const far = mk("gl_DepthRange.far", base + 1);
+      const diff = mk("gl_DepthRange.diff", base + 2);
+      depthRangeUniforms.push(near, far, diff);
+      ul.uniformMap.set("gl_DepthRange.near", near);
+      ul.uniformMap.set("gl_DepthRange.far", far);
+      ul.uniformMap.set("gl_DepthRange.diff", diff);
+      ul.floatMax = base + 3;
+    }
     const bl = layoutBlocks(vs, fs, limits);
     if ("error" in bl) return { ok: false, log: bl.error };
     const vl = layoutVaryings(vs, fs, limits);
@@ -19557,7 +19618,6 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("error" in al) return { ok: false, log: al.error };
     const ol = layoutOutputs(fs, limits);
     if ("error" in ol) return { ok: false, log: ol.error };
-    const uses = mergeUses(vs, fs);
     const structNames = [.../* @__PURE__ */ new Set([...collectStructNames(vs.ast), ...collectStructNames(fs.ast)])];
     const layout = {
       version: vs.version,
@@ -19590,7 +19650,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       ok: true,
       program: {
         attributes: al.infos,
-        uniforms: [...ul.uniforms, ...bl.uniformInfos],
+        uniforms: [...ul.uniforms, ...bl.uniformInfos, ...depthRangeUniforms],
         uniformBlocks: bl.infos,
         varyings: vl.infos,
         vertex: { run: (ctx) => vertexFn(ctx, R) },
@@ -19607,6 +19667,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         uniformMap: ul.uniformMap,
         floatStore: new Float32Array(ul.floatMax),
         intStore: new Int32Array(ul.intMax),
+        depthRangeSlots,
         scratchSize: Math.max(vsRes.scratchSize, fsRes.scratchSize),
         intScratchSize: Math.max(vsRes.intScratchSize, fsRes.intScratchSize),
         transformFeedbackVaryings: tf.varyings
@@ -20478,7 +20539,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         }
         return;
       }
-      const p = validateProgram(ctx, program);
+      const p = validateProgramQuery(ctx, program);
       if (p === null) return;
       ensureProgramLinked(ctx, p);
       if (!p._linkStatus || p._program === null) {
@@ -20486,7 +20547,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         return;
       }
       const prev = ctx._state.currentProgram;
-      if (prev !== null) {
+      if (prev !== null && prev !== p) {
         prev._inUse = false;
         if (prev._deleted) releaseProgram(ctx, prev);
       }
@@ -20497,7 +20558,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       var _a;
       const ctx = this;
       if (isLost2(ctx)) return;
-      const p = validateProgram(ctx, program);
+      const p = validateProgramQuery(ctx, program);
       if (p === null) return;
       const s = validateShader(ctx, shader);
       if (s === null) return;
@@ -20518,7 +20579,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       var _a;
       const ctx = this;
       if (isLost2(ctx)) return;
-      const p = validateProgram(ctx, program);
+      const p = validateProgramQuery(ctx, program);
       if (p === null) return;
       const s = validateShaderDetach(ctx, shader);
       if (s === null) return;
@@ -20534,7 +20595,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     proto.linkProgram = function(program) {
       const ctx = this;
       if (isLost2(ctx)) return;
-      const p = validateProgram(ctx, program);
+      const p = validateProgramQuery(ctx, program);
       if (p === null) return;
       if (khrEnabled(ctx)) {
         enqueueLink(ctx, p);
@@ -21098,7 +21159,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   }
   function schedulePreserveClear(ctx) {
     const canvas = ctx._canvas;
-    if (canvas.isConnected === false) return;
+    if (canvas.isConnected === false || canvas.isConnected === void 0) return;
     const sc = getScratch(ctx);
     if (sc.preserveClearPending) return;
     sc.preserveClearPending = true;
@@ -21738,6 +21799,34 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
     return { images, samplerStates, bindings };
   }
+  function textureFeedbackLoop(ctx, pm) {
+    var _a, _b, _c;
+    const s = ctx._state;
+    const fbo = s.drawFramebuffer;
+    if (!fbo || fbo._attachments.size === 0) return false;
+    const numUnits = s.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS;
+    const intStore = pm.intStore;
+    const uniforms = (_a = pm.uniforms) != null ? _a : [];
+    if (!intStore) return false;
+    for (const u of uniforms) {
+      if (!u.sampler) continue;
+      const size = (_b = u.size) != null ? _b : 1;
+      for (let e = 0; e < size; e++) {
+        const unit = (_c = intStore[u.location + e]) != null ? _c : 0;
+        if (unit < 0 || unit >= numUnits) continue;
+        const key = samplerTargetKey(u.type);
+        const unitState = s.textureUnits[unit];
+        const tex2 = unitState[key];
+        if (!tex2 || !tex2._image) continue;
+        updateCompleteness(tex2, ctx._version);
+        if (!tex2._image.complete) continue;
+        for (const att of fbo._attachments.values()) {
+          if (att.type === "texture" && att.texture === tex2) return true;
+        }
+      }
+    }
+    return false;
+  }
   function buildOutputMaps(ctx, pm) {
     var _a, _b, _c;
     const s = ctx._state;
@@ -21960,11 +22049,17 @@ ${inner.map((l) => "  " + l).join("\n")}
       const eb = vao.elementArrayBuffer;
       const t = req.indexType;
       const ts = t === C1.UNSIGNED_BYTE ? 1 : t === C1.UNSIGNED_SHORT ? 2 : 4;
-      if (!eb || !eb._data || req.firstOrOffset % ts !== 0 || req.firstOrOffset + req.count * ts > eb._size) {
+      if (!eb) {
         pushError(ctx, C1.INVALID_OPERATION);
         return;
       }
-      indices = t === C1.UNSIGNED_BYTE ? new Uint8Array(eb._data, req.firstOrOffset, req.count) : t === C1.UNSIGNED_SHORT ? new Uint16Array(eb._data, req.firstOrOffset, req.count) : new Uint32Array(eb._data, req.firstOrOffset, req.count);
+      if (req.count > 0 && (!eb._data || req.firstOrOffset % ts !== 0 || req.firstOrOffset + req.count * ts > eb._size)) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+      if (req.count > 0) {
+        indices = t === C1.UNSIGNED_BYTE ? new Uint8Array(eb._data, req.firstOrOffset, req.count) : t === C1.UNSIGNED_SHORT ? new Uint16Array(eb._data, req.firstOrOffset, req.count) : new Uint32Array(eb._data, req.firstOrOffset, req.count);
+      }
     }
     const tf = s.transformFeedback;
     const tfActive = !!tf && tf._active && !tf._paused;
@@ -21979,6 +22074,10 @@ ${inner.map((l) => "  " + l).join("\n")}
     const fb = resolveDrawTarget(ctx);
     if (!fb) {
       pushError(ctx, C1.INVALID_FRAMEBUFFER_OPERATION);
+      return;
+    }
+    if (textureFeedbackLoop(ctx, pm)) {
+      pushError(ctx, C1.INVALID_OPERATION);
       return;
     }
     if (req.count === 0 || req.instanceCount === 0) return;
@@ -22273,6 +22372,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     var _a;
     const s = ctx._state;
     if (width === 0 || height === 0) return;
+    ensureCanvasSize(ctx);
     const surf = resolveReadColor(ctx);
     if (!surf) {
       pushError(ctx, C1.INVALID_OPERATION);
@@ -22610,7 +22710,11 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
     }
     const eb = s.vao.elementArrayBuffer;
-    if (!eb || !eb._data || offset + count * ts > eb._size) {
+    if (!eb) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return null;
+    }
+    if (count > 0 && (!eb._data || offset + count * ts > eb._size)) {
       pushError(ctx, C1.INVALID_OPERATION);
       return null;
     }
@@ -26121,8 +26225,13 @@ ${inner.map((l) => "  " + l).join("\n")}
     // RGB32F
     [34836]: { format: C1.RGBA, types: [C1.FLOAT] },
     // RGBA32F
-    [SRGB_EXT]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE] },
-    [SRGB_ALPHA_EXT]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE] }
+    // EXT_sRGB: the WebGL extension spec accepts SRGB_EXT/SRGB_ALPHA_EXT as BOTH
+    // internalformat and format, and CTS uploads with format == internalformat
+    // (ext-sRGB.html, texture-srgb-upload.html) — the combo format must be the
+    // SRGB enum itself (the internalformat !== format check below enforces the
+    // match). Storage resolves these to SRGB8/SRGB8_ALPHA8 (engine unsizedStorage).
+    [SRGB_EXT]: { format: SRGB_EXT, types: [C1.UNSIGNED_BYTE] },
+    [SRGB_ALPHA_EXT]: { format: SRGB_ALPHA_EXT, types: [C1.UNSIGNED_BYTE] }
   };
   function w1InternalformatValid(ctx, fmt) {
     if (W1_INTERNALFORMATS.includes(fmt)) return true;
@@ -26147,6 +26256,9 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (W1_FORMATS.includes(fmt)) return true;
     if (fmt === C1.DEPTH_COMPONENT || fmt === C1.DEPTH_STENCIL) {
       return ctx._extensions.has("WEBGL_depth_texture");
+    }
+    if (fmt === SRGB_EXT || fmt === SRGB_ALPHA_EXT) {
+      return ctx._extensions.has("EXT_sRGB");
     }
     return false;
   }
@@ -26742,8 +26854,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   }
   function texSubImage2DDOM(ctx, target, level, xoffset, yoffset, format, type, source) {
     if (source === null || source === void 0) {
-      ctx._errors.push(C1.INVALID_VALUE);
-      return;
+      throw new TypeError(`Argument is not of type 'TexImageSource'`);
     }
     const dims = sourceDims(source);
     if (dims === null) {
@@ -27007,6 +27118,20 @@ ${inner.map((l) => "  " + l).join("\n")}
         return true;
     }
   }
+  function copyFeedbackLoop(ctx, tex2, level, target, layer) {
+    const readFbo = ctx._state.readFramebuffer;
+    if (readFbo === null) return false;
+    for (const att of readFbo._attachments.values()) {
+      if (att.type !== "texture" || att.texture !== tex2 || att.level !== level) continue;
+      if (layer === null) {
+        const face = target === C1.TEXTURE_2D ? C1.TEXTURE_2D : target;
+        if (att.face === face) return true;
+      } else if (att.layer === layer) {
+        return true;
+      }
+    }
+    return false;
+  }
   function copyTexImage2DImpl(ctx, target, level, internalformat, x, y, width, height, border) {
     var _a, _b;
     if (!is2DTarget(target)) {
@@ -27052,21 +27177,30 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
       return;
     }
+    if (copyFeedbackLoop(ctx, tex2, level, target, null)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     const readFbo = ctx._state.readFramebuffer;
+    let srcFmt = 0;
     if (readFbo !== null) {
       const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
       const att = readFbo._attachments.get(readPoint);
       if (att) {
-        const srcFmt = att.type === "renderbuffer" ? att.renderbuffer._internalformat : (_b = (_a = att.texture._image) == null ? void 0 : _a.internalFormat) != null ? _b : 0;
-        if (ctx._version === 2) {
-          if (internalFormatComponents(internalformat) > internalFormatComponents(srcFmt)) {
-            ctx._errors.push(C1.INVALID_OPERATION);
-            return;
-          }
-        } else if (!w1CopyDestAllowed(srcFmt, internalformat)) {
+        srcFmt = att.type === "renderbuffer" ? att.renderbuffer._internalformat : (_b = (_a = att.texture._image) == null ? void 0 : _a.internalFormat) != null ? _b : 0;
+      }
+    } else {
+      srcFmt = ctx._attrs.alpha !== false ? C1.RGBA : C1.RGB;
+    }
+    if (srcFmt !== 0) {
+      if (ctx._version === 2) {
+        if (internalFormatComponents(internalformat) > internalFormatComponents(srcFmt)) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
+      } else if (!w1CopyDestAllowed(srcFmt, internalformat)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
       }
     }
     try {
@@ -27111,6 +27245,10 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
+    if (copyFeedbackLoop(ctx, tex2, level, target, null)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     try {
       copyTexSubImage(ctx, tex2, target, level, xoffset, yoffset, 0, x, y, width, height);
     } catch {
@@ -27151,6 +27289,10 @@ ${inner.map((l) => "  " + l).join("\n")}
     const levelData = tex2._image.levels[level];
     if (xoffset + width > levelData.width || yoffset + height > levelData.height || zoffset >= levelData.depth) {
       ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (copyFeedbackLoop(ctx, tex2, level, target, zoffset)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
     try {
@@ -27876,9 +28018,9 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (a.type === "texture" && b.type === "texture") return a.texture === b.texture;
     return false;
   }
-  function resolveAttachmentRecord(fbo, attachment) {
+  function resolveAttachmentRecord(ctx, fbo, attachment) {
     var _a, _b, _c;
-    if (attachment === DEPTH_STENCIL_ATTACHMENT2 && fbo._attachments.has(DEPTH_ATTACHMENT3)) {
+    if (ctx._version === 2 && attachment === DEPTH_STENCIL_ATTACHMENT2 && fbo._attachments.has(DEPTH_ATTACHMENT3)) {
       const d = (_a = fbo._attachments.get(DEPTH_ATTACHMENT3)) != null ? _a : null;
       const s = (_b = fbo._attachments.get(STENCIL_ATTACHMENT3)) != null ? _b : null;
       if (d === null || s === null) return { rec: null, conflict: true };
@@ -28217,6 +28359,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       surf = s;
     }
     rb._surface = surf;
+    if (surf.info.isDepth) {
+      surf.data.fill(1);
+    }
     void ctx;
   }
   function formatComponentBits(format) {
@@ -28364,14 +28509,14 @@ ${inner.map((l) => "  " + l).join("\n")}
     fbo._status = status;
     return status;
   }
-  function attachmentImageKey(fbo, attachment) {
+  function attachmentImageKey(ctx, fbo, attachment) {
     if (fbo === null) {
       if (attachment === BACK4 || attachment === COLOR_ATTACHMENT04 || attachment === 6144) {
         return { kind: "default" };
       }
       return null;
     }
-    const { rec, conflict } = resolveAttachmentRecord(fbo, attachment);
+    const { rec, conflict } = resolveAttachmentRecord(ctx, fbo, attachment);
     if (conflict || rec === null) return null;
     if (rec.type === "renderbuffer") return { kind: "rb", rb: rec.renderbuffer };
     return { kind: "tex", texture: rec.texture, level: rec.level, face: rec.face, layer: rec.layer };
@@ -28564,7 +28709,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
       }
-      const { rec, conflict } = resolveAttachmentRecord(fbo, attachment);
+      const { rec, conflict } = resolveAttachmentRecord(ctx, fbo, attachment);
       if (conflict) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return null;
@@ -28987,23 +29132,23 @@ ${inner.map((l) => "  " + l).join("\n")}
           return;
         }
         if ((mask & C1.COLOR_BUFFER_BIT) !== 0) {
-          const readKey = attachmentImageKey(readFbo, readFbo === null ? BACK4 : s.readBuffer);
+          const readKey = attachmentImageKey(ctx, readFbo, readFbo === null ? BACK4 : s.readBuffer);
           if (readKey !== null) {
             const dbList = drawFbo === null ? [BACK4] : s.drawBuffers;
             for (const db of dbList) {
               if (db === NONE5) continue;
-              if (sameImage2(readKey, attachmentImageKey(drawFbo, db))) {
+              if (sameImage2(readKey, attachmentImageKey(ctx, drawFbo, db))) {
                 ctx._errors.push(C1.INVALID_OPERATION);
                 return;
               }
             }
           }
         }
-        if ((mask & C1.DEPTH_BUFFER_BIT) !== 0 && sameImage2(attachmentImageKey(readFbo, DEPTH_ATTACHMENT3), attachmentImageKey(drawFbo, DEPTH_ATTACHMENT3))) {
+        if ((mask & C1.DEPTH_BUFFER_BIT) !== 0 && sameImage2(attachmentImageKey(ctx, readFbo, DEPTH_ATTACHMENT3), attachmentImageKey(ctx, drawFbo, DEPTH_ATTACHMENT3))) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
-        if ((mask & C1.STENCIL_BUFFER_BIT) !== 0 && sameImage2(attachmentImageKey(readFbo, STENCIL_ATTACHMENT3), attachmentImageKey(drawFbo, STENCIL_ATTACHMENT3))) {
+        if ((mask & C1.STENCIL_BUFFER_BIT) !== 0 && sameImage2(attachmentImageKey(ctx, readFbo, STENCIL_ATTACHMENT3), attachmentImageKey(ctx, drawFbo, STENCIL_ATTACHMENT3))) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
@@ -29252,12 +29397,12 @@ ${inner.map((l) => "  " + l).join("\n")}
       case C1.RGB:
       case C2.RGB8:
         if (floatStorage) return floatStorageReadOK(ctx, format, type);
-        return format === C1.RGB && type === C1.UNSIGNED_BYTE;
+        return format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5) || format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4 || type === C1.UNSIGNED_SHORT_5_5_5_1);
       case C1.LUMINANCE:
       case C1.LUMINANCE_ALPHA:
       case C1.ALPHA:
         if (floatStorage) return floatStorageReadOK(ctx, format, type);
-        return false;
+        return format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4 || type === C1.UNSIGNED_SHORT_5_5_5_1);
       case C2.R8:
         return format === C2.RED && type === C1.UNSIGNED_BYTE;
       case C2.RG8:
@@ -29378,7 +29523,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     proto.drawArrays = function(mode, first, count) {
       const ctx = this;
       if (isLost10(ctx)) return;
-      const req = validateDrawArrays(ctx, mode, first, count, 1);
+      const req = validateDrawArrays(ctx, mode, first | 0, count | 0, 1);
       if (!req) return;
       try {
         executeDraw(ctx, req);
@@ -29389,7 +29534,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     proto.drawElements = function(mode, count, type, offset) {
       const ctx = this;
       if (isLost10(ctx)) return;
-      const req = validateDrawElements(ctx, mode, count, type, offset);
+      const req = validateDrawElements(ctx, mode, count | 0, type, offset);
       if (!req) return;
       try {
         executeDraw(ctx, req);
@@ -29503,7 +29648,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       p2.drawArraysInstanced = function(mode, first, count, instanceCount) {
         const ctx = this;
         if (isLost10(ctx)) return;
-        const req = validateDrawArrays(ctx, mode, first, count, instanceCount);
+        const req = validateDrawArrays(ctx, mode, first | 0, count | 0, instanceCount | 0);
         if (!req) return;
         try {
           executeDraw(ctx, req);
@@ -29516,7 +29661,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       p2.drawElementsInstanced = function(mode, count, type, offset, instanceCount) {
         const ctx = this;
         if (isLost10(ctx)) return;
-        const req = validateDrawElements(ctx, mode, count, type, offset, { instanceCount });
+        const req = validateDrawElements(ctx, mode, count | 0, type, offset, { instanceCount: instanceCount | 0 });
         if (!req) return;
         try {
           executeDraw(ctx, req);
@@ -29529,7 +29674,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       p2.drawRangeElements = function(mode, start, end, count, type, offset) {
         const ctx = this;
         if (isLost10(ctx)) return;
-        const req = validateDrawElements(ctx, mode, count, type, offset, { range: [start, end] });
+        const req = validateDrawElements(ctx, mode, count | 0, type, offset, { range: [start >>> 0, end >>> 0] });
         if (!req) return;
         try {
           executeDraw(ctx, req);
@@ -29627,7 +29772,10 @@ ${inner.map((l) => "  " + l).join("\n")}
       };
     }
     const mdProto = proto;
-    mdProto.multiDrawArraysWEBGL = function(mode, firsts, firstsOffset, counts, countsOffset, drawcount) {
+    function installExtensionMethod(proto2, name, fn) {
+      Object.defineProperty(proto2, name, { value: fn, writable: true, configurable: true, enumerable: false });
+    }
+    installExtensionMethod(mdProto, "multiDrawArraysWEBGL", function(mode, firsts, firstsOffset, counts, countsOffset, drawcount) {
       const ctx = this;
       if (isLost10(ctx)) return;
       const firstsArr = toList(firsts, Int32Array, "Int32List");
@@ -29649,8 +29797,8 @@ ${inner.map((l) => "  " + l).join("\n")}
       } catch {
         ctx._errors.push(C1.INVALID_OPERATION);
       }
-    };
-    mdProto.multiDrawElementsWEBGL = function(mode, counts, countsOffset, type, offsets, offsetsOffset, drawcount) {
+    });
+    installExtensionMethod(mdProto, "multiDrawElementsWEBGL", function(mode, counts, countsOffset, type, offsets, offsetsOffset, drawcount) {
       const ctx = this;
       if (isLost10(ctx)) return;
       const countsArr = toList(counts, Int32Array, "Int32List");
@@ -29672,8 +29820,8 @@ ${inner.map((l) => "  " + l).join("\n")}
       } catch {
         ctx._errors.push(C1.INVALID_OPERATION);
       }
-    };
-    mdProto.multiDrawArraysInstancedWEBGL = function(mode, firsts, firstsOffset, counts, countsOffset, instanceCounts, instanceCountsOffset, drawcount) {
+    });
+    installExtensionMethod(mdProto, "multiDrawArraysInstancedWEBGL", function(mode, firsts, firstsOffset, counts, countsOffset, instanceCounts, instanceCountsOffset, drawcount) {
       const ctx = this;
       if (isLost10(ctx)) return;
       const firstsArr = toList(firsts, Int32Array, "Int32List");
@@ -29697,8 +29845,8 @@ ${inner.map((l) => "  " + l).join("\n")}
       } catch {
         ctx._errors.push(C1.INVALID_OPERATION);
       }
-    };
-    mdProto.multiDrawElementsInstancedWEBGL = function(mode, counts, countsOffset, type, offsets, offsetsOffset, instanceCounts, instanceCountsOffset, drawcount) {
+    });
+    installExtensionMethod(mdProto, "multiDrawElementsInstancedWEBGL", function(mode, counts, countsOffset, type, offsets, offsetsOffset, instanceCounts, instanceCountsOffset, drawcount) {
       const ctx = this;
       if (isLost10(ctx)) return;
       const countsArr = toList(counts, Int32Array, "Int32List");
@@ -29722,7 +29870,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       } catch {
         ctx._errors.push(C1.INVALID_OPERATION);
       }
-    };
+    });
   }
 
   // src/gl/api/webgl2.ts
