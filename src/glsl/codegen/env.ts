@@ -1162,6 +1162,12 @@ export class CodegenEnv {
       return `(${target} = ${target} ${op} ${val.v}, ${dual[0]} = ${dual[0]} ${op} ${dxv}, ${dual[1]} = ${dual[1]} ${op} ${dyv}, ${target})`;
     }
     if (op === '*') {
+      // Matrix×matrix '*=' NEVER reaches this template — the assignment
+      // emitters (statements.ts emitAssignStmt/updateString, expressions.ts
+      // emitAssign) intercept it and lower via matrixCompoundMul (matrix
+      // PRODUCT with LHS snapshot + RHS materialization; dual aware). This
+      // per-component product rule serves scalar/vector targets and mat×scalar
+      // broadcast only.
       const t = this.allocTemp();
       return `(${t} = ${val.v}, ${dual[0]} = ${dual[0]} * ${t} + ${target} * ${dxv}, ${dual[1]} = ${dual[1]} * ${t} + ${target} * ${dyv}, ${target} = ${target} * ${t}, ${target})`;
     }

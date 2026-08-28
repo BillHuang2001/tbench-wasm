@@ -66,7 +66,7 @@ import {
   foldPre,
   scalarBaseOf,
 } from './env.js';
-import { emitExpr, emitLValue, materialize } from './expressions.js';
+import { emitExpr, emitLValue, materialize, matrixCompoundMul } from './expressions.js';
 import type { Value } from './index.js';
 
 /** Context for an INLINED function body; absent ⇒ emitting `main`
@@ -457,7 +457,8 @@ function emitExprStmt(e: Expr, env: CodegenEnv, out: string[]): void {
  *   4. `lvalue.copyBack` (spill copy-out) as one line.
  * Compound ops (`+=` etc.) lower per-component via compoundOpExpr — the
  * parser stores `'+='` and expressions.ts's compoundOp expects `'+'`.
- */
+ * EXCEPTION: mat×mat `*=` lowers to a MATRIX PRODUCT via matrixCompoundMul
+ * (LHS snapshot + RHS materialization; dual aware) — see emitAssignStmt. */
 function emitAssignStmt(
   target: Expr,
   value: Expr,
@@ -466,32 +467,47 @@ function emitAssignStmt(
   out: string[],
 ): void {
   const lv = emitLValue(target, env);
-  const conv = convertPreserving(emitExpr(value, env), value.resolvedType!, lv.type);
-  emitPres(out, conv);
-  if (lv.prelude) out.push(lv.prelude);
-  if (op === '=') {
-    for (let c = 0; c < lv.targets.length; c++) {
-      // Dual mode: write the whole triple as one comma statement
-      // `(vslot = vv, dxslot = dxv, dyslot = dyv, vslot);`.
-      if (env.dual && lv.dualTargets && lv.dualTargets[c]) {
-        out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c])};`);
-      } else {
-        out.push(`${lv.targets[c]} = ${conv[c].v};`);
-      }
-    }
+  // mat×mat '*=' lowers to a MATRIX PRODUCT (matrixCompoundMul) — the
+  // component-wise path below is only correct for scalar/vector targets and
+  // mat×scalar broadcast (regression: matrix-compound-multiply CTS page
+  // rendered black). The RAW (unconverted) RHS is passed at its own width;
+  // its pres run inside the helper's materialization (emitPres skipped).
+  const isMatMul =
+    op !== '=' && op[0] === '*' && lv.type.kind === 'matrix' && value.resolvedType!.kind === 'matrix';
+  const rawRhs = emitExpr(value, env);
+  if (isMatMul) {
+    if (lv.prelude) out.push(lv.prelude);
+    const mm = matrixCompoundMul(env, lv.targets, lv.dualTargets, lv.type, rawRhs, value.resolvedType!);
+    for (const p of mm.pre) out.push(`${p};`);
+    for (const w of mm.writes) out.push(`${w};`);
   } else {
-    const base = scalarBaseOf(lv.type);
-    if (base === null || base === 'bool') {
-      throw new Error('codegen: cannot compound-assign a non-scalar-shaped value');
-    }
-    const cop = op.replace('=', '');
-    for (let c = 0; c < lv.targets.length; c++) {
-      // Dual mode, float target: linear ops (+=, -=) update all three planes
-      // via dualWrite; non-linear compounds throw (C5a2 templates).
-      if (env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]) {
-        out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c], cop)};`);
-      } else {
-        out.push(`${compoundOpExpr(cop, lv.targets[c], conv[c].v, base)};`);
+    const conv = convertPreserving(rawRhs, value.resolvedType!, lv.type);
+    emitPres(out, conv);
+    if (lv.prelude) out.push(lv.prelude);
+    if (op === '=') {
+      for (let c = 0; c < lv.targets.length; c++) {
+        // Dual mode: write the whole triple as one comma statement
+        // `(vslot = vv, dxslot = dxv, dyslot = dyv, vslot);`.
+        if (env.dual && lv.dualTargets && lv.dualTargets[c]) {
+          out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c])};`);
+        } else {
+          out.push(`${lv.targets[c]} = ${conv[c].v};`);
+        }
+      }
+    } else {
+      const base = scalarBaseOf(lv.type);
+      if (base === null || base === 'bool') {
+        throw new Error('codegen: cannot compound-assign a non-scalar-shaped value');
+      }
+      const cop = op.replace('=', '');
+      for (let c = 0; c < lv.targets.length; c++) {
+        // Dual mode, float target: linear ops (+=, -=) update all three planes
+        // via dualWrite; non-linear compounds throw (C5a2 templates).
+        if (env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]) {
+          out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c], cop)};`);
+        } else {
+          out.push(`${compoundOpExpr(cop, lv.targets[c], conv[c].v, base)};`);
+        }
       }
     }
   }
@@ -591,29 +607,42 @@ function updateString(e: Expr, env: CodegenEnv): string {
   const parts: string[] = [];
   if (lv.prelude) parts.push(preludeToComma(lv.prelude));
   if (isAssign) {
-    const conv = convertPreserving(emitExpr(e.value, env), e.value.resolvedType!, lv.type);
+    const rawRhs = emitExpr(e.value, env);
+    // mat×mat '*=' is a MATRIX PRODUCT (matrixCompoundMul) — intercept before
+    // the component-wise lowering (regression: matrix-compound-multiply CTS
+    // page rendered black). Snapshot/materialization statements fold as comma
+    // terms, so pres re-run exactly once per iteration evaluation.
+    const isMatMul =
+      e.op !== '=' && e.op[0] === '*' && lv.type.kind === 'matrix' && e.value.resolvedType!.kind === 'matrix';
     const base = scalarBaseOf(lv.type);
     if (base === null || base === 'bool') {
       throw new Error('codegen: cannot compound-assign a non-scalar-shaped value');
     }
-    for (let c = 0; c < lv.targets.length; c++) {
-      const cv = conv[c];
-      const rv = cv.pre && cv.pre.length > 0 ? foldPre(cv.pre, cv.v) : cv.v;
-      // Dual mode, float target: dualWrite emits the triple update as one
-      // comma term (linear ops only; non-linear compounds throw — C5a2).
-      if (e.op === '=') {
-        parts.push(
-          env.dual && lv.dualTargets && lv.dualTargets[c]
-            ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...cv, v: rv })
-            : `${lv.targets[c]} = ${rv}`,
-        );
-      } else {
-        const cop = e.op.replace('=', '');
-        parts.push(
-          env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]
-            ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...cv, v: rv }, cop)
-            : compoundOpExpr(cop, lv.targets[c], rv, base),
-        );
+    if (isMatMul) {
+      const mm = matrixCompoundMul(env, lv.targets, lv.dualTargets, lv.type, rawRhs, e.value.resolvedType!);
+      for (const p of mm.pre) parts.push(p);
+      for (const w of mm.writes) parts.push(w);
+    } else {
+      const conv = convertPreserving(rawRhs, e.value.resolvedType!, lv.type);
+      for (let c = 0; c < lv.targets.length; c++) {
+        const cv = conv[c];
+        const rv = cv.pre && cv.pre.length > 0 ? foldPre(cv.pre, cv.v) : cv.v;
+        // Dual mode, float target: dualWrite emits the triple update as one
+        // comma term (linear ops only; non-linear compounds throw — C5a2).
+        if (e.op === '=') {
+          parts.push(
+            env.dual && lv.dualTargets && lv.dualTargets[c]
+              ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...cv, v: rv })
+              : `${lv.targets[c]} = ${rv}`,
+          );
+        } else {
+          const cop = e.op.replace('=', '');
+          parts.push(
+            env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]
+              ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...cv, v: rv }, cop)
+              : compoundOpExpr(cop, lv.targets[c], rv, base),
+          );
+        }
       }
     }
   } else {
