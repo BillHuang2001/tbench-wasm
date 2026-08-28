@@ -71,8 +71,8 @@ function near(got: number, expected: number, msg: string): void {
 /* Helpers (ctx shapes per program.ts — same as selftest-link.ts)      */
 /* ------------------------------------------------------------------ */
 
-function compile(src: string, type: 'VERTEX' | 'FRAGMENT', version: 100 | 300, extensions?: string[]) {
-  const r = compileShader(src, { type, version, extensions: extensions ? new Set(extensions) : undefined });
+function compile(src: string, type: 'VERTEX' | 'FRAGMENT', version: 100 | 300, extensions?: string[], defines?: Record<string, string>) {
+  const r = compileShader(src, { type, version, extensions: extensions ? new Set(extensions) : undefined, defines });
   if (!r.ok) throw new Error(`compile failed: ${JSON.stringify(r.errors)}`);
   return r.shader;
 }
@@ -1677,6 +1677,148 @@ let uboDual: Program | null = null;
     near(v[2], 49, `(c) m * b → mat3x3 [1][0] = 49`);
     near(v[3], 1, `(c) constant tail component untouched`);
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* #elif-after-taken-#if regression (three.js chunk patterns)          */
+/* ------------------------------------------------------------------ */
+
+// Compile+link regressions for the preprocessor #elif fix (see
+// selftest-preproc.ts): when an earlier #if/#ifdef branch is TAKEN, a
+// following #elif body must NOT be emitted. Before the fix, these three
+// three.js chunk patterns failed to compile (vClearcoatNormalMapUv
+// injected mid-call-args; `color` redefinition + vec3/vec4 *= mismatch;
+// envMap/texColor redefinition + textureCubeUV missing).
+
+{
+  // 1. three.js normal_fragment_begin.glsl.js: #if/#elif/#else INSIDE a
+  //    function call's argument list, USE_NORMALMAP taken.
+  const vs = compile(
+    `#version 300 es
+     in vec3 position;
+     out vec3 normal;
+     void main() { normal = position; gl_Position = vec4(position, 1.0); }`,
+    'VERTEX', 300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision highp float;
+     uniform vec3 vViewPosition;
+     uniform vec2 vNormalMapUv;
+     uniform vec2 vClearcoatNormalMapUv;
+     uniform vec2 vUv;
+     in vec3 normal;
+     out vec4 c;
+     mat3 getTangentFrame(vec3 a, vec3 b, vec2 uv) { return mat3(1.0); }
+     void main() {
+       mat3 tbn = getTangentFrame( - vViewPosition, normal,
+       #if defined( USE_NORMALMAP )
+       vNormalMapUv
+       #elif defined( USE_CLEARCOAT_NORMALMAP )
+       vClearcoatNormalMapUv
+       #else
+       vUv
+       #endif
+       );
+       c = vec4(tbn[0][0], tbn[1][1], tbn[2][2], 1.0);
+     }`,
+    'FRAGMENT', 300, undefined, { USE_NORMALMAP: '' },
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `normal_fragment_begin pattern (USE_NORMALMAP) links (${l.ok ? '' : l.log})`);
+
+  // 2. Same pattern with the #elif branch taken (USE_CLEARCOAT_NORMALMAP).
+  const fs2 = compile(
+    `#version 300 es
+     precision highp float;
+     uniform vec3 vViewPosition;
+     uniform vec2 vNormalMapUv;
+     uniform vec2 vClearcoatNormalMapUv;
+     uniform vec2 vUv;
+     in vec3 normal;
+     out vec4 c;
+     mat3 getTangentFrame(vec3 a, vec3 b, vec2 uv) { return mat3(1.0); }
+     void main() {
+       mat3 tbn = getTangentFrame( - vViewPosition, normal,
+       #if defined( USE_NORMALMAP )
+       vNormalMapUv
+       #elif defined( USE_CLEARCOAT_NORMALMAP )
+       vClearcoatNormalMapUv
+       #else
+       vUv
+       #endif
+       );
+       c = vec4(tbn[0][0], tbn[1][1], tbn[2][2], 1.0);
+     }`,
+    'FRAGMENT', 300, undefined, { USE_CLEARCOAT_NORMALMAP: '' },
+  );
+  const l2 = linkProgram(vs, fs2);
+  check(l2.ok, `normal_fragment_begin pattern (USE_CLEARCOAT_NORMALMAP) links (${l2.ok ? '' : l2.log})`);
+
+  // 3. three.js color_vertex.glsl.js + WebGLProgram.js vertex prefix: BOTH
+  //    USE_COLOR and USE_COLOR_ALPHA defined (three.js defines both for
+  //    alpha-vertex-color materials). Only the #ifdef bodies may survive.
+  const cvs = compile(
+    `#if defined( USE_COLOR_ALPHA )
+     attribute vec4 color;
+     #elif defined( USE_COLOR )
+     attribute vec3 color;
+     #endif
+     attribute vec3 position;
+     varying vec4 vColor;
+     void main() {
+       vColor = vec4(1.0);
+       #ifdef USE_COLOR_ALPHA
+       vColor *= color;
+       #elif defined( USE_COLOR )
+       vColor.rgb *= color;
+       #endif
+       gl_Position = vec4(position, 1.0);
+     }`,
+    'VERTEX', 100, undefined, { USE_COLOR: '', USE_COLOR_ALPHA: '' },
+  );
+  const cfs = compile(
+    `precision mediump float;
+     varying vec4 vColor;
+     void main() { gl_FragColor = vColor; }`,
+    'FRAGMENT', 100,
+  );
+  const cl = linkProgram(cvs, cfs);
+  check(cl.ok, `color_vertex pattern (both defines) links (${cl.ok ? '' : cl.log})`);
+
+  // 4. three.js backgroundCube.glsl.js: #ifdef ENVMAP_TYPE_CUBE +
+  //    #elif defined( ENVMAP_TYPE_CUBE_UV ) — exactly one envMap decl.
+  const bvs = compile(
+    `#version 300 es
+     in vec3 position;
+     out vec3 vWorldPosition;
+     void main() { vWorldPosition = position; gl_Position = vec4(position, 1.0); }`,
+    'VERTEX', 300,
+  );
+  const bfs = compile(
+    `#version 300 es
+     precision highp float;
+     #ifdef ENVMAP_TYPE_CUBE
+     uniform samplerCube envMap;
+     #elif defined( ENVMAP_TYPE_CUBE_UV )
+     uniform sampler2D envMap;
+     #endif
+     in vec3 vWorldPosition;
+     out vec4 c;
+     void main() {
+       #ifdef ENVMAP_TYPE_CUBE
+       vec4 texColor = texture(envMap, vWorldPosition);
+       #elif defined( ENVMAP_TYPE_CUBE_UV )
+       vec4 texColor = texture(envMap, vec2(0.0));
+       #else
+       vec4 texColor = vec4(0.0);
+       #endif
+       c = texColor;
+     }`,
+    'FRAGMENT', 300, undefined, { ENVMAP_TYPE_CUBE: '' },
+  );
+  const bl = linkProgram(bvs, bfs);
+  check(bl.ok, `backgroundCube pattern (ENVMAP_TYPE_CUBE) links (${bl.ok ? '' : bl.log})`);
 }
 
 /* ------------------------------------------------------------------ */

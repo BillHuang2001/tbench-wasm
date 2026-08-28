@@ -1113,11 +1113,11 @@ function dispatchDirective(dTokens: PToken[], line: number, st: State): void {
         st.errors.push({ line: remap(st, line), message: '#elif after #else' });
         return;
       }
-      if (top.parentActive && !top.taken) {
-        if (evalCondition(args, line, st) !== 0) {
-          top.taken = true;
-          top.active = true;
-        }
+      if (top.parentActive && !top.taken && evalCondition(args, line, st) !== 0) {
+        top.taken = true;
+        top.active = true;
+      } else {
+        top.active = false;
       }
       return;
     }
