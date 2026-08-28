@@ -526,7 +526,9 @@ export function setupFragmentCtx(
   quadV: Float32Array, quadStride: number, pixel: number,
 ): void {
   const fc = ctx.fragCoord;
-  fc[0] = x; fc[1] = y; fc[2] = depth; fc[3] = w;
+  // gl_FragCoord.xy = window pixel center (GLSL ES 1.00 §7.1 / 3.00 §7.1):
+  // (x + 0.5, y + 0.5) for the pixel at integer window coords (x, y).
+  fc[0] = x + 0.5; fc[1] = y + 0.5; fc[2] = depth; fc[3] = w;
   const base = pixel * quadStride;
   const varyings = ctx.varyings;
   let offset = 0;
