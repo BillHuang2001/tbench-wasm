@@ -459,8 +459,9 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
         return attrib.normalized;
       case C1.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING:
         return attrib.buffer;
-      case C1.VERTEX_ATTRIB_ARRAY_POINTER:
-        return 0; // WebGL has no client-side pointers
+      // NOTE: VERTEX_ATTRIB_ARRAY_POINTER is intentionally NOT accepted here —
+      // WebGL exposes it only via getVertexAttribOffset (pointer values must
+      // never leak); INVALID_ENUM + null (CTS gl-object-get-calls.html).
       case C2.VERTEX_ATTRIB_ARRAY_INTEGER:
         if (ctx._version !== 2) {
           ctx._errors.push(C1.INVALID_ENUM);

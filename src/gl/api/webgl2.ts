@@ -101,6 +101,7 @@ import { syncCurrentAttribs } from './vertex-attrib';
 import { defaultVAOState } from '../state';
 import type { VAOState } from '../state';
 import { executeClearBuffer } from '../draw';
+import { refreshUnitSamplerBindings } from '../teximage';
 import { createSurface, getFormat, linearToSRGB } from '../../raster';
 import type { Surface } from '../../raster';
 import type {
@@ -728,6 +729,8 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       const s = validateNonNullableObject<WebGLSync>(ctx, sync, Sync.any);
       if (s === null) return null; // INVALID_OPERATION pushed
       switch (pname) {
+        case C2.OBJECT_TYPE:
+          return C2.SYNC_FENCE; // fenceSync objects always have type SYNC_FENCE
         case C2.SYNC_STATUS:
           return s._signaled ? C2.SIGNALED : C2.UNSIGNALED;
         case C2.SYNC_CONDITION:
@@ -764,9 +767,13 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         return;
       }
       if (sampler._deleted) return;
-      // Unbind from every texture unit.
-      for (const u of ctx._state.textureUnits) {
-        if (u.sampler === sampler) u.sampler = null;
+      // Unbind from every texture unit (spec: delete while bound → unbound).
+      const units = ctx._state.textureUnits;
+      for (let i = 0; i < units.length; i++) {
+        if (units[i].sampler === sampler) {
+          units[i].sampler = null;
+          refreshUnitSamplerBindings(ctx._state, i);
+        }
       }
       sampler._deleted = true;
       ctx._resources.untrack(sampler);
@@ -798,11 +805,16 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       }
       if (sampler === null || sampler === undefined) {
         s.textureUnits[unit].sampler = null;
+        refreshUnitSamplerBindings(s, unit);
         return;
       }
       const smp = validateObject<WebGLSampler>(ctx, sampler, Sampler.any);
       if (smp === null) return; // cross-context/deleted → INVALID_OPERATION pushed
       s.textureUnits[unit].sampler = smp;
+      // Keep the completeness engine's texture→sampler association current
+      // (sampler params replace the texture's for the sampling-completeness
+      // decision — conformance2/samplers/sampler-drawing-test.html).
+      refreshUnitSamplerBindings(s, unit);
     };
   }
 

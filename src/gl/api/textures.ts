@@ -37,7 +37,7 @@ import type { WebGLRenderingContext } from '../webgl1';
 import { C1, C2 } from '../constants';
 import { WebGLFramebuffer, WebGLTexture, createObject } from '../objects';
 import { validateObject } from '../validation';
-import { generateMipmap, updateCompleteness } from '../teximage';
+import { generateMipmap, updateCompleteness, refreshUnitSamplerBindings } from '../teximage';
 import type { GLboolean, GLenum, GLfloat, GLint } from '../types';
 
 // GL values not present in C1 (see constants.ts provenance / state.ts precedent).
@@ -336,10 +336,15 @@ export function installTexturesApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
     }
-    const unit = ctx._state.textureUnits[ctx._state.activeTexture];
+    const s = ctx._state;
+    const unitIdx = s.activeTexture;
+    const unit = s.textureUnits[unitIdx];
     const slot = slotForTarget(target);
     if (texture === null || texture === undefined) {
       unit[slot] = null;
+      // The unbound texture may have lost its sampler association (teximage.ts
+      // completeness uses the bound sampler's params for sampling decisions).
+      refreshUnitSamplerBindings(s, unitIdx);
       return;
     }
     if (texture instanceof WebGLTexture && texture._deletePending) {
@@ -358,6 +363,7 @@ export function installTexturesApi(proto: WebGLRenderingContext): void {
     }
     everBoundTextures.add(tex);
     unit[slot] = tex;
+    refreshUnitSamplerBindings(s, unitIdx);
   };
 
   proto.texParameterf = function (this: WebGLRenderingContext, target: GLenum, pname: GLenum, param: GLfloat): void {
@@ -385,7 +391,9 @@ export function installTexturesApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
       }
-      if (pname === TEXTURE_IMMUTABLE_FORMAT) return tex._immutable ? 1 : 0;
+      // WebGL2 spec: TEXTURE_IMMUTABLE_FORMAT returns a boolean (CTS
+      // gl-object-get-calls.html asserts `false` with typeof boolean).
+      if (pname === TEXTURE_IMMUTABLE_FORMAT) return tex._immutable === true;
       return tex._immutable ? tex._image!.levels.length : 0;
     }
     if (!isValidTexParamPname(ctx, pname)) {

@@ -94,7 +94,7 @@ import {
 import type { ProgramModel } from '../objects';
 import { validateNonNullableObject, requireString } from '../validation';
 import { compileShader, linkProgram } from '../../glsl';
-import type { Shader as GlslShader, Program as GlslProgram, LinkOptions, CompileResult } from '../../glsl';
+import type { Shader as GlslShader, Program as GlslProgram, LinkOptions, CompileResult, ShaderInfo } from '../../glsl';
 import { preprocess } from '../../glsl/preprocessor';
 import type { PreprocessResult } from '../../glsl/preprocessor';
 import { tokenize } from '../../glsl/lexer';
@@ -592,6 +592,36 @@ function markBlockRefs(refs: Uint32Array, blocks: GlslShader['info']['uniformBlo
   }
 }
 
+/**
+ * GLSL ES 3.00 §12.46 residual (CTS gl-bindAttribLocation-aliasing-inactive.html):
+ * the link must FAIL when two DIFFERENT declared attribute names are bound to
+ * the same location — even when both attributes are entirely INACTIVE (never
+ * referenced). The glsl linker only lays out ACTIVE attributes (inactive ones
+ * consume no slots, see src/glsl/linker.ts layoutAttributes `if (!a.used)
+ * continue;`), so an all-inactive aliasing pair slips through as a successful
+ * link. This check re-runs the location-claim logic over ALL declared
+ * attributes (active or not) using their EFFECTIVE locations (an explicit
+ * layout(location=) wins over bindAttribLocation, matching the linker).
+ * Gated to version-300 vertex shaders: GLSL ES 1.00 / WebGL1 allows aliasing
+ * when at most one attribute is active, so inactive aliasing must keep
+ * linking there.
+ */
+function declaredAttribAliasingError(attrs: ShaderInfo['attributes'], bindings: Map<string, number>): string | null {
+  const occupied: { start: number; end: number; name: string }[] = [];
+  for (const a of attrs) {
+    if (a.builtin === true) continue; // gl_VertexID/gl_InstanceID/gl_DrawID: not bindable, location -1
+    const loc = a.location !== null ? a.location : bindings.get(a.name);
+    if (loc === undefined) continue; // no explicit location and no binding
+    const need = (a.type.kind === 'matrix' ? a.type.cols : 1) * a.arraySize;
+    for (const o of occupied) {
+      if (loc < o.end && o.start < loc + need) {
+        return `linker: attribute '${a.name}' location ${loc} conflicts with '${o.name}'`;
+      }
+    }
+    occupied.push({ start: loc, end: loc + need, name: a.name });
+  }
+  return null;
+}
 /** linkProgram core (both failure paths clear the executable). */
 function failLink(p: WebGLProgram, log: string): void {
   p._linkStatus = false;
@@ -743,6 +773,17 @@ function executeLink(ctx: WebGLRenderingContext, p: WebGLProgram, snap: LinkSnap
     failLink(p, result.log);
     return;
   }
+  // GLSL ES 3.00 §12.46: aliasing of two distinct declared attributes at the
+  // same location fails the link even when both are inactive (unused) — the
+  // glsl linker only detects conflicts among ACTIVE attributes (CTS
+  // gl-bindAttribLocation-aliasing-inactive.html, "entirely unused" shader).
+  if (vsR.version === 300 && p._bindAttribLocations.size > 0) {
+    const aliasErr = declaredAttribAliasingError(vsR.info.attributes, p._bindAttribLocations);
+    if (aliasErr !== null) {
+      failLink(p, aliasErr);
+      return;
+    }
+  }
   finalizeLinkSuccess(p, vsR, fsR, result);
 }
 
@@ -861,29 +902,33 @@ function readUniform(pm: GlslProgram, uniform: GlslProgram['uniforms'][number], 
         for (let row = 0; row < r; row++) out[e * c * r + col * r + row] = pm.floatStore[uniform.location + (elem + e) * slots + col * 4 + row];
     return out;
   }
-  if (isFloatType(uniform.type) || uniform.type === C1.BOOL_VEC2) {
-    // FLOAT_VEC* (and BOOL_VEC2 per gl-uniform-arrays.html → Float32Array)
+  if (isBoolType(uniform.type) || uniform.type === C1.BOOL) {
+    // WebGL spec: BOOL/BOOL_VEC* are returned as booleans — scalar → boolean,
+    // vectors/arrays → JS Array of booleans. CTS gl-object-get-calls.html
+    // asserts bval2..4 read back as [true,false,...] (strict Array equality);
+    // gl-uniform-arrays.html element-location reads only need .length + loose
+    // equality, which JS boolean arrays also satisfy.
+    const n = isBoolType(uniform.type) ? components : 1;
+    const out: boolean[] = [];
+    for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out.push(read(elem + e, i) !== 0);
+    return count === 1 && n === 1 ? out[0] : out;
+  }
+  if (isFloatType(uniform.type)) {
     const n = components;
     const out = new Float32Array(count * n);
     for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(elem + e, i);
     return out;
   }
-  if (isIntType(uniform.type) || uniform.type === C1.BOOL_VEC3) {
+  if (isIntType(uniform.type)) {
     const n = components;
     const out = new Int32Array(count * n);
     for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(elem + e, i);
     return out;
   }
-  if (isUintType(uniform.type) || uniform.type === C1.BOOL_VEC4) {
+  if (isUintType(uniform.type)) {
     const n = components;
     const out = new Uint32Array(count * n);
     for (let e = 0; e < count; e++) for (let i = 0; i < n; i++) out[e * n + i] = read(elem + e, i);
-    return out;
-  }
-  if (uniform.type === C1.BOOL) {
-    if (count === 1) return read(elem, 0) !== 0;
-    const out = new Uint32Array(count);
-    for (let e = 0; e < count; e++) out[e] = read(elem + e, 0) !== 0 ? 1 : 0;
     return out;
   }
   if (isSamplerType(uniform.type)) {
@@ -1624,6 +1669,13 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
       if (p === null) return null;
       const ubi = uniformBlockIndex >>> 0; // WebIDL GLuint
       ensureProgramLinked(ctx, p); // trigger before reading the program model
+      // GLES 3.0 §2.12.6: not-linked program → INVALID_OPERATION (checked
+      // BEFORE the index range check; CTS gl-object-get-calls.html queries a
+      // never-linked program and expects INVALID_OPERATION).
+      if (!p._linkStatus || p._program === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
       const pm = programModels.get(p);
       if (pm === undefined || ubi >= pm.uniformBlocks.length) {
         ctx._errors.push(C1.INVALID_VALUE);
@@ -1702,7 +1754,7 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
           return null;
       }
       const indices = Array.from(uniformIndices ?? []).map((i) => i >>> 0); // WebIDL GLuint
-      const out: number[] = [];
+      const out: any[] = [];
       for (const i of indices) {
         const u = pm.uniforms[i];
         if (u === undefined) {
@@ -1743,7 +1795,9 @@ export function installProgramsApi(proto: WebGLRenderingContext): void {
                 out.push(m.matrixStride);
                 break;
               default:
-                out.push(m.rowMajor ? 1 : 0);
+                // UNIFORM_IS_ROW_MAJOR returns booleans (WebGL2 spec §5.14.10;
+                // CTS gl-object-get-calls.html checks typeof).
+                out.push(m.rowMajor === true);
                 break;
             }
             break;

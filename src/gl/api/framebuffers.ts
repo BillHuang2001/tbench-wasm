@@ -63,8 +63,11 @@
  *  - drawBuffers (W2): WebIDL sequence<GLenum> conversion — ToUint32 per element
  *    (NaN/Infinity → 0, -1 → 0xFFFFFFFF, 1.5 → 1; TypeError only when the
  *    argument is not a sequence, e.g. null/undefined or a Symbol element);
- *    length > MAX_DRAW_BUFFERS → INVALID_VALUE; length 0 → INVALID_OPERATION;
- *    default FB: exactly [BACK] or [NONE] else INVALID_OPERATION; FBO: entries
+ *    length > MAX_DRAW_BUFFERS → INVALID_VALUE; length 0 → LEGAL (empty draw
+ *    buffer list — GLES 3.0 §4.2.1: the framebuffer has no color buffers, draws
+ *    produce no color output and no error; CTS oes-draw-buffers-indexed.html);
+ *    default FB: exactly [BACK] or [NONE] (or empty) else INVALID_OPERATION;
+ *    FBO: entries
  *    NONE or strictly-increasing COLOR_ATTACHMENTi < MAX_COLOR_ATTACHMENTS
  *    (BACK → INVALID_OPERATION, out-of-range → INVALID_ENUM, out-of-order →
  *    INVALID_OPERATION). Draw-buffer state is FRAMEBUFFER OBJECT state (GLES3
@@ -544,8 +547,17 @@ function formatComponentBits(format: GLenum): [number, number, number, number, n
   const zero: [number, number, number, number, number, number] = [0, 0, 0, 0, 0, 0];
   switch (format) {
     case C1.RGBA8: case C2.SRGB8_ALPHA8: case CExt.SRGB_ALPHA_EXT:
+    case 0x1908 /* RGBA (unsized — 8-bit components) */:
       return [8, 8, 8, 8, 0, 0];
-    case C2.RGB8: case C2.SRGB8: return [8, 8, 8, 0, 0, 0];
+    case C2.RGB8: case C2.SRGB8:
+    case 0x1907 /* RGB (unsized — 8-bit components) */:
+      return [8, 8, 8, 0, 0, 0];
+    case 0x1909 /* LUMINANCE (unsized) */:
+      return [8, 0, 0, 0, 0, 0];
+    case 0x190a /* LUMINANCE_ALPHA (unsized) */:
+      return [8, 0, 0, 8, 0, 0];
+    case 0x1906 /* ALPHA (unsized) */:
+      return [0, 0, 0, 8, 0, 0];
     case C1.RGBA4: return [4, 4, 4, 4, 0, 0];
     case C1.RGB5_A1: return [5, 5, 5, 1, 0, 0];
     case C1.RGB565: return [5, 6, 5, 0, 0, 0];
@@ -573,7 +585,8 @@ function formatComponentBits(format: GLenum): [number, number, number, number, n
     case C2.RG32F: return [32, 32, 0, 0, 0, 0];
     case C2.RGB10_A2: return [10, 10, 10, 2, 0, 0];
     case CExt.RGB16_EXT: return [16, 16, 16, 0, 0, 0];
-    case C1.DEPTH_COMPONENT16: return [0, 0, 0, 0, 16, 0];
+    case C1.DEPTH_COMPONENT16: case 0x1902 /* DEPTH_COMPONENT (unsized — 16-bit) */:
+      return [0, 0, 0, 0, 16, 0];
     case C2.DEPTH_COMPONENT24: return [0, 0, 0, 0, 24, 0];
     case C2.DEPTH_COMPONENT32F: return [0, 0, 0, 0, 32, 0];
     case C2.DEPTH24_STENCIL8: case C1.DEPTH_STENCIL: return [0, 0, 0, 0, 24, 8];
@@ -943,7 +956,7 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
       }
-      return defaultFbAttachmentParameter(ctx, pname);
+      return defaultFbAttachmentParameter(ctx, attachment, pname);
     }
     if (!isValidAttachment(ctx, attachment)) {
       ctx._errors.push(C1.INVALID_ENUM);
@@ -976,7 +989,11 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
             ctx._errors.push(C1.INVALID_ENUM);
             return null;
           }
-          return rec.type === 'renderbuffer' ? 0 : rec.face;
+          // GLES 2.0/3.0 §6.1.13: FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE is
+          // the cube face enum (TEXTURE_CUBE_MAP_POSITIVE_X..NEGATIVE_Z) only
+          // when the attached texture is a cube map; otherwise it is 0 (CTS
+          // gl-object-get-calls.html asserts 0 for TEXTURE_2D attachments).
+          return rec.type === 'renderbuffer' || !isCubeFace(rec.face) ? 0 : rec.face;
         case CExt.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT:
           // EXT_color_buffer_half_float (WebGL1): component-type queries become
           // legal with the extension enabled (CTS ext-color-buffer-half-float.html).
@@ -994,35 +1011,19 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
           return null;
       }
     }
-    // WebGL2 pname table.
+    // WebGL2 pname table. Empty-attachment semantics follow Chromium + GLES 3.0
+    // §6.1.13: when the attachment point has NO image, only OBJECT_TYPE (→ NONE)
+    // and OBJECT_NAME (→ null, no error — WebGL2 spec) are legal; EVERY other
+    // pname — including pnames outside the table (WebIDL converts undefined
+    // constants to 0) — generates INVALID_OPERATION (CTS framebuffer-test.html
+    // passes gl.FRAMEBUFFER_DEPTH_SIZE (undefined → 0) on an empty attachment
+    // and expects INVALID_OPERATION).
     switch (pname) {
       case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
         return rec === null ? NONE : rec.type === 'renderbuffer' ? C1.RENDERBUFFER : TEXTURE;
       case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
         if (rec === null) return null;
         return rec.type === 'renderbuffer' ? rec.renderbuffer : rec.texture;
-      case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
-        if (rec === null) return 0;
-        return rec.type === 'renderbuffer' ? 0 : rec.level;
-      case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
-        if (rec === null) return 0;
-        return rec.type === 'renderbuffer' ? 0 : rec.face;
-      case C2.FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
-        if (rec === null) return 0;
-        return rec.type === 'renderbuffer' ? 0 : rec.layer;
-      case C2.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
-      case C2.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
-      case C2.FRAMEBUFFER_ATTACHMENT_RED_SIZE:
-      case C2.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
-      case C2.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
-      case C2.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
-      case C2.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
-      case C2.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
-        if (rec === null) {
-          ctx._errors.push(C1.INVALID_OPERATION); // CTS framebuffer-test.html
-          return null;
-        }
-        return attachmentParameterValue(ctx, rec, pname);
       case TEXTURE_SAMPLES_EXT:
         // WEBGL_multisampled_render_to_texture (WebGL2-only): sample count of a
         // texture attachment, 0 otherwise (extension spec).
@@ -1033,8 +1034,34 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         if (rec === null) return 0;
         return rec.type === 'texture' ? rec.texture._msaaSamples : 0;
       default:
-        ctx._errors.push(C1.INVALID_ENUM);
-        return null;
+        if (rec === null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return null;
+        }
+        switch (pname) {
+          case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+            return rec.type === 'renderbuffer' ? 0 : rec.level;
+          case C1.FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+            // GLES 2.0/3.0 §6.1.13: FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE is
+            // the cube face enum (TEXTURE_CUBE_MAP_POSITIVE_X..NEGATIVE_Z) only
+            // when the attached texture is a cube map; otherwise it is 0 (CTS
+            // gl-object-get-calls.html asserts 0 for TEXTURE_2D attachments).
+            return rec.type === 'renderbuffer' || !isCubeFace(rec.face) ? 0 : rec.face;
+          case C2.FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:
+            return rec.type === 'renderbuffer' ? 0 : rec.layer;
+          case C2.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:
+          case C2.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:
+          case C2.FRAMEBUFFER_ATTACHMENT_RED_SIZE:
+          case C2.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
+          case C2.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
+          case C2.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:
+          case C2.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:
+          case C2.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:
+            return attachmentParameterValue(ctx, rec, pname);
+          default:
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+        }
     }
   };
 
@@ -1259,6 +1286,12 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_OPERATION); // WebGL2 spec + multisampled.ts factory
         return;
       }
+      // GLES 3.0 §4.4.2.3: the WebGL1-style unsized DEPTH_STENCIL format is not
+      // multisampleable (multisampled-depth-renderbuffer-initialization.html).
+      if (internalformat === C1.DEPTH_STENCIL && samples > 0) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
       if (!isValidRenderbufferFormat(ctx, internalformat)) {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
@@ -1292,13 +1325,15 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
         ctx._errors.push(C1.INVALID_VALUE);
         return;
       }
-      if (arr.length === 0) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
+      // An EMPTY buffers list is legal (GLES 3.0 §4.2.1 — WebGL2 defers to it):
+      // the framebuffer then has NO color buffers, so subsequent draws produce
+      // no color output and generate no error. CTS oes-draw-buffers-indexed.html
+      // calls drawBuffers([]) and requires NO_ERROR. Both paths below accept the
+      // empty list (default-FB path: no entries → no color buffers; FBO path:
+      // the strictly-increasing loop over [] writes the empty per-FBO state).
       if (s.drawFramebuffer === null) {
-        // Default framebuffer: exactly [BACK] or [NONE].
-        if (arr.length !== 1 || (arr[0] !== BACK && arr[0] !== NONE)) {
+        // Default framebuffer: empty (no color buffers) or exactly [BACK]/[NONE].
+        if (arr.length > 1 || (arr.length === 1 && arr[0] !== BACK && arr[0] !== NONE)) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
@@ -1422,6 +1457,15 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       }
       if (filter === LINEAR && (mask & (C1.DEPTH_BUFFER_BIT | C1.STENCIL_BUFFER_BIT)) !== 0) {
         ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      // GLES3 §4.4.4: INVALID_VALUE when the width/height of the source or
+      // destination rectangle exceeds 2^31-1 (the coordinates are GLint, so the
+      // difference is exact in JS doubles). CTS
+      // blitframebuffer-size-overflow.html: sizes exactly 2^31-1 are legal.
+      if (Math.abs(srcX1 - srcX0) > 0x7fffffff || Math.abs(srcY1 - srcY0) > 0x7fffffff ||
+          Math.abs(dstX1 - dstX0) > 0x7fffffff || Math.abs(dstY1 - dstY0) > 0x7fffffff) {
+        ctx._errors.push(C1.INVALID_VALUE);
         return;
       }
       const readFbo = s.readFramebuffer;
@@ -1622,7 +1666,21 @@ function blitAttachmentFormat(fbo: WebGLFramebuffer | null, point: GLenum, defau
 }
 
 /** W2 default-framebuffer attachment parameter values. */
-function defaultFbAttachmentParameter(ctx: WebGLRenderingContext, pname: GLenum): any {
+function defaultFbAttachmentParameter(ctx: WebGLRenderingContext, attachment: GLenum, pname: GLenum): any {
+  // GLES 3.0 §6.1.13: when the attachment point has no image (default
+  // framebuffer without a depth/stencil buffer), OBJECT_TYPE is NONE and
+  // every other pname generates INVALID_OPERATION (CTS
+  // gl-object-get-calls.html queries STENCIL on a stencil:false context).
+  const fb = ctx._defaultFB;
+  const hasBuffer =
+    attachment === C2.STENCIL ? !!(fb && fb.stencil)
+    : attachment === C2.DEPTH ? !!(fb && fb.depth)
+    : true; // BACK always exists
+  if (!hasBuffer) {
+    if (pname === C1.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE) return NONE;
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return null;
+  }
   switch (pname) {
     case C1.FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
       return FRAMEBUFFER_DEFAULT;
@@ -1640,18 +1698,15 @@ function defaultFbAttachmentParameter(ctx: WebGLRenderingContext, pname: GLenum)
     case C2.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:
     case C2.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:
     case C2.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE: {
-      const fb = ctx._defaultFB;
       const format = fb ? fb.color.format : 0;
       const bits = formatComponentBits(format);
       return bits[pname - C2.FRAMEBUFFER_ATTACHMENT_RED_SIZE];
     }
     case C2.FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE: {
-      const fb = ctx._defaultFB;
       const format = fb && fb.depth ? fb.depth.format : 0;
       return formatComponentBits(format)[4];
     }
     case C2.FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE: {
-      const fb = ctx._defaultFB;
       const format = fb && fb.stencil ? fb.stencil.format : 0;
       return formatComponentBits(format)[5];
     }

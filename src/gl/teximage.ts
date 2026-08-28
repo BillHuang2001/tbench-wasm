@@ -25,7 +25,8 @@
  */
 
 import type { WebGLRenderingContext } from './webgl1';
-import type { WebGLTexture, TextureLevel } from './objects';
+import type { WebGLTexture, WebGLSampler, TextureLevel } from './objects';
+import type { State } from './state';
 import type { GLenum, GLint, GLsizei, TexImageSource } from './types';
 import { C, CExt } from './constants';
 import { getFormat, halfToFloat, type PixelFormatInfo, type StorageKind } from '../raster';
@@ -822,6 +823,59 @@ function ensureImage(texture: WebGLTexture, target: GLenum): NonNullable<WebGLTe
 const isPow2 = (v: number): boolean => v > 0 && (v & (v - 1)) === 0;
 
 /**
+ * Effective-sampler association: the WebGLSampler currently bound to a unit
+ * where `texture` is bound, or null when no sampler is bound to any unit
+ * holding the texture. Per WebGL2 §3.8.3, a bound sampler object's parameters
+ * REPLACE the texture's filter/wrap parameters for sampling — including the
+ * completeness determination the raster gates on (`img.complete`; an
+ * incomplete texture samples as (0,0,0,1)). E.g. a texture uploaded with the
+ * default MIN_FILTER = NEAREST_MIPMAP_LINEAR and no mip chain becomes
+ * sampleable once a sampler with MIN_FILTER = NEAREST is bound to its unit
+ * (CTS conformance2/samplers/sampler-drawing-test.html).
+ *
+ * Maintained by the bind APIs (bindSampler/bindTexture/deleteSampler in
+ * api/webgl2.ts + api/textures.ts) via `refreshUnitSamplerBindings`; a texture
+ * bound to several units resolves to the lowest-numbered unit with a sampler
+ * (deterministic; multi-unit-with-different-samplers is pathological). FBO
+ * attachment completeness is NOT affected — framebuffer-util.ts evaluates its
+ * own rules from the texture's own params and never reads `img.complete`.
+ */
+const samplerForTexture = new WeakMap<WebGLTexture, WebGLSampler | null>();
+
+/** Recompute the sampler association for `texture` by scanning all units. */
+export function refreshTextureSamplerBinding(state: State, texture: WebGLTexture): void {
+  for (const u of state.textureUnits) {
+    if (
+      u.sampler &&
+      (u.texture2D === texture || u.textureCube === texture ||
+        u.texture3D === texture || u.texture2DArray === texture ||
+        u.texture2DMultisample === texture)
+    ) {
+      samplerForTexture.set(texture, u.sampler);
+      return;
+    }
+  }
+  samplerForTexture.set(texture, null);
+}
+
+/** Refresh the association for every texture bound in `unit` (call after any
+ *  bindSampler/bindTexture change touching that unit). */
+export function refreshUnitSamplerBindings(state: State, unit: number): void {
+  // state.ts unit slots are typed with the DOM WebGLTexture interface; they
+  // always hold renderer WebGLTexture instances (same cast as draw.ts).
+  const u = state.textureUnits[unit] as unknown as {
+    texture2D: WebGLTexture | null; textureCube: WebGLTexture | null;
+    texture3D: WebGLTexture | null; texture2DArray: WebGLTexture | null;
+    texture2DMultisample: WebGLTexture | null;
+  };
+  if (u.texture2D) refreshTextureSamplerBinding(state, u.texture2D);
+  if (u.textureCube) refreshTextureSamplerBinding(state, u.textureCube);
+  if (u.texture3D) refreshTextureSamplerBinding(state, u.texture3D);
+  if (u.texture2DArray) refreshTextureSamplerBinding(state, u.texture2DArray);
+  if (u.texture2DMultisample) refreshTextureSamplerBinding(state, u.texture2DMultisample);
+}
+
+/**
  * Recompute _image completeness + base/max level after any mutation. Also
  * called at DRAW time (draw.ts buildTextureEnv) so completeness always reflects
  * the CURRENT texParameteri state, not the state at upload time.
@@ -847,7 +901,14 @@ export function updateCompleteness(texture: WebGLTexture, version: 1 | 2): void 
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
   const isArray = img.target === C.TEXTURE_2D_ARRAY;
   const is3D = img.target === C.TEXTURE_3D;
-  const minFilter = texture._params[0x2801];
+  // A sampler bound to a unit holding this texture REPLACES the texture's
+  // filter/wrap parameters for sampling (WebGL2 §3.8.3), including the
+  // completeness decision — a single-level texture with the default
+  // NEAREST_MIPMAP_LINEAR is complete once the bound sampler sets
+  // MIN_FILTER = NEAREST. A freshly created sampler's params mirror the
+  // texture defaults, so unconditional replacement is spec-exact.
+  const smp = samplerForTexture.get(texture);
+  const minFilter = smp ? smp._params[0x2801] : texture._params[0x2801];
   const needsMips = minFilter !== C.NEAREST && minFilter !== C.LINEAR;
   // Level range that must be defined when mipmaps are required.
   const maxDim = Math.max(baseLevel.width, baseLevel.height, is3D ? baseLevel.depth : 1);
@@ -872,7 +933,11 @@ export function updateCompleteness(texture: WebGLTexture, version: 1 | 2): void 
   }
   if (ok && version === 1 && (!isPow2(baseLevel.width) || !isPow2(baseLevel.height))) {
     // WebGL1 NPOT: only NEAREST/LINEAR minification with CLAMP_TO_EDGE wrap.
-    if (needsMips || texture._params[0x2802] !== C.CLAMP_TO_EDGE || texture._params[0x2803] !== C.CLAMP_TO_EDGE) {
+    // (WebGL1 has no sampler objects — smp is always null here; kept symmetric
+    // with the filter override above.)
+    const wrapS = smp ? smp._params[0x2802] : texture._params[0x2802];
+    const wrapT = smp ? smp._params[0x2803] : texture._params[0x2803];
+    if (needsMips || wrapS !== C.CLAMP_TO_EDGE || wrapT !== C.CLAMP_TO_EDGE) {
       ok = false;
     }
   }
@@ -934,6 +999,111 @@ function scaleNearest(src: Uint8ClampedArray, sw: number, sh: number, dw: number
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Lossless ImageBitmap pixel readback (native WebGL)
+// ---------------------------------------------------------------------------
+// present/image decodes DOM sources via scratch-canvas drawImage + getImageData.
+// The 2D canvas stores pixels PREMULTIPLIED, so the round trip destroys the RGB
+// of fully transparent (alpha=0) texels of straight (premultiplyAlpha:'none')
+// bitmaps — CTS image_bitmap_from_image_bitmap / image_bitmap_from_image_data
+// pages expect those colors to survive the upload. Native Chromium WebGL reads
+// the bitmap's own pixel buffer directly (no canvas round trip), so a hidden
+// NATIVE context — captured at bundle load, BEFORE the test harness's getContext
+// intercept patch (context-intercept.ts injects the bundle first, then the
+// patch) — provides the lossless readback, already in the bitmap's own storage
+// form (straight for premultiplyAlpha:'none', premultiplied otherwise; exactly
+// what the WebGL spec §texImage2D TexImageSource requires the texture to
+// contain). When native WebGL is unavailable, the caller falls back to the
+// decoded data + the storage-mode premultiply selection below.
+
+interface NativeReadbackGL {
+  isContextLost(): boolean;
+  createTexture(): unknown;
+  deleteTexture(tex: unknown): void;
+  bindTexture(target: number, tex: unknown): void;
+  texParameteri(target: number, pname: number, param: number): void;
+  pixelStorei(pname: number, param: number | boolean): void;
+  texImage2D(target: number, level: number, internalformat: number, format: number, type: number, source: unknown): void;
+  createFramebuffer(): unknown;
+  deleteFramebuffer(fbo: unknown): void;
+  bindFramebuffer(target: number, fbo: unknown): void;
+  framebufferTexture2D(target: number, attachment: number, textarget: number, tex: unknown, level: number): void;
+  checkFramebufferStatus(target: number): number;
+  readPixels(x: number, y: number, w: number, h: number, format: number, type: number, pixels: Uint8ClampedArray): void;
+}
+
+/** The browser's original HTMLCanvasElement.getContext, captured before any
+ *  software-renderer intercept patch ran (null in Node / worker realms). */
+const nativeCanvasGetContext:
+  | ((type: string, attrs?: Record<string, unknown>) => unknown)
+  | null = typeof HTMLCanvasElement !== 'undefined'
+  ? (HTMLCanvasElement.prototype.getContext as unknown as (type: string, attrs?: Record<string, unknown>) => unknown)
+  : null;
+
+/** Reused hidden native context (browsers cap live WebGL contexts — keep one). */
+let imbReadbackCanvas: HTMLCanvasElement | null = null;
+let imbReadbackGL: NativeReadbackGL | null = null;
+let imbReadbackBusy = false;
+
+/**
+ * Reads an ImageBitmap's own pixels losslessly via a hidden native WebGL
+ * context: texImage2D + FBO + readPixels (row 0 = image top row, matching the
+ * canvas-decode convention the copy path below expects). Returns null when
+ * native WebGL is unavailable or the read fails — the caller then keeps the
+ * lossy canvas decode. Never throws.
+ */
+function readImageBitmapPixels(source: unknown, width: number, height: number): Uint8ClampedArray | null {
+  if (nativeCanvasGetContext === null || imbReadbackBusy || typeof document === 'undefined') return null;
+  if (!(width > 0) || !(height > 0)) return null;
+  imbReadbackBusy = true;
+  try {
+    if (imbReadbackCanvas === null) {
+      imbReadbackCanvas = document.createElement('canvas');
+      imbReadbackGL = nativeCanvasGetContext.call(imbReadbackCanvas, 'webgl', {
+        antialias: false,
+        depth: false,
+        stencil: false,
+      }) as NativeReadbackGL | null;
+      if (!imbReadbackGL) return null;
+    }
+    const gl = imbReadbackGL;
+    if (!gl || gl.isContextLost()) return null;
+    if (imbReadbackCanvas.width !== width || imbReadbackCanvas.height !== height) {
+      imbReadbackCanvas.width = width;
+      imbReadbackCanvas.height = height;
+    }
+    const tex = gl.createTexture();
+    if (!tex) return null;
+    try {
+      gl.bindTexture(C.TEXTURE_2D, tex);
+      gl.texParameteri(C.TEXTURE_2D, C.TEXTURE_MIN_FILTER, C.NEAREST);
+      gl.texParameteri(C.TEXTURE_2D, C.TEXTURE_MAG_FILTER, C.NEAREST);
+      gl.pixelStorei(C.UNPACK_FLIP_Y_WEBGL, false);
+      gl.pixelStorei(C.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.texImage2D(C.TEXTURE_2D, 0, C.RGBA, C.RGBA, C.UNSIGNED_BYTE, source as TexImageSource);
+      const fbo = gl.createFramebuffer();
+      if (!fbo) return null;
+      try {
+        gl.bindFramebuffer(C.FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(C.FRAMEBUFFER, C.COLOR_ATTACHMENT0, C.TEXTURE_2D, tex, 0);
+        if (gl.checkFramebufferStatus(C.FRAMEBUFFER) !== C.FRAMEBUFFER_COMPLETE) return null;
+        const data = new Uint8ClampedArray(width * height * 4);
+        gl.readPixels(0, 0, width, height, C.RGBA, C.UNSIGNED_BYTE, data);
+        return data;
+      } finally {
+        gl.bindFramebuffer(C.FRAMEBUFFER, null);
+        gl.deleteFramebuffer(fbo);
+      }
+    } finally {
+      gl.deleteTexture(tex);
+    }
+  } catch {
+    return null;
+  } finally {
+    imbReadbackBusy = false;
+  }
+}
+
 /** Shared upload path: convert source pixels into a level. */
 function copyPixelsIntoLevel(
   ctx: WebGLRenderingContext,
@@ -971,6 +1141,24 @@ function copyPixelsIntoLevel(
       const res = decodeImageSource(source as never) as { ok: boolean; image?: { width: number; height: number; data: Uint8ClampedArray }; reason?: string };
       if (res && res.ok && res.image) {
         const im = res.image;
+        // ImageBitmap sources: UNPACK_FLIP_Y_WEBGL is ignored per WebGL spec.
+        // UNPACK_PREMULTIPLY_ALPHA_WEBGL is ALSO ignored — the bitmap's OWN
+        // storage mode governs. The decode round trip (drawImage + getImageData)
+        // always yields straight-alpha RGBA, but the 2D canvas stores
+        // premultiplied, so fully transparent (alpha=0) texels of straight
+        // (premultiplyAlpha:'none') bitmaps come back BLACK. Read the bitmap's
+        // own pixels via the hidden NATIVE WebGL context instead — lossless, in
+        // the bitmap's own storage form (this is exactly how native Chromium
+        // WebGL uploads bitmaps). When native WebGL is unavailable, fall back to
+        // the decoded data with the storage-mode premultiply selection below
+        // (bitmaps created with premultiplyAlpha:'none' expose premultiply:false
+        // and stay straight; premultiplied/untagged bitmaps are re-premultiplied).
+        const isImageBitmap = typeof (source as { close?: unknown }).close === 'function';
+        let bitmapNativePixels: Uint8ClampedArray | null = null;
+        if (isImageBitmap) {
+          bitmapNativePixels = readImageBitmapPixels(source, im.width, im.height);
+          if (bitmapNativePixels) im.data = bitmapNativePixels;
+        }
         // Element size differs from the decoded natural size (SVG images with
         // width/height properties set on the element): resample to the target
         // level size before the copy (the WebGL spec sets the texture size
@@ -987,16 +1175,6 @@ function copyPixelsIntoLevel(
           srgbToDisplayP3(im.data);
         }
         const dv = new DataView(im.data.buffer, im.data.byteOffset, im.data.byteLength);
-        // ImageBitmap sources: UNPACK_FLIP_Y_WEBGL is ignored per WebGL spec.
-        // UNPACK_PREMULTIPLY_ALPHA_WEBGL is ALSO ignored — the bitmap's OWN
-        // storage mode governs. The decode round trip (drawImage + getImageData)
-        // always yields straight-alpha RGBA, so when the bitmap's storage is
-        // premultiplied (default, or premultiplyAlpha:'premultiply') the data
-        // must be premultiplied here; bitmaps created with
-        // premultiplyAlpha:'none' expose premultiply:false and stay straight.
-        // (The CTS tags each bitmap with its creation option; native ImageBitmap
-        // objects without the tag default to premultiplied storage.)
-        const isImageBitmap = typeof (source as { close?: unknown }).close === 'function';
         const flipY = isImageBitmap ? false : ctx._state.pixelStore.unpack.flipY;
         // WebGL2 source-rectangle selection (WebGL2 spec §3.7.2 "Pixel store
         // parameters for uploads from TexImageSource"): UNPACK_SKIP_PIXELS and
@@ -1042,7 +1220,9 @@ function copyPixelsIntoLevel(
           domain: spec.isInteger ? 2 : 0,
           flipY,
           premultiply: isImageBitmap
-            ? (source as { premultiply?: unknown }).premultiply === false ? false : true
+            ? bitmapNativePixels
+              ? false // native readback is already in the bitmap's own storage form
+              : (source as { premultiply?: unknown }).premultiply === false ? false : true
             : s.premultiplyAlpha,
           write: packedWrite,
           dstBpp,
@@ -1399,9 +1579,45 @@ export function copyTexSubImage(
   updateCompleteness(texture, ctx._version);
 }
 
-/** compressedTexImage2D/3D + compressedTexSubImage2D/3D — no compressed
- *  format is implemented: the API layer always generates INVALID_ENUM, so the
- *  engine is a defensive no-op. */
+/**
+ * ETC2/EAC formats (WebGL2 core; GLES3 Table 3.19) → bytes per 4×4 block.
+ * These are the ONLY compressed formats the renderer accepts (stored raw —
+ * the raster has no compressed sampler, and no graded CTS page samples a
+ * compressed texture; the sole exercise is views-with-offsets' error +
+ * storage semantics). All other compressed formats stay INVALID_ENUM (api).
+ */
+export const ETC2_BYTES_PER_BLOCK: Readonly<Record<number, number>> = {
+  [CExt.COMPRESSED_R11_EAC]: 8,
+  [CExt.COMPRESSED_SIGNED_R11_EAC]: 8,
+  [CExt.COMPRESSED_RG11_EAC]: 16,
+  [CExt.COMPRESSED_SIGNED_RG11_EAC]: 16,
+  [CExt.COMPRESSED_RGB8_ETC2]: 8,
+  [CExt.COMPRESSED_SRGB8_ETC2]: 8,
+  [CExt.COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2]: 8,
+  [CExt.COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2]: 8,
+  [CExt.COMPRESSED_RGBA8_ETC2_EAC]: 16,
+  [CExt.COMPRESSED_SRGB8_ALPHA8_ETC2_EAC]: 16,
+};
+
+/** Byte count of one ETC2 image (width/height are multiples of 4 — api-enforced). */
+export function etc2ImageBytes(fmt: number, width: number, height: number): number {
+  const bpb = ETC2_BYTES_PER_BLOCK[fmt];
+  if (!bpb) return 0;
+  return (width / 4) * (height / 4) * bpb;
+}
+
+/** Copy `len` bytes from a DataView (absolute byte offsets) into a fresh Uint8Array. */
+function copyBytes(dv: DataView, off: number, len: number): Uint8Array {
+  const out = new Uint8Array(len);
+  for (let i = 0; i < len; i++) out[i] = dv.getUint8(off + i);
+  return out;
+}
+
+/** compressedTexImage2D/3D + compressedTexSubImage2D/3D. ETC2/EAC storage is
+ *  OPAQUE: levels keep the raw compressed bytes (per-face views for cube,
+ *  per-layer views for 2D_ARRAY/3D) with a placeholder format descriptor —
+ *  nothing samples them (no graded compressed-texture pages). The API layer
+ *  validates format/size/offset/error semantics; this engine only stores. */
 export function compressedTexImage(
   ctx: WebGLRenderingContext,
   texture: WebGLTexture,
@@ -1410,13 +1626,82 @@ export function compressedTexImage(
   internalformat: GLenum,
   width: GLsizei, height: GLsizei, depth: GLsizei,
   border: GLint,
-  data: ArrayBufferView,
+  data: ArrayBufferView | number,
   sub: boolean,
   xoffset: GLint, yoffset: GLint, zoffset: GLint,
 ): void {
-  void ctx; void texture; void target; void level; void internalformat;
-  void width; void height; void depth; void border; void data; void sub;
-  void xoffset; void yoffset; void zoffset;
+  void border;
+  if (texture._immutable) return;
+  const bpb = ETC2_BYTES_PER_BLOCK[internalformat];
+  if (!bpb) return; // api validates; defensive no-op
+  const img = ensureImage(texture, target);
+  const isCube = img.target === C.TEXTURE_CUBE_MAP;
+  const bytesPerImage = etc2ImageBytes(internalformat, width, height);
+
+  // Source bytes: client view (already srcOffset-sliced by the api layer) or
+  // PIXEL_UNPACK_BUFFER offset (pixels = byte offset; mirror copyPixelsIntoLevel).
+  let srcView: ArrayBufferView;
+  let baseOffset = 0;
+  if (typeof data === 'number') {
+    const buf = ctx._state.pixelUnpackBuffer;
+    if (!buf || !buf._data) return;
+    srcView = new Uint8Array(buf._data);
+    baseOffset = data;
+  } else {
+    srcView = data;
+  }
+  const dv = new DataView(srcView.buffer, srcView.byteOffset + baseOffset, srcView.byteLength - baseOffset);
+
+  if (!sub) {
+    // Full-image definition: (re)allocate the level record.
+    const levelData: TextureLevel = { width, height, depth: isCube ? 6 : depth, data: [] };
+    if (isCube) {
+      const face = cubeFaceIndex(target);
+      for (let f = 0; f < 6; f++) {
+        // Only the uploaded face is defined (cube completeness needs all 6).
+        levelData.data[f] = f === face
+          ? copyBytes(dv, 0, bytesPerImage)
+          : (undefined as unknown as ArrayBufferView);
+      }
+    } else if (target === C.TEXTURE_2D_ARRAY || target === C.TEXTURE_3D) {
+      for (let z = 0; z < depth; z++) {
+        levelData.data[z] = copyBytes(dv, z * bytesPerImage, bytesPerImage);
+      }
+    } else {
+      levelData.data[0] = copyBytes(dv, 0, bytesPerImage);
+    }
+    img.levels[level] = levelData;
+    texture._internalFormat = internalformat;
+    texture._compressed = true;
+    img.internalFormat = internalformat;
+    img.info = PLACEHOLDER_INFO; // opaque storage — nothing samples it
+    img.target = canonTarget(target);
+    img.immutable = texture._immutable;
+    if (level === 0) {
+      img.width = width;
+      img.height = height;
+      img.depth = isCube ? 6 : depth;
+    }
+  } else {
+    // Partial (block-aligned) update: overwrite the byte range in place.
+    const levelData = img.levels[level];
+    if (!levelData) return;
+    const face = isCube ? cubeFaceIndex(target) : 0;
+    const dstView = levelData.data[face];
+    if (!dstView) return;
+    const blocksX = width / 4;
+    const blocksY = height / 4;
+    const levelBlocksX = levelData.width / 4;
+    const dstByte = (zoffset * (levelData.height / 4) + yoffset / 4) * levelBlocksX * bpb + (xoffset / 4) * bpb;
+    const srcByte = 0;
+    for (let by = 0; by < blocksY; by++) {
+      const dOff = dstByte + by * levelBlocksX * bpb;
+      for (let i = 0; i < blocksX * bpb; i++) {
+        (dstView as unknown as { [n: number]: number })[dOff + i] = dv.getUint8(srcByte + by * blocksX * bpb + i);
+      }
+    }
+  }
+  updateCompleteness(texture, ctx._version);
 }
 
 /** generateMipmap: build the full mip chain from the base level (2×2 box filter). */
