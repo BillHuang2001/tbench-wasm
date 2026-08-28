@@ -67,10 +67,12 @@
  *      matrix-row-major-dynamic-indexing.html shaders (member-array dynamic
  *      index in instance-less AND instance-named blocks, row-major reads).
  *      Every check fails on the pre-cluster code (HEAD 826dbb6).
- *  21. Cross-stage uniform PRECISION mismatch is tolerated (three.js
- *      viewMatrix: highp VS default × mediump FS default, both directions);
- *      uniform TYPE conflicts (vec3 vs vec4) and struct member type/name
- *      mismatches stay link errors; struct member precision mismatch links.
+ *  21. Cross-stage uniform PRECISION mismatch: link error at GLSL ES 1.00
+ *      (the exact CTS shader-with-global-variable-precision-mismatch.html
+ *      shaders — vec4 / int / struct member, linkSuccess:false), tolerated
+ *      at ES 3.00 (three.js viewMatrix highp VS × mediump FS); uniform TYPE
+ *      conflicts (vec3 vs vec4) and struct member type mismatches stay link
+ *      errors at both versions.
  *  22. bindAttribLocation is reserved BEFORE automatic assignment (three.js
  *      `attribute mat4 instanceMatrix;` declared before `attribute vec3
  *      position;` + bindAttribLocation('position', 0) must link with distinct
@@ -2609,42 +2611,122 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
 }
 
 /* ------------------------------------------------------------------ */
-/* 21. Cross-stage uniform PRECISION mismatch is tolerated (three.js)  */
+/* 21. Cross-stage uniform PRECISION mismatch: link error at GLSL ES   */
+/*     1.00 (CTS shader-with-global-variable-precision-mismatch.html   */
+/*     grades linkSuccess:false), tolerated at ES 3.00 (three.js       */
+/*     viewMatrix highp-VS x mediump-FS); type conflicts always error. */
 /* ------------------------------------------------------------------ */
 
 {
+  // GLSL ES 1.00 — the EXACT CTS page shaders: default-highp VS uniforms ×
+  // mediump FS uniforms MUST fail the link (the page grades linkSuccess:
+  // false for the float, int AND struct shapes). The VS `uniform int foo;`
+  // relies on the SPEC vertex default (highp int) — the replay in
+  // stageDefaultPrecisions diverges from semantics' mediump int seed on
+  // purpose.
+  const v100MismatchFails = (name: string, vsSrc: string, fsSrc: string): void => {
+    const vs = compile(vsSrc, 'VERTEX', 100);
+    const fs = compile(fsSrc, 'FRAGMENT', 100);
+    const l = linkProgram(vs, fs);
+    check(!l.ok && l.log.includes('precision mismatch'),
+      `${name} (${l.ok ? 'LINKED' : l.log})`);
+  };
+  v100MismatchFails('(a) v100 vec4: VS default highp x FS `precision mediump float;` fails',
+    `uniform vec4 foo;
+     void main() { gl_Position = foo; }`,
+    `precision mediump float;
+     uniform vec4 foo;
+     void main() { gl_FragColor = foo; }`);
+  v100MismatchFails('(b) v100 int: VS default highp int x FS default mediump int fails',
+    `uniform int foo;
+     void main() { gl_Position = vec4(foo, 0, 0, 1); }`,
+    `uniform int foo;
+     void main() { gl_FragColor = vec4(foo, 0, 0, 1); }`);
+  v100MismatchFails('(c) v100 struct foo{vec4 bar;}: VS highp member x FS mediump fails',
+    `struct foo { vec4 bar; };
+     uniform foo baz;
+     void main() { gl_Position = baz.bar; }`,
+    `precision mediump float;
+     struct foo { vec4 bar; };
+     uniform foo baz;
+     void main() { gl_FragColor = baz.bar; }`);
+
   // three.js built-in materials declare `uniform mat4 viewMatrix;` in both
-  // stages WITHOUT an explicit precision; the VS defaults to highp and the FS
-  // to mediump (generatePrecision). ANGLE links such programs (only TYPE
-  // conflicts are link errors for uniforms), so the linker must not reject
-  // them — the Program model carries no precision anyway.
+  // stages WITHOUT an explicit precision; at ES 3.00 the VS defaults to
+  // highp and the FS to mediump (generatePrecision). ANGLE links such
+  // programs (only TYPE conflicts are link errors for uniforms), so the
+  // linker must not reject them at v300 — the Program model carries no
+  // precision anyway.
   const vsHigh = compile(
-    `precision highp float; uniform mat4 viewMatrix;
-     void main(){ gl_Position = viewMatrix * vec4(0.0, 0.0, 0.0, 1.0); }`,
-    'VERTEX', 100,
+    `#version 300 es
+     precision highp float;
+     uniform mat4 viewMatrix;
+     out vec4 v;
+     void main(){ v = vec4(0.0); gl_Position = viewMatrix * vec4(0.0, 0.0, 0.0, 1.0); }`,
+    'VERTEX', 300,
   );
   const fsMed = compile(
-    `precision mediump float; uniform mat4 viewMatrix;
-     void main(){ gl_FragColor = vec4(1.0); }`,
-    'FRAGMENT', 100,
+    `#version 300 es
+     precision mediump float;
+     uniform mat4 viewMatrix;
+     in vec4 v;
+     out vec4 fragColor;
+     void main(){ fragColor = v + vec4(1.0); }`,
+    'FRAGMENT', 300,
   );
   const l1 = linkProgram(vsHigh, fsMed);
-  check(l1.ok, `(a) highp-VS x mediump-FS mat4 uniform links (${l1.ok ? '' : l1.log})`);
+  check(l1.ok, `(d) v300 highp-VS x mediump-FS mat4 uniform links (${l1.ok ? '' : l1.log})`);
 
-  const vsMed = compile(
-    `precision mediump float; uniform mat4 viewMatrix;
-     void main(){ gl_Position = viewMatrix * vec4(0.0, 0.0, 0.0, 1.0); }`,
-    'VERTEX', 100,
-  );
-  const fsHigh = compile(
-    `precision highp float; uniform mat4 viewMatrix;
-     void main(){ gl_FragColor = vec4(1.0); }`,
-    'FRAGMENT', 100,
-  );
-  const l2 = linkProgram(vsMed, fsHigh);
-  check(l2.ok, `(b) mediump-VS x highp-FS mat4 uniform links (${l2.ok ? '' : l2.log})`);
+  // Same v300 tolerance for the CTS shapes (vec4 / int / struct member).
+  const v300MismatchLinks = (name: string, vsSrc: string, fsSrc: string): void => {
+    const vs = compile(vsSrc, 'VERTEX', 300);
+    const fs = compile(fsSrc, 'FRAGMENT', 300);
+    const l = linkProgram(vs, fs);
+    check(l.ok, `${name} (${l.ok ? '' : l.log})`);
+  };
+  v300MismatchLinks('(e) v300 vec4: highp-VS x mediump-FS uniform links',
+    `#version 300 es
+     precision highp float;
+     uniform vec4 foo;
+     out vec4 v;
+     void main(){ v = foo; gl_Position = foo; }`,
+    `#version 300 es
+     precision mediump float;
+     uniform vec4 foo;
+     in vec4 v;
+     out vec4 fragColor;
+     void main(){ fragColor = foo + v; }`);
+  v300MismatchLinks('(f) v300 int: highp-VS x mediump-FS uniform links',
+    `#version 300 es
+     precision highp float;
+     precision highp int;
+     uniform int foo;
+     out vec4 v;
+     void main(){ v = vec4(1.0); gl_Position = vec4(foo, 0, 0, 1); }`,
+    `#version 300 es
+     precision mediump float;
+     precision mediump int;
+     uniform int foo;
+     in vec4 v;
+     out vec4 fragColor;
+     void main(){ fragColor = v + vec4(foo, 0, 0, 1); }`);
+  v300MismatchLinks('(g) v300 struct foo{vec4 bar;}: highp-VS x mediump-FS uniform links',
+    `#version 300 es
+     precision highp float;
+     struct foo { vec4 bar; };
+     uniform foo baz;
+     out vec4 v;
+     void main(){ v = baz.bar; gl_Position = baz.bar; }`,
+    `#version 300 es
+     precision mediump float;
+     struct foo { vec4 bar; };
+     uniform foo baz;
+     in vec4 v;
+     out vec4 fragColor;
+     void main(){ fragColor = v + baz.bar; }`);
 
-  // Genuine TYPE conflict at the same name stays a link error.
+  // Genuine TYPE conflict at the same name stays a link error at BOTH
+  // versions.
   const vs3 = compile(
     `precision highp float; uniform vec3 x;
      void main(){ gl_Position = vec4(x, 1.0); }`,
@@ -2657,36 +2739,65 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
   );
   const l3 = linkProgram(vs3, fs3);
   check(!l3.ok && l3.log.includes('type conflict'),
-    `(c) vec3 vs vec4 uniform type conflict still fails (${l3.ok ? 'LINKED' : l3.log})`);
+    `(h) v100 vec3 vs vec4 uniform type conflict still fails (${l3.ok ? 'LINKED' : l3.log})`);
 
-  // Same-name struct uniforms with mismatched member PRECISION link; member
-  // name/type mismatches still fail.
+  const vs3b = compile(
+    `#version 300 es
+     precision highp float;
+     uniform vec3 x;
+     out vec4 v;
+     void main(){ v = vec4(x, 1.0); gl_Position = vec4(x, 1.0); }`,
+    'VERTEX', 300,
+  );
+  const fs3b = compile(
+    `#version 300 es
+     precision mediump float;
+     uniform vec4 x;
+     in vec4 v;
+     out vec4 fragColor;
+     void main(){ fragColor = x + v; }`,
+    'FRAGMENT', 300,
+  );
+  const l3b = linkProgram(vs3b, fs3b);
+  check(!l3b.ok && l3b.log.includes('type conflict'),
+    `(i) v300 vec3 vs vec4 uniform type conflict still fails (${l3b.ok ? 'LINKED' : l3b.log})`);
+
+  // Struct uniform member TYPE mismatch still fails at BOTH versions
+  // (member name/count/type identity is version-independent).
   const vs4 = compile(
     `precision highp float; struct S { vec4 v; }; uniform S u;
      void main(){ gl_Position = u.v; }`,
     'VERTEX', 100,
   );
   const fs4 = compile(
-    `precision mediump float; struct S { vec4 v; }; uniform S u;
-     void main(){ gl_FragColor = u.v; }`,
-    'FRAGMENT', 100,
-  );
-  const l4 = linkProgram(vs4, fs4);
-  check(l4.ok, `(d) struct uniform member precision mismatch links (${l4.ok ? '' : l4.log})`);
-
-  const vs5 = compile(
-    `precision highp float; struct S { vec4 v; }; uniform S u;
-     void main(){ gl_Position = u.v; }`,
-    'VERTEX', 100,
-  );
-  const fs5 = compile(
     `precision mediump float; struct S { vec3 v; }; uniform S u;
      void main(){ gl_FragColor = vec4(u.v, 1.0); }`,
     'FRAGMENT', 100,
   );
-  const l5 = linkProgram(vs5, fs5);
-  check(!l5.ok && l5.log.includes('member'),
-    `(e) struct uniform member TYPE mismatch still fails (${l5.ok ? 'LINKED' : l5.log})`);
+  const l4 = linkProgram(vs4, fs4);
+  check(!l4.ok && l4.log.includes('member'),
+    `(j) v100 struct uniform member TYPE mismatch still fails (${l4.ok ? 'LINKED' : l4.log})`);
+
+  const vs4b = compile(
+    `#version 300 es
+     precision highp float;
+     struct S { vec4 v; }; uniform S u;
+     out vec4 v;
+     void main(){ v = u.v; gl_Position = u.v; }`,
+    'VERTEX', 300,
+  );
+  const fs4b = compile(
+    `#version 300 es
+     precision mediump float;
+     struct S { vec3 v; }; uniform S u;
+     in vec4 v;
+     out vec4 fragColor;
+     void main(){ fragColor = vec4(u.v, 1.0) + v; }`,
+    'FRAGMENT', 300,
+  );
+  const l4b = linkProgram(vs4b, fs4b);
+  check(!l4b.ok && l4b.log.includes('member'),
+    `(k) v300 struct uniform member TYPE mismatch still fails (${l4b.ok ? 'LINKED' : l4b.log})`);
 }
 
 /* ------------------------------------------------------------------ */
