@@ -76,21 +76,35 @@ function isLost(ctx: WebGLRenderingContext): boolean {
   return ctx._isLost;
 }
 
-// clearBuffer* buffer enums missing from constants.ts (owned elsewhere) — local
-// GL values so validation is correct before the constant tables are fixed.
-const GL_COLOR_INT = 0x8b8f;
-const GL_COLOR_UINT = 0x8b90;
-
+// clearBuffer* buffer enums per WebGL2 §clearBuffer: COLOR/DEPTH/STENCIL/
+// DEPTH_STENCIL only (GL_COLOR_INT/GL_COLOR_UINT are GL 4.x enums, NOT WebGL
+// enums — they must produce INVALID_ENUM).
 const CLEAR_BUFFERS = new Set<number>([
-  C2.COLOR, GL_COLOR_INT, GL_COLOR_UINT, C2.DEPTH, C2.STENCIL, C2.DEPTH_STENCIL,
+  C2.COLOR, C2.DEPTH, C2.STENCIL, C2.DEPTH_STENCIL,
 ]);
 
 /** clearBufferfv-compatible buffers (float/fixed color, depth, stencil). */
 const CLEAR_FV = new Set<number>([C2.COLOR, C2.DEPTH, C2.STENCIL]);
 /** clearBufferiv-compatible buffers (signed-integer color, depth, stencil). */
-const CLEAR_IV = new Set<number>([GL_COLOR_INT, C2.DEPTH, C2.STENCIL]);
+const CLEAR_IV = new Set<number>([C2.COLOR, C2.DEPTH, C2.STENCIL]);
 /** clearBufferuiv-compatible buffers (unsigned-integer color). */
-const CLEAR_UIV = new Set<number>([GL_COLOR_UINT]);
+const CLEAR_UIV = new Set<number>([C2.COLOR]);
+
+/** Signed-integer color-renderable internal formats (clearBufferiv targets). */
+const SINT_COLOR_FORMATS = new Set<number>([
+  C2.R8I, C2.R16I, C2.R32I,
+  C2.RG8I, C2.RG16I, C2.RG32I,
+  C2.RGB8I, C2.RGB16I, C2.RGB32I,
+  C2.RGBA8I, C2.RGBA16I, C2.RGBA32I,
+]);
+/** Unsigned-integer color-renderable internal formats (clearBufferuiv targets). */
+const UINT_COLOR_FORMATS = new Set<number>([
+  C2.R8UI, C2.R16UI, C2.R32UI,
+  C2.RG8UI, C2.RG16UI, C2.RG32UI,
+  C2.RGB8UI, C2.RGB16UI, C2.RGB32UI,
+  C2.RGBA8UI, C2.RGBA16UI, C2.RGBA32UI,
+  C2.RGB10_A2UI,
+]);
 
 /** WebIDL Float32List/Int32List/Uint32List → typed array (TypeError on junk). */
 function toList<T extends Float32Array | Int32Array | Uint32Array>(
@@ -119,11 +133,36 @@ function validateClearBufferArgs(
     return false;
   }
   // ES3: DEPTH/STENCIL/DEPTH_STENCIL clears only target drawbuffer 0.
-  if (buffer !== C2.COLOR && buffer !== GL_COLOR_INT && buffer !== GL_COLOR_UINT && drawbuffer !== 0) {
+  if (buffer !== C2.COLOR && drawbuffer !== 0) {
     ctx._errors.push(C1.INVALID_OPERATION);
     return false;
   }
   return true;
+}
+
+/**
+ * Format class of the color attachment at `drawbuffer` of the DRAW framebuffer:
+ * 'sint' / 'uint' / 'float' (float/fixed) — or 'missing' when drawBuffers[i] is
+ * NONE or there is no attachment (spec: clearing a missing attachment of a
+ * complete framebuffer clears nothing and generates NO error). The default
+ * framebuffer is fixed-point RGBA8 → 'float'.
+ */
+function clearColorAttachmentClass(
+  ctx: WebGLRenderingContext, drawbuffer: GLint,
+): 'sint' | 'uint' | 'float' | 'missing' {
+  const s = ctx._state;
+  const fbo = s.drawFramebuffer;
+  if (fbo === null) return 'float';
+  const db = s.drawBuffers[drawbuffer] ?? C1.NONE;
+  if (db === C1.NONE) return 'missing';
+  const att = fbo._attachments.get(db);
+  if (!att) return 'missing';
+  const internalFormat = att.type === 'renderbuffer'
+    ? att.renderbuffer._internalformat
+    : (att.texture._image?.internalFormat ?? 0);
+  if (SINT_COLOR_FORMATS.has(internalFormat)) return 'sint';
+  if (UINT_COLOR_FORMATS.has(internalFormat)) return 'uint';
+  return 'float';
 }
 
 // ---------------------------------------------------------------------------
@@ -133,11 +172,6 @@ function validateClearBufferArgs(
 /** Formats accepted as readPixels `format` (WebGL1). */
 const RP_FORMATS_1 = new Set<number>([
   C1.RGBA, C1.RGB, C1.LUMINANCE, C1.LUMINANCE_ALPHA, C1.ALPHA,
-]);
-/** Formats accepted as readPixels `format` (WebGL2 additions). */
-const RP_FORMATS_2 = new Set<number>([
-  ...RP_FORMATS_1, C2.RED, C2.RG, C2.RED_INTEGER, C2.RG_INTEGER,
-  C2.RGB_INTEGER, C2.RGBA_INTEGER, C1.DEPTH_COMPONENT, C2.DEPTH_STENCIL,
 ]);
 
 /** Types accepted as readPixels `type` (WebGL1; incl. half-float enums). */
@@ -597,6 +631,12 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       if (!CLEAR_FV.has(buffer)) { ctx._errors.push(C1.INVALID_OPERATION); return; }
       const need = buffer === C2.COLOR ? 4 : 1;
       if (v.length < need) { ctx._errors.push(C1.INVALID_VALUE); return; }
+      if (buffer === C2.COLOR) {
+        // clearBufferfv clears float/fixed-point color attachments only.
+        const cls = clearColorAttachmentClass(ctx, drawbuffer);
+        if (cls === 'missing') return; // missing attachment → no-op NO_ERROR
+        if (cls !== 'float') { ctx._errors.push(C1.INVALID_OPERATION); return; }
+      }
       try { executeClearBuffer(ctx, buffer, drawbuffer, v); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
   }
@@ -608,8 +648,15 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       const v = toList(values, Int32Array, 'Int32List');
       if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
       if (!CLEAR_IV.has(buffer)) { ctx._errors.push(C1.INVALID_OPERATION); return; }
-      const need = buffer === GL_COLOR_INT ? 4 : 1;
+      const need = buffer === C2.COLOR ? 4 : 1;
       if (v.length < need) { ctx._errors.push(C1.INVALID_VALUE); return; }
+      if (buffer === C2.COLOR) {
+        // clearBufferiv clears signed-integer color attachments only.
+        const cls = clearColorAttachmentClass(ctx, drawbuffer);
+        if (cls === 'missing') return; // missing attachment → no-op NO_ERROR
+        if (cls !== 'sint') { ctx._errors.push(C1.INVALID_OPERATION); return; }
+      }
+      try { executeClearBuffer(ctx, buffer, drawbuffer, v); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
       try { executeClearBuffer(ctx, buffer, drawbuffer, v); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
   }
@@ -622,6 +669,12 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
       if (!CLEAR_UIV.has(buffer)) { ctx._errors.push(C1.INVALID_OPERATION); return; }
       if (v.length < 4) { ctx._errors.push(C1.INVALID_VALUE); return; }
+      if (buffer === C2.COLOR) {
+        // clearBufferuiv clears unsigned-integer color attachments only.
+        const cls = clearColorAttachmentClass(ctx, drawbuffer);
+        if (cls === 'missing') return; // missing attachment → no-op NO_ERROR
+        if (cls !== 'uint') { ctx._errors.push(C1.INVALID_OPERATION); return; }
+      }
       try { executeClearBuffer(ctx, buffer, drawbuffer, v); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
   }
