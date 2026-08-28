@@ -1138,6 +1138,18 @@
     });
   }
 
+  // src/raster/types.ts
+  var RECORD_OFFSET_X = 0;
+  var RECORD_OFFSET_Y = 1;
+  var RECORD_OFFSET_Z = 2;
+  var RECORD_OFFSET_W = 3;
+  var RECORD_OFFSET_POINT_SIZE = 4;
+  var RECORD_OFFSET_CLIP_DISTANCE = 5;
+  var RECORD_OFFSET_CULL_DISTANCE = 13;
+  var VARYINGS_OFFSET = 21;
+  var ALIASED_POINT_SIZE_RANGE = [1, 1024];
+  var ALIASED_LINE_WIDTH_RANGE = [1, 1];
+
   // src/raster/gl-enums.ts
   var POINTS = 0;
   var LINES = 1;
@@ -1323,6 +1335,14 @@
   function planeAt(plane, buf, idx) {
     return plane[0] * buf[idx + X] + plane[1] * buf[idx + Y] + plane[2] * buf[idx + Z] + plane[3] * buf[idx + W];
   }
+  var SET_BITS = new Int32Array(8);
+  function collectSetBits(mask) {
+    let n = 0;
+    for (let i = 0; i < 8; i++) {
+      if (mask & 1 << i) SET_BITS[n++] = i;
+    }
+    return n;
+  }
   function interpRecord(src, aIdx, bIdx, t, stride, dst, dstIdx) {
     for (let k = 0; k < stride; k++) {
       dst[dstIdx + k] = src[aIdx + k] + t * (src[bIdx + k] - src[aIdx + k]);
@@ -1331,13 +1351,13 @@
   function copyRecord(src, srcIdx, dst, dstIdx, stride) {
     for (let k = 0; k < stride; k++) dst[dstIdx + k] = src[srcIdx + k];
   }
-  function clipPlanePass(plane, src, srcBase, n, stride, dst, dstBase, maxRecords) {
+  function clipPlanePass(plane, slot, src, srcBase, n, stride, dst, dstBase, maxRecords) {
     let outCount = 0;
     let prevIdx = srcBase + (n - 1) * stride;
-    let prevF = planeAt(plane, src, prevIdx);
+    let prevF = plane === null ? src[prevIdx + slot] : planeAt(plane, src, prevIdx);
     for (let i = 0; i < n; i++) {
       const currIdx = srcBase + i * stride;
-      const currF = planeAt(plane, src, currIdx);
+      const currF = plane === null ? src[currIdx + slot] : planeAt(plane, src, currIdx);
       if (currF >= 0) {
         if (prevF < 0) {
           const t = prevF / (prevF - currF);
@@ -1363,8 +1383,10 @@
     }
     return outCount;
   }
-  function clipPrimitive(buf, base, stride, count, scratch2, out, outBase, depthMode) {
+  function clipPrimitive(buf, base, stride, count, scratch2, out, outBase, depthMode, clipDistPlanes) {
     const planes = clipPlanesFor(depthMode);
+    const nUser = clipDistPlanes ? collectSetBits(clipDistPlanes) : 0;
+    const totalPasses = planes.length + nUser;
     if (count === 2) {
       const outCap2 = (out.length - outBase) / stride;
       if (outCap2 < 2) return 0;
@@ -1387,25 +1409,40 @@
         }
         if (t0 >= t1) return 0;
       }
+      for (let b = 0; b < nUser; b++) {
+        const slot = RECORD_OFFSET_CLIP_DISTANCE + SET_BITS[b];
+        const fa = buf[aIdx + slot];
+        const fb = buf[bIdx + slot];
+        if (fa < 0 && fb < 0) return 0;
+        if (fa < 0) {
+          const t = fa / (fa - fb);
+          if (t > t0) t0 = t;
+        } else if (fb < 0) {
+          const t = fa / (fa - fb);
+          if (t < t1) t1 = t;
+        }
+        if (t0 >= t1) return 0;
+      }
       interpRecord(buf, aIdx, bIdx, t0, stride, out, outBase);
       interpRecord(buf, aIdx, bIdx, t1, stride, out, outBase + stride);
       return 2;
     }
+    const swap = totalPasses % 2 === 1;
     const scratchCap = Math.floor(scratch2.length / stride);
     const outCap = Math.floor(out.length / stride);
     const outBaseCap = Math.floor((out.length - outBase) / stride);
     let src = buf;
     let srcBase = base;
     let n = count;
-    for (let p = 0; p < planes.length; p++) {
+    for (let p = 0; p < totalPasses; p++) {
       let dst;
       let dstBase;
       let cap;
-      if (p === planes.length - 1) {
+      if (p === totalPasses - 1) {
         dst = out;
         dstBase = outBase;
         cap = outBaseCap;
-      } else if (p % 2 === 0) {
+      } else if (p % 2 === 0 !== swap) {
         dst = scratch2;
         dstBase = 0;
         cap = scratchCap;
@@ -1414,7 +1451,15 @@
         dstBase = 0;
         cap = outCap;
       }
-      n = clipPlanePass(planes[p], src, srcBase, n, stride, dst, dstBase, cap);
+      let plane;
+      let slot = 0;
+      if (p < planes.length) {
+        plane = planes[p];
+      } else {
+        plane = null;
+        slot = RECORD_OFFSET_CLIP_DISTANCE + SET_BITS[p - planes.length];
+      }
+      n = clipPlanePass(plane, slot, src, srcBase, n, stride, dst, dstBase, cap);
       if (n === 0) return 0;
       src = dst;
       srcBase = dstBase;
@@ -1466,22 +1511,6 @@
   }
   var MAX_CLIPPED_VERTICES = 7;
 
-  // src/raster/types.ts
-  var RECORD_OFFSET_X = 0;
-  var RECORD_OFFSET_Y = 1;
-  var RECORD_OFFSET_Z = 2;
-  var RECORD_OFFSET_W = 3;
-  var RECORD_OFFSET_POINT_SIZE = 4;
-  var VARYINGS_OFFSET = 5;
-  var RECORD_HEADER_FLOATS = 5;
-  function computeVertexStride(varyings) {
-    let n = RECORD_HEADER_FLOATS;
-    for (let i = 0; i < varyings.length; i++) n += varyings[i].components;
-    return n;
-  }
-  var ALIASED_POINT_SIZE_RANGE = [1, 1024];
-  var ALIASED_LINE_WIDTH_RANGE = [1, 1];
-
   // src/raster/formats-convert.ts
   var _r4 = new Float32Array(4);
   var _scratchBuf = new ArrayBuffer(8);
@@ -1524,40 +1553,42 @@
       const v2 = readU32At(src, off);
       return k === 3 ? v2 & 3 : v2 >>> 22 - k * 10 & 1023;
     } : (src, off, k) => readCompAt(src, off + k * p.bpe, p);
+    const comps = info.components;
+    const valueAt = (src, so, k) => k < comps ? readK(src, so, k) : k === 3 ? 1 : 0;
     switch (packType) {
       case BYTE:
         return (src, so, dst, do_) => {
           const d = dst;
-          for (let k = 0; k < n; k++) d[do_ + k] = readK(src, so, k);
+          for (let k = 0; k < n; k++) d[do_ + k] = valueAt(src, so, k);
         };
       case UNSIGNED_BYTE:
         return (src, so, dst, do_) => {
           const d = dst;
-          for (let k = 0; k < n; k++) d[do_ + k] = readK(src, so, k);
+          for (let k = 0; k < n; k++) d[do_ + k] = valueAt(src, so, k);
         };
       case SHORT:
         return (src, so, dst, do_) => {
           const d = dst;
           const i = do_ >> 1;
-          for (let k = 0; k < n; k++) d[i + k] = readK(src, so, k);
+          for (let k = 0; k < n; k++) d[i + k] = valueAt(src, so, k);
         };
       case UNSIGNED_SHORT:
         return (src, so, dst, do_) => {
           const d = dst;
           const i = do_ >> 1;
-          for (let k = 0; k < n; k++) d[i + k] = readK(src, so, k);
+          for (let k = 0; k < n; k++) d[i + k] = valueAt(src, so, k);
         };
       case INT:
         return (src, so, dst, do_) => {
           const d = dst;
           const i = do_ >> 2;
-          for (let k = 0; k < n; k++) d[i + k] = readK(src, so, k);
+          for (let k = 0; k < n; k++) d[i + k] = valueAt(src, so, k);
         };
       case UNSIGNED_INT:
         return (src, so, dst, do_) => {
           const d = dst;
           const i = do_ >> 2;
-          for (let k = 0; k < n; k++) d[i + k] = readK(src, so, k);
+          for (let k = 0; k < n; k++) d[i + k] = valueAt(src, so, k);
         };
       default:
         return null;
@@ -2824,7 +2855,7 @@
             s[3] = 1;
           }
         }
-        setupFragmentCtx(ctx, x, y, rs.quadDepth[p], rs.quadW[p], rs.quadV, rs.totalVaryComponents, p);
+        setupFragmentCtx(ctx, x, y, rs.quadDepth[p], rs.quadW[p], rs.quadV, rs.totalVaryComponents, p, rs.quadClipDist, rs.quadCullDist);
         ctx.pointCoord[0] = rs.quadPointCoord[2 * p];
         ctx.pointCoord[1] = rs.quadPointCoord[2 * p + 1];
         ctx.frontFacing = rs.frontFacing;
@@ -2867,7 +2898,7 @@
         s[3] = 1;
       }
     }
-    setupFragmentCtx(ctx, x, y, depth, w, rs.quadV, total, pixel);
+    setupFragmentCtx(ctx, x, y, depth, w, rs.quadV, total, pixel, rs.quadClipDist, rs.quadCullDist);
     ctx.pointCoord[0] = rs.quadPointCoord[2 * pixel];
     ctx.pointCoord[1] = rs.quadPointCoord[2 * pixel + 1];
     ctx.frontFacing = rs.frontFacing;
@@ -2883,7 +2914,7 @@
       );
     }
   }
-  function setupFragmentCtx(ctx, x, y, depth, w, quadV, quadStride, pixel) {
+  function setupFragmentCtx(ctx, x, y, depth, w, quadV, quadStride, pixel, quadClip, quadCull) {
     const fc = ctx.fragCoord;
     fc[0] = x + 0.5;
     fc[1] = y + 0.5;
@@ -2908,6 +2939,14 @@
         }
       }
       offset += n;
+    }
+    if (quadClip && ctx.clipDistance) {
+      const cb = pixel * 8;
+      for (let k = 0; k < 8; k++) ctx.clipDistance[k] = quadClip[cb + k];
+    }
+    if (quadCull && ctx.cullDistance) {
+      const cb = pixel * 8;
+      for (let k = 0; k < 8; k++) ctx.cullDistance[k] = quadCull[cb + k];
     }
   }
   function createFragmentOps(dc) {
@@ -3188,10 +3227,18 @@
     const quadDepth = rs.quadDepth;
     const quadW = rs.quadW;
     const quadPC = rs.quadPointCoord;
+    const quadClip = rs.quadClipDist;
+    const quadCull = rs.quadCullDist;
     const usesDeriv = rs.dc.program.fragment.usesDerivatives;
     const vary0 = i0 + VARYINGS_OFFSET;
     const vary1 = i1 + VARYINGS_OFFSET;
     const vary2 = i2 + VARYINGS_OFFSET;
+    const cd0 = i0 + RECORD_OFFSET_CLIP_DISTANCE;
+    const cd1 = i1 + RECORD_OFFSET_CLIP_DISTANCE;
+    const cd2 = i2 + RECORD_OFFSET_CLIP_DISTANCE;
+    const cu0 = i0 + RECORD_OFFSET_CULL_DISTANCE;
+    const cu1 = i1 + RECORD_OFFSET_CULL_DISTANCE;
+    const cu2 = i2 + RECORD_OFFSET_CULL_DISTANCE;
     const computePixel = (px, py, slot, fill) => {
       const cx = px + 0.5, cy = py + 0.5;
       const e0 = dx01 * (cy - y0) - dy01 * (cx - x0);
@@ -3202,15 +3249,24 @@
       const l0 = e0 * invArea, l1 = e1 * invArea, l2 = e2 * invArea;
       const wDenom = l1 * invW0 + l2 * invW1 + l0 * invW2;
       const base = slot * n;
+      const cq = slot * 8;
       if (isFinite(wDenom) && Math.abs(wDenom) >= 1e-15) {
         const w = 1 / wDenom;
         for (let c = 0; c < n; c++) {
           quadV[base + c] = (l1 * buf[vary0 + c] * invW0 + l2 * buf[vary1 + c] * invW1 + l0 * buf[vary2 + c] * invW2) * w;
         }
+        for (let k = 0; k < 8; k++) {
+          quadClip[cq + k] = (l1 * buf[cd0 + k] * invW0 + l2 * buf[cd1 + k] * invW1 + l0 * buf[cd2 + k] * invW2) * w;
+          quadCull[cq + k] = (l1 * buf[cu0 + k] * invW0 + l2 * buf[cu1 + k] * invW1 + l0 * buf[cu2 + k] * invW2) * w;
+        }
         quadW[slot] = wDenom;
       } else {
         for (let c = 0; c < n; c++) {
           quadV[base + c] = l1 * buf[vary0 + c] + l2 * buf[vary1 + c] + l0 * buf[vary2 + c];
+        }
+        for (let k = 0; k < 8; k++) {
+          quadClip[cq + k] = l1 * buf[cd0 + k] + l2 * buf[cd1 + k] + l0 * buf[cd2 + k];
+          quadCull[cq + k] = l1 * buf[cu0 + k] + l2 * buf[cu1 + k] + l0 * buf[cu2 + k];
         }
         quadW[slot] = wDenom;
       }
@@ -3350,9 +3406,15 @@
     const quadDepth = rs.quadDepth;
     const quadW = rs.quadW;
     const quadPC = rs.quadPointCoord;
+    const quadClip = rs.quadClipDist;
+    const quadCull = rs.quadCullDist;
     const usesDeriv = rs.dc.program.fragment.usesDerivatives;
     const vary0 = i0 + VARYINGS_OFFSET;
     const vary1 = i1 + VARYINGS_OFFSET;
+    const cd0 = i0 + RECORD_OFFSET_CLIP_DISTANCE;
+    const cd1 = i1 + RECORD_OFFSET_CLIP_DISTANCE;
+    const cu0 = i0 + RECORD_OFFSET_CULL_DISTANCE;
+    const cu1 = i1 + RECORD_OFFSET_CULL_DISTANCE;
     const computePixel = (px, py, slot, fill) => {
       const cx = px + 0.5, cy = py + 0.5;
       const covered = px <= maxX && py <= maxY && diamondExit(x0 - cx, y0 - cy, x1 - cx, y1 - cy);
@@ -3362,15 +3424,24 @@
       else if (t > 1) t = 1;
       const wDenom = (1 - t) * invW0 + t * invW1;
       const base = slot * n;
+      const cq = slot * 8;
       if (isFinite(wDenom) && Math.abs(wDenom) >= 1e-15) {
         const w = 1 / wDenom;
         for (let c = 0; c < n; c++) {
           quadV[base + c] = ((1 - t) * buf[vary0 + c] * invW0 + t * buf[vary1 + c] * invW1) * w;
         }
+        for (let k = 0; k < 8; k++) {
+          quadClip[cq + k] = ((1 - t) * buf[cd0 + k] * invW0 + t * buf[cd1 + k] * invW1) * w;
+          quadCull[cq + k] = ((1 - t) * buf[cu0 + k] * invW0 + t * buf[cu1 + k] * invW1) * w;
+        }
         quadW[slot] = wDenom;
       } else {
         for (let c = 0; c < n; c++) {
           quadV[base + c] = (1 - t) * buf[vary0 + c] + t * buf[vary1 + c];
+        }
+        for (let k = 0; k < 8; k++) {
+          quadClip[cq + k] = (1 - t) * buf[cd0 + k] + t * buf[cd1 + k];
+          quadCull[cq + k] = (1 - t) * buf[cu0 + k] + t * buf[cu1 + k];
         }
         quadW[slot] = wDenom;
       }
@@ -3439,14 +3510,23 @@
     const quadDepth = rs.quadDepth;
     const quadW = rs.quadW;
     const quadPC = rs.quadPointCoord;
+    const quadClip = rs.quadClipDist;
+    const quadCull = rs.quadCullDist;
     const usesDeriv = rs.dc.program.fragment.usesDerivatives;
     const vary = i + VARYINGS_OFFSET;
+    const cd = i + RECORD_OFFSET_CLIP_DISTANCE;
+    const cu = i + RECORD_OFFSET_CULL_DISTANCE;
     const computePixel = (px, py, slot, fill) => {
       const cx = px + 0.5, cy = py + 0.5;
       const inside = px <= maxX && py <= maxY && cx >= left && cx < right && cy >= bottom && cy < top;
       if (!fill) return inside;
       const base = slot * n;
       for (let c = 0; c < n; c++) quadV[base + c] = buf[vary + c];
+      const cq = slot * 8;
+      for (let k = 0; k < 8; k++) {
+        quadClip[cq + k] = buf[cd + k];
+        quadCull[cq + k] = buf[cu + k];
+      }
       quadDepth[slot] = z;
       quadW[slot] = w;
       quadPC[slot * 2] = (cx - left) * invSize;
@@ -4768,13 +4848,17 @@
     return zeroIntStore;
   }
   function draw(dc) {
+    var _a;
     if (dc.rasterizerDiscard) return;
     const rs = createRasterState(dc);
     const stride = dc.vertexStride;
     const { first, count, instanceCount, mode } = dc;
+    const clipPlanes = (_a = dc.clipDistPlanes) != null ? _a : 0;
+    const pop = popcount(clipPlanes);
     const primBuf = new Float32Array(3 * stride);
-    const clipA = new Float32Array(MAX_CLIPPED_VERTICES * stride);
-    const clipB = new Float32Array(MAX_CLIPPED_VERTICES * stride);
+    const clipRecs = clipPlanes === 0 ? MAX_CLIPPED_VERTICES : 9 + pop;
+    const clipA = new Float32Array(clipRecs * stride);
+    const clipB = new Float32Array(clipRecs * stride);
     const flatRanges = [];
     {
       let off = dc.varyingsOffset;
@@ -4937,7 +5021,13 @@
       intScratch,
       tex: createTextureEnv(dc.textures),
       out: { color: colorOuts, secondary: secondaryOuts, fragDepth: 0 },
-      discarded: false
+      discarded: false,
+      // Interpolated gl_ClipDistance/gl_CullDistance (8 values each) — ALWAYS
+      // allocated and filled per fragment by setupFragmentCtx, even when the
+      // program does not use them (codegen reads them only for shaders that
+      // declare the builtins; additive-optional for hand-built test ctxs).
+      clipDistance: new Float32Array(8),
+      cullDistance: new Float32Array(8)
     };
     return {
       dc,
@@ -4949,7 +5039,11 @@
       quadV: new Float32Array(4 * totalVaryComponents),
       quadDepth: new Float32Array(4),
       quadW: new Float32Array(4),
-      quadPointCoord: new Float32Array(8)
+      quadPointCoord: new Float32Array(8),
+      // Per-pixel interpolated clip/cull distances (4 pixels × 8 slots,
+      // [pixel][i] — same layout convention as quadV).
+      quadClipDist: new Float32Array(32),
+      quadCullDist: new Float32Array(32)
     };
   }
   function applyFlatFixup(buf, base, count, stride, varyingsOffset, flatRanges) {
@@ -4968,13 +5062,36 @@
   function copyRecord2(src, srcBase, dst, dstBase, stride) {
     for (let i = 0; i < stride; i++) dst[dstBase + i] = src[srcBase + i];
   }
+  function popcount(x) {
+    let n = 0;
+    while (x !== 0) {
+      x &= x - 1;
+      n++;
+    }
+    return n;
+  }
+  function cullDistanceDiscards(buf, base, count, stride) {
+    for (let i = 0; i < 8; i++) {
+      const off = RECORD_OFFSET_CULL_DISTANCE + i;
+      let allNeg = true;
+      for (let v2 = 0; v2 < count; v2++) {
+        if (buf[base + v2 * stride + off] >= 0) {
+          allNeg = false;
+          break;
+        }
+      }
+      if (allNeg) return true;
+    }
+    return false;
+  }
   function emitTriangle(dc, rs, primBuf, clipA, clipB, stride, flatRanges, ia, ib, ic) {
     const src = dc.vertices;
     copyRecord2(src, ia * stride, primBuf, 0, stride);
     copyRecord2(src, ib * stride, primBuf, stride, stride);
     copyRecord2(src, ic * stride, primBuf, 2 * stride, stride);
     applyFlatFixup(primBuf, 0, 3, stride, dc.varyingsOffset, flatRanges);
-    const nv = clipPrimitive(primBuf, 0, stride, 3, clipA, clipB, 0, dc.clipDepthMode);
+    if (cullDistanceDiscards(primBuf, 0, 3, stride)) return;
+    const nv = clipPrimitive(primBuf, 0, stride, 3, clipA, clipB, 0, dc.clipDepthMode, dc.clipDistPlanes);
     if (nv === 0) return;
     applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange, dc.clipOrigin, dc.clipDepthMode);
     let area = signedArea2(clipB, 0, stride, 2 * stride, stride);
@@ -4996,15 +5113,26 @@
     copyRecord2(src, ia * stride, primBuf, 0, stride);
     copyRecord2(src, ib * stride, primBuf, stride, stride);
     applyFlatFixup(primBuf, 0, 2, stride, dc.varyingsOffset, flatRanges);
-    const nv = clipPrimitive(primBuf, 0, stride, 2, clipA, clipB, 0, dc.clipDepthMode);
+    if (cullDistanceDiscards(primBuf, 0, 2, stride)) return;
+    const nv = clipPrimitive(primBuf, 0, stride, 2, clipA, clipB, 0, dc.clipDepthMode, dc.clipDistPlanes);
     if (nv === 0) return;
     applyViewportTransform(clipB, 0, stride, nv, dc.viewport, dc.depthRange, dc.clipOrigin, dc.clipDepthMode);
     rs.frontFacing = false;
     rasterizeLine(clipB, 0, stride, stride, rs);
   }
   function emitPoint(dc, rs, primBuf, stride, ia) {
+    var _a;
     copyRecord2(dc.vertices, ia * stride, primBuf, 0, stride);
+    if (cullDistanceDiscards(primBuf, 0, 1, stride)) return;
     if (!pointIsVisible(primBuf, 0, stride, dc.clipDepthMode)) return;
+    const clipPlanes = (_a = dc.clipDistPlanes) != null ? _a : 0;
+    if (clipPlanes !== 0) {
+      for (let i = 0; i < 8; i++) {
+        if ((clipPlanes & 1 << i) !== 0 && primBuf[RECORD_OFFSET_CLIP_DISTANCE + i] < 0) {
+          return;
+        }
+      }
+    }
     applyViewportTransform(primBuf, 0, stride, 1, dc.viewport, dc.depthRange, dc.clipOrigin, dc.clipDepthMode);
     rs.frontFacing = false;
     rasterizePoint(primBuf, 0, stride, rs);
@@ -5414,7 +5542,12 @@
       if (!tex2._immutable) {
         const baseLevel = (_a = tex2._params[33084]) != null ? _a : 0;
         const maxLevel = (_b = tex2._params[33085]) != null ? _b : 1e3;
-        const maxSize = Math.max(image.width, image.height, image.target === C2.TEXTURE_3D ? image.depth : 1);
+        const baseLvl0 = image.levels[baseLevel];
+        const maxSize = Math.max(
+          baseLvl0 ? baseLvl0.width : image.width,
+          baseLvl0 ? baseLvl0.height : image.height,
+          image.target === C2.TEXTURE_3D ? baseLvl0 ? baseLvl0.depth : image.depth : 1
+        );
         const q = Math.min(Math.floor(Math.log2(maxSize)) + baseLevel, maxLevel);
         if (entry.level < baseLevel || entry.level > q) {
           return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
@@ -6819,6 +6952,11 @@
       case C.UNSIGNED_SHORT_5_5_5_1:
         return 2;
       // packed types: 2 bytes/texel TOTAL regardless of component count
+      case C.UNSIGNED_INT:
+      case C.INT:
+      case C.FLOAT:
+        return comps * 4;
+      // 32-bit per component (RGBA32F → 16, etc.)
       default:
         return 4;
     }
@@ -6895,9 +7033,9 @@
       }
       case C.UNSIGNED_INT_10F_11F_11F_REV: {
         const v2 = dv.getUint32(byteOff, true);
-        out[0] = float10ToFloat(v2 >>> 22);
+        out[0] = float11ToFloat(v2 & 2047);
         out[1] = float11ToFloat(v2 >>> 11 & 2047);
-        out[2] = float11ToFloat(v2 & 2047);
+        out[2] = float10ToFloat(v2 >>> 22);
         out[3] = 1;
         break;
       }
@@ -7038,6 +7176,14 @@
     }
     return texture._image;
   }
+  function inferVirtualSize(img, level, width, height, depth) {
+    if (level > 0 && img.width === 0 && img.height === 0) {
+      const scale = 2 ** level;
+      img.width = width * scale;
+      img.height = height * scale;
+      if (img.target === C.TEXTURE_3D) img.depth = depth * scale;
+    }
+  }
   var isPow2 = (v2) => v2 > 0 && (v2 & v2 - 1) === 0;
   var samplerForTexture = /* @__PURE__ */ new WeakMap();
   function refreshTextureSamplerBinding(state, texture) {
@@ -7081,6 +7227,11 @@
       img.complete = false;
       return;
     }
+    img.width = baseLevel.width * 2 ** base;
+    img.height = baseLevel.height * 2 ** base;
+    if (img.target === C.TEXTURE_CUBE_MAP) img.depth = 6;
+    else if (img.target === C.TEXTURE_3D) img.depth = baseLevel.depth * 2 ** base;
+    else if (img.target === C.TEXTURE_2D_ARRAY) img.depth = baseLevel.depth;
     const isCube = img.target === C.TEXTURE_CUBE_MAP;
     const isArray = img.target === C.TEXTURE_2D_ARRAY;
     const is3D = img.target === C.TEXTURE_3D;
@@ -7384,6 +7535,8 @@
       img.width = width;
       img.height = height;
       img.depth = isCube ? 6 : depth;
+    } else {
+      inferVirtualSize(img, level, width, height, depth);
     }
     recordLevelOrigin(texture, level, format, type);
     copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, 0, 0, 0, explicitDims);
@@ -7399,11 +7552,20 @@
     copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset, explicitDims);
     updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
   }
+  function allocCompressedLevel(w, h, d, isCube, bpb) {
+    const bytes = Math.ceil(w / 4) * Math.ceil(h / 4) * bpb;
+    const views = [];
+    const n = isCube ? 6 : d;
+    for (let i = 0; i < n; i++) views.push(new Uint8Array(bytes));
+    return { width: w, height: h, depth: isCube ? 6 : d, data: views };
+  }
   function allocateImmutableStorage(ctx, texture, target, levels, internalformat, width, height, depth) {
     void ctx;
     if (texture._immutable) return;
-    const spec = resolveStorageSpec(internalformat);
-    if (!spec) return;
+    const bpb = ETC2_BYTES_PER_BLOCK[internalformat];
+    const isCompressed = bpb !== void 0;
+    const spec = isCompressed ? null : resolveStorageSpec(internalformat);
+    if (!isCompressed && !spec) return;
     const img = ensureImage(texture, target);
     const isCube = img.target === C.TEXTURE_CUBE_MAP;
     img.levels = [];
@@ -7411,17 +7573,17 @@
     let h = height;
     let d = depth;
     for (let l = 0; l < levels; l++) {
-      img.levels[l] = allocLevel(spec, w, h, d, isCube);
+      img.levels[l] = isCompressed ? allocCompressedLevel(w, h, d, isCube, bpb) : allocLevel(spec, w, h, d, isCube);
       w = Math.max(1, w >> 1);
       h = Math.max(1, h >> 1);
-      if (!isCube) d = Math.max(1, d >> 1);
+      if (target === C.TEXTURE_3D) d = Math.max(1, d >> 1);
     }
     texture._immutable = true;
     texture._internalFormat = internalformat;
-    texture._compressed = false;
+    texture._compressed = isCompressed;
     img.immutable = true;
     img.internalFormat = internalformat;
-    img.info = toPixelFormatInfo(spec);
+    img.info = isCompressed ? PLACEHOLDER_INFO : toPixelFormatInfo(spec);
     img.target = canonTarget(target);
     img.width = width;
     img.height = height;
@@ -7513,6 +7675,8 @@
       img.width = width;
       img.height = height;
       img.depth = isCube ? 6 : 1;
+    } else {
+      inferVirtualSize(img, level, width, height, 1);
     }
     copyFromReadSurface(ctx, img.levels[level], cubeFaceIndex2(target), spec, x, y, width, height);
     updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
@@ -7531,6 +7695,7 @@
     updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
   }
   var ETC2_BYTES_PER_BLOCK = {
+    [CExt.COMPRESSED_RGB_ETC1_WEBGL]: 8,
     [CExt.COMPRESSED_R11_EAC]: 8,
     [CExt.COMPRESSED_SIGNED_R11_EAC]: 8,
     [CExt.COMPRESSED_RG11_EAC]: 16,
@@ -7596,6 +7761,8 @@
         img.width = width;
         img.height = height;
         img.depth = isCube ? 6 : depth;
+      } else {
+        inferVirtualSize(img, level, width, height, depth);
       }
     } else {
       const levelData = img.levels[level];
@@ -7618,22 +7785,27 @@
     updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
   }
   function generateMipmap(ctx, texture, target) {
+    var _a, _b;
     const img = texture._image;
     if (!img) return;
-    const base = img.levels[0];
-    if (!base) return;
+    const baseRaw = Math.max(0, ((_a = texture._params[C.TEXTURE_BASE_LEVEL]) != null ? _a : 0) | 0);
+    const maxRaw = Math.max(0, ((_b = texture._params[C.TEXTURE_MAX_LEVEL]) != null ? _b : 1e3) | 0);
+    const baseIdx = Math.min(baseRaw, Math.min(maxRaw, img.levels.length - 1));
+    const base = img.levels[baseIdx];
+    if (!base || base.width < 1 || base.height < 1) return;
     const spec = specForImage(img);
     if (!spec) return;
     const isCube = img.target === C.TEXTURE_CUBE_MAP;
     const isArray = img.target === C.TEXTURE_2D_ARRAY;
     const useSRGB = spec.isSRGB;
-    const maxDim = Math.max(img.width, img.height, !isCube && !isArray ? img.depth : 1);
-    const levels = Math.floor(Math.log2(maxDim)) + 1;
+    const maxDim = Math.max(base.width, base.height, !isCube && !isArray ? base.depth : 1);
+    let q = Math.min(maxRaw, Math.floor(Math.log2(maxDim)) + baseIdx);
+    if (img.immutable) q = Math.min(q, img.levels.length - 1);
     const out = new Float32Array(4);
-    let w = img.width;
-    let h = img.height;
-    let d = isCube ? 6 : img.depth;
-    for (let l = 1; l < levels; l++) {
+    let w = base.width;
+    let h = base.height;
+    let d = isCube ? 6 : base.depth;
+    for (let l = baseIdx + 1; l <= q; l++) {
       const nw = Math.max(1, w >> 1);
       const nh = Math.max(1, h >> 1);
       const nd = isArray ? d : Math.max(1, d >> 1);
@@ -11396,6 +11568,20 @@
       writable: false,
       extension: "GL_ANGLE_multi_draw"
     },
+    {
+      name: "gl_ClipDistance",
+      type: arr(F, 8),
+      stage: "BOTH",
+      writable: true,
+      extension: "GL_ANGLE_clip_cull_distance"
+    },
+    {
+      name: "gl_CullDistance",
+      type: arr(F, 8),
+      stage: "BOTH",
+      writable: true,
+      extension: "GL_ANGLE_clip_cull_distance"
+    },
     { name: "gl_FragDepth", type: F, stage: "FRAGMENT", writable: true },
     // GLSL ES 3.00 §7.7 built-in uniform state (usable in BOTH stages):
     // `uniform gl_DepthRangeParameters { float near; float far; float diff; }
@@ -11416,6 +11602,8 @@
     { name: "gl_MaxCombinedTextureImageUnits", value: 32 },
     { name: "gl_MaxDrawBuffers", value: 8 },
     { name: "gl_MaxClipDistances", value: 8 },
+    { name: "gl_MaxCullDistances", value: 8, extension: "GL_ANGLE_clip_cull_distance" },
+    { name: "gl_MaxCombinedClipAndCullDistances", value: 16, extension: "GL_ANGLE_clip_cull_distance" },
     { name: "gl_MaxTransformFeedbackSeparateAttribs", value: 4 },
     { name: "gl_MaxTransformFeedbackInterleavedComponents", value: 64 },
     { name: "gl_MaxTransformFeedbackSeparateComponents", value: 4 },
@@ -13956,7 +14144,10 @@
     for (const v2 of extensionVariables) {
       if (v2.extension === void 0 || ctx.enabledExtensions.has(v2.extension)) names.add(v2.name);
     }
-    for (const c of builtinConstants(ctx.version)) names.add(c.name);
+    for (const c of builtinConstants(ctx.version)) {
+      if (c.extension !== void 0 && !ctx.enabledExtensions.has(c.extension)) continue;
+      names.add(c.name);
+    }
     for (const c of extensionConstants) {
       if (c.extension === void 0 || ctx.enabledExtensions.has(c.extension)) names.add(c.name);
     }
@@ -15101,7 +15292,10 @@
       scope.forceDeclare({ kind: "builtin-var", name: v2.name, type: v2.type, writable: v2.writable, stage: v2.stage });
     }
     const consts = /* @__PURE__ */ new Map();
-    for (const c of builtinConstants(ctx.version)) consts.set(c.name, c.value);
+    for (const c of builtinConstants(ctx.version)) {
+      if (c.extension !== void 0 && !ctx.enabledExtensions.has(c.extension)) continue;
+      consts.set(c.name, c.value);
+    }
     for (const c of extensionConstants) {
       if (c.extension !== void 0 && ctx.enabledExtensions.has(c.extension)) consts.set(c.name, c.value);
     }
@@ -16392,6 +16586,24 @@
         }, () => {
           throw new Error("codegen: gl_FragData must be indexed");
         });
+      case "gl_ClipDistance":
+      case "gl_CullDistance":
+        return mkPath(
+          type,
+          true,
+          (c) => {
+            const arr2 = name === "gl_ClipDistance" ? "clipDistance" : "cullDistance";
+            if (env.stage === "FRAGMENT") return `ctx.${arr2}[${c}]`;
+            return `ctx.out.${arr2}[${c}]`;
+          },
+          (c) => {
+            if (env.stage !== "VERTEX") {
+              throw new Error(`codegen: '${name}' is read-only in fragment shaders`);
+            }
+            const arr2 = name === "gl_ClipDistance" ? "clipDistance" : "cullDistance";
+            return `ctx.out.${arr2}[${c}]`;
+          }
+        );
       default:
         throw new Error(`codegen: unsupported builtin '${name}'`);
     }
@@ -18245,6 +18457,15 @@
         }
         case "gl_DepthRange":
           return `ctx.depthRange[${i}]`;
+        case "gl_ClipDistance":
+        case "gl_CullDistance": {
+          const arr2 = p.builtin === "gl_ClipDistance" ? "clipDistance" : "cullDistance";
+          const dyn = p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.stride}` : "";
+          if (env.stage === "FRAGMENT") {
+            return `ctx.${arr2}[${i}${dyn}]`;
+          }
+          return `ctx.out.${arr2}[${i}${dyn}]`;
+        }
         default:
           throw new Error(`codegen: unsupported builtin '${p.builtin}'`);
       }
@@ -18301,6 +18522,9 @@
         case "gl_FragDepth":
         case "gl_FragDepthEXT":
           return ["0", "0"];
+        case "gl_ClipDistance":
+        case "gl_CullDistance":
+          return ["0", "0"];
         case "gl_DepthRange":
           return ["0", "0"];
         default:
@@ -18352,6 +18576,15 @@
         }
         case "gl_DepthRange":
           throw new Error("codegen: gl_DepthRange is read-only");
+        case "gl_ClipDistance":
+        case "gl_CullDistance": {
+          if (env.stage !== "VERTEX") {
+            throw new Error(`codegen: '${p.builtin}' is read-only in fragment shaders`);
+          }
+          const arr2 = p.builtin === "gl_ClipDistance" ? "clipDistance" : "cullDistance";
+          const dyn = p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.stride}` : "";
+          return `ctx.out.${arr2}[${i}${dyn}]`;
+        }
         default:
           throw new Error(`codegen: '${p.builtin}' is read-only`);
       }
@@ -18401,6 +18634,13 @@
         case "gl_FragColor":
           return null;
         // no dual planes
+        case "gl_ClipDistance":
+        case "gl_CullDistance":
+          if (env.stage !== "VERTEX") {
+            throw new Error(`codegen: '${p.builtin}' is read-only in fragment shaders`);
+          }
+          return null;
+        // vertex stage never runs dual mode
         default:
           throw new Error(`codegen: '${p.builtin}' is read-only`);
       }
@@ -18530,6 +18770,10 @@
           break;
       }
     } else if (q.builtin) {
+      if (q.builtin === "gl_ClipDistance" || q.builtin === "gl_CullDistance") {
+        q.flatOff += k;
+        return q;
+      }
       throw new Error(`codegen: cannot index builtin '${q.builtin}' as a whole-array value`);
     }
     return q;
@@ -18675,6 +18919,8 @@
                 p.dyn = { temp: t, stride: 1, elemSlots: 0 };
                 break;
             }
+          } else if (p.builtin === "gl_ClipDistance" || p.builtin === "gl_CullDistance") {
+            p.dyn = { temp: t, stride: 1, elemSlots: 0 };
           }
           return p;
         }
@@ -23466,7 +23712,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     blockReferenced.set(p, refs);
     const fmap = /* @__PURE__ */ new Map();
     for (const o of fsR.info.outputs) {
-      if (o.index !== null || o.name.startsWith("gl_Frag")) continue;
+      if (o.index === 1 || o.name.startsWith("gl_Frag")) continue;
       fmap.set(o.name, (_a = o.location) != null ? _a : 0);
     }
     fragDataMaps.set(p, fmap);
@@ -24930,6 +25176,9 @@ ${inner.map((l) => "  " + l).join("\n")}
   }
 
   // src/gl/draw.ts
+  var RECORD_OFFSET_CLIP_DISTANCE2 = 5;
+  var RECORD_OFFSET_CULL_DISTANCE2 = 13;
+  var RECORD_TOTAL_HEADER_FLOATS = 21;
   function toU64(v2) {
     const n = Number(v2);
     if (!Number.isFinite(n)) return 0;
@@ -24947,6 +25196,8 @@ ${inner.map((l) => "  " + l).join("\n")}
         attribIndices: new Int32Array(0),
         outPosition: new Float32Array(4),
         outVaryings: new Float32Array(0),
+        outClipDistance: new Float32Array(8),
+        outCullDistance: new Float32Array(8),
         scratch: new Float32Array(64),
         intScratch: new Int32Array(64),
         zeroStore: new Float32Array(16384),
@@ -25811,7 +26062,12 @@ ${inner.map((l) => "  " + l).join("\n")}
       levelMax = Math.min(Math.max(levelBase, rawMax), storedMax);
     }
     if (levelBase > levelMax) return false;
-    const maxSize = Math.max(img.width, img.height, img.target === C2.TEXTURE_3D ? img.depth : 1);
+    const baseLv = img.levels[levelBase];
+    const maxSize = Math.max(
+      baseLv ? baseLv.width : img.width,
+      baseLv ? baseLv.height : img.height,
+      img.target === C2.TEXTURE_3D ? baseLv ? baseLv.depth : img.depth : 1
+    );
     const q = Math.min(Math.floor(Math.log2(maxSize)) + levelBase, levelMax);
     const minFilter = st.minFilter;
     const useMips = minFilter !== C1.NEAREST && minFilter !== C1.LINEAR;
@@ -25901,6 +26157,11 @@ ${inner.map((l) => "  " + l).join("\n")}
     const s = ctx._state;
     const { colorMask, drawBuffers } = buildOutputMaps(ctx, pm);
     const clipControl = getClipControl(ctx);
+    const clipDistFlags = getClipDistances(ctx);
+    let clipDistPlanes = 0;
+    for (let i = 0; i < 8; i++) {
+      if (clipDistFlags[i]) clipDistPlanes |= 1 << i;
+    }
     const blend0 = s.blendPerDrawBuffer.get(0);
     const blend = {
       enabled: s.caps.BLEND,
@@ -25920,13 +26181,14 @@ ${inner.map((l) => "  " + l).join("\n")}
       instanceCount: req.instanceCount,
       vertices: records,
       vertexStride: stride,
-      varyingsOffset: RECORD_HEADER_FLOATS,
+      varyingsOffset: RECORD_TOTAL_HEADER_FLOATS,
       program: pm,
       fb,
       viewport: { x: s.viewport.x, y: s.viewport.y, w: s.viewport.w, h: s.viewport.h },
       depthRange: { near: s.depth.range[0], far: s.depth.range[1] },
       clipOrigin: clipControl.origin,
       clipDepthMode: clipControl.depth,
+      clipDistPlanes,
       scissor: {
         enabled: s.caps.SCISSOR_TEST,
         x: s.scissor.x,
@@ -26042,7 +26304,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       } else {
         const vi = findVarying(varyings, tv.name);
         if (vi >= 0) {
-          recOff = RECORD_HEADER_FLOATS;
+          recOff = RECORD_TOTAL_HEADER_FLOATS;
           for (let i = 0; i < vi; i++) recOff += varyings[i].components;
           comps = varyings[vi].components;
           integral = isIntegralVaryingType(varyings[vi].type);
@@ -26172,9 +26434,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       case 35669:
         return 1;
       case 5125:
-      case 35676:
-      case 35677:
-      case 35678:
+      case 36294:
+      case 36295:
+      case 36296:
         return 2;
       default:
         return 0;
@@ -26361,8 +26623,8 @@ ${inner.map((l) => "  " + l).join("\n")}
       sc.attribIndices = new Int32Array(maxAttribs);
     }
     const ai = sc.attribIndices;
-    const stride = computeVertexStride((_p = pm.varyings) != null ? _p : []);
-    const totalVary = stride - RECORD_HEADER_FLOATS;
+    const totalVary = ((_p = pm.varyings) != null ? _p : []).reduce((n, v2) => n + v2.components, 0);
+    const stride = RECORD_TOTAL_HEADER_FLOATS + totalVary;
     const totalVerts = req.count * req.instanceCount;
     const needRecords = totalVerts * stride;
     if (sc.records.length < needRecords) {
@@ -26371,6 +26633,8 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (sc.outVaryings.length !== totalVary) {
       sc.outVaryings = new Float32Array(totalVary);
     }
+    sc.outClipDistance.fill(0);
+    sc.outCullDistance.fill(0);
     if (tfActive) {
       sc.outVaryings.fill(0);
       sc.outPosition.fill(0);
@@ -26423,7 +26687,13 @@ ${inner.map((l) => "  " + l).join("\n")}
       // gl_DepthRange builtin uniform: [near, far, far - near] (state already
       // clamped to 0..1 by depthRange(); GLES2 §2.11.1).
       depthRange: new Float32Array([s.depth.range[0], s.depth.range[1], s.depth.range[1] - s.depth.range[0]]),
-      out: { position: sc.outPosition, pointSize: 0, varyings: sc.outVaryings }
+      out: {
+        position: sc.outPosition,
+        pointSize: 0,
+        varyings: sc.outVaryings,
+        clipDistance: sc.outClipDistance,
+        cullDistance: sc.outCullDistance
+      }
     };
     const vertexLocs = [];
     const instancedLocs = [];
@@ -26456,8 +26726,16 @@ ${inner.map((l) => "  " + l).join("\n")}
         records[base + 2] = pos[2];
         records[base + 3] = pos[3];
         records[base + 4] = vctx.out.pointSize;
+        const cd = vctx.out.clipDistance;
+        if (cd) {
+          for (let c = 0; c < 8; c++) records[base + RECORD_OFFSET_CLIP_DISTANCE2 + c] = cd[c];
+        }
+        const cd2 = vctx.out.cullDistance;
+        if (cd2) {
+          for (let c = 0; c < 8; c++) records[base + RECORD_OFFSET_CULL_DISTANCE2 + c] = cd2[c];
+        }
         if (totalVary > 0) {
-          const vb = base + RECORD_HEADER_FLOATS;
+          const vb = base + RECORD_TOTAL_HEADER_FLOATS;
           for (let v2 = 0; v2 < totalVary; v2++) records[vb + v2] = sc.outVaryings[v2];
         }
       }
@@ -26506,6 +26784,10 @@ ${inner.map((l) => "  " + l).join("\n")}
         const idx = db - C1.COLOR_ATTACHMENT0;
         const surf = fb.color[idx];
         if (!surf) continue;
+        if (surf.info.isInteger) {
+          pushError(ctx, C1.INVALID_OPERATION);
+          return;
+        }
         const cm = (_a = s.colorMaskPerDrawBuffer.get(d)) != null ? _a : s.colorMask;
         if (drawBufferAttachmentIs(ctx, idx, C2.RGB9_E5) && (cm[0] || cm[1] || cm[2] || cm[3]) && !(cm[0] && cm[1] && cm[2] && cm[3])) {
           pushError(ctx, C1.INVALID_OPERATION);
@@ -31379,7 +31661,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       return tex2._params[pname];
     };
     proto.generateMipmap = function(target) {
-      var _a;
+      var _a, _b;
       const ctx = this;
       if (isLost7(ctx)) return;
       if (!isValidTextureTarget(ctx, target)) {
@@ -31396,7 +31678,10 @@ ${inner.map((l) => "  " + l).join("\n")}
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
-      const base = (_a = tex2._params[C2.TEXTURE_BASE_LEVEL]) != null ? _a : 0;
+      const baseRaw = Math.max(0, ((_a = tex2._params[C2.TEXTURE_BASE_LEVEL]) != null ? _a : 0) | 0);
+      const maxRaw = Math.max(0, ((_b = tex2._params[C2.TEXTURE_MAX_LEVEL]) != null ? _b : 1e3) | 0);
+      const q = img.levels.length - 1;
+      const base = Math.min(baseRaw, Math.min(maxRaw, q));
       const lv = img.levels[base];
       if (!lv || lv.width < 1 || lv.height < 1) {
         ctx._errors.push(C1.INVALID_OPERATION);
@@ -31420,9 +31705,8 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
       if (img.info.isFloat) {
         if (ctx._version === 2) {
-          const is16F = img.internalFormat === 33325 || img.internalFormat === 33327 || img.internalFormat === 34842;
-          const floatExtOK = ctx._extensions.has("EXT_color_buffer_float") || is16F && ctx._extensions.has("EXT_color_buffer_half_float");
-          if (img.internalFormat === RGB9_E52 || !floatExtOK) {
+          const is32F = img.internalFormat === 33326 || img.internalFormat === 33328 || img.internalFormat === 34837 || img.internalFormat === 34836;
+          if (img.internalFormat === RGB9_E52 || is32F && !ctx._extensions.has("OES_texture_float_linear")) {
             ctx._errors.push(C1.INVALID_OPERATION);
             return;
           }
@@ -31442,6 +31726,13 @@ ${inner.map((l) => "  " + l).join("\n")}
   var SRGB_ALPHA_EXT = 35906;
   function isLost8(ctx) {
     return ctx._isLost;
+  }
+  function requireArgCount(method, n, args) {
+    if (args.length < n) {
+      throw new TypeError(
+        `Failed to execute '${method}': ${n} arguments required, but only ${args.length} present.`
+      );
+    }
   }
   var CUBE_FACES = [
     C1.TEXTURE_CUBE_MAP_POSITIVE_X,
@@ -31706,7 +31997,12 @@ ${inner.map((l) => "  " + l).join("\n")}
     [C1.RGBA]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_4_4_4_4, C1.UNSIGNED_SHORT_5_5_5_1] },
     [C1.RGB]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_6_5] },
     [C2.RG]: { format: C2.RG, types: [C1.UNSIGNED_BYTE] },
-    [C2.RED]: { format: C2.RED, types: [C1.UNSIGNED_BYTE] },
+    // NOTE: unsized RED is deliberately ABSENT — it is valid in GLES 3.0
+    // Table 3.2 but INVALID in WebGL 2.0 ("valid in GL but invalid in WebGL";
+    // CTS tex-input-validation.js expects an error for RED/RED/UNSIGNED_BYTE).
+    // The w2InternalformatValid rejection maps RED to INVALID_OPERATION (see
+    // w2ValidateFormatType) so tex-image-with-bad-args.html's RED/UNSIGNED_SHORT
+    // case (which accepts only INVALID_VALUE/INVALID_OPERATION) keeps passing.
     [C2.RGBA_INTEGER]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
     [C2.RGB_INTEGER]: { format: C2.RGB_INTEGER, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
     [C2.RG_INTEGER]: { format: C2.RG_INTEGER, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
@@ -31833,7 +32129,8 @@ ${inner.map((l) => "  " + l).join("\n")}
   }
   function w2ValidateFormatType(ctx, internalformat, format, type, pixels) {
     if (!w2InternalformatValid(ctx, internalformat)) {
-      ctx._errors.push(C1.INVALID_ENUM);
+      if (isNorm16Format(internalformat) || internalformat === C2.RED) ctx._errors.push(C1.INVALID_OPERATION);
+      else ctx._errors.push(C1.INVALID_ENUM);
       return false;
     }
     if (!W2_FORMATS.includes(format)) {
@@ -32084,10 +32381,23 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
     return { width: w, height: h };
   }
+  function videoVisibleDims(s) {
+    const VF = globalThis.VideoFrame;
+    if (typeof VF !== "function") return null;
+    try {
+      const vf = new VF(s);
+      const rect = vf.visibleRect;
+      if (rect && rect.width > 0 && rect.height > 0) return { width: rect.width, height: rect.height };
+    } catch {
+    }
+    return null;
+  }
   function sourceDims(source) {
     if (source === null || typeof source !== "object") return null;
     const s = source;
     if (typeof s.videoWidth === "number" && typeof s.readyState === "number") {
+      const vis = videoVisibleDims(s);
+      if (vis !== null) return vis;
       return typeof s.videoHeight === "number" ? { width: s.videoWidth, height: s.videoHeight } : null;
     }
     if (typeof s.naturalWidth === "number") {
@@ -32100,11 +32410,19 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (typeof s.width === "number" && typeof s.height === "number") return { width: s.width, height: s.height };
     return null;
   }
+  function domUploadPboGuard(ctx) {
+    if (ctx._state.pixelUnpackBuffer !== null) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    return true;
+  }
   function texImage2DDOM(ctx, target, level, internalformat, format, type, source) {
     if (source === null || source === void 0) {
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
+    if (!domUploadPboGuard(ctx)) return;
     const dims = sourceDims(source);
     if (dims === null) {
       ctx._errors.push(C1.INVALID_VALUE);
@@ -32152,6 +32470,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     return true;
   }
   function texImage2DDOMWithDims(ctx, target, level, internalformat, width, height, border, format, type, source) {
+    if (!domUploadPboGuard(ctx)) return;
     width = width | 0;
     height = height | 0;
     border = border | 0;
@@ -32229,6 +32548,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     uploadTexImage(ctx, tex2, target, level, internalformat, width, height, 1, border, format, type, pixels);
   }
   function texImage3DDOM(ctx, target, level, internalformat, format, type, source) {
+    if (!domUploadPboGuard(ctx)) return;
     void internalformat;
     void format;
     void type;
@@ -32265,6 +32585,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     uploadTexImage(ctx, tex2, target, level, internalformat, width, height, depth, border, format, type, pixels);
   }
   function texImage3DDOMWithDims(ctx, target, level, internalformat, width, height, depth, border, format, type, source) {
+    if (!domUploadPboGuard(ctx)) return;
     level = level | 0;
     width = width | 0;
     height = height | 0;
@@ -32342,6 +32663,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (source === null || source === void 0) {
       throw new TypeError(`Argument is not of type 'TexImageSource'`);
     }
+    if (!domUploadPboGuard(ctx)) return;
     const dims = sourceDims(source);
     if (dims === null) {
       ctx._errors.push(C1.INVALID_VALUE);
@@ -32406,6 +32728,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     );
   }
   function texSubImage2DDOMWithDims(ctx, target, level, xoffset, yoffset, width, height, format, type, source) {
+    if (!domUploadPboGuard(ctx)) return;
     if (source === null || source === void 0) {
       throw new TypeError(`Argument is not of type 'TexImageSource'`);
     }
@@ -32483,6 +32806,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     uploadTexSubImage(ctx, tex2, target, level, xoffset, yoffset, 0, width, height, 1, format, type, pixels);
   }
   function texSubImage3DDOM(ctx, target, level, xoffset, yoffset, zoffset, format, type, source) {
+    if (!domUploadPboGuard(ctx)) return;
     void format;
     void type;
     const tex2 = commonTexSubValidation(ctx, target, level, xoffset, yoffset, zoffset, 0, 0, 1, true);
@@ -32494,6 +32818,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     ctx._errors.push(C1.INVALID_OPERATION);
   }
   function texSubImage3DDOMWithDims(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, source) {
+    if (!domUploadPboGuard(ctx)) return;
     if (source === null || source === void 0) {
       throw new TypeError(`Argument is not of type 'TexImageSource'`);
     }
@@ -32801,8 +33126,20 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
     return false;
   }
-  function copyTexImage2DImpl(ctx, target, level, internalformat, x, y, width, height, border) {
+  function copyReadSourceFormat(ctx) {
     var _a, _b;
+    const readFbo = ctx._state.readFramebuffer;
+    if (readFbo !== null) {
+      const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
+      const att = readFbo._attachments.get(readPoint);
+      if (att) {
+        return att.type === "renderbuffer" ? att.renderbuffer._internalformat : (_b = (_a = att.texture._image) == null ? void 0 : _a.internalFormat) != null ? _b : 0;
+      }
+      return 0;
+    }
+    return ctx._attrs.alpha !== false ? C1.RGBA : C1.RGB;
+  }
+  function copyTexImage2DImpl(ctx, target, level, internalformat, x, y, width, height, border) {
     if (!is2DTarget(target)) {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
@@ -32862,16 +33199,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
-    let srcFmt = 0;
-    if (readFbo !== null) {
-      const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
-      const att = readFbo._attachments.get(readPoint);
-      if (att) {
-        srcFmt = att.type === "renderbuffer" ? att.renderbuffer._internalformat : (_b = (_a = att.texture._image) == null ? void 0 : _a.internalFormat) != null ? _b : 0;
-      }
-    } else {
-      srcFmt = ctx._attrs.alpha !== false ? C1.RGBA : C1.RGB;
-    }
+    const srcFmt = copyReadSourceFormat(ctx);
     if (srcFmt !== 0) {
       if (ctx._version === 2) {
         if (internalFormatComponents(internalformat) > internalFormatComponents(srcFmt)) {
@@ -32949,6 +33277,11 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
+    const srcFmt = copyReadSourceFormat(ctx);
+    if (srcFmt !== 0 && internalFormatComponents(tex2._image.internalFormat) > internalFormatComponents(srcFmt)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     try {
       copyTexSubImage(ctx, tex2, target, level, xoffset, yoffset, 0, x, y, width, height);
     } catch {
@@ -33011,6 +33344,11 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
+    const srcFmt = copyReadSourceFormat(ctx);
+    if (srcFmt !== 0 && internalFormatComponents(tex2._image.internalFormat) > internalFormatComponents(srcFmt)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     try {
       copyTexSubImage(ctx, tex2, target, level, xoffset, yoffset, zoffset, x, y, width, height);
     } catch {
@@ -33018,11 +33356,30 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
   }
   function applyCompressedSrcOffset(ctx, view, srcOffsetArg, srcLengthArg) {
-    const v2 = view;
     let off = Number(srcOffsetArg);
     if (off < 0) off += 18446744073709552e3;
     if (!(off > 0)) off = 0;
     else off = Math.floor(off);
+    if (view instanceof DataView) {
+      const len = view.byteLength;
+      if (off > len) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return null;
+      }
+      let effLen2 = len - off;
+      if (srcLengthArg !== void 0) {
+        const srcLen = Number(srcLengthArg) >>> 0;
+        if (srcLen > 0) {
+          if (off + srcLen > len) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return null;
+          }
+          effLen2 = srcLen;
+        }
+      }
+      return new DataView(view.buffer, view.byteOffset + off, effLen2);
+    }
+    const v2 = view;
     if (off > v2.length) {
       ctx._errors.push(C1.INVALID_VALUE);
       return null;
@@ -33076,6 +33433,13 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
     if (typeof data === "number") {
       if (!w2ValidatePbo(ctx, data)) return null;
+      const required2 = etc2ImageBytes(internalformat, width, height);
+      const length = srcOffsetArg === void 0 ? 0 : Number(srcOffsetArg) >>> 0;
+      const buf = ctx._state.pixelUnpackBuffer;
+      if (buf !== null && buf._data !== null && data + Math.max(length, required2) > buf._data.byteLength) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
       return data;
     }
     if (!ArrayBuffer.isView(data)) {
@@ -33093,6 +33457,10 @@ ${inner.map((l) => "  " + l).join("\n")}
   function validateCompressed3D(ctx, target, level, internalformat, width, height, depth, border, data, srcOffsetArg, srcLengthArg, tex2) {
     if (target === C2.TEXTURE_3D) {
       ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
+    if (internalformat === CExt.COMPRESSED_RGB_ETC1_WEBGL) {
+      ctx._errors.push(C1.INVALID_ENUM);
       return null;
     }
     const lim = dimLimit(ctx, target);
@@ -33155,6 +33523,10 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_ENUM);
       return;
     }
+    if (format === CExt.COMPRESSED_RGB_ETC1_WEBGL) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     if (tex2._internalFormat !== format) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
@@ -33174,6 +33546,13 @@ ${inner.map((l) => "  " + l).join("\n")}
     let view;
     if (typeof data === "number") {
       if (!w2ValidatePbo(ctx, data)) return;
+      const required = etc2ImageBytes(format, width, height);
+      const length = srcOffsetArg === void 0 ? 0 : Number(srcOffsetArg) >>> 0;
+      const buf = ctx._state.pixelUnpackBuffer;
+      if (buf !== null && buf._data !== null && data + Math.max(length, required) > buf._data.byteLength) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
       view = data;
     } else if (ArrayBuffer.isView(data)) {
       const sliced = applyCompressedSrcOffset(ctx, data, srcOffsetArg, srcLengthArg);
@@ -33217,6 +33596,10 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_ENUM);
       return;
     }
+    if (format === CExt.COMPRESSED_RGB_ETC1_WEBGL) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return;
+    }
     if (tex2._internalFormat !== format) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
@@ -33236,6 +33619,13 @@ ${inner.map((l) => "  " + l).join("\n")}
     let view;
     if (typeof data === "number") {
       if (!w2ValidatePbo(ctx, data)) return;
+      const required = etc2ImageBytes(format, width, height) * depth;
+      const length = srcOffsetArg === void 0 ? 0 : Number(srcOffsetArg) >>> 0;
+      const buf = ctx._state.pixelUnpackBuffer;
+      if (buf !== null && buf._data !== null && data + Math.max(length, required) > buf._data.byteLength) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
       view = data;
     } else if (ArrayBuffer.isView(data)) {
       const sliced = applyCompressedSrcOffset(ctx, data, srcOffsetArg, srcLengthArg);
@@ -33268,6 +33658,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   ];
   function isW2SizedInternalFormat(ctx, fmt) {
     if (isNorm16Format(fmt)) return ctx._extensions.has("EXT_texture_norm16");
+    if (ETC2_BYTES_PER_BLOCK[fmt] !== void 0) return true;
     return fmt in W2_COMBOS && !W2_UNSIZED.includes(fmt);
   }
   function texStorage2DImpl(ctx, target, levels, internalformat, width, height) {
@@ -33335,6 +33726,10 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
+    if (target === C2.TEXTURE_3D && ETC2_BYTES_PER_BLOCK[internalformat] !== void 0) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     if (!isW2SizedInternalFormat(ctx, internalformat)) {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
@@ -33394,6 +33789,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       copyTexSubImage2DImpl(ctx, target, level, xoffset, yoffset, x, y, width, height);
     };
     proto.compressedTexImage2D = function(target, level, internalformat, width, height, border, data) {
+      requireArgCount("compressedTexImage2D", 7, arguments);
       const ctx = this;
       if (isLost8(ctx)) return;
       if (ctx._version === 1 && (data === null || data === void 0)) {
@@ -33402,6 +33798,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       compressedTexImage2DImpl(ctx, target, level, internalformat, width, height, border, data, arguments[7], arguments[8]);
     };
     proto.compressedTexSubImage2D = function(target, level, xoffset, yoffset, width, height, format, data) {
+      requireArgCount("compressedTexSubImage2D", 8, arguments);
       const ctx = this;
       if (isLost8(ctx)) return;
       if (ctx._version === 1 && (data === null || data === void 0)) {
@@ -33466,11 +33863,13 @@ ${inner.map((l) => "  " + l).join("\n")}
         texStorage3DImpl(ctx, target, levels, internalformat, width, height, depth);
       };
       p.compressedTexImage3D = function(target, level, internalformat, width, height, depth, border, data) {
+        requireArgCount("compressedTexImage3D", 8, arguments);
         const ctx = this;
         if (isLost8(ctx)) return;
         compressedTexImage3DImpl(ctx, target, level, internalformat, width, height, depth, border, data, arguments[8], arguments[9]);
       };
       p.compressedTexSubImage3D = function(target, level, xoffset, yoffset, zoffset, width, height, depth, format, data) {
+        requireArgCount("compressedTexSubImage3D", 9, arguments);
         const ctx = this;
         if (isLost8(ctx)) return;
         compressedTexSubImage3DImpl(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, data, arguments[10], arguments[11]);
