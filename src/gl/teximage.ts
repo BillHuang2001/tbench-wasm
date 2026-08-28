@@ -25,7 +25,8 @@
  */
 
 import type { WebGLRenderingContext } from './webgl1';
-import type { WebGLTexture, TextureLevel } from './objects';
+import type { WebGLTexture, WebGLSampler, TextureLevel } from './objects';
+import type { State } from './state';
 import type { GLenum, GLint, GLsizei, TexImageSource } from './types';
 import { C, CExt } from './constants';
 import { getFormat, halfToFloat, type PixelFormatInfo, type StorageKind } from '../raster';
@@ -822,6 +823,59 @@ function ensureImage(texture: WebGLTexture, target: GLenum): NonNullable<WebGLTe
 const isPow2 = (v: number): boolean => v > 0 && (v & (v - 1)) === 0;
 
 /**
+ * Effective-sampler association: the WebGLSampler currently bound to a unit
+ * where `texture` is bound, or null when no sampler is bound to any unit
+ * holding the texture. Per WebGL2 §3.8.3, a bound sampler object's parameters
+ * REPLACE the texture's filter/wrap parameters for sampling — including the
+ * completeness determination the raster gates on (`img.complete`; an
+ * incomplete texture samples as (0,0,0,1)). E.g. a texture uploaded with the
+ * default MIN_FILTER = NEAREST_MIPMAP_LINEAR and no mip chain becomes
+ * sampleable once a sampler with MIN_FILTER = NEAREST is bound to its unit
+ * (CTS conformance2/samplers/sampler-drawing-test.html).
+ *
+ * Maintained by the bind APIs (bindSampler/bindTexture/deleteSampler in
+ * api/webgl2.ts + api/textures.ts) via `refreshUnitSamplerBindings`; a texture
+ * bound to several units resolves to the lowest-numbered unit with a sampler
+ * (deterministic; multi-unit-with-different-samplers is pathological). FBO
+ * attachment completeness is NOT affected — framebuffer-util.ts evaluates its
+ * own rules from the texture's own params and never reads `img.complete`.
+ */
+const samplerForTexture = new WeakMap<WebGLTexture, WebGLSampler | null>();
+
+/** Recompute the sampler association for `texture` by scanning all units. */
+export function refreshTextureSamplerBinding(state: State, texture: WebGLTexture): void {
+  for (const u of state.textureUnits) {
+    if (
+      u.sampler &&
+      (u.texture2D === texture || u.textureCube === texture ||
+        u.texture3D === texture || u.texture2DArray === texture ||
+        u.texture2DMultisample === texture)
+    ) {
+      samplerForTexture.set(texture, u.sampler);
+      return;
+    }
+  }
+  samplerForTexture.set(texture, null);
+}
+
+/** Refresh the association for every texture bound in `unit` (call after any
+ *  bindSampler/bindTexture change touching that unit). */
+export function refreshUnitSamplerBindings(state: State, unit: number): void {
+  // state.ts unit slots are typed with the DOM WebGLTexture interface; they
+  // always hold renderer WebGLTexture instances (same cast as draw.ts).
+  const u = state.textureUnits[unit] as unknown as {
+    texture2D: WebGLTexture | null; textureCube: WebGLTexture | null;
+    texture3D: WebGLTexture | null; texture2DArray: WebGLTexture | null;
+    texture2DMultisample: WebGLTexture | null;
+  };
+  if (u.texture2D) refreshTextureSamplerBinding(state, u.texture2D);
+  if (u.textureCube) refreshTextureSamplerBinding(state, u.textureCube);
+  if (u.texture3D) refreshTextureSamplerBinding(state, u.texture3D);
+  if (u.texture2DArray) refreshTextureSamplerBinding(state, u.texture2DArray);
+  if (u.texture2DMultisample) refreshTextureSamplerBinding(state, u.texture2DMultisample);
+}
+
+/**
  * Recompute _image completeness + base/max level after any mutation. Also
  * called at DRAW time (draw.ts buildTextureEnv) so completeness always reflects
  * the CURRENT texParameteri state, not the state at upload time.
@@ -847,7 +901,14 @@ export function updateCompleteness(texture: WebGLTexture, version: 1 | 2): void 
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
   const isArray = img.target === C.TEXTURE_2D_ARRAY;
   const is3D = img.target === C.TEXTURE_3D;
-  const minFilter = texture._params[0x2801];
+  // A sampler bound to a unit holding this texture REPLACES the texture's
+  // filter/wrap parameters for sampling (WebGL2 §3.8.3), including the
+  // completeness decision — a single-level texture with the default
+  // NEAREST_MIPMAP_LINEAR is complete once the bound sampler sets
+  // MIN_FILTER = NEAREST. A freshly created sampler's params mirror the
+  // texture defaults, so unconditional replacement is spec-exact.
+  const smp = samplerForTexture.get(texture);
+  const minFilter = smp ? smp._params[0x2801] : texture._params[0x2801];
   const needsMips = minFilter !== C.NEAREST && minFilter !== C.LINEAR;
   // Level range that must be defined when mipmaps are required.
   const maxDim = Math.max(baseLevel.width, baseLevel.height, is3D ? baseLevel.depth : 1);
@@ -872,7 +933,11 @@ export function updateCompleteness(texture: WebGLTexture, version: 1 | 2): void 
   }
   if (ok && version === 1 && (!isPow2(baseLevel.width) || !isPow2(baseLevel.height))) {
     // WebGL1 NPOT: only NEAREST/LINEAR minification with CLAMP_TO_EDGE wrap.
-    if (needsMips || texture._params[0x2802] !== C.CLAMP_TO_EDGE || texture._params[0x2803] !== C.CLAMP_TO_EDGE) {
+    // (WebGL1 has no sampler objects — smp is always null here; kept symmetric
+    // with the filter override above.)
+    const wrapS = smp ? smp._params[0x2802] : texture._params[0x2802];
+    const wrapT = smp ? smp._params[0x2803] : texture._params[0x2803];
+    if (needsMips || wrapS !== C.CLAMP_TO_EDGE || wrapT !== C.CLAMP_TO_EDGE) {
       ok = false;
     }
   }
