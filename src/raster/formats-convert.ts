@@ -543,40 +543,49 @@ function buildIntegerPack(info: PixelFormatInfo, packFormat: GLenum, packType: G
         return k === 3 ? v & 0x3 : (v >>> (22 - k * 10)) & 0x3ff;
       }
     : (src: ArrayBufferView, off: number, k: number) => readCompAt(src, off + k * p.bpe, p);
+  // GLES 3.0 §4.3.2 (after table 3.3): components absent from the internal
+  // format read as 0, and a missing alpha reads as 1. Without this, k >=
+  // components would read the NEXT texel's bytes at stride p.bpe — R8UI read
+  // as RGBA_INTEGER returned the following texels' data (CTS
+  // integer-cubemap-texture-sampling.html readback: (255,255,255,255) for an
+  // all-0xff R8UI face instead of (255,0,0,1)).
+  const comps = info.components;
+  const valueAt = (src: ArrayBufferView, so: number, k: number): number =>
+    k < comps ? readK(src, so, k) : k === 3 ? 1 : 0;
   switch (packType) {
     case BYTE:
       return (src, so, dst, do_) => {
         const d = dst as Int8Array;
-        for (let k = 0; k < n; k++) d[do_ + k] = readK(src, so, k);
+        for (let k = 0; k < n; k++) d[do_ + k] = valueAt(src, so, k);
       };
     case UNSIGNED_BYTE:
       return (src, so, dst, do_) => {
         const d = dst as Uint8Array;
-        for (let k = 0; k < n; k++) d[do_ + k] = readK(src, so, k);
+        for (let k = 0; k < n; k++) d[do_ + k] = valueAt(src, so, k);
       };
     case SHORT:
       return (src, so, dst, do_) => {
         const d = dst as Int16Array;
         const i = do_ >> 1;
-        for (let k = 0; k < n; k++) d[i + k] = readK(src, so, k);
+        for (let k = 0; k < n; k++) d[i + k] = valueAt(src, so, k);
       };
     case UNSIGNED_SHORT:
       return (src, so, dst, do_) => {
         const d = dst as Uint16Array;
         const i = do_ >> 1;
-        for (let k = 0; k < n; k++) d[i + k] = readK(src, so, k);
+        for (let k = 0; k < n; k++) d[i + k] = valueAt(src, so, k);
       };
     case INT:
       return (src, so, dst, do_) => {
         const d = dst as Int32Array;
         const i = do_ >> 2;
-        for (let k = 0; k < n; k++) d[i + k] = readK(src, so, k);
+        for (let k = 0; k < n; k++) d[i + k] = valueAt(src, so, k);
       };
     case UNSIGNED_INT:
       return (src, so, dst, do_) => {
         const d = dst as Uint32Array;
         const i = do_ >> 2;
-        for (let k = 0; k < n; k++) d[i + k] = readK(src, so, k);
+        for (let k = 0; k < n; k++) d[i + k] = valueAt(src, so, k);
       };
     default:
       return null;
