@@ -934,6 +934,111 @@ function scaleNearest(src: Uint8ClampedArray, sw: number, sh: number, dw: number
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Lossless ImageBitmap pixel readback (native WebGL)
+// ---------------------------------------------------------------------------
+// present/image decodes DOM sources via scratch-canvas drawImage + getImageData.
+// The 2D canvas stores pixels PREMULTIPLIED, so the round trip destroys the RGB
+// of fully transparent (alpha=0) texels of straight (premultiplyAlpha:'none')
+// bitmaps — CTS image_bitmap_from_image_bitmap / image_bitmap_from_image_data
+// pages expect those colors to survive the upload. Native Chromium WebGL reads
+// the bitmap's own pixel buffer directly (no canvas round trip), so a hidden
+// NATIVE context — captured at bundle load, BEFORE the test harness's getContext
+// intercept patch (context-intercept.ts injects the bundle first, then the
+// patch) — provides the lossless readback, already in the bitmap's own storage
+// form (straight for premultiplyAlpha:'none', premultiplied otherwise; exactly
+// what the WebGL spec §texImage2D TexImageSource requires the texture to
+// contain). When native WebGL is unavailable, the caller falls back to the
+// decoded data + the storage-mode premultiply selection below.
+
+interface NativeReadbackGL {
+  isContextLost(): boolean;
+  createTexture(): unknown;
+  deleteTexture(tex: unknown): void;
+  bindTexture(target: number, tex: unknown): void;
+  texParameteri(target: number, pname: number, param: number): void;
+  pixelStorei(pname: number, param: number | boolean): void;
+  texImage2D(target: number, level: number, internalformat: number, format: number, type: number, source: unknown): void;
+  createFramebuffer(): unknown;
+  deleteFramebuffer(fbo: unknown): void;
+  bindFramebuffer(target: number, fbo: unknown): void;
+  framebufferTexture2D(target: number, attachment: number, textarget: number, tex: unknown, level: number): void;
+  checkFramebufferStatus(target: number): number;
+  readPixels(x: number, y: number, w: number, h: number, format: number, type: number, pixels: Uint8ClampedArray): void;
+}
+
+/** The browser's original HTMLCanvasElement.getContext, captured before any
+ *  software-renderer intercept patch ran (null in Node / worker realms). */
+const nativeCanvasGetContext:
+  | ((type: string, attrs?: Record<string, unknown>) => unknown)
+  | null = typeof HTMLCanvasElement !== 'undefined'
+  ? (HTMLCanvasElement.prototype.getContext as unknown as (type: string, attrs?: Record<string, unknown>) => unknown)
+  : null;
+
+/** Reused hidden native context (browsers cap live WebGL contexts — keep one). */
+let imbReadbackCanvas: HTMLCanvasElement | null = null;
+let imbReadbackGL: NativeReadbackGL | null = null;
+let imbReadbackBusy = false;
+
+/**
+ * Reads an ImageBitmap's own pixels losslessly via a hidden native WebGL
+ * context: texImage2D + FBO + readPixels (row 0 = image top row, matching the
+ * canvas-decode convention the copy path below expects). Returns null when
+ * native WebGL is unavailable or the read fails — the caller then keeps the
+ * lossy canvas decode. Never throws.
+ */
+function readImageBitmapPixels(source: unknown, width: number, height: number): Uint8ClampedArray | null {
+  if (nativeCanvasGetContext === null || imbReadbackBusy || typeof document === 'undefined') return null;
+  if (!(width > 0) || !(height > 0)) return null;
+  imbReadbackBusy = true;
+  try {
+    if (imbReadbackCanvas === null) {
+      imbReadbackCanvas = document.createElement('canvas');
+      imbReadbackGL = nativeCanvasGetContext.call(imbReadbackCanvas, 'webgl', {
+        antialias: false,
+        depth: false,
+        stencil: false,
+      }) as NativeReadbackGL | null;
+      if (!imbReadbackGL) return null;
+    }
+    const gl = imbReadbackGL;
+    if (!gl || gl.isContextLost()) return null;
+    if (imbReadbackCanvas.width !== width || imbReadbackCanvas.height !== height) {
+      imbReadbackCanvas.width = width;
+      imbReadbackCanvas.height = height;
+    }
+    const tex = gl.createTexture();
+    if (!tex) return null;
+    try {
+      gl.bindTexture(C.TEXTURE_2D, tex);
+      gl.texParameteri(C.TEXTURE_2D, C.TEXTURE_MIN_FILTER, C.NEAREST);
+      gl.texParameteri(C.TEXTURE_2D, C.TEXTURE_MAG_FILTER, C.NEAREST);
+      gl.pixelStorei(C.UNPACK_FLIP_Y_WEBGL, false);
+      gl.pixelStorei(C.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.texImage2D(C.TEXTURE_2D, 0, C.RGBA, C.RGBA, C.UNSIGNED_BYTE, source as TexImageSource);
+      const fbo = gl.createFramebuffer();
+      if (!fbo) return null;
+      try {
+        gl.bindFramebuffer(C.FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(C.FRAMEBUFFER, C.COLOR_ATTACHMENT0, C.TEXTURE_2D, tex, 0);
+        if (gl.checkFramebufferStatus(C.FRAMEBUFFER) !== C.FRAMEBUFFER_COMPLETE) return null;
+        const data = new Uint8ClampedArray(width * height * 4);
+        gl.readPixels(0, 0, width, height, C.RGBA, C.UNSIGNED_BYTE, data);
+        return data;
+      } finally {
+        gl.bindFramebuffer(C.FRAMEBUFFER, null);
+        gl.deleteFramebuffer(fbo);
+      }
+    } finally {
+      gl.deleteTexture(tex);
+    }
+  } catch {
+    return null;
+  } finally {
+    imbReadbackBusy = false;
+  }
+}
+
 /** Shared upload path: convert source pixels into a level. */
 function copyPixelsIntoLevel(
   ctx: WebGLRenderingContext,
@@ -971,6 +1076,24 @@ function copyPixelsIntoLevel(
       const res = decodeImageSource(source as never) as { ok: boolean; image?: { width: number; height: number; data: Uint8ClampedArray }; reason?: string };
       if (res && res.ok && res.image) {
         const im = res.image;
+        // ImageBitmap sources: UNPACK_FLIP_Y_WEBGL is ignored per WebGL spec.
+        // UNPACK_PREMULTIPLY_ALPHA_WEBGL is ALSO ignored — the bitmap's OWN
+        // storage mode governs. The decode round trip (drawImage + getImageData)
+        // always yields straight-alpha RGBA, but the 2D canvas stores
+        // premultiplied, so fully transparent (alpha=0) texels of straight
+        // (premultiplyAlpha:'none') bitmaps come back BLACK. Read the bitmap's
+        // own pixels via the hidden NATIVE WebGL context instead — lossless, in
+        // the bitmap's own storage form (this is exactly how native Chromium
+        // WebGL uploads bitmaps). When native WebGL is unavailable, fall back to
+        // the decoded data with the storage-mode premultiply selection below
+        // (bitmaps created with premultiplyAlpha:'none' expose premultiply:false
+        // and stay straight; premultiplied/untagged bitmaps are re-premultiplied).
+        const isImageBitmap = typeof (source as { close?: unknown }).close === 'function';
+        let bitmapNativePixels: Uint8ClampedArray | null = null;
+        if (isImageBitmap) {
+          bitmapNativePixels = readImageBitmapPixels(source, im.width, im.height);
+          if (bitmapNativePixels) im.data = bitmapNativePixels;
+        }
         // Element size differs from the decoded natural size (SVG images with
         // width/height properties set on the element): resample to the target
         // level size before the copy (the WebGL spec sets the texture size
@@ -987,16 +1110,6 @@ function copyPixelsIntoLevel(
           srgbToDisplayP3(im.data);
         }
         const dv = new DataView(im.data.buffer, im.data.byteOffset, im.data.byteLength);
-        // ImageBitmap sources: UNPACK_FLIP_Y_WEBGL is ignored per WebGL spec.
-        // UNPACK_PREMULTIPLY_ALPHA_WEBGL is ALSO ignored — the bitmap's OWN
-        // storage mode governs. The decode round trip (drawImage + getImageData)
-        // always yields straight-alpha RGBA, so when the bitmap's storage is
-        // premultiplied (default, or premultiplyAlpha:'premultiply') the data
-        // must be premultiplied here; bitmaps created with
-        // premultiplyAlpha:'none' expose premultiply:false and stay straight.
-        // (The CTS tags each bitmap with its creation option; native ImageBitmap
-        // objects without the tag default to premultiplied storage.)
-        const isImageBitmap = typeof (source as { close?: unknown }).close === 'function';
         const flipY = isImageBitmap ? false : ctx._state.pixelStore.unpack.flipY;
         // WebGL2 source-rectangle selection (WebGL2 spec §3.7.2 "Pixel store
         // parameters for uploads from TexImageSource"): UNPACK_SKIP_PIXELS and
@@ -1042,7 +1155,9 @@ function copyPixelsIntoLevel(
           domain: spec.isInteger ? 2 : 0,
           flipY,
           premultiply: isImageBitmap
-            ? (source as { premultiply?: unknown }).premultiply === false ? false : true
+            ? bitmapNativePixels
+              ? false // native readback is already in the bitmap's own storage form
+              : (source as { premultiply?: unknown }).premultiply === false ? false : true
             : s.premultiplyAlpha,
           write: packedWrite,
           dstBpp,
