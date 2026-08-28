@@ -13,7 +13,11 @@
  *  - bindFramebuffer: WebGL1 target FRAMEBUFFER only; WebGL2 adds DRAW/READ
  *    FRAMEBUFFER. FRAMEBUFFER binds BOTH the draw and read slots (ES3). null =
  *    default framebuffer (stored as a null binding). Deleting a bound FBO
- *    resets the binding (GLES2 glDeleteFramebuffers semantics).
+ *    resets the binding (GLES2 glDeleteFramebuffers semantics). WebGL2:
+ *    binding the READ slot (READ_FRAMEBUFFER target, or FRAMEBUFFER which
+ *    rebinds it) resets READ_BUFFER — COLOR_ATTACHMENT0 for an FBO, BACK for
+ *    the default framebuffer (GLES3 §4.4.1; CTS readbuffer.html); the same
+ *    reset applies when deleting the bound read FBO (default FB rebinds).
  *  - framebufferRenderbuffer: attachment ∈ {COLOR_ATTACHMENT0..max-1 (1 on W1),
  *    DEPTH, STENCIL, DEPTH_STENCIL} else INVALID_ENUM; renderbuffertarget must
  *    be RENDERBUFFER; WebGL1 requires the renderbuffer to have been bound at
@@ -703,7 +707,12 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       // owns s.drawBuffers — never touched here.
       if (ctx._version === 2) s.drawBuffers = getDrawBufferList(ctx, null);
     }
-    if (s.readFramebuffer === framebuffer) s.readFramebuffer = null;
+    if (s.readFramebuffer === framebuffer) {
+      s.readFramebuffer = null;
+      // Rebinding the READ slot to the default framebuffer resets READ_BUFFER
+      // to BACK (GLES3 §4.4.1; same rule as bindFramebuffer).
+      if (ctx._version === 2) s.readBuffer = BACK;
+    }
     ctx._resources.untrack(framebuffer);
   };
 
@@ -735,13 +744,23 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
     if (prev instanceof WebGLFramebuffer) prev._isBound = false;
     if (ctx._version === 2 && target === C2.READ_FRAMEBUFFER) {
       s.readFramebuffer = fbo;
+      // GLES3 §4.4.1 / WebGL2 §5.14.11: binding the READ_FRAMEBUFFER resets
+      // READ_BUFFER — COLOR_ATTACHMENT0 for an FBO, BACK for the default
+      // framebuffer (CTS renderbuffers/readbuffer.html "switch to another fbo,
+      // read buffer is GL_COLOR_ATTACHMENT0, not GL_COLOR_ATTACHMENT1").
+      s.readBuffer = fbo === null ? BACK : COLOR_ATTACHMENT0;
     } else {
       // FRAMEBUFFER (and DRAW_FRAMEBUFFER on W2) bind the draw slot; the
       // FRAMEBUFFER target binds BOTH slots (GLES2 §4.4.1 — the bound
       // framebuffer is used for both reading and writing; WebGL1 only has
       // FRAMEBUFFER, WebGL2 keeps the ES3 both-slot behavior).
       s.drawFramebuffer = fbo;
-      if (target === C1.FRAMEBUFFER) s.readFramebuffer = fbo;
+      if (target === C1.FRAMEBUFFER) {
+        s.readFramebuffer = fbo;
+        // FRAMEBUFFER rebinds the READ slot too, so the same READ_BUFFER reset
+        // applies (WebGL2 only; WebGL1 has no readBuffer semantics).
+        if (ctx._version === 2) s.readBuffer = fbo === null ? BACK : COLOR_ATTACHMENT0;
+      }
       // W2: draw-buffer state is framebuffer-object state (GLES3 §4.1.2) — sync
       // the context-visible list (s.drawBuffers, read by getters.ts DRAW_BUFFERi)
       // to the newly-bound draw framebuffer's OWN list ([COLOR_ATTACHMENT0] for
