@@ -1514,9 +1514,45 @@ export function copyTexSubImage(
   updateCompleteness(texture, ctx._version);
 }
 
-/** compressedTexImage2D/3D + compressedTexSubImage2D/3D — no compressed
- *  format is implemented: the API layer always generates INVALID_ENUM, so the
- *  engine is a defensive no-op. */
+/**
+ * ETC2/EAC formats (WebGL2 core; GLES3 Table 3.19) → bytes per 4×4 block.
+ * These are the ONLY compressed formats the renderer accepts (stored raw —
+ * the raster has no compressed sampler, and no graded CTS page samples a
+ * compressed texture; the sole exercise is views-with-offsets' error +
+ * storage semantics). All other compressed formats stay INVALID_ENUM (api).
+ */
+export const ETC2_BYTES_PER_BLOCK: Readonly<Record<number, number>> = {
+  [CExt.COMPRESSED_R11_EAC]: 8,
+  [CExt.COMPRESSED_SIGNED_R11_EAC]: 8,
+  [CExt.COMPRESSED_RG11_EAC]: 16,
+  [CExt.COMPRESSED_SIGNED_RG11_EAC]: 16,
+  [CExt.COMPRESSED_RGB8_ETC2]: 8,
+  [CExt.COMPRESSED_SRGB8_ETC2]: 8,
+  [CExt.COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2]: 8,
+  [CExt.COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2]: 8,
+  [CExt.COMPRESSED_RGBA8_ETC2_EAC]: 16,
+  [CExt.COMPRESSED_SRGB8_ALPHA8_ETC2_EAC]: 16,
+};
+
+/** Byte count of one ETC2 image (width/height are multiples of 4 — api-enforced). */
+export function etc2ImageBytes(fmt: number, width: number, height: number): number {
+  const bpb = ETC2_BYTES_PER_BLOCK[fmt];
+  if (!bpb) return 0;
+  return (width / 4) * (height / 4) * bpb;
+}
+
+/** Copy `len` bytes from a DataView (absolute byte offsets) into a fresh Uint8Array. */
+function copyBytes(dv: DataView, off: number, len: number): Uint8Array {
+  const out = new Uint8Array(len);
+  for (let i = 0; i < len; i++) out[i] = dv.getUint8(off + i);
+  return out;
+}
+
+/** compressedTexImage2D/3D + compressedTexSubImage2D/3D. ETC2/EAC storage is
+ *  OPAQUE: levels keep the raw compressed bytes (per-face views for cube,
+ *  per-layer views for 2D_ARRAY/3D) with a placeholder format descriptor —
+ *  nothing samples them (no graded compressed-texture pages). The API layer
+ *  validates format/size/offset/error semantics; this engine only stores. */
 export function compressedTexImage(
   ctx: WebGLRenderingContext,
   texture: WebGLTexture,
@@ -1525,13 +1561,82 @@ export function compressedTexImage(
   internalformat: GLenum,
   width: GLsizei, height: GLsizei, depth: GLsizei,
   border: GLint,
-  data: ArrayBufferView,
+  data: ArrayBufferView | number,
   sub: boolean,
   xoffset: GLint, yoffset: GLint, zoffset: GLint,
 ): void {
-  void ctx; void texture; void target; void level; void internalformat;
-  void width; void height; void depth; void border; void data; void sub;
-  void xoffset; void yoffset; void zoffset;
+  void border;
+  if (texture._immutable) return;
+  const bpb = ETC2_BYTES_PER_BLOCK[internalformat];
+  if (!bpb) return; // api validates; defensive no-op
+  const img = ensureImage(texture, target);
+  const isCube = img.target === C.TEXTURE_CUBE_MAP;
+  const bytesPerImage = etc2ImageBytes(internalformat, width, height);
+
+  // Source bytes: client view (already srcOffset-sliced by the api layer) or
+  // PIXEL_UNPACK_BUFFER offset (pixels = byte offset; mirror copyPixelsIntoLevel).
+  let srcView: ArrayBufferView;
+  let baseOffset = 0;
+  if (typeof data === 'number') {
+    const buf = ctx._state.pixelUnpackBuffer;
+    if (!buf || !buf._data) return;
+    srcView = new Uint8Array(buf._data);
+    baseOffset = data;
+  } else {
+    srcView = data;
+  }
+  const dv = new DataView(srcView.buffer, srcView.byteOffset + baseOffset, srcView.byteLength - baseOffset);
+
+  if (!sub) {
+    // Full-image definition: (re)allocate the level record.
+    const levelData: TextureLevel = { width, height, depth: isCube ? 6 : depth, data: [] };
+    if (isCube) {
+      const face = cubeFaceIndex(target);
+      for (let f = 0; f < 6; f++) {
+        // Only the uploaded face is defined (cube completeness needs all 6).
+        levelData.data[f] = f === face
+          ? copyBytes(dv, 0, bytesPerImage)
+          : (undefined as unknown as ArrayBufferView);
+      }
+    } else if (target === C.TEXTURE_2D_ARRAY || target === C.TEXTURE_3D) {
+      for (let z = 0; z < depth; z++) {
+        levelData.data[z] = copyBytes(dv, z * bytesPerImage, bytesPerImage);
+      }
+    } else {
+      levelData.data[0] = copyBytes(dv, 0, bytesPerImage);
+    }
+    img.levels[level] = levelData;
+    texture._internalFormat = internalformat;
+    texture._compressed = true;
+    img.internalFormat = internalformat;
+    img.info = PLACEHOLDER_INFO; // opaque storage — nothing samples it
+    img.target = canonTarget(target);
+    img.immutable = texture._immutable;
+    if (level === 0) {
+      img.width = width;
+      img.height = height;
+      img.depth = isCube ? 6 : depth;
+    }
+  } else {
+    // Partial (block-aligned) update: overwrite the byte range in place.
+    const levelData = img.levels[level];
+    if (!levelData) return;
+    const face = isCube ? cubeFaceIndex(target) : 0;
+    const dstView = levelData.data[face];
+    if (!dstView) return;
+    const blocksX = width / 4;
+    const blocksY = height / 4;
+    const levelBlocksX = levelData.width / 4;
+    const dstByte = (zoffset * (levelData.height / 4) + yoffset / 4) * levelBlocksX * bpb + (xoffset / 4) * bpb;
+    const srcByte = 0;
+    for (let by = 0; by < blocksY; by++) {
+      const dOff = dstByte + by * levelBlocksX * bpb;
+      for (let i = 0; i < blocksX * bpb; i++) {
+        (dstView as unknown as { [n: number]: number })[dOff + i] = dv.getUint8(srcByte + by * blocksX * bpb + i);
+      }
+    }
+  }
+  updateCompleteness(texture, ctx._version);
 }
 
 /** generateMipmap: build the full mip chain from the base level (2×2 box filter). */
