@@ -5326,6 +5326,8 @@
         scratchCanvas.width = width;
         scratchCanvas.height = height;
       }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, width, height);
       ctx.drawImage(source, 0, 0);
       const imageData = ctx.getImageData(0, 0, width, height);
       return { ok: true, image: { width, height, data: imageData.data } };
@@ -8863,7 +8865,7 @@
         e = { kind: "call", callee: e, args, loc: e.loc };
       } else if (t.text === "++" || t.text === "--") {
         p.next();
-        e = { kind: "unary", op: t.text, operand: e, loc: e.loc };
+        e = { kind: "unary", op: t.text, operand: e, loc: e.loc, postfix: true };
       } else {
         break;
       }
@@ -10856,8 +10858,10 @@
             return a <= c;
           case ">=":
             return a >= c;
-          default:
+          case "==":
             return a === c;
+          case "!=":
+            return a !== c;
         }
       }
       default: {
@@ -13267,7 +13271,34 @@
   function convertValue(vals, from, to) {
     const fb = scalarBaseOf(from);
     const tb = scalarBaseOf(to);
-    if (fb === null || tb === null || fb === tb) return vals;
+    if (fb === null || tb === null) return vals;
+    const n = flatComponents(to);
+    if (vals.length !== n) {
+      if (vals.length === 0) return vals;
+      if (fb === tb) {
+        const out2 = [];
+        for (let c = 0; c < n; c++) out2.push(vals[c % vals.length]);
+        return out2;
+      }
+      const dual2 = vals[0].dx !== void 0;
+      const out = [];
+      for (let c = 0; c < n; c++) {
+        const src = vals[c % vals.length];
+        if (!dual2) {
+          out.push({ v: convertScalar(src.v, fb, tb), pre: src.pre });
+        } else {
+          const conv = { v: convertScalar(src.v, fb, tb) };
+          if (tb === "float") {
+            conv.dx = "0";
+            conv.dy = "0";
+          }
+          if (src.pre && src.pre.length > 0) conv.pre = src.pre;
+          out.push(conv);
+        }
+      }
+      return out;
+    }
+    if (fb === tb) return vals;
     const dual = vals.length > 0 && vals[0].dx !== void 0;
     if (!dual) return vals.map((v2) => ({ v: convertScalar(v2.v, fb, tb) }));
     return vals.map((v2) => {
@@ -16510,17 +16541,27 @@
       const out = [];
       for (let c = 0; c < n; c++) {
         const target = lv.targets[c];
+        if (base === null || base === "bool") throw new Error("codegen: cannot increment a bool");
+        const wrap = (rhs) => base === "float" ? `${target} = ${rhs}` : base === "int" ? `${target} = ((${rhs}) | 0)` : `${target} = ((${rhs}) >>> 0)`;
         let s;
-        if (base === "float") s = `(${target} = ${target} + ${delta})`;
-        else if (base === "int") s = `(${target} = ((${target} + ${delta}) | 0))`;
-        else if (base === "uint") s = `(${target} = ((${target} + ${delta}) >>> 0))`;
-        else throw new Error("codegen: cannot increment a bool");
+        if (e.postfix) {
+          const t2 = env.allocTemp();
+          s = `(${t2} = ${target}, ${wrap(`${t2} + ${delta}`)}, ${t2})`;
+        } else {
+          s = `(${wrap(`${target} + ${delta}`)})`;
+        }
         let v2 = s;
         if (post) {
           const t2 = env.allocTemp();
           v2 = `(${t2} = ${s}, ${post}, ${t2})`;
         }
-        out.push(preludes.length > 0 ? { v: v2, pre: preludes } : { v: v2 });
+        const val = preludes.length > 0 ? { v: v2, pre: preludes } : { v: v2 };
+        const dual = lv.dualTargets ? lv.dualTargets[c] : void 0;
+        if (env.dual && dual) {
+          val.dx = dual[0];
+          val.dy = dual[1];
+        }
+        out.push(val);
       }
       return out;
     }
@@ -16951,7 +16992,8 @@
     const out = [];
     if (e.op === "=") {
       let conv2 = convertValue(rhs, e.value.resolvedType, t);
-      for (let c = 0; c < n; c++) {
+      const srcN2 = Math.min(n, rhs.length);
+      for (let c = 0; c < srcN2; c++) {
         const src = rhs[c];
         if (conv2[c] !== src && src.pre && src.pre.length > 0) {
           conv2 = conv2.map((v2, i) => i === c ? { ...v2, pre: src.pre } : v2);
@@ -16986,7 +17028,8 @@
     const base = scalarBaseOf(t);
     if (!base) throw new Error("codegen: cannot compound-assign a non-scalar-shaped value");
     let conv = convertValue(rhs, e.value.resolvedType, t);
-    for (let c = 0; c < n; c++) {
+    const srcN = Math.min(n, rhs.length);
+    for (let c = 0; c < srcN; c++) {
       const src = rhs[c];
       if (conv[c] !== src && src.pre && src.pre.length > 0) {
         conv = conv.map((v2, i) => i === c ? { ...v2, pre: src.pre } : v2);
@@ -18806,7 +18849,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         const stride = elemFloatStride(e);
         const int = isIntStoreType(e);
         const base = cursor * 4;
-        st.slots.set(`${path}[0]`, { store: int ? "int" : "float", slot: base, stride });
+        let advance;
         if (dense) {
           for (let k = 0; k < n; k++) {
             const slot = base + k;
@@ -18814,15 +18857,17 @@ ${inner.map((l) => "  " + l).join("\n")}
             if (int) st.intMax = Math.max(st.intMax, slot + 1);
             else st.floatMax = Math.max(st.floatMax, slot + 1);
           }
-          return { advance: Math.ceil(n / 4) };
+          advance = Math.ceil(n / 4);
+        } else {
+          advance = 0;
+          for (let k = 0; k < n; k++) {
+            const r = emitType(`${path}[${k}]`, e, (base + k * stride) / 4, st);
+            if ("error" in r) return r;
+            advance += r.advance;
+          }
         }
-        let adv = 0;
-        for (let k = 0; k < n; k++) {
-          const r = emitType(`${path}[${k}]`, e, (base + k * stride) / 4, st);
-          if ("error" in r) return r;
-          adv += r.advance;
-        }
-        return { advance: adv };
+        st.slots.set(`${path}[0]`, { store: int ? "int" : "float", slot: base, stride });
+        return { advance };
       }
       case "struct": {
         let c = cursor;
@@ -19019,10 +19064,10 @@ ${inner.map((l) => "  " + l).join("\n")}
         const stride = std140ArrayStride(t.element);
         out.set(path, mk(byteOffset, stride, 0));
         if (n > 0) {
-          out.set(`${path}[0]`, mk(byteOffset, stride, 0));
           for (let k = 0; k < n; k++) {
             emitBlockLayout(`${path}[${k}]`, t.element, byteOffset + k * stride, out, blockStride);
           }
+          out.set(`${path}[0]`, mk(byteOffset, stride, t.element.kind === "matrix" ? 16 : 0));
         }
         return;
       }
