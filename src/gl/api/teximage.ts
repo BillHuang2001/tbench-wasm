@@ -530,9 +530,16 @@ function isNorm16Format(fmt: GLenum): boolean {
   return NORM16_FORMATS.includes(fmt);
 }
 
-/** W2 texImage internalformat validity (norm16 gated on EXT_texture_norm16). */
+/**
+ * W2 texImage internalformat validity (norm16 gated on EXT_texture_norm16).
+ * Uses the `_extensions` enabled-cache, NOT `getExtension(...) !== null`:
+ * calling getExtension() from validation code POPULATES the singleton cache
+ * as a side effect, self-enabling the extension before the page requests it
+ * (CTS ext-render-snorm.html checks getSupportedExtensions()/getExtension()
+ * ordering; see also api/webgl2.ts anisotropyEnabled).
+ */
 function w2InternalformatValid(ctx: WebGLRenderingContext, fmt: GLenum): boolean {
-  if (isNorm16Format(fmt)) return ctx.getExtension('EXT_texture_norm16') !== null;
+  if (isNorm16Format(fmt)) return ctx._extensions.has('EXT_texture_norm16');
   return fmt in W2_COMBOS;
 }
 
