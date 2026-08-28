@@ -264,23 +264,38 @@ function floatStorageReadOK(ctx: WebGLRenderingContext, format: GLenum, type: GL
 
 /** True when (format, type) is a legal readPixels combo for the attachment's
  *  internal format. `floatStorage` marks W1 UNSIZED float-storage levels
- *  (info.isFloat on the attached texture/renderbuffer surface). */
+ *  (info.isFloat on the attached texture/renderbuffer surface).
+ *
+ *  Universal expansions per the GLES3 ReadPixels table (ES 3.0 §4.3.2,
+ *  Table 3.2 — CTS conformance2/reading/read-pixels-from-fbo-test.html):
+ *   - RGBA/UNSIGNED_BYTE is accepted for EVERY normalized color attachment
+ *     (R/RG/RGB attachments expand to RGBA on read).
+ *   - RGBA_INTEGER/INT (signed) and RGBA_INTEGER/UNSIGNED_INT (unsigned) are
+ *     accepted for EVERY integer attachment, with type conversion across
+ *     widths (e.g. R8I read as RGBA_INTEGER/INT, R16UI as RGBA_INTEGER/
+ *     UNSIGNED_INT). The integer-vs-normalized boundary is NOT relaxed:
+ *     integer formats never accept plain RGBA, and normalized/float formats
+ *     never accept *_INTEGER formats. */
 function readComboOK(
   ctx: WebGLRenderingContext, internalFormat: GLenum, format: GLenum, type: GLenum,
   floatStorage?: boolean,
 ): boolean {
+  const universalRGBA = format === C1.RGBA && type === C1.UNSIGNED_BYTE;
+  const universalSInt = format === C2.RGBA_INTEGER && type === C1.INT;
+  const universalUInt = format === C2.RGBA_INTEGER && type === C1.UNSIGNED_INT;
   switch (internalFormat) {
     // Unsigned normalized color
     case C1.RGBA: case C1.RGBA8: case C2.RGBA8: case C2.SRGB8_ALPHA8:
       if (floatStorage) return floatStorageReadOK(ctx, format, type);
-      return format === C1.RGBA && type === C1.UNSIGNED_BYTE;
+      return universalRGBA;
     case C1.RGBA4:
       return format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4);
     case C1.RGB5_A1:
       return format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_5_5_1);
     case C1.RGB565:
-      return format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5);
-    case C1.RGB: case C2.RGB8:
+      return (format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5)) ||
+        universalRGBA;
+    case C1.RGB:
       if (floatStorage) return floatStorageReadOK(ctx, format, type);
       // WebGL 1.0 §5.14.12: RGBA/UNSIGNED_BYTE (+ RGBA pack types) must be
       // accepted for ANY complete framebuffer — RGB attachments expand to
@@ -289,6 +304,8 @@ function readComboOK(
       return (format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5)) ||
         (format === C1.RGBA &&
           (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4 || type === C1.UNSIGNED_SHORT_5_5_5_1));
+    case C2.RGB8:
+      return (format === C1.RGB && type === C1.UNSIGNED_BYTE) || universalRGBA;
     case C1.LUMINANCE: case C1.LUMINANCE_ALPHA: case C1.ALPHA:
       if (floatStorage) return floatStorageReadOK(ctx, format, type);
       // WebGL 1.0 §5.14.12: RGBA/UNSIGNED_BYTE (+ RGBA pack types) must be
@@ -296,10 +313,11 @@ function readComboOK(
       // expand to RGBA on read (L→(L,L,L,1), A→(0,0,0,A)).
       return format === C1.RGBA &&
         (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4 || type === C1.UNSIGNED_SHORT_5_5_5_1);
-    case C2.R8: return format === C2.RED && type === C1.UNSIGNED_BYTE;
-    case C2.RG8: return format === C2.RG && type === C1.UNSIGNED_BYTE;
-    case C2.RGB10_A2: return format === C1.RGBA && type === C2.UNSIGNED_INT_2_10_10_10_REV;
-    case C2.RGB10_A2UI: return format === C2.RGBA_INTEGER && type === C1.UNSIGNED_INT;
+    case C2.R8: return (format === C2.RED && type === C1.UNSIGNED_BYTE) || universalRGBA;
+    case C2.RG8: return (format === C2.RG && type === C1.UNSIGNED_BYTE) || universalRGBA;
+    case C2.RGB10_A2:
+      return (format === C1.RGBA && type === C2.UNSIGNED_INT_2_10_10_10_REV) || universalRGBA;
+    case C2.RGB10_A2UI: return universalUInt;
     // Floating point (renderable only with the color-buffer-float extensions).
     // FLOAT is accepted with format ∈ {RED, RG, RGB, RGBA} for the 16F formats
     // when EITHER float color-buffer extension is enabled (GLES3 ReadPixels
@@ -320,31 +338,32 @@ function readComboOK(
       // GLES3 adds RGB/FLOAT; the CTS (format-r11f-g11f-b10f, ext-color-buffer-
       // float) additionally reads RGBA/FLOAT from R11F_G11F_B10F attachments.
       return (format === C1.RGB || format === C1.RGBA) && floatReadOK(ctx, type, true);
-    // Signed / unsigned integer
-    case C2.R8I: return format === C2.RED_INTEGER && type === C1.BYTE;
-    case C2.R8UI: return format === C2.RED_INTEGER && type === C1.UNSIGNED_BYTE;
-    case C2.R16I: return format === C2.RED_INTEGER && type === C1.SHORT;
-    case C2.R16UI: return format === C2.RED_INTEGER && type === C1.UNSIGNED_SHORT;
-    case C2.R32I: return format === C2.RED_INTEGER && type === C1.INT;
-    case C2.R32UI: return format === C2.RED_INTEGER && type === C1.UNSIGNED_INT;
-    case C2.RG8I: return format === C2.RG_INTEGER && type === C1.BYTE;
-    case C2.RG8UI: return format === C2.RG_INTEGER && type === C1.UNSIGNED_BYTE;
-    case C2.RG16I: return format === C2.RG_INTEGER && type === C1.SHORT;
-    case C2.RG16UI: return format === C2.RG_INTEGER && type === C1.UNSIGNED_SHORT;
-    case C2.RG32I: return format === C2.RG_INTEGER && type === C1.INT;
-    case C2.RG32UI: return format === C2.RG_INTEGER && type === C1.UNSIGNED_INT;
-    case C2.RGB8I: return format === C2.RGB_INTEGER && type === C1.BYTE;
-    case C2.RGB8UI: return format === C2.RGB_INTEGER && type === C1.UNSIGNED_BYTE;
-    case C2.RGB16I: return format === C2.RGB_INTEGER && type === C1.SHORT;
-    case C2.RGB16UI: return format === C2.RGB_INTEGER && type === C1.UNSIGNED_SHORT;
-    case C2.RGB32I: return format === C2.RGB_INTEGER && type === C1.INT;
-    case C2.RGB32UI: return format === C2.RGB_INTEGER && type === C1.UNSIGNED_INT;
-    case C2.RGBA8I: return format === C2.RGBA_INTEGER && type === C1.BYTE;
-    case C2.RGBA8UI: return format === C2.RGBA_INTEGER && type === C1.UNSIGNED_BYTE;
-    case C2.RGBA16I: return format === C2.RGBA_INTEGER && type === C1.SHORT;
-    case C2.RGBA16UI: return format === C2.RGBA_INTEGER && type === C1.UNSIGNED_SHORT;
-    case C2.RGBA32I: return format === C2.RGBA_INTEGER && type === C1.INT;
-    case C2.RGBA32UI: return format === C2.RGBA_INTEGER && type === C1.UNSIGNED_INT;
+    // Signed / unsigned integer (native width-matched pair + universal
+    // RGBA_INTEGER/INT | RGBA_INTEGER/UNSIGNED_INT expansion).
+    case C2.R8I: return (format === C2.RED_INTEGER && type === C1.BYTE) || universalSInt;
+    case C2.R8UI: return (format === C2.RED_INTEGER && type === C1.UNSIGNED_BYTE) || universalUInt;
+    case C2.R16I: return (format === C2.RED_INTEGER && type === C1.SHORT) || universalSInt;
+    case C2.R16UI: return (format === C2.RED_INTEGER && type === C1.UNSIGNED_SHORT) || universalUInt;
+    case C2.R32I: return (format === C2.RED_INTEGER && type === C1.INT) || universalSInt;
+    case C2.R32UI: return (format === C2.RED_INTEGER && type === C1.UNSIGNED_INT) || universalUInt;
+    case C2.RG8I: return (format === C2.RG_INTEGER && type === C1.BYTE) || universalSInt;
+    case C2.RG8UI: return (format === C2.RG_INTEGER && type === C1.UNSIGNED_BYTE) || universalUInt;
+    case C2.RG16I: return (format === C2.RG_INTEGER && type === C1.SHORT) || universalSInt;
+    case C2.RG16UI: return (format === C2.RG_INTEGER && type === C1.UNSIGNED_SHORT) || universalUInt;
+    case C2.RG32I: return (format === C2.RG_INTEGER && type === C1.INT) || universalSInt;
+    case C2.RG32UI: return (format === C2.RG_INTEGER && type === C1.UNSIGNED_INT) || universalUInt;
+    case C2.RGB8I: return (format === C2.RGB_INTEGER && type === C1.BYTE) || universalSInt;
+    case C2.RGB8UI: return (format === C2.RGB_INTEGER && type === C1.UNSIGNED_BYTE) || universalUInt;
+    case C2.RGB16I: return (format === C2.RGB_INTEGER && type === C1.SHORT) || universalSInt;
+    case C2.RGB16UI: return (format === C2.RGB_INTEGER && type === C1.UNSIGNED_SHORT) || universalUInt;
+    case C2.RGB32I: return (format === C2.RGB_INTEGER && type === C1.INT) || universalSInt;
+    case C2.RGB32UI: return (format === C2.RGB_INTEGER && type === C1.UNSIGNED_INT) || universalUInt;
+    case C2.RGBA8I: return (format === C2.RGBA_INTEGER && type === C1.BYTE) || universalSInt;
+    case C2.RGBA8UI: return (format === C2.RGBA_INTEGER && type === C1.UNSIGNED_BYTE) || universalUInt;
+    case C2.RGBA16I: return (format === C2.RGBA_INTEGER && type === C1.SHORT) || universalSInt;
+    case C2.RGBA16UI: return (format === C2.RGBA_INTEGER && type === C1.UNSIGNED_SHORT) || universalUInt;
+    case C2.RGBA32I: return universalSInt;
+    case C2.RGBA32UI: return universalUInt;
     // Depth / depth-stencil
     case C1.DEPTH_COMPONENT16:
       return format === C1.DEPTH_COMPONENT && (type === C1.UNSIGNED_SHORT || type === C1.UNSIGNED_INT);
