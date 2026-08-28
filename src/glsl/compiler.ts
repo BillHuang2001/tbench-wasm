@@ -181,9 +181,12 @@ export interface UniformBlockDecl {
 /**
  * Fragment color output.
  * - ES 1.00: 'gl_FragColor' (index null) or 'gl_FragData'[N] (index set,
- *   EXT_draw_buffers only).
+ *   EXT_draw_buffers only) or 'gl_SecondaryFragColorEXT' (index null,
+ *   GL_EXT_blend_func_extended; the linker hardcodes its blend index 1).
  * - ES 3.00: user out variable; location = layout(location=) or null
- *   (auto-assigned at link). ARRAY outputs emit one declaration entry
+ *   (auto-assigned at link); index = the dual-source blend index from
+ *   `layout(index=N)` (0 default, 1 for the secondary output —
+ *   GL_EXT_blend_func_extended). ARRAY outputs emit one declaration entry
  *   (arraySize = element count, type = ELEMENT type) followed by one
  *   PER-ELEMENT entry per slot named '<name>[k]' (arraySize 1, location =
  *   final base + k — the base is the explicit location or 0, the
@@ -192,7 +195,7 @@ export interface UniformBlockDecl {
  */
 export interface OutputDecl {
   name: string;
-  index: number | null; // gl_FragData[N] index (1.00), else null
+  index: number | null; // 1.00 gl_FragData[N] slot; 3.00 blend index (0/1); null for 1.00 non-FragData
   location: number | null; // explicit location (3.00) or null
   type: GLSLType; // element type: float/int/uint scalar or vector
   arraySize: number; // element count (1 for scalars/vectors)

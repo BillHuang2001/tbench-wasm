@@ -371,7 +371,11 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   check(info4.outputs.length === 2, '3.00: two outputs');
   check(info4.outputs[0].name === 'c' && info4.outputs[0].location === 3 && info4.outputs[0].arraySize === 1, 'layout(location=3) output');
   check(info4.outputs[1].name === 'd' && info4.outputs[1].location === null && info4.outputs[1].arraySize === 1, 'output without layout → location null');
-  check(info4.outputs[0].index === null, '3.00 output index null');
+  check(info4.outputs[0].index === 0, '3.00 output blend index defaults to 0');
+
+  // GL_EXT_blend_func_extended: layout(index=N) on fragment outputs.
+  const info5 = okInfo('#version 300 es\n#extension GL_EXT_blend_func_extended : enable\nprecision mediump float;\nlayout(location=0, index=1) out vec4 sec;\nvoid main() { sec = vec4(1.0); }', 300, 'FRAGMENT', ['GL_EXT_blend_func_extended']);
+  check(info5.outputs.length === 1 && info5.outputs[0].name === 'sec' && info5.outputs[0].index === 1, 'layout(index=1) → output blend index 1');
 
   okInfo('#version 300 es\nprecision mediump float;\nout ivec4 i;\nout uvec4 u;\nvoid main() { i = ivec4(1); u = uvec4(1u); }', 300, 'FRAGMENT'); // ivec4/uvec4 outputs OK
 

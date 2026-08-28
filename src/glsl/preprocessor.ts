@@ -977,6 +977,51 @@ const KNOWN_UNAVAILABLE_GLSL_EXTENSIONS: ReadonlySet<string> = new Set([
   'GL_NV_shader_noperspective_interpolation',
 ]);
 
+/**
+ * GLSL extension names whose enablement is signaled by a DIFFERENT name in
+ * `opts.extensions`. gl/ feeds the WebGL REGISTRY names (the ctx._extensions
+ * cache keys, e.g. `WEBGL_blend_func_extended`) plus the GLSL names its
+ * glsl-names.ts mapping knows; EXT_blend_func_extended's GLSL counterpart is
+ * missing from that mapping (gl-side file, kept frozen), so the preprocessor
+ * resolves the WebGL registry name as the enablement signal for the GLSL
+ * name. The macro (`GL_EXT_blend_func_extended`) and the enabled-extension
+ * entry are keyed by the GLSL name either way, so semantics' builtin gating
+ * (enabledExtensions) sees the canonical GLSL name. `enable`/`require` of the
+ * GLSL name before getExtension() on the context still fails exactly like the
+ * disabled phases of the CTS pages demand (the registry name is absent).
+ * Keep in sync with src/gl/extensions/glsl-names.ts.
+ */
+const WEBGL_TO_GLSL_EXTENSION_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  GL_EXT_blend_func_extended: ['WEBGL_blend_func_extended'],
+};
+
+/** Is the GLSL extension `name` available? Direct hit or a WebGL-name alias. */
+function extensionAvailable(st: State, name: string): boolean {
+  const exts = st.opts.extensions;
+  if (!exts) return false;
+  if (exts.has(name)) return true;
+  const aliases = WEBGL_TO_GLSL_EXTENSION_ALIASES[name];
+  if (aliases !== undefined) {
+    for (const a of aliases) {
+      if (exts.has(a)) return true;
+    }
+  }
+  return false;
+}
+
+/** GLSL macro name for an enabled-extension entry in opts.extensions: the
+ *  name itself when it IS a GLSL name ('GL_...'), else the GLSL name whose
+ *  WebGL alias list contains it (reverse of WEBGL_TO_GLSL_EXTENSION_ALIASES).
+ *  Null when the name is not a GLSL extension (registry names without a GLSL
+ *  counterpart, e.g. EXT_texture_filter_anisotropic — no GLSL macro exists). */
+function glslMacroNameFor(name: string): string | null {
+  if (name.startsWith('GL_')) return name;
+  for (const [glslName, webglNames] of Object.entries(WEBGL_TO_GLSL_EXTENSION_ALIASES)) {
+    if (webglNames.includes(name)) return glslName;
+  }
+  return null;
+}
+
 function handleExtension(args: PToken[], line: number, st: State): void {
   if (args.length !== 3 || args[1].text !== ':') {
     st.errors.push({ line: remap(st, line), message: 'invalid #extension directive' });
@@ -1009,7 +1054,7 @@ function handleExtension(args: PToken[], line: number, st: State): void {
   }
   if (behavior === 'require') {
     // Only `require` of an unsupported extension is an error (GLSL ES §3.4).
-    if (!st.opts.extensions || !st.opts.extensions.has(name)) {
+    if (!extensionAvailable(st, name)) {
       st.errors.push({ line: remap(st, line), message: `extension '${name}' is not supported` });
     } else {
       st.macros.set(name, simpleMacro(name, '1'));
@@ -1022,7 +1067,7 @@ function handleExtension(args: PToken[], line: number, st: State): void {
     // EXCEPTION: KNOWN_UNAVAILABLE_GLSL_EXTENSIONS — a compile error, because
     // their CTS pages (nv-shader-noperspective-interpolation.html) demand
     // that enabling an unsupported extension fails the shader.
-    if (st.opts.extensions && st.opts.extensions.has(name)) {
+    if (extensionAvailable(st, name)) {
       st.macros.set(name, simpleMacro(name, '1'));
       st.extState.set(name, behavior);
     } else if (KNOWN_UNAVAILABLE_GLSL_EXTENSIONS.has(name)) {
@@ -1264,6 +1309,23 @@ export function preprocess(source: string, opts: PreprocessOptions): PreprocessR
       }
       const body = tokenize(charsOf(value)).filter((t) => t.text !== '\n');
       st.macros.set(name, { name, params: null, body, paramIndex: new Map(), rawArgs: [], kind: 'normal' });
+    }
+  }
+  // GLSL ES §3.4: an enabled extension's GL_<name> macro is defined to 1. gl/
+  // feeds the ENABLED WebGL extensions (registry names + mapped GLSL names
+  // from glsl-names.ts); the CTS extension pages compile macro-check shaders
+  // with NO #extension directive and expect the macro defined exactly when
+  // the extension is enabled on the context (webgl-blend-func-extended.js
+  // macro100/macro300: enabled phase after getExtension(), disabled phase
+  // before it). Registry names resolve through WEBGL_TO_GLSL_EXTENSION_ALIASES
+  // to their GLSL macro name. `#extension ... : disable` / `all : disable`
+  // still undefine the macro (last directive wins — handleExtension).
+  if (opts.extensions) {
+    for (const name of opts.extensions) {
+      const macroName = glslMacroNameFor(name);
+      if (macroName !== null && !st.macros.has(macroName)) {
+        st.macros.set(macroName, simpleMacro(macroName, '1'));
+      }
     }
   }
 

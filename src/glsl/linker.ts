@@ -1565,30 +1565,38 @@ function layoutAttributes(vs: Shader, opts: LinkOptions, limits: LinkLimits): At
 
 interface OutputLayoutResult {
   map: Map<string, number>;
-  outputs: { location: number; type: number }[];
+  outputs: { location: number; index: number; type: number }[];
 }
 
 /** Fragment output locations. ES 1.00: gl_FragColor → 0, gl_FragData[i] → i
- *  (layout key 'gl_FragData' → base 0; codegen adds the index). ES 3.00: user
- *  outs with explicit layout(location=) or the single-output default 0; ARRAY
- *  outputs expand to one Program output entry PER SLOT (ShaderInfo carries the
- *  declaration entry + per-element '<name>[k]' entries — see compiler.ts
- *  OutputDecl). */
+ *  (layout key 'gl_FragData' → base 0; codegen adds the index),
+ *  gl_SecondaryFragColorEXT → 0 with blend index 1 (dual-source secondary).
+ *  ES 3.00: user outs with explicit layout(location=) or the single-output
+ *  default 0; ARRAY outputs expand to one Program output entry PER SLOT
+ *  (ShaderInfo carries the declaration entry + per-element '<name>[k]'
+ *  entries — see compiler.ts OutputDecl). Every entry carries the dual-source
+ *  blend `index` (0/1): same location with indices 0/1 links fine (primary +
+ *  secondary); same location AND index conflicts. */
 function layoutOutputs(fs: Shader, limits: LinkLimits): OutputLayoutResult | { error: string } {
   const map = new Map<string, number>();
-  const outputs: { location: number; type: number }[] = [];
+  const outputs: { location: number; index: number; type: number }[] = [];
   if (fs.version === 100) {
     for (const o of fs.info.outputs) {
       if (o.name === 'gl_FragColor') {
         map.set('gl_FragColor', 0);
-        outputs.push({ location: 0, type: toGLenum(o.type) });
+        outputs.push({ location: 0, index: 0, type: toGLenum(o.type) });
+      } else if (o.name === 'gl_SecondaryFragColorEXT') {
+        // GL_EXT_blend_func_extended: secondary color = location 0, index 1.
+        // gl/ (draw.ts) reads index === 1 to detect dual-source outputs.
+        map.set('gl_SecondaryFragColorEXT', 0);
+        outputs.push({ location: 0, index: 1, type: toGLenum(o.type) });
       } else if (o.name.startsWith('gl_FragData')) {
         const idx = o.index ?? 0;
         if (idx >= limits.maxDrawBuffers) {
           return { error: `linker: gl_FragData[${idx}] exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
         }
         map.set('gl_FragData', 0);
-        outputs.push({ location: idx, type: toGLenum(o.type) });
+        outputs.push({ location: idx, index: 0, type: toGLenum(o.type) });
       }
     }
   } else {
@@ -1597,7 +1605,9 @@ function layoutOutputs(fs: Shader, limits: LinkLimits): OutputLayoutResult | { e
     // then auto-assigns location 0 — CTS draw-buffers / gl-get-frag-data).
     let declCount = 0;
     for (const o of fs.info.outputs) if (parseOutputElement(o.name) === null) declCount++;
-    const occupied = new Map<number, string>(); // location → owning declaration
+    // location:index → owning declaration (dual-source: index 0/1 share the
+    // location; same location+index is a conflict).
+    const occupied = new Map<string, string>();
     for (const o of fs.info.outputs) {
       const el = parseOutputElement(o.name);
       if (el !== null) {
@@ -1612,13 +1622,14 @@ function layoutOutputs(fs: Shader, limits: LinkLimits): OutputLayoutResult | { e
         if (loc >= limits.maxDrawBuffers) {
           return { error: `linker: output '${o.name}' location ${loc} exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
         }
-        const owner = occupied.get(loc);
+        const key = `${loc}:${o.index ?? 0}`;
+        const owner = occupied.get(key);
         if (owner !== undefined && owner !== el.base) {
           return { error: `linker: output '${o.name}' location ${loc} conflicts with another output` };
         }
-        occupied.set(loc, el.base);
+        occupied.set(key, el.base);
         map.set(o.name, loc);
-        outputs.push({ location: loc, type: toGLenum(o.type) });
+        outputs.push({ location: loc, index: o.index ?? 0, type: toGLenum(o.type) });
         continue;
       }
       // Declaration entry.
@@ -1635,13 +1646,15 @@ function layoutOutputs(fs: Shader, limits: LinkLimits): OutputLayoutResult | { e
         return { error: `linker: output '${o.name}' location ${base} exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
       }
       map.set(o.name, base);
+      const outIndex = o.index ?? 0;
       if (o.arraySize === 1) {
-        const owner = occupied.get(base);
+        const key = `${base}:${outIndex}`;
+        const owner = occupied.get(key);
         if (owner !== undefined) {
           return { error: `linker: output '${o.name}' location ${base} conflicts with another output` };
         }
-        occupied.set(base, o.name);
-        outputs.push({ location: base, type: toGLenum(o.type) });
+        occupied.set(key, o.name);
+        outputs.push({ location: base, index: outIndex, type: toGLenum(o.type) });
       } else {
         // Claim the whole [base, base+arraySize) range; the per-slot Program
         // output entries come from the element entries below.
@@ -1650,11 +1663,12 @@ function layoutOutputs(fs: Shader, limits: LinkLimits): OutputLayoutResult | { e
           if (loc >= limits.maxDrawBuffers) {
             return { error: `linker: output '${o.name}' location ${loc} exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
           }
-          const owner = occupied.get(loc);
+          const key = `${loc}:${outIndex}`;
+          const owner = occupied.get(key);
           if (owner !== undefined && owner !== o.name) {
             return { error: `linker: output '${o.name}' location ${loc} conflicts with another output` };
           }
-          occupied.set(loc, o.name);
+          occupied.set(key, o.name);
         }
       }
     }
