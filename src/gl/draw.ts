@@ -791,7 +791,16 @@ function buildAttribs(
         // constant attribute
         plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: true, constant: true };
         if (pa.integral) {
-          attribs[l] = (a.constantI ?? sc.emptyInt) as Int32Array;
+          // Signedness matters: the uint mirror (constantUI) holds the values
+          // written by vertexAttribI4ui — constantI is never touched by those
+          // setters (attrib-type-match.html "Correct setup" draw reads the
+          // uvec2 constant through constantUI; constantI would be stale zeros).
+          const unsigned = pa.type === C1.UNSIGNED_INT ||
+            pa.type === C2.UNSIGNED_INT_VEC2 || pa.type === C2.UNSIGNED_INT_VEC3 ||
+            pa.type === C2.UNSIGNED_INT_VEC4;
+          attribs[l] = unsigned
+            ? (a.constantUI as Uint32Array)
+            : (a.constantI as Int32Array);
         } else {
           attribs[l] = a.constantF as Float32Array;
         }
@@ -2735,6 +2744,53 @@ function validateCommonDraw(ctx: WebGLRenderingContext, mode: GLenum, indexed: b
     if (a.enabled && !a.buffer) {
       pushError(ctx, C1.INVALID_OPERATION);
       return false;
+    }
+  }
+  // GLES 3.0 §2.11.6 (CTS conformance2/rendering/attrib-type-match.html): at
+  // draw time, the base type of every ACTIVE vertex shader input must match the
+  // type of its backing data. ENABLED arrays: vertexAttribPointer (float) vs
+  // vertexAttribIPointer (integer) must match the shader input's float vs
+  // int/uint declaration, INCLUDING int-vs-uint signedness (an INT array on a
+  // uvec input is a mismatch, and vice versa). DISABLED arrays: the current
+  // generic value's type (most recent setter — vertexAttrib* → float,
+  // vertexAttribI* → int, vertexAttribIu* → uint; default float) must match
+  // likewise. Inactive attributes are exempt (they are not in pm.attributes).
+  {
+    const pm = prog._program;
+    if (pm) {
+      const attrs = pm.attributes ?? [];
+      for (const pa of attrs) {
+        const loc = pa.location;
+        if (loc < 0 || loc >= maxAttribs) continue;
+        const a = vao.attribs[loc];
+        const shaderInt = !!pa.integral;
+        const shaderUnsigned =
+          pa.type === C1.UNSIGNED_INT || pa.type === C2.UNSIGNED_INT_VEC2 ||
+          pa.type === C2.UNSIGNED_INT_VEC3 || pa.type === C2.UNSIGNED_INT_VEC4;
+        const kind = a.genericKind ?? 'f';
+        let bad = false;
+        if (a.enabled) {
+          if (shaderInt !== a.integer) {
+            bad = true;
+          } else if (shaderInt) {
+            const arrUnsigned = a.type === C1.UNSIGNED_BYTE ||
+              a.type === C1.UNSIGNED_SHORT || a.type === C1.UNSIGNED_INT;
+            if (shaderUnsigned !== arrUnsigned) bad = true;
+          }
+        } else if (shaderInt) {
+          if (kind === 'f') {
+            bad = true;
+          } else if (shaderUnsigned ? kind !== 'ui' : kind !== 'i') {
+            bad = true;
+          }
+        } else if (kind !== 'f') {
+          bad = true;
+        }
+        if (bad) {
+          pushError(ctx, C1.INVALID_OPERATION);
+          return false;
+        }
+      }
     }
   }
   const fb = resolveDrawTarget(ctx);
