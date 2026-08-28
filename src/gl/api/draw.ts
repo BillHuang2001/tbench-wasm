@@ -269,7 +269,9 @@ function readComboOK(
     // Floating point (renderable only with the color-buffer-float extensions).
     // FLOAT is accepted with format ∈ {RED, RG, RGB, RGBA} for the 16F formats
     // when EITHER float color-buffer extension is enabled (GLES3 ReadPixels
-    // table: R16F/RG16F/RGBA16F accept RG/RGB/RGBA expansion with FLOAT).
+    // table: R16F/RG16F/RGBA16F accept RG/RGB/RGBA expansion with FLOAT; the
+    // 32F formats accept the same expansion with FLOAT only — the CTS
+    // ext-color-buffer-float.html reads RGBA/FLOAT from R32F/RG32F).
     case C2.R16F: case C2.RG16F: case C2.RGBA16F:
       if (type === C1.FLOAT &&
           (extSupported(ctx, 'EXT_color_buffer_float') || extSupported(ctx, 'EXT_color_buffer_half_float'))) {
@@ -277,11 +279,13 @@ function readComboOK(
       }
       return format === (internalFormat === C2.R16F ? C2.RED : internalFormat === C2.RG16F ? C2.RG : C1.RGBA) &&
         floatReadOK(ctx, type, true);
-    case C2.R32F: return format === C2.RED && floatReadOK(ctx, type, false);
-    case C2.RG32F: return format === C2.RG && floatReadOK(ctx, type, false);
-    case C2.RGBA32F: return format === C1.RGBA && floatReadOK(ctx, type, false);
+    case C2.R32F: case C2.RG32F: case C2.RGBA32F:
+      return (format === C2.RED || format === C2.RG || format === C1.RGB || format === C1.RGBA) &&
+        floatReadOK(ctx, type, false);
     case C2.R11F_G11F_B10F:
-      return format === C1.RGB && floatReadOK(ctx, type, true);
+      // GLES3 adds RGB/FLOAT; the CTS (format-r11f-g11f-b10f, ext-color-buffer-
+      // float) additionally reads RGBA/FLOAT from R11F_G11F_B10F attachments.
+      return (format === C1.RGB || format === C1.RGBA) && floatReadOK(ctx, type, true);
     // Signed / unsigned integer
     case C2.R8I: return format === C2.RED_INTEGER && type === C1.BYTE;
     case C2.R8UI: return format === C2.RED_INTEGER && type === C1.UNSIGNED_BYTE;
