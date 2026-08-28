@@ -658,8 +658,12 @@ function readSourceTexel(dv: DataView, byteOff: number, format: GLenum, type: GL
     case C.RGB: case C.RGB_INTEGER: out[3] = 1; break;
     case C.RG: case C.RG_INTEGER: out[2] = 0; out[3] = 1; break;
     case C.LUMINANCE: out[1] = out[0]; out[2] = out[0]; out[3] = 1; break;
-    case C.LUMINANCE_ALPHA: out[1] = out[0]; out[2] = out[0]; break;
-    case C.ALPHA: out[0] = 0; out[1] = 0; out[2] = 0; break;
+    // LUMINANCE_ALPHA stores [L, A]; encoders read L from out[0] and A from
+    // out[3] (raster registry) or out[1] (local spec) — keep both slots = A.
+    case C.LUMINANCE_ALPHA: out[2] = out[0]; out[3] = out[1]; break;
+    // ALPHA stores A; encoders read it from out[0] (local spec) or out[3]
+    // (raster registry) — keep both slots = A.
+    case C.ALPHA: out[1] = 0; out[2] = 0; out[3] = out[0]; break;
     case C.RED: case C.RED_INTEGER: case C.DEPTH_COMPONENT: out[1] = 0; out[2] = 0; out[3] = 1; break;
     default: break;
   }
@@ -1018,13 +1022,24 @@ export function uploadTexImage(
   if (!spec) return;
   const img = ensureImage(texture, target);
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
-  const levelData = allocLevel(spec, width, height, depth, isCube);
+  // Cube faces are independent images: when re-uploading a face into an
+  // existing level of the same size/format, reuse the record so previously
+  // uploaded faces keep their data (cube completeness needs all 6 defined).
+  const prev = isCube ? img.levels[level] : undefined;
+  const reuse = !!(prev && prev.width === width && prev.height === height && img.internalFormat === internalformat);
+  const levelData = reuse ? prev : allocLevel(spec, width, height, depth, isCube);
   if (isCube) {
-    // Only the uploaded face is defined (cube completeness needs all 6).
     const face = cubeFaceIndex(target);
-    for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = undefined as unknown as ArrayBufferView;
+    if (!reuse) {
+      // Fresh record: only the uploaded face is defined (cube completeness needs all 6).
+      for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = undefined as unknown as ArrayBufferView;
+    } else if (levelData.data[face] === undefined) {
+      // Reused record: allocate the view for the face being (re)defined.
+      const perFace = width * height;
+      levelData.data[face] = new spec.ctor((perFace * spec.bytesPerPixel) / spec.bytesPerElement);
+    }
   }
-  img.levels[level] = levelData;
+  if (!reuse) img.levels[level] = levelData;
   texture._internalFormat = internalformat;
   texture._compressed = false;
   img.internalFormat = internalformat;
@@ -1167,10 +1182,16 @@ export function copyTexImage(
   if (!spec) return;
   const img = ensureImage(texture, target);
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
+  const existing = img.levels[level];
   const levelData = allocLevel(spec, width, height, 1, isCube);
   if (isCube) {
+    // Keep faces from earlier copyTexImage2D calls (see uploadTexImage).
     const face = cubeFaceIndex(target);
-    for (let f = 0; f < 6; f++) if (f !== face) levelData.data[f] = undefined as unknown as ArrayBufferView;
+    for (let f = 0; f < 6; f++) {
+      levelData.data[f] = f !== face && existing && existing.data[f] !== undefined
+        ? existing.data[f]
+        : (undefined as unknown as ArrayBufferView);
+    }
   }
   img.levels[level] = levelData;
   texture._internalFormat = internalformat;
