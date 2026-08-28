@@ -908,6 +908,32 @@ export function hasTextureLevel(texture: WebGLTexture, target: GLenum, level: nu
 // Engine entry points (called by api/teximage.ts after validation)
 // ---------------------------------------------------------------------------
 
+/**
+ * Nearest-neighbor RGBA8 resample. Used when a DOM source's element size
+ * differs from its decoded natural size (SVG images: the WebGL spec sizes the
+ * texture from the HTMLImageElement width/height properties, while
+ * present/image decodes the SVG at its natural raster size — e.g. 150×150
+ * decoded vs 100×100 element props in tex-image-svg-image-no-natural-
+ * width-and-height.html). Non-hot path (uploads, not per-fragment).
+ */
+function scaleNearest(src: Uint8ClampedArray, sw: number, sh: number, dw: number, dh: number): Uint8ClampedArray {
+  const out = new Uint8ClampedArray(dw * dh * 4);
+  for (let y = 0; y < dh; y++) {
+    const sy = Math.min(sh - 1, Math.floor((y * sh) / dh));
+    const srcRow = sy * sw * 4;
+    const dstRow = y * dw * 4;
+    for (let x = 0; x < dw; x++) {
+      const si = srcRow + Math.min(sw - 1, Math.floor((x * sw) / dw)) * 4;
+      const di = dstRow + x * 4;
+      out[di] = src[si];
+      out[di + 1] = src[si + 1];
+      out[di + 2] = src[si + 2];
+      out[di + 3] = src[si + 3];
+    }
+  }
+  return out;
+}
+
 /** Shared upload path: convert source pixels into a level. */
 function copyPixelsIntoLevel(
   ctx: WebGLRenderingContext,
@@ -937,10 +963,23 @@ function copyPixelsIntoLevel(
   // DOM source: decode via present/ (stub → zero-fill fallback, documented gap).
   if (pixels === null || pixels === undefined) return; // zero-filled allocation
   if (typeof pixels !== 'number' && !ArrayBuffer.isView(pixels) && source !== undefined) {
+    // 0×0 level (e.g. an SVG without width/height attributes — the WebGL spec
+    // sizes SVG uploads from the element width/height properties, which are 0
+    // when the SVG has no intrinsic dimensions): nothing to upload.
+    if (width <= 0 || height <= 0) return;
     try {
       const res = decodeImageSource(source as never) as { ok: boolean; image?: { width: number; height: number; data: Uint8ClampedArray }; reason?: string };
       if (res && res.ok && res.image) {
         const im = res.image;
+        // Element size differs from the decoded natural size (SVG images with
+        // width/height properties set on the element): resample to the target
+        // level size before the copy (the WebGL spec sets the texture size
+        // from the element properties, so the source must be scaled to fit).
+        if (im.width !== width || im.height !== height) {
+          im.data = scaleNearest(im.data, im.width, im.height, width, height);
+          im.width = width;
+          im.height = height;
+        }
         // unpackColorSpace = 'display-p3': convert the decoded (sRGB) pixels to
         // display-p3 before upload (WebGL color-space rules; CSS Color 4
         // matrices). Integer formats store raw channel values and are exempt.
