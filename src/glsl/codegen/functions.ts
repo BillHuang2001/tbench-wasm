@@ -39,9 +39,16 @@
  * (env.pushParamFrame) holding per-call-site LocalVars (unique JS names
  * `<name>$c<N>` — `$` is not a GLSL identifier char, so they can never
  * collide with GLSL-derived names or temps) plus the function's local names
- * (pre-scanned from the body). env.resolveLocal consults the frames
- * top-down, so same-named params/locals of nested calls never collide
- * (locals_ alone can hold only ONE entry per GLSL name).
+ * (pre-scanned from the body). env.resolveLocal consults the CURRENT
+ * function's frame (env.bodyDepth - 1), so same-named params/locals of
+ * nested calls never collide (locals_ alone can hold only ONE entry per
+ * GLSL name), while CALLER frames stay invisible to the inlined body:
+ * a callee body sees only its own scope + globals, exactly as GLSL scoping
+ * requires (in-parameter-passed-as-inout-argument-and-global — a free name
+ * matching the caller's param must resolve to the global). Arg
+ * materialization runs BEFORE the body (bodyDepth not yet incremented), so
+ * the args of a nested call resolve in the CALLER's scope, where they
+ * belong.
  *
  * The function's OWN body locals get the SAME per-call-site treatment
  * (env.frameLocal, consulted by statements.ts's emitDeclStmt BEFORE the
@@ -473,12 +480,23 @@ function inlineCall(
 
     /* ---------- 4. inlined body ---------- */
     const label = ctx.label();
-    const bodyLines = emitStatements(fn.body.body, env, {
-      retTemps,
-      retDualTemps,
-      epilogueLabel: label,
-      retType,
-    });
+    // Callee-body mode: while emitting THIS function's body, free-name
+    // resolution must see only this function's frame + globals — never the
+    // caller's frames (GLSL scoping; env.resolveLocal uses bodyDepth - 1 as
+    // the current-function frame index). Arg materialization above stays in
+    // the CALLER's scope (bodyDepth unchanged).
+    env.bodyDepth++;
+    let bodyLines: string[];
+    try {
+      bodyLines = emitStatements(fn.body.body, env, {
+        retTemps,
+        retDualTemps,
+        epilogueLabel: label,
+        retType,
+      });
+    } finally {
+      env.bodyDepth--;
+    }
 
     /* ---------- 5. write-backs (after the labeled block — a
      * `break EP_<n>` from a return lands right after `}` and still runs) ---- */
