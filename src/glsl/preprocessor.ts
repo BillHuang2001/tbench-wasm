@@ -373,8 +373,12 @@ function scanNumber(chars: Char[], i: number): { text: string; next: number } {
  * `\n` tokens (directive detection needs line boundaries); every other run of
  * characters becomes a token (identifiers, numbers, punctuators, single
  * chars — `"` is a single-char token; the lexer validates characters later).
+ *
+ * `errors` is optional: only the main source tokenization passes it, so the
+ * identifier-length check applies to shader source (including tokens inside
+ * `#define` bodies) but not to preprocessor-injected defines.
  */
-function tokenize(chars: Char[]): PToken[] {
+function tokenize(chars: Char[], errors?: CompileError[]): PToken[] {
   const out: PToken[] = [];
   let i = 0;
   let col = 0;
@@ -401,6 +405,19 @@ function tokenize(chars: Char[]): PToken[] {
       while (j < n && isIdentChar(chars[j].ch)) j++;
       text = chars.slice(i, j).map((x) => x.ch).join('');
       i = j;
+      // ESSL 3.00 §3.6: identifiers are limited to 1024 characters; a longer
+      // identifier TOKEN is a compile error (CTS: shader-with-1025-character-
+      // define.html / shader-with-1025-character-identifier.frag.html /
+      // attrib-location-length-limits.html). Checked here — NOT only in the
+      // lexer — because a `#define`-body token (like the 1025 X's of
+      // shader-with-1025-character-define.html) never reaches the lexer
+      // unless the macro is expanded. Exactly 1024 characters stays legal
+      // (attrib-location-length-limits.html compiles a 1024-char attrib).
+      // The error keeps the token in the stream (processing continues; the
+      // lexer would reject it too if it ever reaches the output).
+      if (errors && text.length > 1024) {
+        errors.push({ line: c.line, message: 'identifier longer than 1024 characters' });
+      }
     } else if (isDigit(c.ch) || (c.ch === '.' && i + 1 < n && isDigit(chars[i + 1].ch))) {
       const r = scanNumber(chars, i);
       text = r.text;
@@ -927,6 +944,18 @@ function handleVersion(args: PToken[], line: number, st: State): void {
     st.errors.push({ line: remap(st, line), message: 'invalid #version directive: 300 es not supported in a WebGL 1 context' });
     return;
   }
+  // ESSL 3.00 §3.3: `#version` must appear on the very FIRST line of the
+  // shader — a newline or comment before it is a compile error (CTS:
+  // conformance2/glsl3/misplaced-version-directive.html grades all four
+  // newline/comment-before cases as failures). ESSL 1.00 is permissive:
+  // comments and whitespace may precede `#version 100` (CTS:
+  // conformance/glsl/misc/shader-with-version-100.vert.html compiles such a
+  // shader successfully). Note this check runs AFTER versionSeen, so a
+  // duplicate `#version` still reports the duplicate error.
+  if (v === 300 && line !== 1) {
+    st.errors.push({ line: remap(st, line), message: 'invalid #version directive: must appear on the first line' });
+    return;
+  }
   st.version = v;
   st.versionSeen = true;
 }
@@ -1126,8 +1155,30 @@ function dispatchDirective(dTokens: PToken[], line: number, st: State): void {
         case 'error':
           handleError(args, line, st);
           return;
-        case 'pragma':
+        case 'pragma': {
+          // ESSL 3.00 §4.6.1: "#pragma STDGL invariant(all)" — "It is an
+          // error to use this pragma in a fragment shader" (only OUTPUTS can
+          // be invariant; the pragma is the vertex-shader debug aid).
+          // ESSL 1.00 has no such restriction (conformance/glsl/misc/
+          // shaders-with-invariance.html case 17 compiles a fragment shader
+          // carrying the pragma). Other pragmas are dropped entirely.
+          if (
+            st.version === 300 &&
+            st.opts.type === 'FRAGMENT' &&
+            args.length === 5 &&
+            args[0].text === 'STDGL' &&
+            args[1].text === 'invariant' &&
+            args[2].text === '(' &&
+            args[3].text === 'all' &&
+            args[4].text === ')'
+          ) {
+            st.errors.push({
+              line: remap(st, line),
+              message: "'invariant(all)' : the '#pragma STDGL invariant(all)' directive is an error in a fragment shader",
+            });
+          }
           return;
+        }
         case 'version':
           handleVersion(args, line, st);
           return;
@@ -1216,7 +1267,7 @@ export function preprocess(source: string, opts: PreprocessOptions): PreprocessR
     }
   }
 
-  const tokens = tokenize(stripComments(splice(source), errors));
+  const tokens = tokenize(stripComments(splice(source), errors), errors);
   const out: RawToken[] = [];
   let i = 0;
   while (i < tokens.length) {

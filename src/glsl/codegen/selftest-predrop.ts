@@ -723,6 +723,324 @@ void main() {
 }
 
 /* ------------------------------------------------------------------ */
+/* Shared-pre identity dedupe in ctor/unary/comma consumers            */
+/* (dedupeSharedPre — emitVectorCtor/emitMatrixCtor/emitUnary/         */
+/* emitComma): a multi-component user-call result carries ONE [iife]   */
+/* pre array on EVERY component; folding it per component re-ran the   */
+/* callee once per component. Each pin uses an int side-effect counter */
+/* global `g` (intScratch-backed; read back through the shader output  */
+/* via float(g)) incremented inside the callee.                        */
+/* ------------------------------------------------------------------ */
+
+// (v) vec4(f(), 0.0, 1.0) with a vec2-returning f — the ctor arg carries
+// the shared [iife] on both components; emitVectorCtor must dedupe BEFORE
+// materialize. Pre-fix: callee ran twice (counter 2).
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+int g = 0;
+vec2 f() { g = g + 1; return vec2(1.0, 2.0); }
+out vec4 color;
+void main() {
+  vec4 v = vec4(f(), 0.0, 1.0);
+  color = vec4(float(g), v.x, v.y, v.z);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  check(
+    ctx.out.color[0][0] === 1,
+    `vec4(f(),0,1) runs callee once (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === 1 && ctx.out.color[0][2] === 2 && ctx.out.color[0][3] === 0,
+    `vec4(f(),0,1) values (got [${ctx.out.color[0].join(',')}])`,
+  );
+}
+
+// (v2) DUAL mode: same ctor — the materialized (v,dx,dy) temp triples share
+// one deduped pre; the callee runs once and the result duals read the temps.
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+int g = 0;
+vec2 f() { g = g + 1; return vec2(1.0, 2.0); }
+out vec4 color;
+void main() {
+  vec4 v = vec4(f(), 0.0, 1.0);
+  float dx = dFdx(v.x);
+  color = vec4(float(g), v.x, v.y, dx);
+}`,
+    'FRAGMENT',
+    300,
+    { derivatives: true },
+  );
+  check(
+    ctx.out.color[0][0] === 1,
+    `dual vec4(f(),0,1) runs callee once (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === 1 && ctx.out.color[0][2] === 2 && ctx.out.color[0][3] === 0,
+    `dual vec4(f(),0,1) values (got [${ctx.out.color[0].join(',')}])`,
+  );
+}
+
+// (w) mat2(f()) with a mat2-returning f (lone-matrix copy) — the source
+// carries the shared [iife] on all 4 components; dedupe before use().
+// Pre-fix: callee ran 4 times.
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+int g = 0;
+mat2 f() { g = g + 1; return mat2(1.0, 2.0, 3.0, 4.0); }
+out vec4 color;
+void main() {
+  mat2 m = mat2(f());
+  color = vec4(float(g), m[0][0], m[1][1], 0.0);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  check(
+    ctx.out.color[0][0] === 1,
+    `mat2(f()) matrix copy runs callee once (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === 1 && ctx.out.color[0][2] === 4,
+    `mat2(f()) matrix copy values (got [${ctx.out.color[0].join(',')}])`,
+  );
+}
+
+// (x) vec2 v = -f(); — emitUnary non-dual path folds the operand's shared
+// [iife] per component. Pre-fix: callee ran twice.
+{
+  const { ctx } = runMain(
+    `precision mediump float;
+int g = 0;
+vec2 f() { g = g + 1; return vec2(1.0, 2.0); }
+void main() {
+  vec2 v = -f();
+  gl_FragColor = vec4(float(g), v.x, v.y, 1.0);
+}`,
+    'FRAGMENT',
+    100,
+  );
+  check(
+    ctx.out.color[0][0] === 1,
+    `-f() runs callee once (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === -1 && ctx.out.color[0][2] === -2,
+    `-f() values (got [${ctx.out.color[0].join(',')}])`,
+  );
+}
+
+// (x2) (f(), g2()) non-dual — the comma's intermediate AND last operand
+// dedupe; each callee runs once. g2's RETURN reads g, so v.x === 11 pins
+// f-before-g2 order (reversed would give 10); g === 11 pins each-once
+// (re-runs would give 12/21). Pre-fix: f ran twice (counter 12).
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+int g = 0;
+vec2 f() { g = g + 1; return vec2(1.0, 2.0); }
+vec2 g2() { g = g + 10; return vec2(float(g), 4.0); }
+out vec4 color;
+void main() {
+  vec2 v = (f(), g2());
+  color = vec4(float(g), v.x, v.y, 0.0);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  check(
+    ctx.out.color[0][0] === 11,
+    `(f(),g2()) non-dual counter (got ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === 11 && ctx.out.color[0][2] === 4,
+    `(f(),g2()) non-dual order+value (got [${ctx.out.color[0].join(',')}])`,
+  );
+}
+
+// (y) DUAL mode: (f(), g2()) — emitComma's dual path attaches ONE shared pre
+// array (intermediates + deduped last pres) to comp0 ONLY; later components
+// read the temps it sets. Same counter/order/value pins as (x2).
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+int g = 0;
+vec2 f() { g = g + 1; return vec2(1.0, 2.0); }
+vec2 g2() { g = g + 10; return vec2(float(g), 4.0); }
+out vec4 color;
+void main() {
+  vec2 v = (f(), g2());
+  float dx = dFdx(v.x);
+  color = vec4(float(g), v.x, v.y, dx);
+}`,
+    'FRAGMENT',
+    300,
+    { derivatives: true },
+  );
+  check(
+    ctx.out.color[0][0] === 11,
+    `(f(),g2()) dual counter (got ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === 11 && ctx.out.color[0][2] === 4 && ctx.out.color[0][3] === 0,
+    `(f(),g2()) dual order+value (got [${ctx.out.color[0].join(',')}])`,
+  );
+}
+
+// (y2) (f(), 1.0) at version 300 — the sequence operator NEVER const-folds at
+// 3.00 (28d1e13), so f IS evaluated (pre-fix: the last-operand const fold
+// dropped the call entirely, counter 0). The non-dual prelude embeds the
+// intermediate IIFE in comp0's v.
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+int g = 0;
+float f() { g = g + 1; return 2.0; }
+out vec4 color;
+void main() {
+  float x = (f(), 1.0);
+  color = vec4(float(g), x, 0.0, 1.0);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  check(
+    ctx.out.color[0][0] === 1,
+    `(f(),1.0) ES3 calls f (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(ctx.out.color[0][1] === 1, `(f(),1.0) value (got ${ctx.out.color[0][1]})`);
+}
+
+// (z) comma chain (f(), g2(), h()) with VEC2 functions — every operand
+// carries the shared [iife] on both components; the intermediates AND the
+// last operand dedupe. h's return reads g, so v.x === 111 pins f,g2-before-h
+// order; g === 111 pins each-once. Pre-fix: every operand ran twice
+// (counter 244, v.x 122).
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+int g = 0;
+vec2 f() { g = g + 1; return vec2(1.0, 2.0); }
+vec2 g2() { g = g + 10; return vec2(2.0, 3.0); }
+vec2 h() { g = g + 100; return vec2(float(g), 0.0); }
+out vec4 color;
+void main() {
+  vec2 v = (f(), g2(), h());
+  color = vec4(float(g), v.x, v.y, 1.0);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  check(
+    ctx.out.color[0][0] === 111,
+    `(f(),g2(),h()) chain counter (got ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === 111 && ctx.out.color[0][2] === 0,
+    `(f(),g2(),h()) chain order+value (got [${ctx.out.color[0].join(',')}])`,
+  );
+}
+
+// (z2) comma in for-init/update: `for (int i = (g = 1, 0); i < 2;
+// i = (g = g + 1, i + 1))` — the init comma runs g=1 once, the update comma
+// runs twice → g === 3, body runs twice (acc === 2). Pre-fix: dropping or
+// duplicating any comma term changed g/acc.
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+int g = 0;
+out vec4 color;
+void main() {
+  int acc = 0;
+  for (int i = (g = 1, 0); i < 2; i = (g = g + 1, i + 1)) {
+    acc = acc + 1;
+  }
+  color = vec4(float(g), float(acc), 0.0, 1.0);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  check(
+    ctx.out.color[0][0] === 3,
+    `comma for-loop counter (got ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === 2,
+    `comma for-loop body count (got ${ctx.out.color[0][1]})`,
+  );
+}
+
+// (z3) vec4(f()) SPLAT with a float-returning f, consumed by UNARY MINUS:
+// the splat broadcasts the SAME value object to all 4 outputs, and the
+// non-dual emitUnary path folds each component's pre inline — the splat's
+// shared [iife] must be deduped (once, on comp0) before the fold. (A plain
+// decl-init consumer would mask the bug — emitPres dedupes by array
+// identity.) Pre-fix: callee ran 4 times (counter 4).
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+int g = 0;
+float f() { g = g + 1; return 3.0; }
+out vec4 color;
+void main() {
+  vec4 v = -vec4(f());
+  color = vec4(float(g), v.x, v.y, v.z);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  check(
+    ctx.out.color[0][0] === 1,
+    `vec4(f()) splat runs callee once (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === -3 && ctx.out.color[0][2] === -3 && ctx.out.color[0][3] === -3,
+    `vec4(f()) splat values (got [${ctx.out.color[0].join(',')}])`,
+  );
+}
+
+// (z4) mat2(f()) FLOAT diagonal with a float-returning f — the lone-scalar
+// path broadcasts the same value object to the diagonal slots; dedupe BEFORE
+// the use()/ctorComp wrap. Pre-fix: callee ran once per column (2×).
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision mediump float;
+int g = 0;
+float f() { g = g + 1; return 3.0; }
+out vec4 color;
+void main() {
+  mat2 m = mat2(f());
+  color = vec4(float(g), m[0][0], m[1][1], 0.0);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  check(
+    ctx.out.color[0][0] === 1,
+    `mat2(f()) float diagonal runs callee once (got counter ${ctx.out.color[0][0]})`,
+  );
+  check(
+    ctx.out.color[0][1] === 3 && ctx.out.color[0][2] === 3,
+    `mat2(f()) float diagonal values (got [${ctx.out.color[0].join(',')}])`,
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
 

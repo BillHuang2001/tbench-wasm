@@ -269,7 +269,7 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   check(info2.uniforms[0].name === 'env' && info2.uniforms[0].binding === 3, 'layout(binding=3) recorded');
   checkType(info2.uniforms[0].type, { kind: 'sampler', sampler: 'samplerCube' } as GLSLType, 'samplerCube type');
   check(info2.uniforms[1].name === 'tex' && info2.uniforms[1].binding === null, 'second sampler binding null');
-  check(info2.uniforms[1].precision === 'highp', '3.00 vertex sampler defaults highp');
+  check(info2.uniforms[1].precision === 'lowp', '3.00 vertex sampler defaults lowp (ESSL 3.00 §4.5.4)');
 }
 
 /* ------------------------------------------------------------------ */
@@ -500,6 +500,57 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   check(lod300b.uses.derivatives === false, 'texelFetch → NOT derivatives');
   const lod100 = okInfo('#extension GL_EXT_shader_texture_lod : enable\nprecision mediump float;\nuniform sampler2D s;\nvarying vec2 uv;\nvoid main() { gl_FragColor = texture2DLodEXT(s, uv, 0.0); }', 100, 'FRAGMENT', ['GL_EXT_shader_texture_lod']);
   check(lod100.uses.derivatives === false, 'texture2DLodEXT → NOT derivatives');
+}
+
+/* ------------------------------------------------------------------ */
+/* 6b. Texture-offset constant-expression + range rules (GLSL ES 3.00  */
+/*     §8.8; CTS texture-offset-non-constant-offset.html +             */
+/*     texture-offset-out-of-range.html)                               */
+/* ------------------------------------------------------------------ */
+
+{
+  // In-range constant offsets compile (min -8 / max 7 are the WebGL2 bounds).
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, -8)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, 7)); }', 300, 'FRAGMENT');
+  // 3-component offsets (sampler3D) and the other offset-family names.
+  okInfo('#version 300 es\nprecision mediump float;\nprecision mediump sampler3D;\nuniform sampler3D s;\nin vec3 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec3(0)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureLodOffset(s, uv, 0.0, ivec2(1)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec4 uv;\nout vec4 c;\nvoid main() { c = textureProjOffset(s, uv, ivec2(1)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec4 uv;\nout vec4 c;\nvoid main() { c = textureProjLodOffset(s, uv, 0.0, ivec2(1)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureGradOffset(s, uv, vec2(1.0), vec2(1.0), ivec2(1)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec4 uv;\nout vec4 c;\nvoid main() { c = textureProjGradOffset(s, uv, vec2(1.0), vec2(1.0), ivec2(1)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = texelFetchOffset(s, ivec2(uv), 0, ivec2(0, 1)); }', 300, 'FRAGMENT');
+  // A `const` variable offset IS a constant expression (§4.3.3) — legal.
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { const ivec2 off = ivec2(1, 2); c = textureOffset(s, uv, off); }', 300, 'FRAGMENT');
+  // The trailing float bias comes after the offset — the offset stays checked.
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, 1), 0.5); }', 300, 'FRAGMENT');
+
+  // Out-of-range CONSTANT offsets are compile errors (below -8 / above 7).
+  const r1 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, -9)); }', 300, 'FRAGMENT');
+  check(hasErr(r1, 6, "'textureOffset' : offset argument out of range [-8, 7]"), 'textureOffset offset -9 → out-of-range error line 6');
+  const r2 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, 8)); }', 300, 'FRAGMENT');
+  check(hasErr(r2, 6, "'textureOffset' : offset argument out of range [-8, 7]"), 'textureOffset offset 8 → out-of-range error line 6');
+
+  // NON-constant offsets are compile errors: a local variable initialized
+  // with a constant is still not a constant expression (CTS
+  // texture-offset-non-constant-offset.html), a uniform read is not, and the
+  // whole offset family is gated.
+  const n1 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() {\n    ivec2 offset = ivec2(0);\n    c = textureOffset(s, uv, offset);\n}', 300, 'FRAGMENT');
+  check(hasErr(n1, 8, "'textureOffset' : offset argument must be a constant integral expression"), 'textureOffset non-const local offset → error line 8');
+  const n2 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nuniform int x;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, x)); }', 300, 'FRAGMENT');
+  check(hasErr(n2, 7, "'textureOffset' : offset argument must be a constant integral expression"), 'textureOffset uniform-derived offset → error line 7');
+  const n3 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() {\n    ivec2 offset = ivec2(0);\n    c = textureLodOffset(s, uv, 0.0, offset);\n}', 300, 'FRAGMENT');
+  check(hasErr(n3, 8, "'textureLodOffset' : offset argument must be a constant integral expression"), 'textureLodOffset non-const offset → error line 8');
+  const n4 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() {\n    ivec2 offset = ivec2(0);\n    c = textureGradOffset(s, uv, vec2(1.0), vec2(1.0), offset);\n}', 300, 'FRAGMENT');
+  check(hasErr(n4, 8, "'textureGradOffset' : offset argument must be a constant integral expression"), 'textureGradOffset non-const offset (5-arg form) → error line 8');
+  const n5 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec4 uv;\nout vec4 c;\nvoid main() {\n    ivec2 offset = ivec2(0);\n    c = textureProjOffset(s, uv, offset);\n}', 300, 'FRAGMENT');
+  check(hasErr(n5, 8, "'textureProjOffset' : offset argument must be a constant integral expression"), 'textureProjOffset non-const offset → error line 8');
+  const n6 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() {\n    ivec2 offset = ivec2(0);\n    c = texelFetchOffset(s, ivec2(uv), 0, offset);\n}', 300, 'FRAGMENT');
+  check(hasErr(n6, 8, "'texelFetchOffset' : offset argument must be a constant integral expression"), 'texelFetchOffset non-const offset → error line 8');
+  // A const variable with an OUT-OF-RANGE value is also rejected (value check
+  // runs on the evaluated constant, not the AST form).
+  const n7 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { const ivec2 off = ivec2(0, 9); c = textureOffset(s, uv, off); }', 300, 'FRAGMENT');
+  check(hasErr(n7, 6, "'textureOffset' : offset argument out of range [-8, 7]"), 'textureOffset const-var offset 9 → out-of-range error line 6');
 }
 
 /* ------------------------------------------------------------------ */
@@ -999,6 +1050,266 @@ check(hasErr(u9, 4, "'vec4' : type name used as a value"), 'bare T[] in expressi
 // `a[]` on a VARIABLE is rejected by semantics (was a parse error before).
 const u10 = errs('#version 300 es\nprecision mediump float;\nout vec4 o;\nvoid main() { float a = 1.0; o = vec4(a[]); }', 300, 'FRAGMENT');
 check(hasErr(u10, 4, "'[' : cannot index a value of type 'float'"), '`a[]` on a variable → error line 4');
+
+/* ------------------------------------------------------------------ */
+/* 17. ES 3.00 sequence (comma) operator restrictions                  */
+/*     (CTS forbidden-operators.html + sequence-operator-returns-      */
+/*      non-constant.html — compile-level pins; the side-effect/       */
+/*      runtime pins live in codegen/selftest-predrop.ts)              */
+/* ------------------------------------------------------------------ */
+
+// Array operand: `float b[3] = (true, a);` must fail at 300 (WebGL 2.0 spec
+// "Unsupported variants of GLSL ES 3.00 operators" — forbidden-operators.html
+// fshader-array-sequence-operator).
+const c1 = errs(
+  '#version 300 es\nprecision mediump float;\nvoid main() {\n  float a[3];\n  float b[3] = (true, a);\n}',
+  300,
+  'FRAGMENT',
+);
+check(hasErr(c1, 5, "',' : sequence operator operands cannot be arrays or structures containing arrays"), '3.00 comma array operand → error line 5');
+// Struct containing an array: `MyStruct c = (true, b);` (fshader-struct-array-sequence-operator).
+const c2 = errs(
+  '#version 300 es\nprecision mediump float;\nstruct MyStruct { bool a[3]; };\nvoid main() {\n  MyStruct b;\n  MyStruct c = (true, b);\n}',
+  300,
+  'FRAGMENT',
+);
+check(hasErr(c2, 6, "',' : sequence operator operands cannot be arrays or structures containing arrays"), '3.00 comma struct-with-array operand → error line 6');
+// Void operand: `(foo(), foo());` (fshader-void-sequence-operator).
+const c3 = errs(
+  '#version 300 es\nprecision mediump float;\nvoid foo() {}\nvoid main() {\n  (foo(), foo());\n}',
+  300,
+  'FRAGMENT',
+);
+check(hasErr(c3, 5, "',' : cannot use a void expression as a sequence operator operand"), '3.00 comma void operand → error line 5');
+// The sequence result is NEVER a constant expression at 300: `const float a
+// = (0.0, 1.0);` must fail (sequence-operator-returns-non-constant.html).
+const c4 = errs(
+  '#version 300 es\nprecision mediump float;\nconst float a = (0.0, 1.0);\nvoid main() { }',
+  300,
+  'FRAGMENT',
+);
+check(hasErr(c4, 3, "'a' : initializer of const variable must be a constant expression"), '3.00 const comma initializer → error line 3');
+// Array size from a sequence: `float a[(2, 3)];` must fail at 300 (same page).
+const c5 = errs(
+  '#version 300 es\nprecision mediump float;\nvoid main() {\n  float a[(2, 3)];\n}',
+  300,
+  'FRAGMENT',
+);
+check(hasErr(c5, 4, 'array size must be a constant integer expression'), '3.00 comma array size → error line 4');
+// ES 1.00 keeps every one of these permissive (no graded restriction): all
+// five variants must still COMPILE at version 100.
+const c1v = okInfo('precision mediump float;\nvoid main() {\n  float a[3];\n  float b[3] = (true, a);\n}', 100, 'FRAGMENT');
+check(c1v !== null, '1.00 comma array operand still compiles');
+const c2v = okInfo('precision mediump float;\nstruct MyStruct { bool a[3]; };\nvoid main() {\n  MyStruct b;\n  MyStruct c = (true, b);\n}', 100, 'FRAGMENT');
+check(c2v !== null, '1.00 comma struct-with-array operand still compiles');
+const c3v = okInfo('precision mediump float;\nvoid foo() {}\nvoid main() {\n  (foo(), foo());\n}', 100, 'FRAGMENT');
+check(c3v !== null, '1.00 comma void operand still compiles');
+const c4v = okInfo('precision mediump float;\nconst float a = (0.0, 1.0);\nvoid main() { }', 100, 'FRAGMENT');
+check(c4v !== null, '1.00 all-constant comma const initializer still compiles');
+const c5v = okInfo('precision mediump float;\nvoid main() {\n  float a[(2, 3)];\n}', 100, 'FRAGMENT');
+check(c5v !== null, '1.00 all-constant comma array size still compiles');
+/* ES 3.00 sampler precision + sampler-array indexing (CTS             */
+/* sampler-no-precision.html / sampler-array-indexing.html)            */
+/* ------------------------------------------------------------------ */
+
+// ESSL 3.00 §4.5.4: ONLY sampler2D/samplerCube have predeclared defaults
+// (lowp) — every other sampler kind needs an explicit qualifier or a
+// `precision <q> <kind>;` statement, in BOTH stages.
+const SAMPLER_KINDS_NO_DEFAULT = [
+  'sampler3D', 'samplerCubeShadow', 'sampler2DShadow', 'sampler2DArray',
+  'sampler2DArrayShadow', 'isampler2D', 'isampler3D', 'isamplerCube',
+  'isampler2DArray', 'usampler2D', 'usampler3D', 'usamplerCube',
+  'usampler2DArray',
+];
+for (const s of SAMPLER_KINDS_NO_DEFAULT) {
+  const ev = errs(`#version 300 es\nprecision mediump float;\nuniform ${s} u_s;\nvoid main() { gl_Position = vec4(0.0); }`, 300, 'VERTEX');
+  check(hasErr(ev, 3, `'u_s' : No precision specified for (${s})`), `v300 vertex ${s} no precision → error line 3`);
+  const ef = errs(`#version 300 es\nprecision mediump float;\nout vec4 c;\nuniform ${s} u_s;\nvoid main() { c = vec4(1.0); }`, 300, 'FRAGMENT');
+  check(hasErr(ef, 4, `'u_s' : No precision specified for (${s})`), `v300 fragment ${s} no precision → error line 4`);
+}
+// sampler2D/samplerCube keep their predeclared lowp defaults (no error).
+okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D u_s;\nvoid main() { gl_Position = vec4(0.0); }', 300, 'VERTEX');
+okInfo('#version 300 es\nprecision mediump float;\nout vec4 c;\nuniform sampler2D u_s;\nvoid main() { c = vec4(1.0); }', 300, 'FRAGMENT');
+okInfo('#version 300 es\nprecision mediump float;\nuniform samplerCube u_s;\nvoid main() { gl_Position = vec4(0.0); }', 300, 'VERTEX');
+okInfo('#version 300 es\nprecision mediump float;\nout vec4 c;\nuniform samplerCube u_s;\nvoid main() { c = vec4(1.0); }', 300, 'FRAGMENT');
+// An explicit `precision mediump sampler3D;` default statement is honored
+// (uniform resolves to mediump).
+const pv = okInfo('#version 300 es\nprecision mediump float;\nprecision mediump sampler3D;\nuniform sampler3D u_s;\nvoid main() { gl_Position = vec4(0.0); }', 300, 'VERTEX');
+check(pv.uniforms[0].precision === 'mediump', 'explicit `precision mediump sampler3D;` gives the uniform mediump');
+okInfo('#version 300 es\nprecision mediump float;\nprecision highp sampler2DArray;\nout vec4 c;\nuniform sampler2DArray u_s;\nvoid main() { c = vec4(1.0); }', 300, 'FRAGMENT');
+// An explicit per-declaration qualifier also satisfies the rule.
+okInfo('#version 300 es\nprecision mediump float;\nuniform highp sampler3D u_s;\nvoid main() { gl_Position = vec4(0.0); }', 300, 'VERTEX');
+// Sampler ARRAYS unwrap to their element for the precision rule.
+const ea = errs('#version 300 es\nprecision mediump float;\nuniform sampler3D u_s[2];\nvoid main() { gl_Position = vec4(0.0); }', 300, 'VERTEX');
+check(hasErr(ea, 3, "'u_s' : No precision specified for (sampler3D)"), 'v300 sampler ARRAY no precision → error on the array name');
+
+// ESSL 3.00 §4.1.7: sampler arrays may only be indexed with CONSTANT
+// integral expressions (v300 only — 1.00 stays lenient).
+const idxErr = errs(
+  '#version 300 es\nprecision mediump float;\nuniform sampler2D u_tex[2];\nvoid main() {\n  for (int i = 0; i < 2; i++) {\n    texture(u_tex[i], vec2(0));\n  }\n}',
+  300,
+  'FRAGMENT',
+);
+check(hasErr(idxErr, 6, 'sampler arrays may only be indexed with constant integral expressions'), 'v300 sampler array loop-index → error line 6');
+okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D u_tex[2];\nvoid main() {\n  texture(u_tex[0], vec2(0));\n  texture(u_tex[1], vec2(0));\n}', 300, 'FRAGMENT');
+okInfo(
+  'precision mediump float;\nuniform sampler2D u_tex[2];\nvarying vec2 uv;\nvoid main() {\n  for (int i = 0; i < 2; i++) {\n    gl_FragColor = texture2D(u_tex[i], uv);\n  }\n}',
+  100,
+  'FRAGMENT',
+);
+
+/* ------------------------------------------------------------------ */
+/* 16. ESSL 3.00 invariant-on-inputs (CTS invalid-invariant.html)      */
+/* ------------------------------------------------------------------ */
+
+{
+  // ESSL 3.00 §4.6.1: "Only variables output from a shader can be candidates
+  // for invariance" — the qualifier form on an INPUT is a compile error in
+  // both stages (pre-fix: accepted and linked). ESSL 1.00 explicitly ALLOWS
+  // invariant on fragment-input varyings (§4.6.1 list) — no 1.00 regression.
+  const g1 = errs(
+    '#version 300 es\nprecision mediump float;\ninvariant in vec4 v_varying;\nout vec4 my_color;\nvoid main() { my_color = v_varying; }',
+    300,
+    'FRAGMENT',
+  );
+  check(
+    hasErr(g1, 3, "'v_varying' : invariant qualifier can only be applied to shader outputs"),
+    'v300 fragment `invariant in` → error line 3',
+  );
+  const g2 = errs(
+    '#version 300 es\nprecision mediump float;\ninvariant in vec4 pos;\nvoid main() { gl_Position = pos; }',
+    300,
+    'VERTEX',
+  );
+  check(
+    hasErr(g2, 3, "'pos' : invariant qualifier can only be applied to shader outputs"),
+    'v300 vertex `invariant in` → error line 3',
+  );
+  // Short form on an input (ESSL 3.00: same rule; ANGLE rejects it).
+  const g3 = errs(
+    '#version 300 es\nprecision mediump float;\nin vec4 v_varying;\ninvariant v_varying;\nout vec4 my_color;\nvoid main() { my_color = v_varying; }',
+    300,
+    'FRAGMENT',
+  );
+  check(hasErr(g3, 4, "'v_varying' : invariant can only be applied to shader outputs"), 'v300 short-form invariant on input → error line 4');
+  // gl_FragCoord is a fragment INPUT — invariant short form on it is an
+  // error at 300 (allowed at 100, pinned above in section 14).
+  const g4 = errs(
+    '#version 300 es\nprecision mediump float;\ninvariant gl_FragCoord;\nout vec4 c;\nvoid main() { c = vec4(gl_FragCoord.xy, 0.0, 1.0); }',
+    300,
+    'FRAGMENT',
+  );
+  check(hasErr(g4, 3, "'gl_FragCoord' : invariant can only be applied to shader outputs"), 'v300 `invariant gl_FragCoord;` → error line 3');
+  // Legal at 300: outputs only.
+  okInfo('#version 300 es\nprecision mediump float;\ninvariant out vec4 v;\nvoid main() { v = vec4(1.0); gl_Position = v; }', 300, 'VERTEX');
+  okInfo('#version 300 es\nout vec4 v;\ninvariant v;\nvoid main() { v = vec4(1.0); gl_Position = v; }', 300, 'VERTEX');
+  okInfo('#version 300 es\nprecision mediump float;\nout vec4 c;\ninvariant c;\nvoid main() { c = vec4(1.0); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\ninvariant gl_Position;\nvoid main() { gl_Position = vec4(1.0); }', 300, 'VERTEX');
+  // Interface blocks: block-level `invariant in` is an error; `invariant out`
+  // is legal (valid-invariant-style block form).
+  const g5 = errs(
+    '#version 300 es\nprecision mediump float;\ninvariant in VS_OUT { vec4 c; } v;\nout vec4 o;\nvoid main() { o = v.c; }',
+    300,
+    'FRAGMENT',
+  );
+  check(hasErr(g5, 3, "'invariant' : can only be applied to shader outputs"), 'v300 fragment `invariant in` block → error line 3');
+  okInfo('#version 300 es\ninvariant out VS_OUT { vec4 c; } v;\nvoid main() { v.c = vec4(1.0); gl_Position = v.c; }', 300, 'VERTEX');
+  // ESSL 3.00 §4.6.1: "#pragma STDGL invariant(all)" is an ERROR in a
+  // fragment shader (invalid-invariant.html subtest 1); legal in a vertex
+  // shader and in 1.00 fragment shaders (shaders-with-invariance case 17).
+  const g6 = errs(
+    '#version 300 es\n#pragma STDGL invariant(all)\nprecision mediump float;\nin vec4 v_varying;\nout vec4 my_color;\nvoid main() { my_color = v_varying; }',
+    300,
+    'FRAGMENT',
+  );
+  check(
+    hasErr(g6, 2, "'invariant(all)' : the '#pragma STDGL invariant(all)' directive is an error in a fragment shader"),
+    'v300 fragment `#pragma STDGL invariant(all)` → error line 2',
+  );
+  okInfo('#version 300 es\n#pragma STDGL invariant(all)\nprecision mediump float;\nout vec4 v_varying;\nvoid main() { v_varying = vec4(1.0); gl_Position = v_varying; }', 300, 'VERTEX');
+  okInfo('#pragma STDGL invariant(all)\nprecision mediump float;\nvarying vec4 v_varying;\nvoid main() { gl_FragColor = v_varying; }', 100, 'FRAGMENT');
+  // 1.00 fragment-input invariant still compiles (shaders-with-invariance
+  // cases 1/8 — qualifier AND short form).
+  okInfo('precision mediump float;\ninvariant varying vec4 v_varying;\nvoid main() { gl_FragColor = v_varying; }', 100, 'FRAGMENT');
+  okInfo('precision mediump float;\nvarying vec4 v_varying;\ninvariant v_varying;\nvoid main() { gl_FragColor = v_varying; }', 100, 'FRAGMENT');
+}
+/* 18. Compound-assignment matrix-multiply rule (CTS                   */
+/*     compound-assignment-type-combination.html): matC1xR1 *= matC2xR2 */
+/*     is legal iff C1 == R2 (left COLUMNS == right ROWS, ESSL 3.00     */
+/*     §5.9), result matC2xR1 — non-square left matrices only multiply  */
+/*     with a square right matrix of matching column count.             */
+/* ------------------------------------------------------------------ */
+
+// mat2x3 *= mat2 (C1=2 == R2=2) compiles — was rejected pre-fix.
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat2 ur;\nuniform mat2x3 ul;\nvoid main() {\n  mat2x3 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat2 ur;\nuniform mat2x4 ul;\nvoid main() {\n  mat2x4 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat3 ur;\nuniform mat3x2 ul;\nvoid main() {\n  mat3x2 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat3 ur;\nuniform mat3x4 ul;\nvoid main() {\n  mat3x4 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat4 ur;\nuniform mat4x2 ul;\nvoid main() {\n  mat4x2 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat4 ur;\nuniform mat4x3 ul;\nvoid main() {\n  mat4x3 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+// Binary mat2x3 * mat2 uses the same rule and compiles too.
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat2 ur;\nuniform mat2x3 ul;\nvoid main() {\n  mat2x3 a = ul * ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+// Non-square *= itself must FAIL (C1 != R2 — the page's expected-fail set).
+const m1 = errs(
+  '#version 300 es\nprecision mediump float;\nuniform mat2x3 ur;\nuniform mat2x3 ul;\nvoid main() {\n  mat2x3 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+check(hasErr(m1, 7, "'*=' : operands of type 'mat2x3' and 'mat2x3' are incompatible"), 'mat2x3 *= mat2x3 → error line 7');
+// mat3x2 *= mat2x4 must FAIL (C1=3 != R2=4).
+const m2 = errs(
+  '#version 300 es\nprecision mediump float;\nuniform mat2x4 ur;\nuniform mat3x2 ul;\nvoid main() {\n  mat3x2 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+check(hasErr(m2, 7, "'*=' : operands of type 'mat3x2' and 'mat2x4' are incompatible"), 'mat3x2 *= mat2x4 → error line 7');
+// mat4x3 *= mat4x3 must FAIL (C1=4 != R2=3).
+const m3 = errs(
+  '#version 300 es\nprecision mediump float;\nuniform mat4x3 ur;\nuniform mat4x3 ul;\nvoid main() {\n  mat4x3 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+check(hasErr(m3, 7, "'*=' : operands of type 'mat4x3' and 'mat4x3' are incompatible"), 'mat4x3 *= mat4x3 → error line 7');
+// Square matrices still self-multiply.
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat3 ur;\nuniform mat3 ul;\nvoid main() {\n  mat3 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+// vec *= mat keeps working (row-vector product: vecC * matCxR → vecR).
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat2 ur;\nuniform vec2 ul;\nvoid main() {\n  vec2 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a.x));\n}',
+  300,
+  'VERTEX',
+);
 
 /* ------------------------------------------------------------------ */
 /* Summary                                                             */

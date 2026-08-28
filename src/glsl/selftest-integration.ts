@@ -34,6 +34,15 @@
  *      matrix-compound-multiply regression): CTS pattern (mat2/3/4),
  *      distinct-values statement, aliasing `a *= a`, expression-value,
  *      for-update, and dual mode.
+ *  11. ES 3.00 unsized array constructors `T[](...)` (runtime values).
+ *  12. Non-square matrix multiply rules (GLSL ES 3.00 §5.9): matCxR *
+ *      vecC → vecR, vecR * matCxR → vecC, matC1xR1 * matC2xR2 iff
+ *      C1 == R2 → matC2xR1 — the gl-object-get-calls.html
+ *      matForWebGL2UniformShader.vert pair links (pre-fix: 'operands
+ *      of type mat2x3 and vec2 are incompatible'), swapped-dimension
+ *      forms are compile errors, and a run pin (m * vec2(2,3) =
+ *      (14,19,24), vec3(1,2,3) * m = (14,32), m * b → mat3x3 col1 row0
+ *      = 49).
  *
  * Run: npx tsx src/glsl/selftest-integration.ts
  * Prints "OK" and exits 0 on success; non-zero exit on failure.
@@ -412,7 +421,7 @@ let uboDual: Program | null = null;
 {
   const vs = compile(
     `#version 300 es
-     uniform Params { float k; float j; } p;
+     uniform Params { highp float k; highp float j; } p;
      in vec4 aPos;
      float scale(float x) { return x * p.k + p.j; }
      out float vX;
@@ -423,7 +432,7 @@ let uboDual: Program | null = null;
   const fs = compile(
     `#version 300 es
      precision mediump float;
-     uniform Params { float k; float j; } p;
+     uniform Params { highp float k; highp float j; } p;
      in float vX;
      out vec4 oColor;
      float scale(float x) { return x * p.k + p.j; }
@@ -1533,6 +1542,140 @@ let uboDual: Program | null = null;
       struct S { float x; };
       void main() { S s[2] = S[](S(1.0), S(2.0)); gl_Position = vec4(s[0].x, s[1].x, 0.0, 1.0); }`);
     check(pos[0] === 1 && pos[1] === 2, `runtime S[](...): [1,2] (got ${pos[0]},${pos[1]})`);
+  }
+}
+
+/* ================================================================== */
+/* 12. Non-square matrix multiply rules (GLSL ES 3.00 §5.9) —          */
+/*     gl-object-get-calls.html matForWebGL2UniformShader.vert pin.    */
+/*     matrix*vector: matCxR * vecC → vecR (a right vector operand is  */
+/*     a COLUMN vector with as many components as the matrix has       */
+/*     COLUMNS; the result has ROWS components); vector*matrix:        */
+/*     vecR * matCxR → vecC; matrix*matrix: C1 == R2 → matC2xR1.       */
+/*     Pre-fix (semantics-expr.ts arithmeticType) the dimension rules  */
+/*     were SWAPPED — mat2x3 * vec2 was rejected ('incompatible') and  */
+/*     mat2x3 * vec3 accepted — so the page's vertex shader failed to  */
+/*     compile and LINK_STATUS was false (the codegen + const-fold     */
+/*     indexing were already spec-correct).                            */
+/* ================================================================== */
+
+{
+  // (a) The exact gl-object-get-calls.html VS + noop FS pair links.
+  const vs = compile(
+    `#version 300 es
+     uniform mat2x3 mval2x3;
+     uniform mat2x4 mval2x4;
+     uniform mat3x2 mval3x2;
+     uniform mat3x4 mval3x4;
+     uniform mat4x2 mval4x2;
+     uniform mat4x3 mval4x3;
+     void main() {
+       gl_Position = vec4(mval2x3 * vec2(1.0, 2.0), 0.0) +
+           mval2x4 * vec2(1.0, 2.0) +
+           vec4(mval3x2 * vec3(1.0, 2.0, 3.0), 0.0, 0.0) +
+           mval3x4 * vec3(1.0, 2.0, 3.0) +
+           vec4(mval4x2 * vec4(1.0, 2.0, 3.0, 4.0), 0.0, 0.0) +
+           vec4(mval4x3 * vec4(1.0, 2.0, 3.0, 4.0), 0.0);
+     }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision mediump float;
+     out vec4 fragColor;
+     void main() { fragColor = vec4(0.0, 0.0, 0.0, 1.0); }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `(a) non-square matrix x vector pair links (${l.ok ? '' : l.log})`);
+
+  // (b) Type REJECTIONS (vector components must match the matrix COLUMNS
+  // on the right / ROWS on the left; matrix*matrix needs C1 == R2).
+  const err = (src: string, want: string, tag: string): void => {
+    const r = compileErr(src, 'FRAGMENT', 300);
+    check(
+      !r.ok && r.errors.some((e) => e.message.includes(want)),
+      `(b) ${tag}: compile error '${want}' (${r.ok ? 'ACCEPTED' : JSON.stringify(r.errors[0].message)})`,
+    );
+  };
+  err(
+    `#version 300 es
+     precision mediump float;
+     uniform mat2x3 m;
+     out vec4 o;
+     void main() { o = vec4(m * vec3(1.0), 0.0); }`,
+    'incompatible',
+    'mat2x3 * vec3',
+  );
+  err(
+    `#version 300 es
+     precision mediump float;
+     uniform mat2x3 m;
+     out vec4 o;
+     void main() { o = vec4(vec2(1.0) * m, 0.0); }`,
+    'incompatible',
+    'vec2 * mat2x3',
+  );
+  err(
+    `#version 300 es
+     precision mediump float;
+     uniform mat2x3 m;
+     out vec4 o;
+     void main() { o = vec4((m * m)[0][0], 0.0, 0.0, 0.0); }`,
+    'incompatible',
+    'mat2x3 * mat2x3 (C1 2 != R2 3)',
+  );
+
+  // (c) RUN: column-major stores — m = (cols (1,2,3),(4,5,6)),
+  // b = mat3x2 (cols (7,8),(9,10),(11,12)).
+  //   m * vec2(2,3) = 2*(1,2,3) + 3*(4,5,6) = (14,19,24)
+  //   vec3(1,2,3) * m = (1*1+2*2+3*3, 1*4+2*5+3*6) = (14,32)
+  //   m * b (mat2x3 * mat3x2, C1 2 == R2 2 → mat3x3): col1 = 9*a0 + 10*a1,
+  //   row0 = 9*1 + 10*4 = 49.
+  const vs2 = compile(
+    `#version 300 es
+     uniform mat2x3 m;
+     uniform mat3x2 b;
+     out vec4 o;
+     void main() {
+       vec3 mv = m * vec2(2.0, 3.0);
+       vec2 vm = vec3(1.0, 2.0, 3.0) * m;
+       mat3x3 mm = m * b;
+       o = vec4(mv.x, vm.x, mm[1][0], 1.0);
+       gl_Position = vec4(0.0);
+     }`,
+    'VERTEX',
+    300,
+  );
+  const fs2 = compile(
+    `#version 300 es
+     precision mediump float;
+     in vec4 o;
+     out vec4 c;
+     void main() { c = o; }`,
+    'FRAGMENT',
+    300,
+  );
+  const l2 = linkProgram(vs2, fs2);
+  check(l2.ok, `(c) non-square multiply pair links (${l2.ok ? '' : l2.log})`);
+  if (l2.ok) {
+    const p = l2.program;
+    const mloc = p.uniformMap.get('m')!.location; // mat2x3: col stride 4 floats
+    p.floatStore[mloc + 0] = 1; p.floatStore[mloc + 1] = 2; p.floatStore[mloc + 2] = 3;
+    p.floatStore[mloc + 4] = 4; p.floatStore[mloc + 5] = 5; p.floatStore[mloc + 6] = 6;
+    const bloc = p.uniformMap.get('b')!.location; // mat3x2: col stride 4 floats
+    p.floatStore[bloc + 0] = 7; p.floatStore[bloc + 1] = 8;
+    p.floatStore[bloc + 4] = 9; p.floatStore[bloc + 5] = 10;
+    p.floatStore[bloc + 8] = 11; p.floatStore[bloc + 9] = 12;
+    const vctx = vertexCtx(p);
+    p.vertex.run(vctx);
+    const v = vctx.out.varyings;
+    near(v[0], 14, `(c) m * vec2(2,3) → vec3 x = 14`);
+    near(v[1], 14, `(c) vec3(1,2,3) * m → vec2 x = 14`);
+    near(v[2], 49, `(c) m * b → mat3x3 [1][0] = 49`);
+    near(v[3], 1, `(c) constant tail component untouched`);
   }
 }
 

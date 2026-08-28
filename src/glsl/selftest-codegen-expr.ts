@@ -710,6 +710,30 @@ const TEX_UNIFORM: [string, { store: 'float' | 'int'; slot: number; stride: numb
 }
 
 {
+  // Fragment texture2D (1.00) WITH bias → bias is clamped to
+  // ±MAX_TEXTURE_LOD_BIAS before reaching the sampler (GLSL ES 3.00 §8.8;
+  // CTS texture-bias.html grades the clamp against the queried limit).
+  const e = env('FRAGMENT', 100, [TEX_UNIFORM]);
+  e.declareLocal('P', vT('float', 2));
+  const vals = emitExpr(
+    call('texture2D', [ident('u_tex', sT('sampler2D')), ident('P', vT('float', 2)), lit(0.5, fT())], vT('float', 4)),
+    e,
+  );
+  check(
+    vals[0].pre !== undefined && vals[0].pre[0].includes('Math.min(8, Math.max(-8, 0.5))'),
+    `texture2D bias clamped to ±MAX_TEXTURE_LOD_BIAS (got '${vals[0].pre?.[0]}')`,
+  );
+  const vals2 = emitExpr(
+    call('texture2D', [ident('u_tex', sT('sampler2D')), ident('P', vT('float', 2)), lit(9, fT())], vT('float', 4)),
+    e,
+  );
+  check(
+    vals2[0].pre !== undefined && vals2[0].pre[0].includes('Math.min(8, Math.max(-8, 9.0))'),
+    `texture2D bias 9 still clamped at codegen (got '${vals2[0].pre?.[0]}')`,
+  );
+}
+
+{
   // Fragment texture2DProj (1.00, vec3 P) divides by P.z first.
   const e = env('FRAGMENT', 100, [TEX_UNIFORM]);
   e.declareLocal('P', vT('float', 3));

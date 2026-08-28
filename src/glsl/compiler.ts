@@ -164,9 +164,18 @@ export interface UniformBlockDecl {
   name: string;
   instanceName: string | null;
   arraySize: number;
+  /**
+   * True when the instance declares an EXPLICIT array dimension
+   * (`uniform B {..} b[1]` IS an array of one — member access requires
+   * `b[0].m`; the linker keys arrayed blocks per element). False for plain
+   * `uniform B {..} b;` and instance-less blocks.
+   */
+  instanceArray: boolean;
+  /** Block-level `layout(row_major)` (default false — column-major). */
+  rowMajor: boolean;
   /** layout(binding=) or null (default 0). */
   binding: number | null;
-  members: { name: string; type: GLSLType; precision: Precision | null }[];
+  members: { name: string; type: GLSLType; precision: Precision | null; rowMajor: boolean | null }[];
 }
 
 /**

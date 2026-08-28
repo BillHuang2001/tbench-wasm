@@ -179,9 +179,20 @@ export function evalConstExpr(e: Expr, scope: Scope, ctx: SemContext): (number |
       return evalConstExpr(c[0] ? e.whenTrue : e.whenFalse, scope, ctx);
     }
     case 'comma': {
-      // The comma operator's value is its LAST operand.
+      // ES 3.00: the sequence operator NEVER yields a constant expression
+      // (ESSL 3.00 §5.9 — CTS sequence-operator-returns-non-constant.html:
+      // `const float a = (0.0, 1.0);` must fail to compile). ES 1.00 folds
+      // ONLY when every operand is a constant expression (the ogles
+      // CorrectComma_frag build test requires `const vec4 v = (vec4(1,2,3,4),
+      // vec4(5,6,7,8));` to compile); a non-constant operand (user call,
+      // assignment) keeps the sequence non-constant.
+      if (ctx.version !== 100) return undefined;
       const last = e.exprs[e.exprs.length - 1];
-      return last === undefined ? undefined : evalConstExpr(last, scope, ctx);
+      if (last === undefined) return undefined;
+      for (const x of e.exprs) {
+        if (evalConstExpr(x, scope, ctx) === undefined) return undefined;
+      }
+      return evalConstExpr(last, scope, ctx);
     }
     case 'call':
       return evalConstCall(e, scope, ctx);
@@ -249,8 +260,8 @@ function evalConstBinary(
   // True linear-algebra products (codegen emitArith indexing).
   if (op === '*') {
     if (lt.kind === 'matrix' && rt.kind === 'matrix') {
-      // A (lt.cols × lt.rows) * B (rt.cols × rt.rows), legal iff lt.rows === rt.cols.
-      // result[c][r] = Σ_{s<lt.cols} A[s][r] * B[c][s]
+      // A (C1 × R1) * B (C2 × R2), legal iff C1 === R2.
+      // result[c][r] = Σ_{s<C1} A[s][r] * B[c][s]
       const aRows = lt.rows;
       const aCols = lt.cols;
       const bRows = rt.rows;
@@ -280,8 +291,7 @@ function evalConstBinary(
       return out;
     }
     if (lt.kind === 'vector' && rt.kind === 'matrix') {
-      // v (rt.rows) * M (rt.cols × rt.rows) → v (rt.cols):
-      // result[c] = Σ_{r<rt.rows} v[r] * M[c*rt.rows + r]
+      // v (R) * M (C × R) → v (C): result[c] = Σ_{r<R} v[r] * M[c*R + r]
       const R = rt.rows;
       const C = rt.cols;
       const out: number[] = [];

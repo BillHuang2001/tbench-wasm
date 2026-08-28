@@ -22,7 +22,7 @@
  */
 import type {
   CallExpr, Expr, FunctionDefinition, GlobalVarDecl, IdentifierExpr,
-  InterfaceBlockDecl, Stmt, StructDecl, TranslationUnit, TypeSpec, VarDeclarator,
+  IndexExpr, InterfaceBlockDecl, Stmt, StructDecl, TranslationUnit, TypeSpec, VarDeclarator,
 } from './ast.js';
 import type { GLSLType, Precision, StorageClass, TypeQualifiers } from './types.js';
 import { isFloat, isIntegral, typeName } from './types.js';
@@ -521,6 +521,15 @@ function analyzeGlobalDecl(d: GlobalVarDecl, ctx: SemContext, info: ShaderInfo):
         if (ctx.stage === 'VERTEX') info.attributes.push(attrOf(name, element, arraySize, q));
         break;
       case 'in': // ES 3.00: vertex input (attribute) or fragment input (varying)
+        // ESSL 3.00 §4.6.1: "Only variables output from a shader can be
+        // candidates for invariance" — `invariant in` is a compile error in
+        // BOTH stages (CTS invalid-invariant.html: fragment input invariant
+        // must fail to compile). ESSL 1.00 explicitly ALLOWS invariant on
+        // varyings input to the fragment shader (§4.6.1 list), so this check
+        // is unreachable at version 100 (`in` never parses there).
+        if (q.invariant === true) {
+          ctx.error(line, `'${name}' : invariant qualifier can only be applied to shader outputs`);
+        }
         if (ctx.stage === 'VERTEX') {
           if (!isValidInputType(element)) {
             ctx.error(line, `'${name}' : attribute variables cannot have a boolean type`);
@@ -606,6 +615,12 @@ function analyzeInterfaceBlock(d: InterfaceBlockDecl, ctx: SemContext, info: Sha
     if (typeof v === 'number' && v > 0) arraySize = v;
   }
   const storage = q.storage;
+  // ESSL 3.00 §4.6.1: only outputs can be invariant — a block-level
+  // `invariant` on an INPUT block (fragment `in` varying block, or vertex
+  // `in` attribute block) is a compile error (invalid-invariant.html).
+  if (storage === 'in' && q.invariant === true) {
+    ctx.error(d.loc.line, `'invariant' : can only be applied to shader outputs`);
+  }
   const isVaryingBlock =
     (storage === 'out' && ctx.stage === 'VERTEX') || (storage === 'in' && ctx.stage === 'FRAGMENT');
   if (!isVaryingBlock) {
@@ -623,8 +638,23 @@ function analyzeInterfaceBlock(d: InterfaceBlockDecl, ctx: SemContext, info: Sha
         name: d.blockName,
         instanceName: d.instanceName,
         arraySize,
+        // `uniform B {..} b[1]` declares an ARRAY of one: member access must go
+        // through `b[0].m` (the linker keys arrayed blocks per element). Plain
+        // `b` (no dims) and instance-less blocks are non-arrayed.
+        instanceArray: d.instanceName !== null && d.instanceName !== '' && d.arrayDims.length > 0,
+        // Block-level layout(row_major) (ES 3.00 §4.3.9) applies to every
+        // matrix member unless the member carries its own row_major/column_major.
+        rowMajor: q.layout?.rowMajor ?? false,
         binding: q.layout?.binding ?? null,
-        members: members.map((m) => ({ name: m.name, type: m.type, precision: m.precision })),
+        members: members.map((m) => ({
+          name: m.name,
+          type: m.type,
+          precision: m.precision,
+          // Member-level layout(row_major)/layout(column_major) overrides the
+          // block-level qualifier for this member. null = no member qualifier
+          // (inherits the block-level rowMajor at link time).
+          rowMajor: m.qualifiers.layout?.rowMajor ?? null,
+        })),
       };
       info.uniformBlocks.push(blk);
     }
@@ -717,6 +747,27 @@ function baseIdentifier(e: Expr): IdentifierExpr | null {
   }
 }
 
+/**
+ * ESSL 3.00 §4.1.7: arrays of samplers may be indexed ONLY with constant
+ * integral expressions (literals, const variables, folded const exprs).
+ * ES 1.00 additionally permits constant-INDEX expressions (loop-invariant
+ * indices), so the rule is version-300-only (CTS sampler-array-indexing:
+ * `texture(u_tex[i], ...)` with a loop variable must fail to compile).
+ * Runs as part of the post-analysis scanUses walk — resolvedType and
+ * constValue are already annotated on every node.
+ */
+function checkSamplerArrayIndex(e: IndexExpr, ctx: SemContext): void {
+  if (ctx.version !== 300) return;
+  const ot = e.object.resolvedType;
+  if (ot === undefined) return; // unresolved (error already reported)
+  let t = ot;
+  while (t.kind === 'array') t = t.element;
+  if (t.kind !== 'sampler') return;
+  if (e.index.constValue === undefined) {
+    ctx.error(e.index.loc.line, 'sampler arrays may only be indexed with constant integral expressions');
+  }
+}
+
 /** Scan every expression of the shader for stage-specific builtin use. Only
  * SUCCESSFULLY resolved identifiers/calls count (error-recovery nodes don't
  * set resolvedType). ES 1.00 fragment outputs are finalized here too. */
@@ -728,6 +779,29 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
     fragDataLine: 1,
   };
   const written = new Set<IdentifierExpr>(); // write-root identifiers (not reads)
+
+  // Uniform-block INSTANCE names (ES 3.00): an instance name has no VALUE —
+  // it is only valid as the base of a member/index access chain
+  // (`b.m`, `b[0].m`). Using it bare (`b;`) or as an indexed block element
+  // (`b[0];`) is a compile error (conformance2/uniforms/
+  // uniform-block-idents-as-expr.html). Instance-less blocks expose bare
+  // MEMBER names — those are ordinary reads and are NOT flagged.
+  const blockInstances = new Map<string, boolean>(); // instance name → arrayed
+  for (const b of info.uniformBlocks) {
+    if (b.instanceName !== null && b.instanceName !== '') {
+      blockInstances.set(b.instanceName, b.instanceArray);
+    }
+  }
+  const isBlockInstanceId = (id: IdentifierExpr): boolean => {
+    const t = id.resolvedType;
+    if (t === undefined) return false;
+    // The identifier must resolve to the block's struct type (array-of-struct
+    // for arrayed instances) — a shadowing local of the same name has another
+    // type and stays an ordinary variable.
+    if (t.kind === 'struct') return blockInstances.has(id.name);
+    if (t.kind === 'array' && t.element.kind === 'struct') return blockInstances.has(id.name);
+    return false;
+  };
 
   const recordWrite = (root: IdentifierExpr, firstIndex: Expr | null): void => {
     if (root.resolvedType === undefined) return; // unresolved (error reported)
@@ -851,11 +925,16 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
     }
   };
 
-  const visit = (e: Expr): void => {
+  const visit = (e: Expr, asBase = false): void => {
     switch (e.kind) {
       case 'literal':
         return;
       case 'identifier':
+        // A block instance name is never a value: legal only as the base of a
+        // member/index chain (asBase) — `b;` alone is a compile error.
+        if (!asBase && isBlockInstanceId(e)) {
+          ctx.error(e.loc.line, `'${e.name}' : uniform block instance name cannot be used as a value`);
+        }
         if (!written.has(e)) recordRead(e);
         return;
       case 'unary': {
@@ -898,10 +977,21 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
         visit(e.callee);
         for (const a of e.args) visit(a);
         return;
-      case 'index':
-        visit(e.object);
+      case 'index': {
+        // `b[0]` on an ARRAYED block instance yields the block ELEMENT — also
+        // not a value (only `b[0].member` is legal, which visits this node as
+        // a chain base). Non-arrayed instances already error at semantics.
+        const obj = e.object;
+        const objIsArrayedInstance =
+          obj.kind === 'identifier' && obj.resolvedType?.kind === 'array' && isBlockInstanceId(obj);
+        visit(obj, true);
         visit(e.index);
+        checkSamplerArrayIndex(e, ctx);
+        if (!asBase && objIsArrayedInstance) {
+          ctx.error(e.loc.line, `'${obj.name}' : uniform block instance element cannot be used as a value`);
+        }
         return;
+      }
       case 'member': {
         // Varying-interface-block member access: entries are keyed
         // '<instance>.<member>' — reconstruct the key from the object chain
@@ -915,7 +1005,7 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
         if (base !== null && !written.has(base) && !isShadowed(base.name)) {
           markVaryingUsed(`${base.name}.${e.name}`);
         }
-        visit(e.object);
+        visit(e.object, true);
         return;
       }
       case 'comma':

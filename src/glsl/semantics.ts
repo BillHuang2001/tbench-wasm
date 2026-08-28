@@ -98,26 +98,30 @@ export class SemContext {
 
   /**
    * Reset to the stage's PRE-DECLARED default precisions (§4.5.3): vertex
-   * defaults float to highp, int to mediump and the sampler kinds to lowp
-   * (1.00) / highp (3.00); fragment defaults ONLY int to mediump — float and
-   * samplers have no fragment default (float declarations then require a
-   * `precision` statement; sampler declarations are LENIENT by design — the
-   * WebGL specs do not require sampler precision and real-world shaders omit
-   * it).
+   * defaults float to highp, int to mediump; fragment defaults ONLY int to
+   * mediump (float declarations then require a `precision` statement).
+   * ESSL 3.00 §4.5.4 predeclares `precision lowp sampler2D;` and
+   * `precision lowp samplerCube;` in BOTH stages — every OTHER sampler kind
+   * has no default and needs an explicit qualifier or `precision` statement
+   * (checkSamplerPrecision enforces this at version 300). Version 1.00
+   * seeds the same two sampler defaults in the vertex language only and is
+   * deliberately LENIENT about sampler precision (the WebGL1 specs do not
+   * require it — checkSamplerPrecision is version-300-only).
    */
   initDefaultPrecisions(): void {
     const m = new Map<string, Precision>();
     if (this.stage === 'VERTEX') {
       m.set('float', 'highp');
       m.set('int', 'mediump');
-      if (this.version === 100) {
-        m.set('sampler2D', 'lowp');
-        m.set('samplerCube', 'lowp');
-      } else {
-        for (const s of SAMPLER_300) m.set(s, 'highp');
-      }
     } else {
       m.set('int', 'mediump');
+    }
+    if (this.version === 300) {
+      m.set('sampler2D', 'lowp');
+      m.set('samplerCube', 'lowp');
+    } else if (this.stage === 'VERTEX') {
+      m.set('sampler2D', 'lowp');
+      m.set('samplerCube', 'lowp');
     }
     this.defaultPrecisions = m;
   }
@@ -503,14 +507,41 @@ export function wrapArrayDims(
  * explicit precision qualifier requires a default float precision to have
  * been declared earlier in the shader; the error is reported at the
  * declaration's line. Vertex shaders default float to highp. Sampler
- * declarations are deliberately NOT checked (lenient — see
- * initDefaultPrecisions).
+ * declarations are deliberately NOT checked here (see checkSamplerPrecision
+ * and initDefaultPrecisions).
  */
 function checkFloatPrecision(ctx: SemContext, line: number, t: GLSLType, name: string | null): void {
   if (ctx.stage !== 'FRAGMENT' || !isFloat(t)) return;
   if (ctx.defaultPrecisions.get('float') === undefined) {
     ctx.error(line, name === null ? 'No precision specified for (float)' : `'${name}' : No precision specified for (float)`);
   }
+}
+
+/**
+ * ESSL 3.00 §4.5.4: sampler types OTHER than sampler2D/samplerCube have NO
+ * predeclared default precision — a declaration with no explicit precision
+ * qualifier (and no earlier `precision <q> <samplerKind>;` statement) is a
+ * compile error in BOTH stages (CTS sampler-no-precision.html). Version-300
+ * only: ES 1.00 sampler precision stays lenient (initDefaultPrecisions).
+ * Arrays unwrap to their element; the error mirrors checkFloatPrecision's
+ * format.
+ */
+function checkSamplerPrecision(ctx: SemContext, line: number, t: GLSLType, name: string | null): void {
+  if (ctx.version !== 300) return;
+  let u = t;
+  while (u.kind === 'array') u = u.element;
+  if (u.kind !== 'sampler') return;
+  if (u.sampler === 'sampler2D' || u.sampler === 'samplerCube') return;
+  if (ctx.defaultPrecisions.get(u.sampler) === undefined) {
+    ctx.error(line, name === null ? `No precision specified for (${u.sampler})` : `'${name}' : No precision specified for (${u.sampler})`);
+  }
+}
+
+/** Both no-precision rules for a declaration without an explicit qualifier:
+ *  the fragment float default (§4.5.4) and the ES 3.00 sampler defaults. */
+function checkDeclPrecision(ctx: SemContext, line: number, t: GLSLType, name: string | null): void {
+  checkFloatPrecision(ctx, line, t, name);
+  checkSamplerPrecision(ctx, line, t, name);
 }
 
 /**
@@ -536,7 +567,7 @@ export function declareVariables(
   for (const d of declarators) {
     if (d.name === '') continue; // parser error-recovery placeholder
     const type = wrapArrayDims(baseType, d.arrayDims, scope, ctx, allowUnsized, d.loc.line);
-    if (spec.qualifiers.precision === undefined) checkFloatPrecision(ctx, d.loc.line, type, d.name === '' ? null : d.name);
+    if (spec.qualifiers.precision === undefined) checkDeclPrecision(ctx, d.loc.line, type, d.name === '' ? null : d.name);
     if (type.kind === 'void') {
       ctx.error(d.loc.line, "'void' : cannot declare a variable of type void");
       continue;
@@ -741,7 +772,7 @@ function resolveReturnType(d: FunctionPrototype, scope: Scope, ctx: SemContext):
   const base = resolveTypeSpec(d.returnType, scope, ctx);
   if (base === null) return null;
   if (d.returnDims.length === 0) {
-    if (d.returnType.qualifiers.precision === undefined) checkFloatPrecision(ctx, d.loc.line, base, d.name);
+    if (d.returnType.qualifiers.precision === undefined) checkDeclPrecision(ctx, d.loc.line, base, d.name);
     return base;
   }
   if (d.returnDims.length > 1) {
@@ -750,7 +781,7 @@ function resolveReturnType(d: FunctionPrototype, scope: Scope, ctx: SemContext):
   }
   const t = wrapArrayDims(base, d.returnDims, scope, ctx, false, d.loc.line);
   d.returnType.resolved = t;
-  if (d.returnType.qualifiers.precision === undefined) checkFloatPrecision(ctx, d.loc.line, t, d.name);
+  if (d.returnType.qualifiers.precision === undefined) checkDeclPrecision(ctx, d.loc.line, t, d.name);
   return t;
 }
 
@@ -848,7 +879,7 @@ function registerInterfaceBlock(d: InterfaceBlockDecl, scope: Scope, ctx: SemCon
   for (const m of d.members) {
     const mt = resolveTypeSpec(m.type, scope, ctx);
     if (mt !== null && mt.kind !== 'void') {
-      if (m.type.qualifiers.precision === undefined) checkFloatPrecision(ctx, m.loc.line, mt, m.name === '' ? null : m.name);
+      if (m.type.qualifiers.precision === undefined) checkDeclPrecision(ctx, m.loc.line, mt, m.name === '' ? null : m.name);
       // Member arrays (same wrap as resolveStructDef — cache the full type).
       const full = m.arrayDims.length > 0 ? wrapArrayDims(mt, m.arrayDims, scope, ctx, false, m.loc.line) : mt;
       m.type.resolved = full;
@@ -1037,6 +1068,21 @@ export function analyzeProgram(ast: TranslationUnit, ctx: SemContext): void {
           ctx.error(d.loc.line, `'${d.name}' : invariant declaration must follow the variable declaration`);
         } else if (sym.kind === 'builtin-var' && !INVARIANT_BUILTIN_ALLOWLIST.has(d.name)) {
           ctx.error(d.loc.line, `'${d.name}' : invariant cannot be applied to this built-in variable`);
+        } else if (ctx.version === 300) {
+          // ESSL 3.00 §4.6.1: "Only variables output from a shader can be
+          // candidates for invariance" — the short form on an INPUT is a
+          // compile error in 3.00 (qualifier form `invariant in ...` is
+          // rejected in semantics-decl.ts). Legal targets at 300: user `out`
+          // variables (vertex varyings / fragment outputs) and the vertex
+          // output builtins gl_Position/gl_PointSize (gl_FragColor/gl_FragData
+          // are 1.00-only; gl_FragCoord/gl_PointCoord are fragment INPUTS —
+          // ANGLE rejects them at ES 3.00). ESSL 1.00 explicitly allows
+          // invariant on fragment-input varyings and gl_FragCoord/gl_PointCoord.
+          if (sym.kind === 'var' && sym.storage !== 'out') {
+            ctx.error(d.loc.line, `'${d.name}' : invariant can only be applied to shader outputs`);
+          } else if (sym.kind === 'builtin-var' && sym.name !== 'gl_Position' && sym.name !== 'gl_PointSize') {
+            ctx.error(d.loc.line, `'${d.name}' : invariant can only be applied to shader outputs`);
+          }
         }
         break;
       }

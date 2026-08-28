@@ -167,9 +167,11 @@ function sameShapeType(lt: GLSLType, rt: GLSLType, version: 100 | 300): GLSLType
  * Result type of the arithmetic binary operators (+ - * /). Returns null when
  * the operand combination is not legal; the caller reports the error.
  * Matrix rules: scalar applied component-wise; matrix±matrix same dims;
- * matrix*matrix: (matC2xR2)*(matC1xR1) legal iff R1==C2 → matC2xR1
+ * matrix*matrix: (matC1xR1)*(matC2xR2) legal iff C1==R2 → matC2xR1
  * (ES 1.00 has only square matrices, so this reduces to same-dims);
- * matrix*vector: matCxR * vecR → vecC; vector*matrix: vecC * matCxR → vecR.
+ * matrix*vector: matCxR * vecC → vecR; vector*matrix: vecR * matCxR → vecC
+ * (GLSL ES 3.00 §5.9 — a right vector operand is a column vector with as
+ * many components as the matrix has COLUMNS, result has ROWS components).
  */
 function arithmeticType(op: BinaryOp, lt: GLSLType, rt: GLSLType, version: 100 | 300): GLSLType | null {
   const ss = sameShapeType(lt, rt, version);
@@ -179,16 +181,16 @@ function arithmeticType(op: BinaryOp, lt: GLSLType, rt: GLSLType, version: 100 |
       if (lt.kind === 'scalar' && rt.kind === 'matrix') return lt.base === 'float' ? rt : null;
       if (lt.kind === 'matrix' && rt.kind === 'scalar') return rt.base === 'float' ? lt : null;
       if (lt.kind === 'matrix' && rt.kind === 'matrix') {
-        if (lt.rows !== rt.cols) return null;
+        if (lt.cols !== rt.rows) return null;
         return { kind: 'matrix', cols: rt.cols, rows: lt.rows };
       }
       if (lt.kind === 'matrix' && rt.kind === 'vector') {
-        if (rt.base !== 'float' || rt.size !== lt.rows) return null;
-        return { kind: 'vector', base: 'float', size: lt.cols };
+        if (rt.base !== 'float' || rt.size !== lt.cols) return null;
+        return { kind: 'vector', base: 'float', size: lt.rows };
       }
       if (lt.kind === 'vector' && rt.kind === 'matrix') {
-        if (lt.base !== 'float' || lt.size !== rt.cols) return null;
-        return { kind: 'vector', base: 'float', size: rt.rows };
+        if (lt.base !== 'float' || lt.size !== rt.rows) return null;
+        return { kind: 'vector', base: 'float', size: rt.cols };
       }
       return null;
     }
@@ -434,10 +436,41 @@ export function analyzeExpr(e: Expr, scope: Scope, ctx: SemContext): void {
       return;
     case 'comma': {
       for (const x of e.exprs) analyzeExpr(x, scope, ctx);
+      // WebGL 2.0 spec "Unsupported variants of GLSL ES 3.00 operators": the
+      // sequence operator is not allowed with arrays, structs containing
+      // arrays, or void operands (CTS forbidden-operators.html — the ternary
+      // path enforces the same restrictions: void via an explicit check,
+      // arrays/structs via the type-match rule). ES 1.00 keeps its historical
+      // permissive behavior (no graded test restricts it).
+      if (ctx.version === 300) {
+        for (const x of e.exprs) {
+          const xt = x.resolvedType;
+          if (xt === undefined) continue; // subexpression already errored
+          if (xt.kind === 'void') {
+            ctx.error(x.loc.line, `',' : cannot use a void expression as a sequence operator operand`);
+            continue;
+          }
+          if (containsArray(xt)) {
+            ctx.error(x.loc.line, `',' : sequence operator operands cannot be arrays or structures containing arrays`);
+            continue;
+          }
+        }
+      }
       const last = e.exprs[e.exprs.length - 1];
       if (last !== undefined && last.resolvedType !== undefined) {
         e.resolvedType = last.resolvedType;
-        e.constValue = last.constValue;
+        // ES 3.00: the sequence operator NEVER yields a constant expression
+        // (ESSL 3.00 §5.9 — CTS sequence-operator-returns-non-constant.html:
+        // `const float a = (0.0, 1.0);` and `float a[(2, 3)];` must fail).
+        // ES 1.00 folds ONLY when EVERY operand is itself a constant — the
+        // ogles CorrectComma_frag build test requires `const vec4 v =
+        // (vec4(1,2,3,4), vec4(5,6,7,8));` to compile. A non-constant operand
+        // keeps the sequence operator so its side effects still run (`int i =
+        // (g = 1, 0);` must assign g — the unconditional last-operand fold
+        // dropped it).
+        if (ctx.version === 100 && e.exprs.every((x) => x.constValue !== undefined)) {
+          e.constValue = last.constValue;
+        }
       }
       e.lvalue = false; // comma result is never an lvalue
       return;
@@ -1225,7 +1258,7 @@ function analyzeCall(e: CallExpr, scope: Scope, ctx: SemContext): void {
       return;
     }
     if (matches(name, builtinSignatures(ctx.version)).length > 0 || extensionFunctions.some((s) => s.name === name)) {
-      analyzeBuiltinCall(e, name, ctx);
+      analyzeBuiltinCall(e, name, scope, ctx);
       return;
     }
     ctx.error(e.loc.line, `'${name}' : no matching function`);
@@ -1342,7 +1375,77 @@ function analyzeUserCall(e: CallExpr, sym: FnSymbol, ctx: SemContext): void {
   ctx.currentFunction?.calls.add(sym.siblings[sigs.indexOf(best)]);
 }
 
-function analyzeBuiltinCall(e: CallExpr, name: string, ctx: SemContext): void {
+/**
+ * WebGL 2.0 minimum/maximum program texel offset (GLSL ES 3.00 §8.8:
+ * implementation-defined range; WebGL 2.0 fixes it to [-8, 7] — see
+ * src/gl/state.ts MIN_PROGRAM_TEXEL_OFFSET/MAX_PROGRAM_TEXEL_OFFSET).
+ */
+const MIN_PROGRAM_TEXEL_OFFSET = -8;
+const MAX_PROGRAM_TEXEL_OFFSET = 7;
+
+/** The textureOffset family: the trailing integral-vector argument is a
+ *  CONSTANT integral expression within [MIN_PROGRAM_TEXEL_OFFSET,
+ *  MAX_PROGRAM_TEXEL_OFFSET] (GLSL ES 3.00 §8.8). Note textureGradOffset /
+ *  textureProjGradOffset take (sampler, P, dPdx, dPdy, offset) — the offset
+ *  is still the LAST argument. */
+const TEXEL_OFFSET_FUNCS: ReadonlySet<string> = new Set([
+  'textureOffset',
+  'textureProjOffset',
+  'textureLodOffset',
+  'textureProjLodOffset',
+  'textureGradOffset',
+  'textureProjGradOffset',
+  'texelFetchOffset',
+]);
+
+/**
+ * GLSL ES 3.00 §8.8: the offset argument of the textureOffset family must be a
+ * constant integral expression with every component in
+ * [MIN_PROGRAM_TEXEL_OFFSET, MAX_PROGRAM_TEXEL_OFFSET]. A non-constant offset
+ * (local variable, uniform read, ...) and an out-of-range constant are both
+ * compile errors. Graded by CTS texture-offset-non-constant-offset.html and
+ * texture-offset-out-of-range.html. `evalConstExpr` implements the §4.3.3
+ * constant-expression rules (literals, const variables — global AND local —
+ * constructors of constants, binary/unary ops on constants, ...); a
+ * non-const leaf makes the whole expression non-constant.
+ */
+function checkTexelOffsetArg(e: CallExpr, name: string, scope: Scope, ctx: SemContext): void {
+  if (ctx.version !== 300 || !TEXEL_OFFSET_FUNCS.has(name)) return;
+  // The offset is the trailing integral vector; the optional float bias comes
+  // AFTER it in the signature (textureOffset(s, P, offset[, bias])), so when
+  // the last argument is not a vector the offset is the second-to-last.
+  let arg = e.args[e.args.length - 1];
+  const at = arg.resolvedType;
+  if (at !== undefined && at.kind === 'vector' && (at.base === 'int' || at.base === 'uint')) {
+    // offset is the last argument
+  } else if (e.args.length >= 2) {
+    arg = e.args[e.args.length - 2];
+  } else {
+    return; // signature already failed to match — analysis reported it
+  }
+  if (arg.resolvedType === undefined) return; // analysis already failed
+  const data = evalConstExpr(arg, scope, ctx);
+  if (data === undefined) {
+    ctx.error(arg.loc.line, `'${name}' : offset argument must be a constant integral expression`);
+    return;
+  }
+  for (const v of data) {
+    if (
+      typeof v !== 'number' ||
+      !Number.isInteger(v) ||
+      v < MIN_PROGRAM_TEXEL_OFFSET ||
+      v > MAX_PROGRAM_TEXEL_OFFSET
+    ) {
+      ctx.error(
+        arg.loc.line,
+        `'${name}' : offset argument out of range [${MIN_PROGRAM_TEXEL_OFFSET}, ${MAX_PROGRAM_TEXEL_OFFSET}]`,
+      );
+      return;
+    }
+  }
+}
+
+function analyzeBuiltinCall(e: CallExpr, name: string, scope: Scope, ctx: SemContext): void {
   const all: BuiltinSignature[] = [...matches(name, builtinSignatures(ctx.version))];
   for (const s of extensionFunctions) {
     if (s.name !== name) continue;
@@ -1384,6 +1487,7 @@ function analyzeBuiltinCall(e: CallExpr, name: string, ctx: SemContext): void {
   }
   e.resolvedType = best.ret;
   e.constValue = foldBuiltin(name, best.ret, e.args);
+  checkTexelOffsetArg(e, name, scope, ctx);
 }
 
 /**

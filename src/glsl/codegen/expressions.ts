@@ -68,7 +68,7 @@ import { emitBuiltinCall } from './expr-builtins.js';
 
 type StorageKind =
   | { kind: 'uniform'; key: string }
-  | { kind: 'block'; blockIndex: number; key: string; instance: boolean }
+  | { kind: 'block'; blockIndex: number; key: string; baseKey: string }
   | { kind: 'varying'; key: string }
   | {
       kind: 'attrib';
@@ -555,7 +555,12 @@ function walk(e: Expr, env: CodegenEnv): P {
             kind: 'block',
             blockIndex: info.blockIndex,
             key: info.key,
-            instance: info.baseKey !== '',
+            // '' for instance-less blocks (identifier IS the member name),
+            // else the instance name — a dynamic index whose key EQUALS
+            // baseKey is an INSTANCE-element index (arrayed block → stride =
+            // blockStride); any other dynamic index descends a MEMBER array
+            // (stride = the member's arrayStride).
+            baseKey: info.baseKey,
           };
           return p;
         case 'attrib':
@@ -651,8 +656,13 @@ function walk(e: Expr, env: CodegenEnv): P {
                   `codegen: missing block layout prefix '${key}' for dynamic index (linker must emit '[0]' prefixes)`,
                 );
               }
+              // Instance-element index (pre-update key still equals the
+              // instance name) strides by blockStride; a member-array index
+              // (key ≠ baseKey) strides by the member's arrayStride
+              // (blockStride is absent on non-arrayed-instance member entries).
+              const atInstance = p.storage.key === p.storage.baseKey;
               p.storage = { ...p.storage, key };
-              const stride = p.storage.instance ? entry.blockStride ?? 0 : entry.arrayStride;
+              const stride = atInstance ? entry.blockStride ?? 0 : entry.arrayStride;
               if (stride <= 0) {
                 throw new Error(
                   `codegen: block path '${key}' has no stride for dynamic indexing (linker must set arrayStride/blockStride)`,
@@ -679,32 +689,93 @@ function walk(e: Expr, env: CodegenEnv): P {
       }
       if (ot.kind === 'vector') {
         p.type = { kind: 'scalar', base: ot.base };
-        p.swz = null;
         if (isConst) {
-          p.flatOff += cv;
+          // The swizzle applies to the INDEX, not to the flat offset:
+          // `v.zyx[1]` addresses base component swz[1] (v.y), not flat
+          // component 1 (v.x). Fold the remap into flatOff (constant), then
+          // consume the swizzle.
+          p.flatOff += p.swz ? p.swz[cv] : cv;
+          p.swz = null;
           return p;
         }
         // dynamic component (ES 3.00 allows it): spill locals / stride-1 storage
         const t = env.allocTemp();
         p.pre.push(`${t} = ${idxV!.pre && idxV!.pre.length ? foldPre(idxV!.pre, idxV!.v) : idxV!.v}`);
+        // A dynamic index into a SWIZZLED vector addresses base component
+        // swz[t] (`v.zyx[i]` ↔ v[swz[i]]) — remap the runtime index through
+        // the compile-time swizzle permutation, then consume the swizzle so
+        // leafRead/leafWrite don't ALSO apply it as a constant offset.
+        let idx = t;
+        if (p.swz) {
+          const j = env.allocTemp();
+          p.pre.push(`${j} = ${swzLookup(p.swz, t)}`);
+          idx = j;
+          p.swz = null;
+        }
         if (p.local) {
           if (p.local.synth) {
             // BUG 1: call-result object — scratch spill (see the array branch).
             spillSynthLocal(p, env, 1);
+            p.dyn = { temp: idx, stride: 0, elemSlots: 1 };
+          } else if (p.local.kind === 'scratch') {
+            // Scratch-backed local (array / struct-with-array): already
+            // index-addressable — no spill needed. An existing dyn (outer
+            // element index, e.g. `V[func()][i]` on vec4[2]) folds into a
+            // combined offset temp; otherwise the index temp strides 1.
+            if (p.dyn) {
+              const j = env.allocTemp();
+              p.pre.push(`${j} = (${p.dyn.temp}) * ${p.dyn.elemSlots} + ${idx}`);
+              p.dyn = { temp: j, stride: 0, elemSlots: 1 };
+            } else {
+              p.dyn = { temp: idx, stride: 0, elemSlots: 1 };
+            }
           } else {
             const ds = env.ensureDynScratch(p.local.name);
             p.pre.unshift(...ds.copyIn);
             p.post.push(...ds.copyOut);
             p.local = { ...p.local, kind: 'scratch', scratchBase: ds.base, elemSlots: 1, int: ds.int };
+            p.dyn = { temp: idx, stride: 0, elemSlots: 1 };
           }
-          p.dyn = { temp: t, stride: 0, elemSlots: 1 };
         } else if (p.storage) {
-          p.dyn = { temp: t, stride: storageElemStride(p, 1), elemSlots: 0 };
+          p.dyn = { temp: idx, stride: storageElemStride(p, 1), elemSlots: 0 };
         }
         return p;
       }
       if (ot.kind === 'matrix') {
         const rows = ot.rows;
+        // ROW-MAJOR BLOCK MEMBER: a matrix COLUMN is not contiguous in memory —
+        // component r of column c lives at float index c + r*4 (rows are
+        // 16-byte strided). Materialize the column into a synthesized flat
+        // local so const/dynamic component indexing and swizzles read the
+        // strided bytes (the generic path folds const columns as contiguous
+        // flatOff, which is only valid for column-major storage).
+        if (p.storage && p.storage.kind === 'block') {
+          const entry = env.lookupBlockMember(p.storage.blockIndex, p.storage.key);
+          if (entry !== null && entry.rowMajor) {
+            const base = `${entry.offset} / 4${p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.stride / 4}` : ''}`;
+            let colTerm: string;
+            if (isConst) {
+              colTerm = String(cv);
+            } else {
+              const t = env.allocTemp();
+              p.pre.push(`${t} = ${idxV!.pre && idxV!.pre.length ? foldPre(idxV!.pre, idxV!.v) : idxV!.v}`);
+              colTerm = t;
+            }
+            const compNames: string[] = [];
+            const dxNames: (string | null)[] = [];
+            const dyNames: (string | null)[] = [];
+            for (let r = 0; r < rows; r++) {
+              compNames.push(`ctx.blockStores[${p.storage.blockIndex}][${base} + ${colTerm} + ${r} * 4]`);
+              dxNames.push('0');
+              dyNames.push('0');
+            }
+            const q = freshP({ kind: 'vector', base: 'float', size: rows as 2 | 3 | 4 });
+            q.local = { name: '_rmcol', type: q.type, kind: 'flat', compNames, dxNames, dyNames, synth: true };
+            q.pre = p.pre;
+            q.lvalue = false;
+            return q;
+          }
+        }
         p.type = { kind: 'vector', base: 'float', size: rows };
         p.swz = null;
         if (isConst) {
@@ -739,15 +810,34 @@ function walk(e: Expr, env: CodegenEnv): P {
           if (p.local.synth) {
             // BUG 1: call-result object — scratch spill (see the array branch).
             spillSynthLocal(p, env, rows);
+            p.dyn = { temp: t, stride: 0, elemSlots: rows };
+          } else if (p.local.kind === 'scratch') {
+            // Scratch-backed local: already index-addressable — no spill.
+            // An existing dyn (outer element index, e.g. `M[func()][i]` on
+            // mat4[2]) folds into a combined offset temp; otherwise the index
+            // temp strides `rows` (column-major layout).
+            if (p.dyn) {
+              const j = env.allocTemp();
+              p.pre.push(`${j} = (${p.dyn.temp}) * ${p.dyn.elemSlots} + ${t}`);
+              p.dyn = { temp: j, stride: 0, elemSlots: rows };
+            } else {
+              p.dyn = { temp: t, stride: 0, elemSlots: rows };
+            }
           } else {
             const ds = env.ensureDynScratch(p.local.name);
             p.pre.unshift(...ds.copyIn);
             p.post.push(...ds.copyOut);
             p.local = { ...p.local, kind: 'scratch', scratchBase: ds.base, elemSlots: rows, int: ds.int };
+            p.dyn = { temp: t, stride: 0, elemSlots: rows };
           }
-          p.dyn = { temp: t, stride: 0, elemSlots: rows };
         } else if (p.storage) {
-          p.dyn = { temp: t, stride: storageElemStride(p, rows), elemSlots: 0 };
+          // Block matrices: the column stride is the std140 matrixStride
+          // (16 bytes — 4*rows only matches square matrices).
+          const stride =
+            p.storage.kind === 'block'
+              ? (env.lookupBlockMember(p.storage.blockIndex, p.storage.key)?.matrixStride ?? 4 * rows)
+              : storageElemStride(p, rows);
+          p.dyn = { temp: t, stride, elemSlots: 0 };
         }
         return p;
       }
@@ -885,6 +975,15 @@ export function swizzleComponents(size: number, name: string): number[] {
   return out;
 }
 
+/** Compile-time swizzle permutation applied to a RUNTIME index: `v.zyx[i]`
+ *  reads base component swz[i] (vectors have ≤ 4 components, so a nested
+ *  ternary chain is compact and allocation-free). */
+function swzLookup(swz: number[], t: string): string {
+  let s = String(swz[swz.length - 1]);
+  for (let i = swz.length - 2; i >= 0; i--) s = `(${t} === ${i} ? ${swz[i]} : ${s})`;
+  return s;
+}
+
 /* ------------------------------------------------------------------ */
 /* emitExpr / emitLValue                                               */
 /* ------------------------------------------------------------------ */
@@ -960,6 +1059,34 @@ export function emitLValue(e: Expr, env: CodegenEnv): LValue {
     prelude: p.pre.length ? p.pre.join('; ') + ';' : undefined,
     copyBack: p.post.length ? p.post.join('; ') + ';' : undefined,
   };
+}
+
+/**
+ * Dedupe SHARED pre arrays by array identity across components. A
+ * multi-component user-call result carries ONE `[iife]` pre array on EVERY
+ * component (functions.ts) — consumers that fold each component's pre inline
+ * (materialize, binary/unary/comma/ctor paths) would re-run the callee once
+ * per component. Each DISTINCT pre array is kept on the FIRST component
+ * carrying it only; later components drop it (their v/dx/dy strings reference
+ * the temps the first component's pre sets — emission order is 0..n-1, so the
+ * first component's fold always runs first). Values with no pre or with
+ * per-component-unique pres pass through unchanged. SAFE ONLY for consumers
+ * that use each component exactly once (ctor/unary/comma operands) — the
+ * caller must guarantee this.
+ */
+export function dedupeSharedPre(vals: Value[]): Value[] {
+  const seen = new Set<string[]>();
+  const out: Value[] = [];
+  for (const v of vals) {
+    const p = v.pre;
+    if (p && p.length > 0 && seen.has(p)) {
+      out.push({ ...v, pre: undefined });
+      continue;
+    }
+    if (p && p.length > 0) seen.add(p);
+    out.push(v);
+  }
+  return out;
 }
 
 /** Split an LValue.prelude ('; '-joined statements, trailing ';') into
@@ -1159,7 +1286,13 @@ function emitUnary(e: Extract<Expr, { kind: 'unary' }>, env: CodegenEnv): Value[
     }
     return out;
   }
-  const vals = emitExpr(e.operand, env);
+  // BUG (shared-pre re-run): dedupe the operand's pre arrays by identity — a
+  // multi-component call result carries ONE [iife] on every component; the
+  // per-component fold below would re-run the callee once per component
+  // (`vec2 v = -f();` ran f twice). Only the first component keeps the shared
+  // pre (folded inline into its v / attached for dual-mode consumers); later
+  // components read the call's retTemps directly.
+  const vals = dedupeSharedPre(emitExpr(e.operand, env));
   return vals.map((v) => {
     const x = v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v;
     switch (op) {
@@ -2118,7 +2251,10 @@ function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Va
 function emitComma(e: Extract<Expr, { kind: 'comma' }>, env: CodegenEnv): Value[] {
   const n = e.exprs.length;
   if (n === 0) throw new Error('codegen: empty comma expression');
-  const last = emitExpr(e.exprs[n - 1], env);
+  // BUG (shared-pre re-run): dedupe the LAST operand's pre arrays by identity
+  // — its components BECOME the comma result, and folding a shared [iife] per
+  // component (below) would re-run the callee once per component.
+  const last = dedupeSharedPre(emitExpr(e.exprs[n - 1], env));
   const pre: string[] = [];
   for (let i = 0; i < n - 1; i++) {
     // BUG (expression-list-in-declarator-initializer): emit EVERY flat
@@ -2127,7 +2263,10 @@ function emitComma(e: Extract<Expr, { kind: 'comma' }>, env: CodegenEnv): Value[
     // b.y; taking only [0] left b.y unassigned → the final value read NaN).
     // The intermediate result is discarded, so each component's pres fold
     // inline and the whole sequence lands in one temp as a comma term.
-    const vals = emitExpr(e.exprs[i], env);
+    // BUG (shared-pre re-run): the dedupe keeps a shared pre array (a
+    // multi-component call result's ONE [iife]) on the FIRST component only —
+    // folding it per component ran the callee n times.
+    const vals = dedupeSharedPre(emitExpr(e.exprs[i], env));
     const t = env.allocTemp();
     const terms: string[] = [];
     for (const v of vals) {
@@ -2136,14 +2275,40 @@ function emitComma(e: Extract<Expr, { kind: 'comma' }>, env: CodegenEnv): Value[
     pre.push(`${t} = (${terms.join(', ')})`);
   }
   if (pre.length === 0) return last;
+  if (env.dual) {
+    // ONE shared pre array (the intermediate terms + the last expr's deduped
+    // pre) attached to ONLY component 0 — statement emitters dedupe by array
+    // identity (run once), and expression-context consumers fold each
+    // component's pre INLINE in 0..n-1 order, so comp0's fold runs the
+    // intermediates + the last expr's IIFE first and later components read
+    // the temps it sets. A shared array on EVERY component would re-run the
+    // intermediate side effects per component in expression contexts (same
+    // comp0-only convention as emitArith's sharedPre / emitTernary's hoist).
+    const shared: string[] = [...pre];
+    const seen = new Set<string[]>();
+    for (const v of last) {
+      if (v.pre && v.pre.length > 0 && !seen.has(v.pre)) {
+        seen.add(v.pre);
+        shared.push(...v.pre);
+      }
+    }
+    const arr = shared.length > 0 ? shared : undefined;
+    return last.map((v, c) => {
+      const out: Value = { v: `(${v.v})`, dx: v.dx, dy: v.dy };
+      if (c === 0 && arr) out.pre = arr;
+      return out;
+    });
+  }
+  // Non-dual: the prelude is embedded in the v string of component 0 (its
+  // evaluation runs the intermediate effects and sets the last expr's
+  // retTemps; later components read the temps — 0..n-1 emission order
+  // guarantees the first component's v ran first). Any DISTINCT pre still on
+  // later components (dedupeSharedPre above kept only shared arrays on comp0)
+  // folds inline per component.
   const prelude = `(${pre.join(', ')}, `;
-  // Dual mode: the comma's value is the LAST expr — propagate its duals.
-  // The prelude terms + the last expr's pre attach to the Value (embedding
-  // the prelude in the v string would strand side effects when only dx/dy
-  // are consumed).
-  return last.map((v) => {
-    if (env.dual) return { v: `(${v.v})`, dx: v.dx, dy: v.dy, pre: [...pre, ...(v.pre ?? [])] };
-    const s = `${prelude}${v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v})`;
+  return last.map((v, c) => {
+    const x = v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v;
+    const s = c === 0 ? `${prelude}${x})` : `(${x})`;
     return { v: s };
   });
 }

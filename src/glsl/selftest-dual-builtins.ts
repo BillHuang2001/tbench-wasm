@@ -591,7 +591,7 @@ function makeTexStub(): Record<string, any> {
   const r = runDual(
     `#version 300 es
      precision mediump float;
-     uniform sampler3D u;
+     uniform mediump sampler3D u;
      in vec3 P;
      out vec4 oColor;
      void main() { vec4 tc = texture(u, P); oColor = tc; }`,
@@ -629,7 +629,7 @@ function makeTexStub(): Record<string, any> {
   const r = runDual(
     `#version 300 es
      precision mediump float;
-     uniform sampler2DArray u;
+     uniform mediump sampler2DArray u;
      in vec3 P;
      out vec4 oColor;
      void main() { vec4 tc = texture(u, P); oColor = tc; }`,
@@ -704,7 +704,7 @@ function makeTexStub(): Record<string, any> {
   const r = runDual(
     `#version 300 es
      precision mediump float;
-     uniform sampler2DShadow s;
+     uniform mediump sampler2DShadow s;
      in vec3 P;
      out vec4 oColor;
      void main() { float rr = texture(s, P); oColor.x = rr; }`,
@@ -751,7 +751,7 @@ function makeTexStub(): Record<string, any> {
        precision mediump float;
        in vec2 vv;
        uniform sampler2D u;
-       uniform isampler2D is;
+       uniform mediump isampler2D is;
        out vec4 oColor;
        void main() {
          uint p = packUnorm2x16(vv);

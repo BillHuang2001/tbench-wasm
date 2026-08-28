@@ -72,6 +72,17 @@ export function tokenize(raw: RawToken[], version: 100 | 300): LexResult {
     }
 
     if (IDENT_RE.test(text)) {
+      // ESSL 3.00 §3.6: identifiers are limited to 1024 characters (CTS:
+      // shader-with-1025-character-define.html / shader-with-1025-character-
+      // identifier.frag.html / attrib-location-length-limits.html). The
+      // preprocessor already rejects source tokens at this length; this
+      // catches tokens that bypass it (e.g. `a##b` paste results). The
+      // 1024-char boundary stays legal (attrib-location-length-limits.html
+      // compiles a 1024-char attribute name).
+      if (text.length > 1024) {
+        errors.push({ line, message: 'identifier longer than 1024 characters' });
+        continue;
+      }
       if (isKeyword(text, version)) {
         tokens.push({ kind: 'keyword', name: text, line, column });
         continue;

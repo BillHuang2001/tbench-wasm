@@ -793,6 +793,24 @@ void main() { gl_Position = vec4(0.0); }
   check(errs.length === 1, `switch-noncompound count: ${errs.length}`);
   check(errs[0].line === 3, `switch-noncompound line: ${errs[0].line}`);
   check(errs[0].message === 'switch body must be a compound statement', `switch-noncompound msg: ${errs[0].message}`);
+  // case/default labels may only appear DIRECTLY inside the switch body —
+  // a label inside a nested block is a compile error (GLSL ES 3.10 §6.2,
+  // CTS switch-case.html). A case label directly in the body stays legal.
+  parseOk('#version 300 es\nvoid main() {\n  switch (x) {\n    case 1:\n      break;\n  }\n}\n', 300);
+  const nestedCase = parseFail(
+    '#version 300 es\nvoid main() {\n  switch (x) {\n    case 1:\n    {\n      case 0:\n        break;\n    }\n  }\n}\n',
+    300,
+  );
+  check(nestedCase.length === 1, `switch nested-case count: ${nestedCase.length}`);
+  check(nestedCase[0].line === 6, `switch nested-case line: ${nestedCase[0].line}`);
+  check(nestedCase[0].message === "'case' : case label nested inside a block within a switch statement", `switch nested-case msg: ${nestedCase[0].message}`);
+  const nestedDefault = parseFail(
+    '#version 300 es\nvoid main() {\n  switch (x) {\n    default:\n    {\n      default:\n        break;\n    }\n  }\n}\n',
+    300,
+  );
+  check(nestedDefault.length === 1, `switch nested-default count: ${nestedDefault.length}`);
+  check(nestedDefault[0].line === 6, `switch nested-default line: ${nestedDefault[0].line}`);
+  check(nestedDefault[0].message === "'default' : default label nested inside a block within a switch statement", `switch nested-default msg: ${nestedDefault[0].message}`);
 }
 
 /* ------------------------------------------------------------------ */

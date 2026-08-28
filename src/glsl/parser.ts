@@ -92,6 +92,17 @@ export class Parser {
    */
   fnPrecisionDecls: { fn: FunctionDefinition; decl: PrecisionDecl }[] = [];
 
+  /**
+   * Case-label context (GLSL ES 3.10 §6.2: case/default labels may appear
+   * only IMMEDIATELY within the switch statement's body — never nested
+   * inside blocks). `inSwitchBody` is true while parsing the direct
+   * statements of a switch body compound; every nested compound inside it
+   * increments `switchBlockNesting`. A case label is legal exactly when
+   * `inSwitchBody && switchBlockNesting === 0` (parser-stmt.ts enforces).
+   */
+  inSwitchBody = false;
+  switchBlockNesting = 0;
+
   constructor(tokens: Token[], version: 100 | 300) {
     this.tokens = tokens;
     this.version = version;
@@ -304,6 +315,13 @@ function parseInvariantDecl(p: Parser): ExternalDecl {
     } else {
       returnDims = parseArrayDims(p, false);
     }
+  }
+  // `invariant <qualifiers> BlockName { ... }` — an ES 3.00 interface block
+  // (`invariant out VS_OUT { vec4 c; } v;`). The type spec is already parsed
+  // (with `invariant` re-attached above); a following `{` means a block —
+  // same detection as parseDeclarationOrFunction.
+  if (p.atOp('{')) {
+    return parseInterfaceBlock(p, type);
   }
   const nameT = p.peek();
   const t3 = p.peek(1);
@@ -604,8 +622,11 @@ export function parseTypeSpec(p: Parser, ctx: TypeSpecCtx): TypeSpec {
       }
       case 'layout': {
         // `layout` is an identifier in 1.00 — unreachable there.
-        if (ctx.member || ctx.param) {
-          p.error(t.line, `'layout' : layout qualifiers are not allowed on ${ctx.member ? 'struct or block members' : 'function parameters'}`);
+        // ES 3.00 §4.3.9: layout qualifiers may appear on interface-BLOCK
+        // members (row_major/column_major/std140); struct members and
+        // function parameters never take layout qualifiers.
+        if (ctx.param || (ctx.member && !ctx.block)) {
+          p.error(t.line, `'layout' : layout qualifiers are not allowed on ${ctx.member ? 'struct members' : 'function parameters'}`);
           p.next();
           continue;
         }
@@ -664,8 +685,9 @@ function setStorage(p: Parser, t: Token, q: TypeQualifiers, storage: StorageClas
  * (literal values only; semantics resolves non-literal constants); the
  * uniform-block layout ids `std140`/`shared`/`packed` are captured into
  * `blockLayout` (semantics rejects `shared`/`packed` — WebGL2 supports only
- * std140); other unknown ids (`column_major`, ...) are accepted and ignored
- * (the CTS uses them in valid WebGL2 shaders).
+ * std140); `row_major`/`column_major` are captured into `rowMajor` (ES 3.00
+ * §4.3.9, block-level or member-level); other unknown ids are accepted and
+ * ignored (the CTS uses them in valid WebGL2 shaders).
  */
 function parseLayoutQualifiers(p: Parser): LayoutQualifiers {
   const layout: LayoutQualifiers = {};
@@ -680,6 +702,10 @@ function parseLayoutQualifiers(p: Parser): LayoutQualifiers {
         const v = parseAssignmentExpr(p);
         if (idT.name === 'location') layout.location = intValueOf(v);
         else if (idT.name === 'binding') layout.binding = intValueOf(v);
+      } else if (idT.name === 'row_major') {
+        layout.rowMajor = true;
+      } else if (idT.name === 'column_major') {
+        layout.rowMajor = false;
       } else if (idT.name === 'std140' || idT.name === 'shared' || idT.name === 'packed') {
         layout.blockLayout = idT.name;
       }
@@ -845,7 +871,7 @@ export function parseDeclarators(p: Parser, allowUnsized: boolean): VarDeclarato
  * Array dimension brackets. An unsized `[]` pushes `null` (per the AST
  * contract: `[null]` = unsized) and errors unless `allowUnsized`.
  */
-function parseArrayDims(p: Parser, allowUnsized: boolean): Expr[] {
+export function parseArrayDims(p: Parser, allowUnsized: boolean): Expr[] {
   const dims: (Expr | null)[] = [];
   while (p.atOp('[')) {
     const open = p.next();

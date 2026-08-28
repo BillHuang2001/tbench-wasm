@@ -400,7 +400,18 @@ function inlineCall(
         const lv = emitLValue(rawArgs[i], env);
         if (lv.prelude) lines.push(lv.prelude);
         if (storage === 'inout') {
-          argTemps.push(materializeArg(conv, env, lines));
+          // in-value: read the captured lvalue's targets NOW (after its
+          // prelude ran). The emitExpr'd arg value must NOT be used — its v
+          // string re-embeds the index expression, so a side-effectful index
+          // (`foo(v[funcWithSideEffects()])`) would run its effects twice
+          // (once in the value, once in the lvalue prelude — CTS
+          // vector-dynamic-indexing "inout parameter ... with an index with
+          // side effects"). The prelude already evaluated the index once.
+          const readVals = lv.targets.map((tgt, c) => {
+            const d = lv.dualTargets?.[c];
+            return d ? { v: tgt, dx: d[0], dy: d[1] } : { v: tgt };
+          });
+          argTemps.push(materializeArg(convertArg(readVals, argTypes[i], paramType), env, lines));
         } else {
           argTemps.push([]); // out: no in-value
         }

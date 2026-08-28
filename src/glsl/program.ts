@@ -83,8 +83,8 @@ export interface UniformBlockMemberInfo {
   type: number; // GLenum of the member's element type
   size: number; // array length (1 for non-arrays)
   arrayStride: number; // bytes between array elements (0 when size === 1)
-  matrixStride: number; // bytes between columns/rows (0 for non-matrices)
-  rowMajor: boolean; // always false (std140 column-major is mandatory)
+  matrixStride: number; // bytes between columns (column-major) or rows (row-major); 0 for non-matrices
+  rowMajor: boolean; // true for layout(row_major) members (default column-major)
 }
 
 /**
