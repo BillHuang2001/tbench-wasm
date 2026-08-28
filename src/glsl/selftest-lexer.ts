@@ -130,7 +130,7 @@ expect(['.5'], 100, ['float:0.5']);
 expect(['1.5'], 100, ['float:1.5']);
 expect(['1e3'], 100, ['float:1000']);
 expect(['1E3'], 100, ['float:1000']);
-expect(['1.5e-2'], 100, ['float:0.015']);
+expect(['1.5e-2'], 100, ['float:0.014999999664723873']); // f32 rounding of 0.015
 expect(['1E+3'], 100, ['float:1000']);
 expect(['1.e3'], 100, ['float:1000']);
 expect(['1f'], 100, ['float:1']);
@@ -464,7 +464,7 @@ function lexPreproc(src: string, version: 100 | 300): LexResult {
   check(res.ok, 'integration 1..2 run ok: ' + (res.ok ? '' : JSON.stringify(res.errors)));
   if (res.ok) {
     check(
-      JSON.stringify(res.tokens.map(ser)) === JSON.stringify(['float:1', 'float:0.2']),
+      JSON.stringify(res.tokens.map(ser)) === JSON.stringify(['float:1', 'float:0.20000000298023224']),
       `integration 1..2 tokens: ${JSON.stringify(res.tokens.map(ser))}`,
     );
   }
