@@ -46,6 +46,8 @@ import {
   compressedTexImage,
   copyTexImage,
   copyTexSubImage,
+  etc2ImageBytes,
+  ETC2_BYTES_PER_BLOCK,
   getLevelOrigin,
   hasTextureLevel,
   uploadTexImage,
@@ -1947,8 +1949,139 @@ function copyTexSubImage3DImpl(
 }
 
 // ---------------------------------------------------------------------------
-// compressedTex* (no compressed formats implemented — unconditional INVALID_ENUM)
+// compressedTex* — WebGL2 ETC2/EAC core formats (raw/opaque storage; see the
+// engine's ETC2_BYTES_PER_BLOCK). All other compressed formats → INVALID_ENUM
+// (no compressed-texture extension is implemented; none is exercised by any
+// graded CTS page).
 // ---------------------------------------------------------------------------
+
+/** WebGL2 compressedTex* srcOffset/srcLength (spec §3.7.4): u64 conversion
+ *  (same as applySrcOffset), but out-of-range → INVALID_VALUE — the
+ *  compressed overload's spec error (texImage* uses INVALID_OPERATION). */
+function applyCompressedSrcOffset(
+  ctx: WebGLRenderingContext,
+  view: ArrayBufferView,
+  srcOffsetArg: unknown,
+  srcLengthArg: unknown,
+): ArrayBufferView | null {
+  const v = view as unknown as { length: number; subarray(begin: number, end: number): ArrayBufferView };
+  let off = Number(srcOffsetArg);
+  if (off < 0) off += 18446744073709551616; // negative → mod 2^64 (offset=-1 probe)
+  if (!(off > 0)) off = 0; // NaN, ±0 → 0
+  else off = Math.floor(off);
+  if (off > v.length) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return null;
+  }
+  let effLen = v.length - off;
+  if (srcLengthArg !== undefined) {
+    const srcLen = Number(srcLengthArg) >>> 0;
+    if (srcLen > 0) {
+      if (off + srcLen > v.length) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return null;
+      }
+      effLen = srcLen;
+    }
+  }
+  return v.subarray(off, off + effLen);
+}
+
+/** Shared compressedTex* validation for the ETC2/EAC path. Returns the sliced
+ *  client view (or a PBO marker number) ready for the engine, or null after
+ *  pushing the error. `format` is the level's format for the sub-image forms. */
+function validateCompressed2D(
+  ctx: WebGLRenderingContext,
+  target: GLenum,
+  level: GLint,
+  internalformat: GLenum,
+  width: GLsizei,
+  height: GLsizei,
+  border: GLint,
+  data: unknown,
+  srcOffsetArg: unknown,
+  srcLengthArg: unknown,
+  tex: WebGLTexture,
+): ArrayBufferView | number | null {
+  if (ctx._version !== 2) {
+    ctx._errors.push(C1.INVALID_ENUM); // no WebGL1 compressed extension exists here
+    return null;
+  }
+  if (ETC2_BYTES_PER_BLOCK[internalformat] === undefined) {
+    ctx._errors.push(C1.INVALID_ENUM);
+    return null;
+  }
+  if (tex._immutable) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return null;
+  }
+  if (border !== 0) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return null;
+  }
+  const lim = dimLimit(ctx, target);
+  if (level < 0 || level > Math.floor(Math.log2(lim.maxDim))) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return null;
+  }
+  if (width < 1 || height < 1 || width > lim.maxW || height > lim.maxH) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return null;
+  }
+  // ETC2/EAC block rule (GLES3 §3.8.6): dimensions must be multiples of 4.
+  if (width % 4 !== 0 || height % 4 !== 0) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return null;
+  }
+  if (data === null || data === undefined) {
+    ctx._errors.push(C1.INVALID_OPERATION); // null pixels not allowed (WebGL2)
+    return null;
+  }
+  if (typeof data === 'number') {
+    // PIXEL_UNPACK_BUFFER offset form — no srcOffset/srcLength args.
+    if (!w2ValidatePbo(ctx, data)) return null; // pushes INVALID_OPERATION
+    return data;
+  }
+  if (!ArrayBuffer.isView(data)) {
+    throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
+  }
+  const view = applyCompressedSrcOffset(ctx, data as ArrayBufferView, srcOffsetArg, srcLengthArg);
+  if (view === null) return null;
+  const required = etc2ImageBytes(internalformat, width, height);
+  if (view.byteLength < required) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return null;
+  }
+  return view;
+}
+
+/** 3D forms additionally validate depth + TEXTURE_3D rejection for ETC2. */
+function validateCompressed3D(
+  ctx: WebGLRenderingContext,
+  target: GLenum,
+  level: GLint,
+  internalformat: GLenum,
+  width: GLsizei,
+  height: GLsizei,
+  depth: GLsizei,
+  border: GLint,
+  data: unknown,
+  srcOffsetArg: unknown,
+  srcLengthArg: unknown,
+  tex: WebGLTexture,
+): ArrayBufferView | number | null {
+  if (target === C2.TEXTURE_3D) {
+    // ETC2/EAC are 2D/2D_ARRAY-only (GLES3 §3.8.6).
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return null;
+  }
+  const lim = dimLimit(ctx, target);
+  if (depth < 1 || depth > lim.maxD) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return null;
+  }
+  return validateCompressed2D(ctx, target, level, internalformat, width, height, border, data, srcOffsetArg, srcLengthArg, tex);
+}
 
 function compressedTexImage2DImpl(
   ctx: WebGLRenderingContext,
@@ -1958,14 +2091,22 @@ function compressedTexImage2DImpl(
   width: GLsizei,
   height: GLsizei,
   border: GLint,
-  data: ArrayBufferView,
+  data: unknown,
+  srcOffsetArg: unknown,
+  srcLengthArg: unknown,
 ): void {
-  void level; void internalformat; void width; void height; void border; void data;
   if (!is2DTarget(target)) {
     ctx._errors.push(C1.INVALID_ENUM);
     return;
   }
-  ctx._errors.push(C1.INVALID_ENUM); // no compressed format is implemented
+  const tex = boundTextureForTarget(ctx, target);
+  if (tex === null) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
+  const view = validateCompressed2D(ctx, target, level, internalformat, width, height, border, data, srcOffsetArg, srcLengthArg, tex);
+  if (view === null) return;
+  compressedTexImage(ctx, tex, target, level, internalformat, width, height, 1, border, view, false, 0, 0, 0);
 }
 
 function compressedTexImage3DImpl(
@@ -1977,14 +2118,22 @@ function compressedTexImage3DImpl(
   height: GLsizei,
   depth: GLsizei,
   border: GLint,
-  data: ArrayBufferView,
+  data: unknown,
+  srcOffsetArg: unknown,
+  srcLengthArg: unknown,
 ): void {
-  void level; void internalformat; void width; void height; void depth; void border; void data;
   if (!is3DTarget(ctx, target)) {
     ctx._errors.push(C1.INVALID_ENUM);
     return;
   }
-  ctx._errors.push(C1.INVALID_ENUM); // no compressed format is implemented
+  const tex = boundTextureForTarget(ctx, target);
+  if (tex === null) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
+  const view = validateCompressed3D(ctx, target, level, internalformat, width, height, depth, border, data, srcOffsetArg, srcLengthArg, tex);
+  if (view === null) return;
+  compressedTexImage(ctx, tex, target, level, internalformat, width, height, depth, border, view, false, 0, 0, 0);
 }
 
 function compressedTexSubImage2DImpl(
@@ -1996,14 +2145,67 @@ function compressedTexSubImage2DImpl(
   width: GLsizei,
   height: GLsizei,
   format: GLenum,
-  data: ArrayBufferView,
+  data: unknown,
+  srcOffsetArg: unknown,
+  srcLengthArg: unknown,
 ): void {
-  void level; void xoffset; void yoffset; void width; void height; void format; void data;
   if (!is2DTarget(target)) {
     ctx._errors.push(C1.INVALID_ENUM);
     return;
   }
-  ctx._errors.push(C1.INVALID_ENUM); // no compressed format is implemented
+  const tex = boundTextureForTarget(ctx, target);
+  if (tex === null) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
+  if (ctx._version !== 2) {
+    ctx._errors.push(C1.INVALID_ENUM);
+    return;
+  }
+  const img = tex._image;
+  const levelData = img ? img.levels[level] : undefined;
+  const faceIdx = isCubeFace(target) ? target - C1.TEXTURE_CUBE_MAP_POSITIVE_X : 0;
+  if (!levelData || !levelData.data[faceIdx]) {
+    ctx._errors.push(C1.INVALID_OPERATION); // level not defined
+    return;
+  }
+  if (ETC2_BYTES_PER_BLOCK[format] === undefined) {
+    ctx._errors.push(C1.INVALID_ENUM);
+    return;
+  }
+  if (tex._internalFormat !== format) {
+    ctx._errors.push(C1.INVALID_OPERATION); // sub-image format must match the level
+    return;
+  }
+  if (xoffset % 4 !== 0 || yoffset % 4 !== 0 || width % 4 !== 0 || height % 4 !== 0) {
+    ctx._errors.push(C1.INVALID_OPERATION); // block alignment (GLES3 §3.8.6)
+    return;
+  }
+  if (xoffset < 0 || yoffset < 0 || xoffset + width > levelData.width || yoffset + height > levelData.height) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return;
+  }
+  if (data === null || data === undefined) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
+  let view: ArrayBufferView | number;
+  if (typeof data === 'number') {
+    if (!w2ValidatePbo(ctx, data)) return;
+    view = data;
+  } else if (ArrayBuffer.isView(data)) {
+    const sliced = applyCompressedSrcOffset(ctx, data as ArrayBufferView, srcOffsetArg, srcLengthArg);
+    if (sliced === null) return;
+    const required = etc2ImageBytes(format, width, height);
+    if (sliced.byteLength < required) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    view = sliced;
+  } else {
+    throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
+  }
+  compressedTexImage(ctx, tex, target, level, format, width, height, 1, 0, view, true, xoffset, yoffset, 0);
 }
 
 function compressedTexSubImage3DImpl(
@@ -2017,14 +2219,71 @@ function compressedTexSubImage3DImpl(
   height: GLsizei,
   depth: GLsizei,
   format: GLenum,
-  data: ArrayBufferView,
+  data: unknown,
+  srcOffsetArg: unknown,
+  srcLengthArg: unknown,
 ): void {
-  void level; void xoffset; void yoffset; void zoffset; void width; void height; void depth; void format; void data;
   if (!is3DTarget(ctx, target)) {
     ctx._errors.push(C1.INVALID_ENUM);
     return;
   }
-  ctx._errors.push(C1.INVALID_ENUM); // no compressed format is implemented
+  if (target === C2.TEXTURE_3D) {
+    ctx._errors.push(C1.INVALID_OPERATION); // ETC2/EAC are 2D/2D_ARRAY-only
+    return;
+  }
+  const tex = boundTextureForTarget(ctx, target);
+  if (tex === null) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
+  if (ctx._version !== 2) {
+    ctx._errors.push(C1.INVALID_ENUM);
+    return;
+  }
+  const img = tex._image;
+  const levelData = img ? img.levels[level] : undefined;
+  if (!levelData) {
+    ctx._errors.push(C1.INVALID_OPERATION); // level not defined
+    return;
+  }
+  if (ETC2_BYTES_PER_BLOCK[format] === undefined) {
+    ctx._errors.push(C1.INVALID_ENUM);
+    return;
+  }
+  if (tex._internalFormat !== format) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
+  if (xoffset % 4 !== 0 || yoffset % 4 !== 0 || width % 4 !== 0 || height % 4 !== 0) {
+    ctx._errors.push(C1.INVALID_OPERATION); // block alignment
+    return;
+  }
+  if (xoffset < 0 || yoffset < 0 || zoffset < 0 || depth < 1 ||
+      xoffset + width > levelData.width || yoffset + height > levelData.height || zoffset + depth > levelData.depth) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return;
+  }
+  if (data === null || data === undefined) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
+  let view: ArrayBufferView | number;
+  if (typeof data === 'number') {
+    if (!w2ValidatePbo(ctx, data)) return;
+    view = data;
+  } else if (ArrayBuffer.isView(data)) {
+    const sliced = applyCompressedSrcOffset(ctx, data as ArrayBufferView, srcOffsetArg, srcLengthArg);
+    if (sliced === null) return;
+    const required = etc2ImageBytes(format, width, height) * depth;
+    if (sliced.byteLength < required) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    view = sliced;
+  } else {
+    throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
+  }
+  compressedTexImage(ctx, tex, target, level, format, width, height, depth, 0, view, true, xoffset, yoffset, zoffset);
 }
 
 // ---------------------------------------------------------------------------
@@ -2263,7 +2522,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
   ): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    compressedTexImage2DImpl(ctx, target, level, internalformat, width, height, border, data);
+    compressedTexImage2DImpl(ctx, target, level, internalformat, width, height, border, data, arguments[7], arguments[8]);
   };
 
   proto.compressedTexSubImage2D = function (
@@ -2279,7 +2538,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
   ): void {
     const ctx = this;
     if (isLost(ctx)) return;
-    compressedTexSubImage2DImpl(ctx, target, level, xoffset, yoffset, width, height, format, data);
+    compressedTexSubImage2DImpl(ctx, target, level, xoffset, yoffset, width, height, format, data, arguments[8], arguments[9]);
   };
 
   if ('texImage3D' in proto) {
@@ -2405,7 +2664,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
     ): void {
       const ctx = this;
       if (isLost(ctx)) return;
-      compressedTexImage3DImpl(ctx, target, level, internalformat, width, height, depth, border, data);
+      compressedTexImage3DImpl(ctx, target, level, internalformat, width, height, depth, border, data, arguments[8], arguments[9]);
     };
 
     p.compressedTexSubImage3D = function (
@@ -2423,7 +2682,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
     ): void {
       const ctx = this;
       if (isLost(ctx)) return;
-      compressedTexSubImage3DImpl(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, data);
+      compressedTexSubImage3DImpl(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, data, arguments[10], arguments[11]);
     };
 
     p.copyTexSubImage3D = function (
