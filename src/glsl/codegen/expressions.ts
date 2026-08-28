@@ -689,19 +689,34 @@ function walk(e: Expr, env: CodegenEnv): P {
       }
       if (ot.kind === 'vector') {
         p.type = { kind: 'scalar', base: ot.base };
-        p.swz = null;
         if (isConst) {
-          p.flatOff += cv;
+          // The swizzle applies to the INDEX, not to the flat offset:
+          // `v.zyx[1]` addresses base component swz[1] (v.y), not flat
+          // component 1 (v.x). Fold the remap into flatOff (constant), then
+          // consume the swizzle.
+          p.flatOff += p.swz ? p.swz[cv] : cv;
+          p.swz = null;
           return p;
         }
         // dynamic component (ES 3.00 allows it): spill locals / stride-1 storage
         const t = env.allocTemp();
         p.pre.push(`${t} = ${idxV!.pre && idxV!.pre.length ? foldPre(idxV!.pre, idxV!.v) : idxV!.v}`);
+        // A dynamic index into a SWIZZLED vector addresses base component
+        // swz[t] (`v.zyx[i]` ↔ v[swz[i]]) — remap the runtime index through
+        // the compile-time swizzle permutation, then consume the swizzle so
+        // leafRead/leafWrite don't ALSO apply it as a constant offset.
+        let idx = t;
+        if (p.swz) {
+          const j = env.allocTemp();
+          p.pre.push(`${j} = ${swzLookup(p.swz, t)}`);
+          idx = j;
+          p.swz = null;
+        }
         if (p.local) {
           if (p.local.synth) {
             // BUG 1: call-result object — scratch spill (see the array branch).
             spillSynthLocal(p, env, 1);
-            p.dyn = { temp: t, stride: 0, elemSlots: 1 };
+            p.dyn = { temp: idx, stride: 0, elemSlots: 1 };
           } else if (p.local.kind === 'scratch') {
             // Scratch-backed local (array / struct-with-array): already
             // index-addressable — no spill needed. An existing dyn (outer
@@ -709,20 +724,20 @@ function walk(e: Expr, env: CodegenEnv): P {
             // combined offset temp; otherwise the index temp strides 1.
             if (p.dyn) {
               const j = env.allocTemp();
-              p.pre.push(`${j} = (${p.dyn.temp}) * ${p.dyn.elemSlots} + ${t}`);
+              p.pre.push(`${j} = (${p.dyn.temp}) * ${p.dyn.elemSlots} + ${idx}`);
               p.dyn = { temp: j, stride: 0, elemSlots: 1 };
             } else {
-              p.dyn = { temp: t, stride: 0, elemSlots: 1 };
+              p.dyn = { temp: idx, stride: 0, elemSlots: 1 };
             }
           } else {
             const ds = env.ensureDynScratch(p.local.name);
             p.pre.unshift(...ds.copyIn);
             p.post.push(...ds.copyOut);
             p.local = { ...p.local, kind: 'scratch', scratchBase: ds.base, elemSlots: 1, int: ds.int };
-            p.dyn = { temp: t, stride: 0, elemSlots: 1 };
+            p.dyn = { temp: idx, stride: 0, elemSlots: 1 };
           }
         } else if (p.storage) {
-          p.dyn = { temp: t, stride: storageElemStride(p, 1), elemSlots: 0 };
+          p.dyn = { temp: idx, stride: storageElemStride(p, 1), elemSlots: 0 };
         }
         return p;
       }
@@ -958,6 +973,15 @@ export function swizzleComponents(size: number, name: string): number[] {
     out.push(i);
   }
   return out;
+}
+
+/** Compile-time swizzle permutation applied to a RUNTIME index: `v.zyx[i]`
+ *  reads base component swz[i] (vectors have ≤ 4 components, so a nested
+ *  ternary chain is compact and allocation-free). */
+function swzLookup(swz: number[], t: string): string {
+  let s = String(swz[swz.length - 1]);
+  for (let i = swz.length - 2; i >= 0; i--) s = `(${t} === ${i} ? ${swz[i]} : ${s})`;
+  return s;
 }
 
 /* ------------------------------------------------------------------ */

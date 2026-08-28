@@ -1233,6 +1233,83 @@ okInfo(
   okInfo('precision mediump float;\ninvariant varying vec4 v_varying;\nvoid main() { gl_FragColor = v_varying; }', 100, 'FRAGMENT');
   okInfo('precision mediump float;\nvarying vec4 v_varying;\ninvariant v_varying;\nvoid main() { gl_FragColor = v_varying; }', 100, 'FRAGMENT');
 }
+/* 18. Compound-assignment matrix-multiply rule (CTS                   */
+/*     compound-assignment-type-combination.html): matC1xR1 *= matC2xR2 */
+/*     is legal iff C1 == R2 (left COLUMNS == right ROWS, ESSL 3.00     */
+/*     §5.9), result matC2xR1 — non-square left matrices only multiply  */
+/*     with a square right matrix of matching column count.             */
+/* ------------------------------------------------------------------ */
+
+// mat2x3 *= mat2 (C1=2 == R2=2) compiles — was rejected pre-fix.
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat2 ur;\nuniform mat2x3 ul;\nvoid main() {\n  mat2x3 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat2 ur;\nuniform mat2x4 ul;\nvoid main() {\n  mat2x4 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat3 ur;\nuniform mat3x2 ul;\nvoid main() {\n  mat3x2 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat3 ur;\nuniform mat3x4 ul;\nvoid main() {\n  mat3x4 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat4 ur;\nuniform mat4x2 ul;\nvoid main() {\n  mat4x2 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat4 ur;\nuniform mat4x3 ul;\nvoid main() {\n  mat4x3 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+// Binary mat2x3 * mat2 uses the same rule and compiles too.
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat2 ur;\nuniform mat2x3 ul;\nvoid main() {\n  mat2x3 a = ul * ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+// Non-square *= itself must FAIL (C1 != R2 — the page's expected-fail set).
+const m1 = errs(
+  '#version 300 es\nprecision mediump float;\nuniform mat2x3 ur;\nuniform mat2x3 ul;\nvoid main() {\n  mat2x3 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+check(hasErr(m1, 7, "'*=' : operands of type 'mat2x3' and 'mat2x3' are incompatible"), 'mat2x3 *= mat2x3 → error line 7');
+// mat3x2 *= mat2x4 must FAIL (C1=3 != R2=4).
+const m2 = errs(
+  '#version 300 es\nprecision mediump float;\nuniform mat2x4 ur;\nuniform mat3x2 ul;\nvoid main() {\n  mat3x2 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+check(hasErr(m2, 7, "'*=' : operands of type 'mat3x2' and 'mat2x4' are incompatible"), 'mat3x2 *= mat2x4 → error line 7');
+// mat4x3 *= mat4x3 must FAIL (C1=4 != R2=3).
+const m3 = errs(
+  '#version 300 es\nprecision mediump float;\nuniform mat4x3 ur;\nuniform mat4x3 ul;\nvoid main() {\n  mat4x3 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+check(hasErr(m3, 7, "'*=' : operands of type 'mat4x3' and 'mat4x3' are incompatible"), 'mat4x3 *= mat4x3 → error line 7');
+// Square matrices still self-multiply.
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat3 ur;\nuniform mat3 ul;\nvoid main() {\n  mat3 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a[0].x));\n}',
+  300,
+  'VERTEX',
+);
+// vec *= mat keeps working (row-vector product: vecC * matCxR → vecR).
+okInfo(
+  '#version 300 es\nprecision mediump float;\nuniform mat2 ur;\nuniform vec2 ul;\nvoid main() {\n  vec2 a = ul;\n  a *= ur;\n  gl_Position = vec4(float(a.x));\n}',
+  300,
+  'VERTEX',
+);
 
 /* ------------------------------------------------------------------ */
 /* Summary                                                             */

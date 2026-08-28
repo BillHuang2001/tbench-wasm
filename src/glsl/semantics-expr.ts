@@ -167,9 +167,10 @@ function sameShapeType(lt: GLSLType, rt: GLSLType, version: 100 | 300): GLSLType
  * Result type of the arithmetic binary operators (+ - * /). Returns null when
  * the operand combination is not legal; the caller reports the error.
  * Matrix rules: scalar applied component-wise; matrix±matrix same dims;
- * matrix*matrix: (matC2xR2)*(matC1xR1) legal iff R1==C2 → matC2xR1
- * (ES 1.00 has only square matrices, so this reduces to same-dims);
- * matrix*vector: matCxR * vecR → vecC; vector*matrix: vecC * matCxR → vecR.
+ * matrix*matrix: (matC1xR1)*(matC2xR2) legal iff C1==R2 (left columns ==
+ * right rows, ESSL 3.00 §5.9) → matC2xR1 (ES 1.00 has only square matrices,
+ * so this reduces to same-dims); matrix*vector: matCxR * vecR → vecC;
+ * vector*matrix: vecC * matCxR → vecR.
  */
 function arithmeticType(op: BinaryOp, lt: GLSLType, rt: GLSLType, version: 100 | 300): GLSLType | null {
   const ss = sameShapeType(lt, rt, version);
@@ -179,7 +180,7 @@ function arithmeticType(op: BinaryOp, lt: GLSLType, rt: GLSLType, version: 100 |
       if (lt.kind === 'scalar' && rt.kind === 'matrix') return lt.base === 'float' ? rt : null;
       if (lt.kind === 'matrix' && rt.kind === 'scalar') return rt.base === 'float' ? lt : null;
       if (lt.kind === 'matrix' && rt.kind === 'matrix') {
-        if (lt.rows !== rt.cols) return null;
+        if (lt.cols !== rt.rows) return null;
         return { kind: 'matrix', cols: rt.cols, rows: lt.rows };
       }
       if (lt.kind === 'matrix' && rt.kind === 'vector') {

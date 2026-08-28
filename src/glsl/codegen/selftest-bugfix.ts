@@ -785,6 +785,216 @@ void main() {
 }
 
 /* ------------------------------------------------------------------ */
+/* (f) Swizzle × dynamic/const index (CTS                                */
+/*     conformance2/glsl3/vector-dynamic-indexing-swizzled-lvalue.html). */
+/*     The swizzle applies to the INDEX, not as a constant offset:        */
+/*     `v.zyx[i]` addresses base component swz[i]. Pre-fix, the dynamic   */
+/*     lvalue wrote scratch[base + i + swz[c]] (out of range for i>0)     */
+/*     and the const read folded flatOff += cv (wrong for swz[cv] != cv). */
+/* ------------------------------------------------------------------ */
+
+// (f1) the exact CTS swizzled-lvalue subtest: v.zyx[i] = v[i] in a loop
+// (dynamic index of a swizzled lvalue — pre-fix rendered red).
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision highp float;
+out vec4 color;
+void main() {
+  vec3 v = vec3(1.0, 2.0, 3.0);
+  for (int i = 0; i < 3; i++) {
+    v.zyx[i] = v[i];
+  }
+  color = distance(v, vec3(1.0, 2.0, 1.0)) < 0.01 ? vec4(0, 1, 0, 1) : vec4(1, 0, 0, 1);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  const c = ctx.out.color[0];
+  check(
+    c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+    `v.zyx[i] = v[i] loop: green (v == (1,2,1)) — got [${c.join(',')}]`,
+  );
+}
+
+// (f2) const index into a swizzled vector (latent bug, same root cause):
+// v.zyx[0] == v.z, v.yxz[0] == v.y, v.zyx[1] == v.y.
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision highp float;
+out vec4 color;
+void main() {
+  vec3 v = vec3(1.0, 2.0, 3.0);
+  float a = v.zyx[0];
+  float b = v.yxz[0];
+  float c = v.zyx[1];
+  color = (abs(a - 3.0) < 0.01 && abs(b - 2.0) < 0.01 && abs(c - 2.0) < 0.01) ? vec4(0, 1, 0, 1) : vec4(1, 0, 0, 1);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  const c = ctx.out.color[0];
+  check(
+    c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+    `const index of swizzled vector (v.zyx[0]==v.z, v.yxz[0]==v.y, v.zyx[1]==v.y) — got [${c.join(',')}]`,
+  );
+}
+
+// (f3) dynamic index of a swizzled ARRAY element: arr[i].zyx[j] composes
+// the outer dyn offset with the swizzle-remapped inner index.
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision highp float;
+out vec4 color;
+uniform int i;
+void main() {
+  vec3[2] arr = vec3[2](vec3(1.0, 2.0, 3.0), vec3(4.0, 5.0, 6.0));
+  float a = arr[i].zyx[0];
+  float b = arr[i].zyx[2];
+  color = (abs(a - 6.0) < 0.01 && abs(b - 4.0) < 0.01) ? vec4(0, 1, 0, 1) : vec4(1, 0, 0, 1);
+}`,
+    'FRAGMENT',
+    300,
+    {
+      uniformSlots: { i: { store: 'int', slot: 0, stride: 0 } },
+      intUniforms: { 0: 1 },
+    },
+  );
+  const c = ctx.out.color[0];
+  check(
+    c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+    `arr[i].zyx[j] const (arr[1].zyx[0]==6, arr[1].zyx[2]==4) — got [${c.join(',')}]`,
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* (g) inout param with a SIDE-EFFECTFUL index (CTS                      */
+/*     conformance2/glsl3/vector-dynamic-indexing.html "Index an inout   */
+/*     parameter passed to an user-defined function with an index with   */
+/*     side effects"). Pre-fix, the in-value re-embedded the index       */
+/*     expression, so the side effect ran twice (once in the emitted     */
+/*     arg value, once in the lvalue prelude) → the counter check        */
+/*     failed and the page rendered red. The in-value now reads the      */
+/*     captured lvalue targets after the prelude evaluated the index     */
+/*     exactly once.                                                     */
+/* ------------------------------------------------------------------ */
+
+// (g1) the exact CTS subtest: foo(v[funcWithSideEffects()]) with inout.
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision highp float;
+out vec4 color;
+int sideEffectCounter = 0;
+void foo(inout float f) {
+  float g = f + 2.5;
+  modf(g, f);
+}
+int funcWithSideEffects() {
+  sideEffectCounter++;
+  return 2;
+}
+void main() {
+  vec4 v = vec4(1.0, 2.0, 3.0, 4.0);
+  foo(v[funcWithSideEffects()]);
+  vec4 expected = vec4(1.0, 2.0, 5.0, 4.0);
+  float f = 1.0 - distance(v, expected);
+  if (sideEffectCounter != 1) {
+    f = 0.0;
+  }
+  color = vec4(1.0 - f, f, 0.0, 1.0);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  const c = ctx.out.color[0];
+  check(
+    c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+    `foo(v[funcWithSideEffects()]) inout: green (v[2]==5, counter==1) — got [${c.join(',')}]`,
+  );
+}
+
+// (g2) plain inout scalar arg still round-trips (no prelude path).
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision highp float;
+out vec4 color;
+void foo(inout float f) {
+  f = f * 2.0;
+}
+void main() {
+  float x = 3.0;
+  foo(x);
+  color = abs(x - 6.0) < 0.01 ? vec4(0, 1, 0, 1) : vec4(1, 0, 0, 1);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  const c = ctx.out.color[0];
+  check(
+    c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+    `plain inout scalar round-trip (x==6) — got [${c.join(',')}]`,
+  );
+}
+
+// (g3) inout with a CONST-indexed lvalue keeps working.
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision highp float;
+out vec4 color;
+void foo(inout float f) {
+  f = f + 1.0;
+}
+void main() {
+  vec4 v = vec4(1.0, 2.0, 3.0, 4.0);
+  foo(v[2]);
+  color = abs(v[2] - 4.0) < 0.01 ? vec4(0, 1, 0, 1) : vec4(1, 0, 0, 1);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  const c = ctx.out.color[0];
+  check(
+    c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+    `inout const-indexed lvalue (v[2]==4) — got [${c.join(',')}]`,
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* (h) Non-square matrix compound multiply `matC1xR1 *= matC2xR2`        */
+/*     (CTS conformance2/glsl3/compound-assignment-type-combination.html */
+/*     — semantics fix in arithmeticType; codegen matrixCompoundMul      */
+/*     already handled the widths). Runtime pin with real values.        */
+/* ------------------------------------------------------------------ */
+
+// (h1) mat2x3 *= mat2: A (2 cols × 3 rows) times B (2×2):
+// A = [1 3; 2 4; 3 5] (columns), B = [2 0; 0 2] (diag) → A*B = 2A.
+{
+  const { ctx } = runMain(
+    `#version 300 es
+precision highp float;
+out vec4 color;
+void main() {
+  mat2x3 a = mat2x3(1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
+  mat2 b = mat2(2.0);
+  a *= b;
+  color = (abs(a[0].x - 2.0) < 0.01 && abs(a[1].y - 10.0) < 0.01 && abs(a[1].z - 12.0) < 0.01) ? vec4(0, 1, 0, 1) : vec4(1, 0, 0, 1);
+}`,
+    'FRAGMENT',
+    300,
+  );
+  const c = ctx.out.color[0];
+  check(
+    c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+    `mat2x3 *= mat2 runtime (a[0].x==2, a[1].y==10, a[1].z==12) — got [${c.join(',')}]`,
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
 
