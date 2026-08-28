@@ -439,7 +439,12 @@ const W2_COMBOS: Record<number, { format: number; types: number[] }> = {
   [C1.RGBA]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_4_4_4_4, C1.UNSIGNED_SHORT_5_5_5_1] },
   [C1.RGB]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_6_5] },
   [C2.RG]: { format: C2.RG, types: [C1.UNSIGNED_BYTE] },
-  [C2.RED]: { format: C2.RED, types: [C1.UNSIGNED_BYTE] },
+  // NOTE: unsized RED is deliberately ABSENT — it is valid in GLES 3.0
+  // Table 3.2 but INVALID in WebGL 2.0 ("valid in GL but invalid in WebGL";
+  // CTS tex-input-validation.js expects an error for RED/RED/UNSIGNED_BYTE).
+  // The w2InternalformatValid rejection maps RED to INVALID_OPERATION (see
+  // w2ValidateFormatType) so tex-image-with-bad-args.html's RED/UNSIGNED_SHORT
+  // case (which accepts only INVALID_VALUE/INVALID_OPERATION) keeps passing.
   [C2.RGBA_INTEGER]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
   [C2.RGB_INTEGER]: { format: C2.RGB_INTEGER, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
   [C2.RG_INTEGER]: { format: C2.RG_INTEGER, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
@@ -593,8 +598,11 @@ function w2ValidateFormatType(
     // norm16 formats (R16_EXT etc.) are valid GLES3 Table 3.2 formats gated
     // on EXT_texture_norm16 — without the extension they are rejected with
     // INVALID_OPERATION, NOT INVALID_ENUM (CTS tex-image-with-bad-args.html
-    // accepts only INVALID_VALUE/INVALID_OPERATION for 0x822A).
-    if (isNorm16Format(internalformat)) ctx._errors.push(C1.INVALID_OPERATION);
+    // accepts only INVALID_VALUE/INVALID_OPERATION for 0x822A). Unsized RED
+    // is invalid in WebGL2 (absent from W2_COMBOS) but the same page expects
+    // INVALID_VALUE/INVALID_OPERATION for RED/UNSIGNED_SHORT, so it must NOT
+    // report INVALID_ENUM either.
+    if (isNorm16Format(internalformat) || internalformat === C2.RED) ctx._errors.push(C1.INVALID_OPERATION);
     else ctx._errors.push(C1.INVALID_ENUM);
     return false;
   }
@@ -1850,6 +1858,31 @@ function copyFeedbackLoop(
   return false;
 }
 
+/**
+ * Format of the current READ source for copyTex{Sub}Image2D/3D. With a
+ * framebuffer bound: the attachment at the read point (renderbuffer
+ * internalformat or texture level format; 0 when the attachment is missing —
+ * the caller's attachment checks have already rejected that case). With the
+ * default framebuffer as the read source: RGBA or RGB per the alpha context
+ * attribute (a dest format needing a component the backbuffer lacks — e.g.
+ * ALPHA/LUMINANCE_ALPHA/RGBA from an RGB backbuffer — is INVALID_OPERATION;
+ * CTS copy-tex-image-2d-formats.html, tex-input-validation.js).
+ */
+function copyReadSourceFormat(ctx: WebGLRenderingContext): number {
+  const readFbo = ctx._state.readFramebuffer;
+  if (readFbo !== null) {
+    const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
+    const att = readFbo._attachments.get(readPoint);
+    if (att) {
+      return att.type === 'renderbuffer'
+        ? att.renderbuffer._internalformat
+        : (att.texture._image?.internalFormat ?? 0);
+    }
+    return 0;
+  }
+  return ctx._attrs.alpha !== false ? C1.RGBA : C1.RGB;
+}
+
 function copyTexImage2DImpl(
   ctx: WebGLRenderingContext,
   target: GLenum,
@@ -1929,28 +1962,13 @@ function copyTexImage2DImpl(
     ctx._errors.push(C1.INVALID_OPERATION);
     return;
   }
-  // Dest/source component rules (EXT_color_buffer_half_float CTS matrix). With
-  // the default framebuffer as the read source, derive its format from the
-  // alpha context attribute (alpha → RGBA, else RGB) — a dest format needing a
-  // component the backbuffer lacks (e.g. ALPHA/LUMINANCE_ALPHA/RGBA from an RGB
-  // backbuffer) is INVALID_OPERATION (CTS copy-tex-image-2d-formats.html).
-  let srcFmt = 0;
-  if (readFbo !== null) {
-    const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
-    const att = readFbo._attachments.get(readPoint);
-    if (att) {
-      srcFmt = att.type === 'renderbuffer'
-        ? att.renderbuffer._internalformat
-        : (att.texture._image?.internalFormat ?? 0);
-    }
-  } else {
-    srcFmt = ctx._attrs.alpha !== false ? C1.RGBA : C1.RGB;
-  }
+  // Dest/source component rules (EXT_color_buffer_half_float CTS matrix).
+  // Components can be dropped but not added, and a sized dest's component
+  // sizes must exactly match the source's (spec "Color conversion in
+  // copyTex{Sub}Image2D"; CTS copy-texture-image.html, tex-input-validation.js).
+  const srcFmt = copyReadSourceFormat(ctx);
   if (srcFmt !== 0) {
     if (ctx._version === 2) {
-      // W2: components can be dropped but not added, and a sized dest's
-      // component sizes must exactly match the source's (spec "Color conversion
-      // in copyTex{Sub}Image2D"; CTS copy-texture-image.html).
       if (internalFormatComponents(internalformat) > internalFormatComponents(srcFmt)) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
@@ -2045,6 +2063,17 @@ function copyTexSubImage2DImpl(
     ctx._errors.push(C1.INVALID_OPERATION);
     return;
   }
+  // GLES 3.0 §3.8.5 / WebGL2 "Color conversion in copyTexSubImage2D": the
+  // destination may not have MORE color components than the source (RGB565
+  // renderbuffer → RGBA texture, or an RGB backbuffer → RGBA texture, is
+  // INVALID_OPERATION — CTS tex-input-validation.js). Size-class matching does
+  // NOT apply to copyTexSubImage2D (only copyTexImage2D's internalformat
+  // selection is constrained that way).
+  const srcFmt = copyReadSourceFormat(ctx);
+  if (srcFmt !== 0 && internalFormatComponents(tex._image!.internalFormat) > internalFormatComponents(srcFmt)) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
   try {
     copyTexSubImage(ctx, tex, target, level, xoffset, yoffset, 0, x, y, width, height);
   } catch {
@@ -2123,6 +2152,13 @@ function copyTexSubImage3DImpl(
   // (framebufferTextureLayer; CTS copy-texture-image-webgl-specific.html —
   // same layer → INVALID_OPERATION, different layer/level → legal).
   if (copyFeedbackLoop(ctx, tex, level, target, zoffset)) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
+  // GLES 3.0 §3.8.5: same component-count rule as copyTexSubImage2D — the
+  // destination may not have MORE color components than the source.
+  const srcFmt = copyReadSourceFormat(ctx);
+  if (srcFmt !== 0 && internalFormatComponents(tex._image!.internalFormat) > internalFormatComponents(srcFmt)) {
     ctx._errors.push(C1.INVALID_OPERATION);
     return;
   }
