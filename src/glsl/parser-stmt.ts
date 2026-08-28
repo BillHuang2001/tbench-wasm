@@ -267,8 +267,10 @@ function parseReturnStmt(p: Parser): ReturnStmt {
   return { kind: 'return', value, loc: locOf(start) };
 }
 
-/** Local declaration statement (possibly `struct S {...};` with no declarators). */
-function parseDeclStmt(p: Parser): DeclStmt {
+/** Local declaration statement (possibly `struct S {...};` with no declarators).
+ *  Returns `{kind:'empty'}` for the standalone-layout-decl form (§4.4
+ *  `type_qualifier SEMICOLON`), which declares nothing. */
+function parseDeclStmt(p: Parser): Stmt {
   const start = p.peek();
   const type = parseTypeSpec(p, { param: false, member: false });
   if (type.base.kind === 'struct-definition') {
@@ -285,6 +287,16 @@ function parseDeclStmt(p: Parser): DeclStmt {
       p.next();
       return { kind: 'decl-stmt', type, declarators: [], loc: locOf(start) };
     }
+  }
+  // Standalone layout declaration inside a function body (`layout(std140)
+  // uniform;` — the `type_qualifier SEMICOLON` grammar form is a legal
+  // declaration_statement). The marker type spec (empty type-name) can only
+  // come from parseTypeSpec's §4.4 path; accept and drop the statement —
+  // layout defaults only matter at global scope (semantics processes them in
+  // the global pre-pass) and ANGLE treats in-body instances as no-ops.
+  if (type.base.kind === 'type-name' && type.base.name === '' && p.atOp(';')) {
+    p.next();
+    return { kind: 'empty', loc: locOf(start) };
   }
   // GLSL ES 3.00: array dims may precede the declarator name (`vec4[2] V;` —
   // ANGLE/CTS accept; tricky-loop-conditions.html). Invalid in 1.00 —

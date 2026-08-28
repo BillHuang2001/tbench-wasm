@@ -43,7 +43,8 @@ export type ExternalDecl =
   | StructDecl
   | PrecisionDecl
   | ExtensionDecl
-  | InvariantDecl;
+  | InvariantDecl
+  | LayoutDecl;
 
 /* ------------------------------------------------------------------ */
 /* Type specs                                                          */
@@ -166,6 +167,20 @@ export interface ExtensionDecl extends Node {
 export interface InvariantDecl extends Node {
   kind: 'invariant-decl';
   name: string;
+}
+
+/**
+ * ES 3.00 standalone layout declaration — the `type_qualifier SEMICOLON`
+ * grammar form (`layout(std140,column_major) uniform;`): layout qualifier(s)
+ * with NO base type and NO declarator. Sets the DEFAULT layout for subsequent
+ * declarations (GLSL ES 3.00 §4.4): the block layout (std140/shared/packed)
+ * and row_major/column_major thread into later interface blocks declared
+ * without an explicit `layout(...)` (Babylon.js standard-material UBO
+ * sections start every block group with such a line).
+ */
+export interface LayoutDecl extends Node {
+  kind: 'layout-decl';
+  qualifiers: TypeQualifiers;
 }
 
 /* ------------------------------------------------------------------ */

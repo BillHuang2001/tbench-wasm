@@ -46,7 +46,7 @@ import type { CompileError } from './compiler.js';
 import type { Precision, SamplerKind, StorageClass, TypeQualifiers, LayoutQualifiers } from './types.js';
 import type {
   ExternalDecl, Expr, FunctionDefinition, FunctionPrototype, GlobalVarDecl, InterfaceBlockDecl,
-  InvariantDecl, ParamDecl, PrecisionDecl, StructDecl, StructDefinition,
+  InvariantDecl, LayoutDecl, ParamDecl, PrecisionDecl, StructDecl, StructDefinition,
   StructMemberDecl, TranslationUnit, TypeName, TypeSpec, VarDeclarator,
 } from './ast.js';
 import {
@@ -303,6 +303,14 @@ function parseInvariantDecl(p: Parser): ExternalDecl {
   // The leading 'invariant' was consumed above — re-attach it to the type
   // spec (the qualifier form `invariant varying vec4 v;` must record it).
   type.qualifiers.invariant = true;
+  // `invariant layout(...) uniform;` — the standalone-layout-decl marker
+  // (type_qualifier SEMICOLON; `invariant` is itself a qualifier): return a
+  // layout-decl carrying the qualifiers (semantics reads only .layout).
+  if (type.base.kind === 'type-name' && type.base.name === '' && p.atOp(';')) {
+    p.next(); // ';'
+    const decl: LayoutDecl = { kind: 'layout-decl', qualifiers: type.qualifiers, loc: locOf(start) };
+    return decl;
+  }
   // `invariant <type> <name>(...)` — invariant on a function is invalid;
   // parse it anyway (semantics rejects) so recovery stays clean.
   // Array return dims (`invariant float[2] f()`) follow the same version
@@ -401,6 +409,17 @@ function parseDeclarationOrFunction(p: Parser): ExternalDecl | null {
     const declarators = parseDeclarators(p, false);
     p.expectOp(';', "expected ';' after declaration");
     const decl: GlobalVarDecl = { kind: 'global-var-decl', type, declarators, loc: locOf(start) };
+    return decl;
+  }
+  // GLSL ES 3.00 §4.4 standalone layout declaration: `layout(...) ;` /
+  // `layout(...) uniform;` — the marker type spec from parseTypeSpec (empty
+  // type-name) with the `;` directly after the qualifiers. No type, no
+  // declarator; the qualifiers become the DEFAULT layout for subsequent
+  // declarations (Babylon standard-material UBO sections start with
+  // `layout(std140,column_major) uniform;`).
+  if (type.base.kind === 'type-name' && type.base.name === '' && p.atOp(';')) {
+    p.next(); // ';'
+    const decl: LayoutDecl = { kind: 'layout-decl', qualifiers: type.qualifiers, loc: locOf(start) };
     return decl;
   }
   if (p.atOp('{')) {
@@ -644,6 +663,20 @@ export function parseTypeSpec(p: Parser, ctx: TypeSpecCtx): TypeSpec {
   // Base type: type name or inline struct definition.
   let base: TypeName | StructDefinition;
   const bt = p.peek();
+  if (bt.kind === 'op' && bt.text === ';' && qualifiers.layout !== undefined) {
+    // GLSL ES 3.00 §4.4 `type_qualifier SEMICOLON`: a STANDALONE layout
+    // declaration (`layout(std140,column_major) uniform;`) — layout
+    // qualifier(s) with NO base type and NO declarator, setting the default
+    // layout for subsequent declarations. Return a marker type spec (empty
+    // type-name, `;` NOT consumed) so parseDeclarationOrFunction /
+    // parseDeclStmt / parseInvariantDecl can recognize and consume it
+    // without the "syntax error, unexpected ';'" that parseTypeName would
+    // produce. The marker can never leak into a real declaration: an empty
+    // type name cannot be produced by parseTypeName (identifier/keyword
+    // paths always carry a real name) and any other consumer of the marker
+    // records its own error downstream.
+    return { kind: 'type-spec', qualifiers, base: { kind: 'type-name', name: '', loc: locOf(bt) }, loc: locOf(start) };
+  }
   if (bt.kind === 'keyword' && bt.name === 'struct') {
     if (ctx.member) p.error(bt.line, 'struct definitions are not allowed inside structs');
     else if (ctx.param) p.error(bt.line, 'struct definitions are not allowed in function parameters');

@@ -32,7 +32,7 @@ import type { CompileError } from './compiler.js';
 import type {
   TranslationUnit, ExternalDecl, GlobalVarDecl, FunctionDefinition,
   FunctionPrototype, PrecisionDecl, StructDecl, InterfaceBlockDecl,
-  InvariantDecl, ExtensionDecl, DeclStmt, ExprStmt, ForStmt, IfStmt,
+  InvariantDecl, ExtensionDecl, LayoutDecl, DeclStmt, ExprStmt, ForStmt, IfStmt,
   DoWhileStmt, SwitchStmt, CaseLabelStmt, ReturnStmt, CompoundStmt, Expr, BinaryExpr,
   AssignExpr, UnaryExpr, TernaryExpr, CallExpr, IndexExpr, MemberExpr,
   CommaExpr,
@@ -115,6 +115,10 @@ function idecl(d: ExternalDecl): InvariantDecl {
 function edecl(d: ExternalDecl): ExtensionDecl {
   check(d.kind === 'extension-decl', `expected extension-decl, got ${d.kind}`);
   return d as ExtensionDecl;
+}
+function ldecl(d: ExternalDecl): LayoutDecl {
+  check(d.kind === 'layout-decl', `expected layout-decl, got ${d.kind}`);
+  return d as LayoutDecl;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1109,6 +1113,54 @@ void main() { gl_Position = vec4(0.0); }
   const gv = gvar(d[1]);
   check(gv.type.qualifiers.invariant === true && gv.type.qualifiers.storage === 'varying', 'invariant varying vec4 v');
   check(gv.declarators[0].name === 'v', 'invariant declarator v');
+}
+
+/* ------------------------------------------------------------------ */
+/* Standalone layout declarations (ES 3.00 §4.4 `type_qualifier       */
+/* SEMICOLON` — `layout(std140,column_major) uniform;`)               */
+/* ------------------------------------------------------------------ */
+
+{
+  // Bare `layout(...) ;` with no storage qualifier.
+  const ast = parseOk('#version 300 es\nlayout(std140);\nvoid main() {}\n', 300);
+  check(ast.declarations.length === 2, `layout-std140 decl count: ${ast.declarations.length}`);
+  const l0 = ldecl(ast.declarations[0]);
+  check(l0.qualifiers.layout?.blockLayout === 'std140', 'layout(std140); blockLayout std140');
+  check(l0.qualifiers.storage === undefined, 'layout(std140); no storage');
+  check(ast.declarations[1].kind === 'function-definition', 'layout(std140); followed by valid code');
+
+  // `layout(...) uniform;` — the Babylon standard-material form.
+  const ast2 = parseOk('#version 300 es\nlayout(std140, column_major) uniform;\nvoid main() {}\n', 300);
+  const l1 = ldecl(ast2.declarations[0]);
+  check(l1.qualifiers.layout?.blockLayout === 'std140', 'layout(std140,column_major) uniform; blockLayout');
+  check(l1.qualifiers.layout?.rowMajor === false, 'layout(std140,column_major) uniform; column_major');
+  check(l1.qualifiers.storage === 'uniform', 'layout(std140,column_major) uniform; storage uniform');
+
+  // `layout(location=0) in;` — standalone storage-qualified form.
+  const ast3 = parseOk('#version 300 es\nlayout(location = 0) in;\nvoid main() {}\n', 300);
+  const l2 = ldecl(ast3.declarations[0]);
+  check(l2.qualifiers.layout?.location === 0, 'layout(location=0) in; location 0');
+  check(l2.qualifiers.storage === 'in', 'layout(location=0) in; storage in');
+
+  // The full Babylon UBO pattern: standalone decls interleaved with bare
+  // interface blocks — the blocks must still parse as interface-blocks.
+  const ast4 = parseOk(
+    `#version 300 es
+     layout(std140,column_major) uniform;
+     uniform Material { vec4 color; };
+     layout(std140,column_major) uniform;
+     uniform Scene { mat4 view; };
+     void main() { gl_Position = vec4(0.0); }`,
+    300,
+  );
+  check(ast4.declarations.length === 5, `babylon pattern decl count: ${ast4.declarations.length}`);
+  check(ast4.declarations[0].kind === 'layout-decl', 'babylon pattern: standalone 1');
+  check(ast4.declarations[1].kind === 'interface-block' && iblock(ast4.declarations[1]).blockName === 'Material',
+    'babylon pattern: block Material after standalone');
+  check(ast4.declarations[2].kind === 'layout-decl', 'babylon pattern: standalone 2');
+  check(ast4.declarations[3].kind === 'interface-block' && iblock(ast4.declarations[3]).blockName === 'Scene',
+    'babylon pattern: block Scene after standalone');
+  check(ast4.declarations[4].kind === 'function-definition', 'babylon pattern: main follows');
 }
 
 /* ------------------------------------------------------------------ */
