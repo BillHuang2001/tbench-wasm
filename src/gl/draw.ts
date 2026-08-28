@@ -1127,13 +1127,13 @@ function primitiveInfo(mode: GLenum, count: number): { primCount: number; vertsP
   }
 }
 
-/** Vertex position (within the draw) of primitive p, vertex v. */
-function primVertexIndex(mode: GLenum, p: number, v: number): number {
+/** Vertex position (within the draw) of primitive p, vertex v (count = total vertices, for LINE_LOOP wrap). */
+function primVertexIndex(mode: GLenum, p: number, v: number, count: number): number {
   switch (mode) {
     case C1.POINTS: return p;
     case C1.LINES: return p * 2 + v;
     case C1.LINE_STRIP: return p + v;
-    case C1.LINE_LOOP: return v === 0 ? p : (p + 1) % (p + 1 + 1) === 0 ? 0 : p + 1;
+    case C1.LINE_LOOP: return v === 0 ? p : (p + 1) % count;
     case C1.TRIANGLES: return p * 3 + v;
     case C1.TRIANGLE_STRIP: return p + v;
     default: return v === 0 ? 0 : p + v; // TRIANGLE_FAN
@@ -1149,45 +1149,139 @@ function findVarying(varyings: readonly { name: string }[], name: string): numbe
   return -1;
 }
 
-function captureTransformFeedback(
-  ctx: WebGLRenderingContext,
+/** One resolved capture: where the value lives in the vertex record + its component count. */
+interface ResolvedTfVarying {
+  name: string;
+  /** Record float offset of the captured value (gl_Position/gl_PointSize live in the header). */
+  recOff: number;
+  /** Floats captured per vertex. */
+  comps: number;
+}
+
+interface ResolvedTfState {
+  varyings: ResolvedTfVarying[];
+  /** Sum of captured components (interleaved per-vertex stride). */
+  totalComps: number;
+}
+
+/**
+ * Resolve the program's `transformFeedbackVaryings` against the packed vertex
+ * record layout (contract §2): each captured varying's SOURCE offset is derived
+ * from its position in `pm.varyings` (the record packs varyings contiguously in
+ * that order), NOT from the capture list order — the two may differ. The
+ * built-ins gl_Position / gl_PointSize are capturable per GLES 3.0 §2.15.2 and
+ * live in the record header (offsets 0..3 / 4). Returns null when nothing is
+ * captured (no TF varyings, or none resolve into the record).
+ */
+function resolveTfVaryings(pm: ProgramModel): ResolvedTfState | null {
+  const tfVarys = (pm as unknown as { transformFeedbackVaryings?: { name: string }[] }).transformFeedbackVaryings;
+  if (!tfVarys || tfVarys.length === 0) return null;
+  const varyings = pm.varyings ?? [];
+  const out: ResolvedTfVarying[] = [];
+  let totalComps = 0;
+  for (const tv of tfVarys) {
+    let recOff = -1;
+    let comps = 0;
+    if (tv.name === 'gl_Position') {
+      recOff = 0;
+      comps = 4;
+    } else if (tv.name === 'gl_PointSize') {
+      recOff = 4;
+      comps = 1;
+    } else {
+      const vi = findVarying(varyings, tv.name);
+      if (vi >= 0) {
+        recOff = RECORD_HEADER_FLOATS;
+        for (let i = 0; i < vi; i++) recOff += varyings[i].components;
+        comps = varyings[vi].components;
+      }
+    }
+    if (comps === 0) continue; // not active in the record — skipped (linker normally rejects)
+    out.push({ name: tv.name, recOff, comps });
+    totalComps += comps;
+  }
+  return out.length === 0 ? null : { varyings: out, totalComps };
+}
+
+/**
+ * Effective capture capacity (bytes) of a bound TF buffer range.
+ * The available bytes are measured against the CURRENT data store
+ * (`buf._data.byteLength - range.offset`), NOT the `range.size` snapshot taken
+ * at bind time: CTS switching-objects.html does `bindBuffer(TF, buf)` →
+ * `bufferData(TF, ...)` (grow) → draw, and the bind-time size would be stale.
+ * An unallocated/too-small store yields 0.
+ */
+function tfRangeCapacity(tf: WebGLTransformFeedback, bufIdx: number): number {
+  const buf = tf._buffers[bufIdx];
+  if (!buf || !buf._data) return 0;
+  const range = tf._bufferRanges[bufIdx] ?? { offset: 0, size: buf._size };
+  return Math.max(0, buf._data.byteLength - range.offset);
+}
+
+/**
+ * True when this draw's capture would overflow a bound TF buffer: the spec
+ * (GLES 3.0 §2.15.2) makes the draw generate INVALID_OPERATION and capture
+ * NOTHING (CTS too-small-buffers.html expects the buffers untouched). The
+ * cursor is cumulative across draws of the current TF session.
+ */
+function tfCaptureOverflows(
   tf: WebGLTransformFeedback,
   prog: WebGLProgram,
-  pm: ProgramModel,
+  tfState: ResolvedTfState,
+  req: DrawRequest,
+  startVerts: number,
+): boolean {
+  const { varyings, totalComps } = tfState;
+  if (varyings.length === 0 || totalComps === 0) return false;
+  const separate = prog._tfBufferMode === C2.SEPARATE_ATTRIBS;
+  const { vertsPerPrim } = primitiveInfo(req.mode, req.count);
+  const totalVerts = req.count * req.instanceCount;
+  const needed = (startVerts + totalVerts) * 4;
+  if (separate) {
+    for (let k = 0; k < varyings.length; k++) {
+      if (tfRangeCapacity(tf, k) < needed * varyings[k].comps) return true;
+    }
+  } else {
+    if (tfRangeCapacity(tf, 0) < needed * totalComps) return true;
+  }
+  return false;
+}
+
+/**
+ * Write the captured varyings of each processed primitive into the bound TF
+ * buffers (INTERLEAVED_ATTRIBS / SEPARATE_ATTRIBS) from the packed records.
+ * `startVerts` is the per-session vertex cursor (vertices captured by earlier
+ * draws of this begin/end session); the write offsets continue from it. Only
+ * fully-captured primitives count toward `tf._primitivesWritten` (returned).
+ * Unbound buffers are skipped per-varying (the varying is not captured, the
+ * primitive still counts); a write that would exceed a bound range aborts the
+ * whole draw's capture (the caller's pre-check should have prevented it).
+ */
+function captureTransformFeedback(
+  tf: WebGLTransformFeedback,
+  prog: WebGLProgram,
+  tfState: ResolvedTfState,
   records: Float32Array,
   stride: number,
   req: DrawRequest,
-): void {
-  const tfVarys = (pm as unknown as { transformFeedbackVaryings?: { name: string }[] }).transformFeedbackVaryings ?? [];
-  if (tfVarys.length === 0) return;
-  const separate = (prog._tfBufferMode === C2.SEPARATE_ATTRIBS);
-  // record offset + components per captured varying
-  const offsets: number[] = [];
-  const comps: number[] = [];
-  let off = RECORD_HEADER_FLOATS;
-  for (const tv of tfVarys) {
-    const vi = findVarying(pm.varyings, tv.name);
-    const c = vi >= 0 ? pm.varyings[vi].components : 0;
-    offsets.push(off);
-    comps.push(c);
-    off += c;
-  }
-  const totalComps = comps.reduce((a, c) => a + c, 0);
-  if (totalComps === 0) return;
+  startVerts: number,
+): number {
+  const { varyings: tfVarys, totalComps } = tfState;
+  const separate = prog._tfBufferMode === C2.SEPARATE_ATTRIBS;
   const { primCount, vertsPerPrim } = primitiveInfo(req.mode, req.count);
   const buffers = tf._buffers;
   const ranges = tf._bufferRanges;
-  let capturedVerts = 0;
+  let capturedVerts = startVerts;
+  let primsCaptured = 0;
   let overflow = false;
 
   outer: for (let i = 0; i < req.instanceCount && !overflow; i++) {
     for (let p = 0; p < primCount && !overflow; p++) {
       for (let v = 0; v < vertsPerPrim; v++) {
-        const vIdx = primVertexIndex(req.mode, p, v);
+        const vIdx = primVertexIndex(req.mode, p, v, req.count);
         const recBase = (i * req.count + vIdx) * stride;
         for (let k = 0; k < tfVarys.length; k++) {
-          const c = comps[k];
-          if (c === 0) continue;
+          const c = tfVarys[k].comps;
           const bufIdx = separate ? k : 0;
           const buf = buffers[bufIdx];
           if (!buf || !buf._data) continue; // unbound → varying not captured
@@ -1198,21 +1292,34 @@ function captureTransformFeedback(
           if (separate) {
             dstByte = range.offset + capturedVerts * c * 4;
           } else {
-            const before = comps.slice(0, k).reduce((a, x) => a + x, 0);
+            let before = 0;
+            for (let j = 0; j < k; j++) before += tfVarys[j].comps;
             dstByte = range.offset + capturedVerts * totalComps * 4 + before * 4;
           }
-          if (dstByte + c * 4 > range.offset + range.size) {
+          if (dstByte + c * 4 > range.offset + tfRangeCapacity(tf, bufIdx)) {
             overflow = true;
             break outer;
           }
-          const src = records.subarray(recBase + offsets[k], recBase + offsets[k] + c);
+          const src = records.subarray(recBase + tfVarys[k].recOff, recBase + tfVarys[k].recOff + c);
           new Float32Array(buf._data, dstByte, c).set(src);
         }
         capturedVerts++;
       }
+      primsCaptured++; // every vertex of this primitive was captured
     }
   }
-  tf._primitivesWritten += Math.floor(capturedVerts / vertsPerPrim);
+  tf._primitivesWritten += primsCaptured;
+  // Per-session vertex cursor (exact for strips/fans, where prims ≠ verts/vertsPerPrim).
+  (tf as unknown as { _tfCaptureCursor?: number })._tfCaptureCursor = capturedVerts;
+  return primsCaptured;
+}
+
+/** Per-session vertex cursor for a TF object (reset when a new begin/end session starts). */
+function tfCaptureCursor(tf: WebGLTransformFeedback): number {
+  const cursor = (tf as unknown as { _tfCaptureCursor?: number })._tfCaptureCursor ?? 0;
+  // beginTransformFeedback resets _primitivesWritten to 0; a nonzero cursor from
+  // a previous session must not carry over.
+  return tf._primitivesWritten === 0 && cursor !== 0 ? 0 : cursor;
 }
 
 /* ================================================================== */
@@ -1319,6 +1426,17 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
 
   if (req.count === 0 || req.instanceCount === 0) return; // nothing to do, no error
 
+  // Transform feedback capture pre-check: when the active TF's bound buffers
+  // cannot hold this draw's capture (cumulative across the session), the draw
+  // generates INVALID_OPERATION and captures NOTHING (GLES 3.0 §2.15.2; CTS
+  // too-small-buffers.html). Runs BEFORE attribute fetch / vertex evaluation so
+  // huge draws (e.g. 2^16 × 2^16 instances) error out without allocating.
+  const tfState = tfActive ? resolveTfVaryings(pm) : null;
+  if (tfActive && tfState !== null && tfCaptureOverflows(tf!, prog, tfState, req, tfCaptureCursor(tf!))) {
+    pushError(ctx, C1.INVALID_OPERATION);
+    return;
+  }
+
   // 3. Attribute fetch (dense extraction).
   const sc = getScratch(ctx);
   const { attribs, plans } = buildAttribs(ctx, pm, req, indices);
@@ -1341,6 +1459,13 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
   }
   if (sc.outVaryings.length !== totalVary) {
     sc.outVaryings = new Float32Array(totalVary);
+  }
+  if (tfActive) {
+    // Unwritten varyings capture as 0, not as stale values from a previous draw
+    // (the outVaryings/outPosition scratch is reused across draws; CTS
+    // unwritten-output-defaults-to-zero.html expects zeros).
+    sc.outVaryings.fill(0);
+    sc.outPosition.fill(0);
   }
   const scratchSize = (pm as unknown as { scratchSize?: number }).scratchSize ?? 0;
   const intScratchSize = (pm as unknown as { intScratchSize?: number }).intScratchSize ?? 0;
@@ -1438,7 +1563,14 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
 
   // 5. Transform feedback capture (bypasses the rasterizer).
   if (tfActive) {
-    captureTransformFeedback(ctx, tf!, prog, pm, records, stride, req);
+    if (tfState !== null) {
+      const prims = captureTransformFeedback(tf!, prog, tfState, records, stride, req, tfCaptureCursor(tf!));
+      // TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN query: accumulate the primitives
+      // captured by this draw (GLES 3.0 §4.1.4; CTS transform_feedback.html
+      // expects 3 for a 3-point POINTS draw).
+      const tfQuery = (s.activeQueries as unknown as Record<number, WebGLQuery | null>)[C2.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN];
+      if (tfQuery && tfQuery._active) tfQuery._result += prims;
+    }
     return; // TF draws never present (no FB writes) and never count queries
   }
 
