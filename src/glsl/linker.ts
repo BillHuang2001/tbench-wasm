@@ -190,8 +190,7 @@ function emitType(path: string, t: GLSLType, cursor: number, st: AllocState): { 
       const stride = elemFloatStride(e);
       const int = isIntStoreType(e);
       const base = cursor * 4;
-      // '[0]' prefix: dynamic-index resolution (codegen reads its stride).
-      st.slots.set(`${path}[0]`, { store: int ? 'int' : 'float', slot: base, stride });
+      let advance: number;
       if (dense) {
         // Scalar/sampler arrays pack densely: element k at base + k floats.
         for (let k = 0; k < n; k++) {
@@ -200,17 +199,26 @@ function emitType(path: string, t: GLSLType, cursor: number, st: AllocState): { 
           if (int) st.intMax = Math.max(st.intMax, slot + 1);
           else st.floatMax = Math.max(st.floatMax, slot + 1);
         }
-        return { advance: Math.ceil(n / 4) };
+        advance = Math.ceil(n / 4);
+      } else {
+        // Non-scalar elements (vector/matrix/struct/nested array): one whole
+        // (aligned) element block per index; recursion places the inner leaves.
+        advance = 0;
+        for (let k = 0; k < n; k++) {
+          const r = emitType(`${path}[${k}]`, e, (base + k * stride) / 4, st);
+          if ('error' in r) return r;
+          advance += r.advance;
+        }
       }
-      // Non-scalar elements (vector/matrix/struct/nested array): one whole
-      // (aligned) element block per index; recursion places the inner leaves.
-      let adv = 0;
-      for (let k = 0; k < n; k++) {
-        const r = emitType(`${path}[${k}]`, e, (base + k * stride) / 4, st);
-        if ('error' in r) return r;
-        adv += r.advance;
-      }
-      return { advance: adv };
+      // '[0]' prefix: dynamic-index resolution (codegen reads its stride).
+      // MUST be set AFTER the element entries — the element-0 leaf entry
+      // ('u[0]' for vector/matrix/scalar/sampler elements, 'u[0][0]' for
+      // nested arrays) would otherwise overwrite it with stride 0, so every
+      // dynamically indexed element read would resolve to element 0 (BUG d:
+      // `uni[ii]` on `uniform vec4 uni[8]` read only element 0). Struct
+      // elements self-key with elemFloatStride, so they never collide.
+      st.slots.set(`${path}[0]`, { store: int ? 'int' : 'float', slot: base, stride });
+      return { advance };
     }
     case 'struct': {
       // Members are laid out sequentially (each at its own slot advance);
@@ -469,10 +477,15 @@ function emitBlockLayout(
       const stride = std140ArrayStride(t.element);
       out.set(path, mk(byteOffset, stride, 0));
       if (n > 0) {
-        out.set(`${path}[0]`, mk(byteOffset, stride, 0));
         for (let k = 0; k < n; k++) {
           emitBlockLayout(`${path}[${k}]`, t.element, byteOffset + k * stride, out, blockStride);
         }
+        // '[0]' prefix AFTER the element entries — the element-0 leaf entry
+        // ('u[0]') would otherwise overwrite its arrayStride with 0, so every
+        // dynamically indexed element read would resolve to element 0 (BUG d,
+        // block twin). matrixStride keeps the element's column stride (matrix
+        // elements: const-index reads of element 0 use the same entry).
+        out.set(`${path}[0]`, mk(byteOffset, stride, t.element.kind === 'matrix' ? 16 : 0));
       }
       return;
     }

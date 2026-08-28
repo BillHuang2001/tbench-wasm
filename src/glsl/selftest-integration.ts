@@ -969,6 +969,111 @@ let uboDual: Program | null = null;
   }
 }
 
+/* 11. Dynamic uniform-array element reads carry the FULL vecN (BUG d)*/
+/* ================================================================== */
+/* Regression: the linker's '[0]' dynamic-index prefix entry was
+ * overwritten by the element-0 leaf entry (stride 0), so EVERY
+ * dynamically-indexed element read resolved to element 0 — `uni[ii]` on
+ * `uniform vec4 uni[8]` summed only element 0 (CTS gl-min-uniforms: the
+ * w component — the only per-element-varying one — rendered 0 while
+ * x/y/z, identical across elements, looked fine). Per-element DISTINCT
+ * values make a constant-read regression observable in every component. */
+
+{
+  // 9a. vec4 array (float store) — the CTS gl-min-uniforms shape.
+  const vs = compile(
+    `attribute vec4 aPos;
+     uniform vec4 uf[4];
+     varying vec4 c;
+     void main() {
+       gl_Position = aPos;
+       vec4 s = vec4(0.0);
+       for (int i = 0; i < 4; ++i) { s += uf[i]; }
+       c = s;
+     }`,
+    'VERTEX',
+    100,
+  );
+  const fs = compile(`precision mediump float; varying vec4 c; void main() { gl_FragColor = c; }`, 'FRAGMENT', 100);
+  const l = linkProgram(vs, fs);
+  check(l.ok, `BUG d: vec4-array pair links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    const base = p.uniforms.find((u) => u.name === 'uf[0]')!.location;
+    for (let i = 0; i < 4; i++) {
+      p.floatStore[base + i * 4 + 0] = 1;
+      p.floatStore[base + i * 4 + 1] = 2;
+      p.floatStore[base + i * 4 + 2] = 3;
+      p.floatStore[base + i * 4 + 3] = i; // w distinct per element
+    }
+    const vctx = vertexCtx(p, { attribs: [new Float32Array([0, 0, 0, 1])], attribIndices: new Int32Array([0]) });
+    p.vertex.run(vctx);
+    const v = vctx.out.varyings;
+    near(v[0], 4, `BUG d: vec4[4] dynamic read x = Σ1`);
+    near(v[1], 8, `BUG d: vec4[4] dynamic read y = Σ2`);
+    near(v[2], 12, `BUG d: vec4[4] dynamic read z = Σ3`);
+    near(v[3], 6, `BUG d: vec4[4] dynamic read w = Σi (element-0-only read gives 0)`);
+  }
+}
+
+{
+  // 9b. ivec4 (int store) + float (dense scalar) + mat2 (matrix stride 8)
+  // arrays, ES 3.00.
+  const vs = compile(
+    `#version 300 es
+     uniform ivec4 ui[4];
+     uniform float us[4];
+     uniform mat2 um[4];
+     out vec4 o;
+     void main() {
+       ivec4 iv = ivec4(0);
+       float s = 0.0;
+       float m = 0.0;
+       for (int i = 0; i < 4; ++i) { iv += ui[i]; s += us[i]; m += um[i][0][0] + um[i][1][1]; }
+       o = vec4(float(iv.x + iv.y + iv.z + iv.w), s, m, 1.0);
+       gl_Position = vec4(0.0);
+     }`,
+    'VERTEX',
+    300,
+  );
+  const fs = compile(
+    `#version 300 es
+     precision mediump float;
+     in vec4 o;
+     out vec4 c;
+     void main() { c = o; }`,
+    'FRAGMENT',
+    300,
+  );
+  const l = linkProgram(vs, fs);
+  check(l.ok, `BUG d: ivec4/float/mat2 array pair links (${l.ok ? '' : l.log})`);
+  if (l.ok) {
+    const p = l.program;
+    const ib = p.uniforms.find((u) => u.name === 'ui[0]')!.location;
+    for (let i = 0; i < 4; i++) {
+      p.intStore[ib + i * 4 + 0] = 1 + i;
+      p.intStore[ib + i * 4 + 1] = 10 + i;
+      p.intStore[ib + i * 4 + 2] = 100 + i;
+      p.intStore[ib + i * 4 + 3] = 1000 + i;
+    }
+    const sb = p.uniforms.find((u) => u.name === 'us[0]')!.location;
+    for (let i = 0; i < 4; i++) p.floatStore[sb + i] = 0.5 + i; // dense stride 1
+    const mb = p.uniforms.find((u) => u.name === 'um[0]')!.location;
+    for (let i = 0; i < 4; i++) {
+      p.floatStore[mb + i * 8 + 0] = 1 + i; // [0][0]
+      p.floatStore[mb + i * 8 + 5] = 10 + i; // [1][1] — column 1 at +4 floats, row 1
+    }
+    const vctx = vertexCtx(p);
+    p.vertex.run(vctx);
+    const v = vctx.out.varyings;
+    // iv = Σ(1..4, 10..13, 100..103, 1000..1003) → total 4468; s = 8; m = Σ(1..4) + Σ(10..13) = 56.
+    near(v[0], 4468, `BUG d: ivec4[4] dynamic read (int store) = Σ per-element ints`);
+    near(v[1], 8, `BUG d: float[4] dense dynamic read = Σ per-element floats`);
+    near(v[2], 56, `BUG d: mat2[4] dynamic read = Σ per-element diagonals (stride 8)`);
+    near(v[3], 1, `BUG d: constant tail component untouched`);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */
