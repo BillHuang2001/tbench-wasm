@@ -193,8 +193,19 @@ function evalParams(v: Value, e: CodegenEnv, params: string[], args: number[]): 
   e.declareLocal('m', mT(2, 2));
   e.declareLocal('v', vT('float', 2));
   const vals = emitExpr(bin('*', ident('m', mT(2, 2)), ident('v', vT('float', 2)), vT('float', 2)), e);
-  check(vals[0].v === '((m__0 * (v__0)) + (m__2 * (v__1)))', `mat2*vec2 comp0 (got '${vals[0].v}')`);
-  check(vals[1].v === '((m__1 * (v__0)) + (m__3 * (v__1)))', `mat2*vec2 comp1 (got '${vals[1].v}')`);
+  // ALIASING FIX: both operands materialize into temps (ONE shared pre on
+  // comp0) so sequential `=` writes (`v = m * v`) never read partially-updated
+  // operands; the result strings are pure temp reads.
+  check(vals[0].v === '((t0 * (t4)) + (t2 * (t5)))', `mat2*vec2 comp0 (got '${vals[0].v}')`);
+  check(vals[1].v === '((t1 * (t4)) + (t3 * (t5)))', `mat2*vec2 comp1 (got '${vals[1].v}')`);
+  check(
+    vals[0].pre?.join('; ') === 't0 = m__0; t1 = m__1; t2 = m__2; t3 = m__3; t4 = v__0; t5 = v__1',
+    `mat2*vec2 comp0 materializes both operands (got '${vals[0].pre?.join('; ')}')`,
+  );
+  check(
+    vals[1].pre === undefined,
+    `mat2*vec2 comp1 carries no pre (comp0-only hoist) (got '${vals[1].pre?.join('; ')}')`,
+  );
 }
 
 {
@@ -540,7 +551,12 @@ function evalParams(v: Value, e: CodegenEnv, params: string[], args: number[]): 
   const m = call('mat2', [lit(1.0, fT()), lit(2.0, fT()), lit(3.0, fT()), lit(4.0, fT())], mT(2, 2));
   const vv = call('vec2', [lit(5.0, fT()), lit(6.0, fT())], vT('float', 2));
   const vals = emitExpr(bin('*', m, vv, vT('float', 2)), e);
-  check(evalV(vals[0], e) === 23 && evalV(vals[1], e) === 34, `mat2(1,2,3,4) * vec2(5,6) === (23, 34)`);
+  // comp0's pre (the operand materialization) must run FIRST — comps 1+ read
+  // its temps (comp0-only hoist convention).
+  const decl = e.temps.length ? `var ${e.temps.join(', ')}; ` : '';
+  const pres = vals[0].pre && vals[0].pre.length ? vals[0].pre.join('; ') + '; ' : '';
+  const got = new Function('ctx', 'R', `${decl}${pres}return [${vals[0].v}, ${vals[1].v}];`)({}, R);
+  check(got[0] === 23 && got[1] === 34, `mat2(1,2,3,4) * vec2(5,6) === (23, 34) (got [${got}])`);
 }
 
 {

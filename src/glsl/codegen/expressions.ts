@@ -1168,6 +1168,31 @@ export function materializeSharedPre(vals: Value[], env: CodegenEnv): Value[] {
 }
 
 /**
+ * Materialize every operand component into a FRESH temp, appending the
+ * assignments to `pre` (one shared buffer — the caller attaches it to
+ * component 0 only, the established comp0-hoist convention). Pres carried by
+ * the values are folded per component BEFORE its temp assignment, deduped by
+ * array identity (a multi-component result shares ONE pre array, so its side
+ * effects run exactly once, at the first component). All returned reads
+ * reference the temps, so sequential target writes (`v = m * v`,
+ * `m = m1 * m2`) never observe partially-updated operands (matrixCompoundMul's
+ * RHS-materialization idiom).
+ */
+function materializeOperands(vals: Value[], env: CodegenEnv, pre: string[]): string[] {
+  const seen = new Set<string[]>();
+  return vals.map((v) => {
+    const t = env.allocTemp();
+    if (v.pre && v.pre.length > 0 && !seen.has(v.pre)) {
+      seen.add(v.pre);
+      pre.push(`${t} = ${foldPre(v.pre, v.v)}`);
+    } else {
+      pre.push(`${t} = ${v.v}`);
+    }
+    return t;
+  });
+}
+
+/**
  * Does the expression subtree fold GLSL side effects (assignments, ++/--)
  * into its codegen v strings? User-function calls put their whole inline in
  * Value.pre instead (detected separately there) — but when a call is nested
@@ -1664,6 +1689,17 @@ function emitArith(
       const av = emitExpr(e.left, env);
       const bv = emitExpr(e.right, env);
       const out: Value[] = [];
+      // ALIASING FIX (sequential-assignment aliasing): the non-dual result
+      // strings below reference the OPERAND components directly — a sequential
+      // target write (`v = m * v`, `m = m1 * m2`) would observe partially-
+      // updated operands (GLSL requires every RHS read to see pre-assignment
+      // values). Materialize BOTH operands into fresh temps (ONE shared pre on
+      // component 0 — the comp0-hoist convention, matrixCompoundMul idiom) so
+      // all reads are captured before any target write. The dual branch
+      // materializes per term inside arithDual.
+      const matPre: string[] = [];
+      const aT = !dual ? materializeOperands(av, env, matPre) : null;
+      const bT = !dual ? materializeOperands(bv, env, matPre) : null;
       for (let c = 0; c < rt.cols; c++) {
         for (let r = 0; r < aRows; r++) {
           if (dual) {
@@ -1675,13 +1711,11 @@ function emitArith(
           } else {
             const parts: string[] = [];
             for (let s = 0; s < aCols; s++) {
-              const a = av[s * aRows + r];
-              const b = bv[c * bRows + s];
-              const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
-              const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-              parts.push(`(${ax} * (${bx}))`);
+              parts.push(`(${aT![s * aRows + r]} * (${bT![c * bRows + s]}))`);
             }
-            out.push({ v: `(${parts.join(' + ')})` });
+            const res: Value = { v: `(${parts.join(' + ')})` };
+            if (out.length === 0) res.pre = matPre;
+            out.push(res);
           }
         }
       }
@@ -1694,6 +1728,13 @@ function emitArith(
       const av = emitExpr(e.left, env);
       const bv = emitExpr(e.right, env);
       const out: Value[] = [];
+      // ALIASING FIX — same as the matrix×matrix branch: materialize both
+      // operands into temps (shared pre on component 0) so in-place targets
+      // (`v = m * v` — result[r] reads ALL of v) never observe partially-
+      // updated operands during sequential writes.
+      const matPre: string[] = [];
+      const aT = !dual ? materializeOperands(av, env, matPre) : null;
+      const bT = !dual ? materializeOperands(bv, env, matPre) : null;
       for (let r = 0; r < R; r++) {
         if (dual) {
           const terms: Value[] = [];
@@ -1704,13 +1745,11 @@ function emitArith(
         } else {
           const parts: string[] = [];
           for (let c = 0; c < C; c++) {
-            const a = av[c * R + r];
-            const b = bv[c];
-            const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
-            const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-            parts.push(`(${ax} * (${bx}))`);
+            parts.push(`(${aT![c * R + r]} * (${bT![c]}))`);
           }
-          out.push({ v: `(${parts.join(' + ')})` });
+          const res: Value = { v: `(${parts.join(' + ')})` };
+          if (out.length === 0) res.pre = matPre;
+          out.push(res);
         }
       }
       return out;
@@ -1722,6 +1761,13 @@ function emitArith(
       const av = emitExpr(e.left, env);
       const bv = emitExpr(e.right, env);
       const out: Value[] = [];
+      // ALIASING FIX — same as the matrix×matrix branch: materialize both
+      // operands into temps (shared pre on component 0) so in-place targets
+      // (`v = v * M` — result[c] reads ALL of v) never observe partially-
+      // updated operands during sequential writes.
+      const matPre: string[] = [];
+      const aT = !dual ? materializeOperands(av, env, matPre) : null;
+      const bT = !dual ? materializeOperands(bv, env, matPre) : null;
       for (let c = 0; c < C; c++) {
         if (dual) {
           const terms: Value[] = [];
@@ -1732,13 +1778,11 @@ function emitArith(
         } else {
           const parts: string[] = [];
           for (let r = 0; r < R; r++) {
-            const a = av[r];
-            const b = bv[c * R + r];
-            const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
-            const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-            parts.push(`(${ax} * (${bx}))`);
+            parts.push(`(${aT![r]} * (${bT![c * R + r]}))`);
           }
-          out.push({ v: `(${parts.join(' + ')})` });
+          const res: Value = { v: `(${parts.join(' + ')})` };
+          if (out.length === 0) res.pre = matPre;
+          out.push(res);
         }
       }
       return out;
