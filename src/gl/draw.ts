@@ -1442,6 +1442,22 @@ function findVarying(varyings: readonly { name: string }[], name: string): numbe
   return -1;
 }
 
+/** True for GLenum varying types that carry integral values (int/uint/bool families). */
+function isIntegralVaryingType(glType: number): boolean {
+  return (
+    glType === 0x1404 /* INT */ ||
+    glType === 0x1405 /* UNSIGNED_INT */ ||
+    (glType >= 0x8b53 && glType <= 0x8b55) /* INT_VEC2..4 */ ||
+    (glType >= 0x8dc6 && glType <= 0x8dc8) /* UNSIGNED_INT_VEC2..4 */ ||
+    (glType >= 0x8b56 && glType <= 0x8b59) /* BOOL..BOOL_VEC4 */
+  );
+}
+
+/** True for unsigned GLenum varying types (uint/uvec families). */
+function isUnsignedVaryingType(glType: number): boolean {
+  return glType === 0x1405 || (glType >= 0x8dc6 && glType <= 0x8dc8);
+}
+
 /** One resolved capture: where the value lives in the vertex record + its component count. */
 interface ResolvedTfVarying {
   name: string;
@@ -1449,6 +1465,10 @@ interface ResolvedTfVarying {
   recOff: number;
   /** Floats captured per vertex. */
   comps: number;
+  /** Integral varying: the record holds float32 VALUES — the TF buffer must get the exact integer, not float bits. */
+  integral: boolean;
+  /** Unsigned integral varying: captured as uint32. */
+  unsigned: boolean;
 }
 
 interface ResolvedTfState {
@@ -1475,6 +1495,8 @@ function resolveTfVaryings(pm: ProgramModel): ResolvedTfState | null {
   for (const tv of tfVarys) {
     let recOff = -1;
     let comps = 0;
+    let integral = false;
+    let unsigned = false;
     if (tv.name === 'gl_Position') {
       recOff = 0;
       comps = 4;
@@ -1487,10 +1509,12 @@ function resolveTfVaryings(pm: ProgramModel): ResolvedTfState | null {
         recOff = RECORD_HEADER_FLOATS;
         for (let i = 0; i < vi; i++) recOff += varyings[i].components;
         comps = varyings[vi].components;
+        integral = isIntegralVaryingType(varyings[vi].type);
+        unsigned = isUnsignedVaryingType(varyings[vi].type);
       }
     }
     if (comps === 0) continue; // not active in the record — skipped (linker normally rejects)
-    out.push({ name: tv.name, recOff, comps });
+    out.push({ name: tv.name, recOff, comps, integral, unsigned });
     totalComps += comps;
   }
   return out.length === 0 ? null : { varyings: out, totalComps };
@@ -1652,8 +1676,24 @@ function captureTransformFeedback(
             overflow = true;
             break outer;
           }
-          const src = records.subarray(recBase + tfVarys[k].recOff, recBase + tfVarys[k].recOff + c);
-          new Float32Array(buf._data, dstByte, c).set(src);
+          const recOff = recBase + tfVarys[k].recOff;
+          if (tfVarys[k].integral) {
+            // Integral varyings ride the float32 record as float VALUES; the TF
+            // buffer must hold the exact integer (GLES 3.0 §2.15.2), not the
+            // float bit pattern (vertex-id.html "Via transform feedback",
+            // get-buffer-sub-data-validity.html). Values within float32 exact
+            // range convert losslessly; larger magnitudes need the glsl
+            // bit-exact side channel (src/glsl CONTEXT.md).
+            const dst = tfVarys[k].unsigned
+              ? new Uint32Array(buf._data, dstByte, c)
+              : new Int32Array(buf._data, dstByte, c);
+            for (let j = 0; j < c; j++) {
+              const v = records[recOff + j];
+              dst[j] = tfVarys[k].unsigned ? v >>> 0 : v | 0;
+            }
+          } else {
+            new Float32Array(buf._data, dstByte, c).set(records.subarray(recOff, recOff + c));
+          }
         }
         capturedVerts++;
       }
