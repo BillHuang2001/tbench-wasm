@@ -284,11 +284,39 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
 
   const info4 = okInfo('#version 300 es\nprecision mediump float;\nlayout(location=3) out vec4 c;\nout vec4 d;\nvoid main() { c = vec4(1.0); d = vec4(2.0); }', 300, 'FRAGMENT');
   check(info4.outputs.length === 2, '3.00: two outputs');
-  check(info4.outputs[0].name === 'c' && info4.outputs[0].location === 3, 'layout(location=3) output');
-  check(info4.outputs[1].name === 'd' && info4.outputs[1].location === null, 'output without layout → location null');
+  check(info4.outputs[0].name === 'c' && info4.outputs[0].location === 3 && info4.outputs[0].arraySize === 1, 'layout(location=3) output');
+  check(info4.outputs[1].name === 'd' && info4.outputs[1].location === null && info4.outputs[1].arraySize === 1, 'output without layout → location null');
   check(info4.outputs[0].index === null, '3.00 output index null');
 
   okInfo('#version 300 es\nprecision mediump float;\nout ivec4 i;\nout uvec4 u;\nvoid main() { i = ivec4(1); u = uvec4(1u); }', 300, 'FRAGMENT'); // ivec4/uvec4 outputs OK
+
+  // GLSL ES 3.00 §4.3.6: fragment outputs are float/int/uint scalars,
+  // vectors, or arrays of those. `out vec3` / `out float` / `out int` are
+  // legal; the OLD strict vec4-only contract is gone (CTS vertex-id /
+  // draw-buffers need scalar-int and array outputs).
+  const vec3 = okInfo('#version 300 es\nprecision mediump float;\nout vec3 c;\nvoid main() { c = vec3(1.0); }', 300, 'FRAGMENT');
+  check(vec3.outputs.length === 1 && vec3.outputs[0].name === 'c' && vec3.outputs[0].arraySize === 1, '3.00 out vec3 → scalar declaration entry');
+  checkType(vec3.outputs[0].type, V3, '3.00 out vec3 element type');
+
+  const iOut = okInfo('#version 300 es\nout int oI;\nvoid main() { oI = 7; }', 300, 'FRAGMENT');
+  check(iOut.outputs.length === 1 && iOut.outputs[0].name === 'oI' && iOut.outputs[0].arraySize === 1, '3.00 out int → scalar declaration entry');
+  checkType(iOut.outputs[0].type, I, '3.00 out int element type');
+
+  // ARRAY output: one declaration entry (arraySize, element type, explicit
+  // location or null) followed by one per-element entry PER SLOT, named
+  // '<name>[k]' with the FINAL location (explicit base or the single-output
+  // default 0) — gl-side getFragDataLocation consumes these directly.
+  const arr = okInfo('#version 300 es\nprecision mediump float;\nout vec4 fragColor[2];\nvoid main() { fragColor[0] = vec4(1.0); fragColor[1] = vec4(2.0); }', 300, 'FRAGMENT');
+  check(arr.outputs.length === 3, `3.00 out vec4[2] → 1 declaration + 2 element entries (got ${arr.outputs.length})`);
+  check(arr.outputs[0].name === 'fragColor' && arr.outputs[0].arraySize === 2 && arr.outputs[0].location === null, 'array declaration: bare name, arraySize 2, location null');
+  checkType(arr.outputs[0].type, V4, 'array declaration element type');
+  check(arr.outputs[1].name === 'fragColor[0]' && arr.outputs[1].location === 0 && arr.outputs[1].arraySize === 1, 'element entry fragColor[0] → location 0');
+  check(arr.outputs[2].name === 'fragColor[1]' && arr.outputs[2].location === 1 && arr.outputs[2].arraySize === 1, 'element entry fragColor[1] → location 1');
+
+  const arrLoc = okInfo('#version 300 es\nprecision mediump float;\nlayout(location = 2) out vec4 a[3];\nvoid main() { a[0] = vec4(1.0); }', 300, 'FRAGMENT');
+  check(arrLoc.outputs.length === 4, 'explicit-location array → 1 + 3 entries');
+  check(arrLoc.outputs[0].name === 'a' && arrLoc.outputs[0].location === 2 && arrLoc.outputs[0].arraySize === 3, 'array declaration carries explicit base 2');
+  check(arrLoc.outputs[1].location === 2 && arrLoc.outputs[2].location === 3 && arrLoc.outputs[3].location === 4, 'array elements at 2,3,4');
 
   const e1 = errs('precision mediump float;\nvoid main() { gl_FragColor = vec4(1.0); gl_FragData[0] = vec4(1.0); }', 100, 'FRAGMENT');
   check(hasErr(e1, 2, "'gl_FragData' : cannot write both gl_FragColor and gl_FragData"), 'gl_FragColor + gl_FragData → error');
@@ -299,11 +327,17 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   const e3 = errs('#extension GL_EXT_draw_buffers : enable\nprecision mediump float;\nvoid main() { gl_FragData[4] = vec4(1.0); }', 100, 'FRAGMENT', ['GL_EXT_draw_buffers']);
   check(hasErr(e3, 3, "'gl_FragData' : index 4 out of range [0, 3]"), 'gl_FragData[4] with EXT → out of range');
 
-  const e4 = errs('#version 300 es\nprecision mediump float;\nout vec3 c;\nvoid main() { c = vec3(1.0); }', 300, 'FRAGMENT');
-  check(hasErr(e4, 3, "'c' : fragment shader outputs must be vec4, ivec4 or uvec4"), '3.00 out vec3 → error (strict vec4 contract)');
+  const eBool = errs('#version 300 es\nprecision mediump float;\nout bool oB;\nvoid main() { oB = true; }', 300, 'FRAGMENT');
+  check(eBool.length > 0 && eBool[0].message.includes('fragment shader outputs must be float, int or uint'), '3.00 out bool → error');
 
-  const e5 = errs('#version 300 es\nprecision mediump float;\nout vec4 c[2];\nvoid main() { c[0] = vec4(1.0); }', 300, 'FRAGMENT');
-  check(e5.length > 0 && e5[0].message.includes('fragment shader outputs must be vec4'), '3.00 out vec4[2] (array) → error');
+  const eMat = errs('#version 300 es\nprecision mediump float;\nout mat4 oM;\nvoid main() { oM = mat4(1.0); }', 300, 'FRAGMENT');
+  check(eMat.length > 0 && eMat[0].message.includes('fragment shader outputs must be float, int or uint'), '3.00 out mat4 → error');
+
+  const eStruct = errs('#version 300 es\nprecision mediump float;\nstruct S { vec4 c; };\nout S oS;\nvoid main() { oS.c = vec4(1.0); }', 300, 'FRAGMENT');
+  check(eStruct.length > 0 && eStruct[0].message.includes('fragment shader outputs must be float, int or uint'), '3.00 out struct → error');
+
+  const eArrBool = errs('#version 300 es\nprecision mediump float;\nout bool oB[2];\nvoid main() { oB[0] = true; }', 300, 'FRAGMENT');
+  check(eArrBool.length > 0 && eArrBool[0].message.includes('fragment shader outputs must be float, int or uint'), '3.00 out bool[2] → error');
 }
 
 /* ------------------------------------------------------------------ */

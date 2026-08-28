@@ -167,13 +167,19 @@ export interface UniformBlockDecl {
  * - ES 1.00: 'gl_FragColor' (index null) or 'gl_FragData'[N] (index set,
  *   EXT_draw_buffers only).
  * - ES 3.00: user out variable; location = layout(location=) or null
- *   (auto-assigned at link).
+ *   (auto-assigned at link). ARRAY outputs emit one declaration entry
+ *   (arraySize = element count, type = ELEMENT type) followed by one
+ *   PER-ELEMENT entry per slot named '<name>[k]' (arraySize 1, location =
+ *   final base + k — the base is the explicit location or 0, the
+ *   single-output default the linker requires). gl-side getFragDataLocation
+ *   reads these element entries directly.
  */
 export interface OutputDecl {
   name: string;
   index: number | null; // gl_FragData[N] index (1.00), else null
   location: number | null; // explicit location (3.00) or null
-  type: GLSLType; // FLOAT_VEC4 / INT_VEC4 / UINT_VEC4
+  type: GLSLType; // element type: float/int/uint scalar or vector
+  arraySize: number; // element count (1 for scalars/vectors)
 }
 
 /** Capability flags: which stage-specific built-ins the shader references. */

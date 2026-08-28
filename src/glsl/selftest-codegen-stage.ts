@@ -456,6 +456,47 @@ function makeTex(): any {
 }
 
 /* ------------------------------------------------------------------ */
+/* 10b. FRAGMENT: array + scalar-int outputs (ES 3.00) write the right  */
+/*      ctx.out.color slots (const index → location+k, int → [L][0])   */
+/* ------------------------------------------------------------------ */
+
+{
+  const layout = baseLayout(300, { outputLocations: new Map([['my_FragData', 0], ['oVertexID', 4]]) });
+  const r = runStage(
+    `#version 300 es
+     precision mediump float;
+     out vec4 my_FragData[4];
+     out int oVertexID;
+     void main() { my_FragData[2] = vec4(1.0, 2.0, 3.0, 4.0); oVertexID = 7; }`,
+    'FRAGMENT',
+    layout,
+    { out: { color: [new Float32Array(4), new Float32Array(4), new Float32Array(4), new Float32Array(4), new Float32Array(4)], fragDepth: 0 } },
+  );
+  const cols = r.ctx.out.color;
+  check(
+    cols[2][0] === 1 && cols[2][1] === 2 && cols[2][2] === 3 && cols[2][3] === 4,
+    `array output const index 2 → color[2] (got [${Array.from(cols[2]).join(', ')}])`,
+  );
+  check(cols[0][0] === 0, `unwritten array slot color[0] stays zero (got ${cols[0][0]})`);
+  // Scalar int output: writes the int into color[4][0].
+  check(cols[4][0] === 7, `scalar int output → color[4][0] (got ${cols[4][0]})`);
+  // ivec4 output: same slot layout, components c = 0..3.
+  const r2 = runStage(
+    `#version 300 es
+     out ivec4 oI;
+     void main() { oI = ivec4(1, 2, 3, 4); }`,
+    'FRAGMENT',
+    baseLayout(300, { outputLocations: new Map([['oI', 1]]) }),
+    { out: { color: [new Float32Array(4), new Float32Array(4)], fragDepth: 0 } },
+  );
+  const ci = r2.ctx.out.color[1];
+  check(
+    ci[0] === 1 && ci[1] === 2 && ci[2] === 3 && ci[3] === 4,
+    `ivec4 output → color[1] components (got [${Array.from(ci).join(', ')}])`,
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* 11. ROUND-TRIP: vertex packs varyings → fragment reads them back    */
 /* ------------------------------------------------------------------ */
 

@@ -140,10 +140,17 @@ export interface FragmentStage {
   /** True when the shader writes gl_FragDepth/gl_FragDepthEXT: raster must commit ctx.out.fragDepth. */
   usesFragDepth: boolean;
   /**
-   * Fragment color outputs. WebGL1: one entry for gl_FragColor (location 0),
-   * or gl_FragData[0..n] with EXT_draw_buffers. WebGL2: `layout(location=)`
-   * out variables (location = assigned location).
-   * `type` = GLenum (GL_FLOAT_VEC4 | GL_INT_VEC4 | GL_UNSIGNED_INT_VEC4).
+   * Fragment color outputs, ONE ENTRY PER SLOT: WebGL1 — gl_FragColor
+   * (location 0) or gl_FragData[0..n] with EXT_draw_buffers. WebGL2 — the
+   * assigned locations of every output variable, expanded per slot: an array
+   * output `out vec4 my_FragData[8]` produces 8 entries (locations
+   * base..base+7); scalar/vector outputs produce 1 entry each (explicit
+   * layout(location=) honored).
+   * `type` = GLenum of the element type (GL_FLOAT_VEC4 | GL_INT_VEC4 |
+   * GL_UNSIGNED_INT_VEC4 | ... — any float/int/uint scalar or vector).
+   * Name → location lookups (getFragDataLocation) are NOT part of this array:
+   * gl/ builds its map from ShaderInfo.outputs (which carries declaration +
+   * per-element '<name>[k]' entries).
    */
   outputs: { location: number; type: number }[];
 }
