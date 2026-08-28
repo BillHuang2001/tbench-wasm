@@ -68,7 +68,7 @@ import { emitBuiltinCall } from './expr-builtins.js';
 
 type StorageKind =
   | { kind: 'uniform'; key: string }
-  | { kind: 'block'; blockIndex: number; key: string; instance: boolean }
+  | { kind: 'block'; blockIndex: number; key: string; baseKey: string }
   | { kind: 'varying'; key: string }
   | {
       kind: 'attrib';
@@ -555,7 +555,12 @@ function walk(e: Expr, env: CodegenEnv): P {
             kind: 'block',
             blockIndex: info.blockIndex,
             key: info.key,
-            instance: info.baseKey !== '',
+            // '' for instance-less blocks (identifier IS the member name),
+            // else the instance name — a dynamic index whose key EQUALS
+            // baseKey is an INSTANCE-element index (arrayed block → stride =
+            // blockStride); any other dynamic index descends a MEMBER array
+            // (stride = the member's arrayStride).
+            baseKey: info.baseKey,
           };
           return p;
         case 'attrib':
@@ -651,8 +656,13 @@ function walk(e: Expr, env: CodegenEnv): P {
                   `codegen: missing block layout prefix '${key}' for dynamic index (linker must emit '[0]' prefixes)`,
                 );
               }
+              // Instance-element index (pre-update key still equals the
+              // instance name) strides by blockStride; a member-array index
+              // (key ≠ baseKey) strides by the member's arrayStride
+              // (blockStride is absent on non-arrayed-instance member entries).
+              const atInstance = p.storage.key === p.storage.baseKey;
               p.storage = { ...p.storage, key };
-              const stride = p.storage.instance ? entry.blockStride ?? 0 : entry.arrayStride;
+              const stride = atInstance ? entry.blockStride ?? 0 : entry.arrayStride;
               if (stride <= 0) {
                 throw new Error(
                   `codegen: block path '${key}' has no stride for dynamic indexing (linker must set arrayStride/blockStride)`,
