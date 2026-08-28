@@ -41,6 +41,7 @@ import { C1, C2, CExt } from '../constants';
 import type { WebGLFramebuffer, WebGLTexture } from '../objects';
 import type { GLenum, GLint, GLsizei, TexImageSource } from '../types';
 import { checkFramebufferStatus } from '../framebuffer-util';
+import { bufferTfUseError } from './buffers';
 import {
   allocateImmutableStorage,
   compressedTexImage,
@@ -458,7 +459,7 @@ const W2_COMBOS: Record<number, { format: number; types: number[] }> = {
   [C2.RGB8_SNORM]: { format: C1.RGB, types: [C1.BYTE] },
   [C2.RGBA8_SNORM]: { format: C1.RGBA, types: [C1.BYTE] },
   [C1.RGBA4]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_4_4_4_4] },
-  [C1.RGB5_A1]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_5_5_1] },
+  [C1.RGB5_A1]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_5_5_1, C2.UNSIGNED_INT_2_10_10_10_REV] }, // GLES3 Table 3.2
   [C1.RGB565]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_6_5] },
   [C2.RGB10_A2]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C2.UNSIGNED_INT_2_10_10_10_REV] },
   [C2.SRGB8]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE] },
@@ -816,10 +817,18 @@ function applySrcOffset(
   return v.subarray(off, off + effLen);
 }
 
-/** WebGL2 PBO (pixels = byte offset) pre-checks: bound, flipY/premultiply, offset. */
+/** WebGL2 PBO (pixels = byte offset) pre-checks: bound, TF-binding, flipY/premultiply, offset. */
 function w2ValidatePbo(ctx: WebGLRenderingContext, pixels: number): boolean {
   const buf = ctx._state.pixelUnpackBuffer;
   if (buf === null) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return false;
+  }
+  // Transform-feedback binding rules (spec "Preventing undefined behavior with
+  // Transform Feedback"; GLES 3.0 §2.15.2): a PBO in the currently bound TF
+  // object's indexed bindings (or in an active TF's) cannot be used through
+  // PIXEL_UNPACK_BUFFER (CTS simultaneous_binding.html "Test PIXEL_UNPACK_BUFFER").
+  if (bufferTfUseError(ctx, buf, C2.PIXEL_UNPACK_BUFFER)) {
     ctx._errors.push(C1.INVALID_OPERATION);
     return false;
   }

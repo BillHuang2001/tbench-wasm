@@ -262,7 +262,7 @@ function bufferBoundToOtherBindingPoint(ctx: WebGLRenderingContext, buf: WebGLBu
  * (CTS simultaneous_binding.html "Test bufferData family with tf object
  * unbound").
  */
-function bufferTfUseError(ctx: WebGLRenderingContext, buf: WebGLBuffer, target: GLenum): boolean {
+export function bufferTfUseError(ctx: WebGLRenderingContext, buf: WebGLBuffer, target: GLenum): boolean {
   const s = ctx._state;
   const boundTf = s.transformFeedback;
   if (boundTf && boundTf._buffers.includes(buf)) {
