@@ -33,6 +33,8 @@ export * from './formats';
 
 // Texture sampling (contract §3)
 export * from './sampler';
+export * from './sampler-env';
+export * from './sampler-raw';
 
 // Surfaces
 export * from './surface';

@@ -4,22 +4,26 @@
  * Two entry levels:
  *  1. Generic functions (sampleTexture / sampleTextureLod / sampleTextureShadow
  *     / texelFetch) — explicit TextureImage + effective SamplerState; used by
- *     gl/ and unit tests.
- *  2. TextureEnv (see types.ts) — per-draw unit table + codegen-facing
- *     methods (glsl/ compiles `ctx.tex.*` against them). Each method looks up
- *     its unit in a table pre-resolved ONCE per draw (binding → img/state +
- *     sampling plan; null = unbound/incomplete → default result), calls the
- *     core, and writes the result into env.out (float domain); the raw bits
- *     are also visible via env.outInt / env.outUint for integer textures
- *     (same ArrayBuffer). NO allocation: all results land in preallocated
- *     scratch.
+ *     gl/ and unit tests. texelFetch and the raw texel reads live in
+ *     sampler-raw.ts (re-exported here); the raw layer is imported by nothing
+ *     above it (acyclic).
+ *  2. TextureEnv (see types.ts; implemented in sampler-env.ts) — per-draw unit
+ *     table + codegen-facing methods (glsl/ compiles `ctx.tex.*` against
+ *     them). Each method looks up its unit in a table pre-resolved ONCE per
+ *     draw (binding → img/state + sampling plan; null = unbound/incomplete →
+ *     default result), calls the core, and writes the result into env.out
+ *     (float domain); the raw bits are also visible via env.outInt /
+ *     env.outUint for integer textures (same ArrayBuffer). NO allocation: all
+ *     results land in preallocated scratch.
  *
  * Fast paths (all mathematically identical to the generic path):
  *  - Single-level images (hi <= base): the level is fixed, so only the sign
  *    of λ matters (mag vs min filter) — computeLod's log2/clamps are skipped
  *    (lodGtZero; full λ fallback at the λ = 0 boundary / under anisotropy).
  *  - 1×1 levels: every filter/wrap maps all taps to the one texel — read it
- *    directly (no LOD, no filter selection at all).
+ *    directly (no LOD, no filter selection at all). NOT for cube (the face is
+ *    still selected by the direction, and LINEAR is seamless across faces) or
+ *    shadow (the depth compare must still run).
  *  - Normalized u8 RGBA bilinear: direct Uint8Array taps + LUT decode
  *    (bit-identical numerics, no per-tap format dispatch/scratch).
  *  - Per-binding SamplePlan: filter-enum semantics are precomputed per draw
@@ -68,21 +72,15 @@ import {
   TEXTURE_2D, TEXTURE_3D, TEXTURE_CUBE_MAP, TEXTURE_2D_ARRAY,
   NEVER, LESS, EQUAL, LEQUAL, GREATER, NOTEQUAL, GEQUAL, ALWAYS,
   DEPTH_COMPONENT16, DEPTH_COMPONENT24, DEPTH24_STENCIL8,
-  ALPHA, LUMINANCE, LUMINANCE_ALPHA,
 } from './gl-enums';
-import { halfToFloat, sRGBToLinear } from './formats';
-import type { PixelFormatInfo, StorageKind } from './formats';
-import type { SampleCoord, SamplerState, TextureEnv, TextureImage, TextureLevel, TextureUnitBinding } from './types';
+import type { SampleCoord, SamplerState, TextureImage, TextureLevel } from './types';
+import { readTexel, writeDefault } from './sampler-raw';
+export { readTexel, texelFetch } from './sampler-raw';
 
 /* ================================================================== */
 /* Module-level scratch (shared by the generic core; sampling is        */
 /* strictly sequential so no reentrancy hazard exists).                 */
 /* ================================================================== */
-
-/** Bit-preserving int transport: set _i32/_u32, copy _f32[0] into out. */
-const _f32 = new Float32Array(1);
-const _i32 = new Int32Array(_f32.buffer);
-const _u32 = new Uint32Array(_f32.buffer);
 
 /** One texel read (bilinear taps accumulate immediately). */
 const _tap = new Float32Array(4);
@@ -102,14 +100,6 @@ const _cornerSum = new Float32Array(4);
 /* ================================================================== */
 /* Small helpers                                                       */
 /* ================================================================== */
-
-/** Writes the incomplete/null result: (0,0,0,1), or all-zero for integer formats. */
-function writeDefault(out: Float32Array, isInteger: boolean): void {
-  out[0] = 0;
-  out[1] = 0;
-  out[2] = 0;
-  out[3] = isInteger ? 0 : 1;
-}
 
 /** Wraps one integer texel index (GLES 3.0 table 3.22; index-space wrap). */
 function wrapIndex(c: number, wrap: GLenum, size: number): number {
@@ -219,7 +209,7 @@ function isMipmapMinFilter(f: GLenum): boolean {
  * instead of re-deriving filter semantics from the GL enums, and skips the
  * LOD machinery entirely for single-level images.
  */
-interface SamplePlan {
+export interface SamplePlan {
   /** Effective LOD range (baseLevel/maxLevel clamped to the available levels). */
   base: number;
   hi: number;
@@ -240,7 +230,7 @@ interface SamplePlan {
 }
 
 /** Fills `p` from (img, state) — no allocation (writes into the caller's object). */
-function fillPlan(img: TextureImage, state: SamplerState, p: SamplePlan): SamplePlan {
+export function fillPlan(img: TextureImage, state: SamplerState, p: SamplePlan): SamplePlan {
   let hi = img.maxLevel;
   const maxAvail = img.levels.length - 1;
   if (hi > maxAvail) hi = maxAvail;
@@ -313,216 +303,6 @@ function lodGtZero(img: TextureImage, state: SamplerState, coord: SampleCoord, b
   if (rel > 1 + 1e-9) return true;
   if (rel < 1 - 1e-9) return false;
   return null;
-}
-
-/* ================================================================== */
-/* Raw texel reads                                                     */
-/* ================================================================== */
-
-/** Bytes per component for the uniform-width storage kinds. */
-function compSize(storage: StorageKind): number {
-  switch (storage) {
-    case 'u8': case 'i8': return 1;
-    case 'u16': case 'i16': case 'f16': return 2;
-    default: return 4; // u32, i32, f32
-  }
-}
-
-/** True when every component occupies compSize bytes (i.e. not packed 565/4444/5551/RGB10_A2/R11F/RGB9_E5). */
-function isUniformStorage(info: PixelFormatInfo): boolean {
-  return info.bytesPerPixel === info.components * compSize(info.storage);
-}
-
-/** Normalization divisor for a uniform fixed-point storage kind (GLES 3.0 §3.8.17). */
-function normDivisor(storage: StorageKind): number {
-  switch (storage) {
-    case 'u8': return 255;
-    case 'i8': return 127;
-    case 'u16': return 65535;
-    case 'i16': return 32767;
-    default: return 1; // u32/i32 normalized storage does not occur (packed formats use decode)
-  }
-}
-
-/** Reads one component at byte offset `o` (view-relative indexing). */
-function readComp(entry: ArrayBufferView, storage: StorageKind, o: number): number {
-  switch (storage) {
-    case 'u8': return (entry as Uint8Array)[o];
-    case 'i8': return (entry as Int8Array)[o];
-    case 'u16': return (entry as Uint16Array)[o >> 1];
-    case 'i16': return (entry as Int16Array)[o >> 1];
-    case 'u32': return (entry as Uint32Array)[o >> 2];
-    case 'i32': return (entry as Int32Array)[o >> 2];
-    case 'f32': return (entry as Float32Array)[o >> 2];
-    case 'f16': return halfToFloat((entry as Uint16Array)[o >> 1]);
-  }
-}
-
-/** Reads an INTEGER-format texel bit-preserving: the raw int bits travel in the float slot (env.outInt/outUint reveal them); missing components → 0. */
-function readInts(entry: ArrayBufferView, storage: StorageKind, byteOffset: number, n: number, out: Float32Array): void {
-  switch (storage) {
-    case 'u8': {
-      const d = entry as Uint8Array;
-      for (let c = 0; c < n; c++) { _u32[0] = d[byteOffset + c]; out[c] = _f32[0]; }
-      break;
-    }
-    case 'i8': {
-      const d = entry as Int8Array;
-      for (let c = 0; c < n; c++) { _i32[0] = d[byteOffset + c]; out[c] = _f32[0]; }
-      break;
-    }
-    case 'u16': {
-      const d = entry as Uint16Array;
-      const o = byteOffset >> 1;
-      for (let c = 0; c < n; c++) { _u32[0] = d[o + c]; out[c] = _f32[0]; }
-      break;
-    }
-    case 'i16': {
-      const d = entry as Int16Array;
-      const o = byteOffset >> 1;
-      for (let c = 0; c < n; c++) { _i32[0] = d[o + c]; out[c] = _f32[0]; }
-      break;
-    }
-    case 'u32': {
-      const d = entry as Uint32Array;
-      const o = byteOffset >> 2;
-      for (let c = 0; c < n; c++) { _u32[0] = d[o + c]; out[c] = _f32[0]; }
-      break;
-    }
-    case 'i32': {
-      const d = entry as Int32Array;
-      const o = byteOffset >> 2;
-      for (let c = 0; c < n; c++) { _i32[0] = d[o + c]; out[c] = _f32[0]; }
-      break;
-    }
-    default: // f32/f16 storage with an integer format: decode fallback (defensive)
-      for (let c = 0; c < n; c++) out[c] = readComp(entry, storage, byteOffset + c * compSize(storage));
-  }
-  for (let c = n; c < 4; c++) out[c] = 0;
-}
-
-/** Decodes one texel from a level entry. `linearize` applies sRGB→linear (sampling; texelFetch must not). */
-function readFromEntry(info: PixelFormatInfo, entry: ArrayBufferView, byteOffset: number, linearize: boolean, out: Float32Array): void {
-  if (info.isInteger) {
-    readInts(entry, info.storage, byteOffset, info.components, out);
-    return;
-  }
-  if (info.isDepth) {
-    let d: number;
-    if (info.storage === 'f32') {
-      d = (entry as Float32Array)[byteOffset >> 2];
-    } else {
-      info.decode(entry, byteOffset, out);
-      d = out[0];
-    }
-    out[0] = d;
-    out[1] = d;
-    out[2] = d;
-    out[3] = 1;
-    return;
-  }
-  if (isUniformStorage(info)) {
-    // WebGL1 unsized luminance/alpha formats have non-identity channel maps
-    // (ALPHA → (0,0,0,a); LUMINANCE → (l,l,l,1); LUMINANCE_ALPHA → (l,l,l,a)).
-    // The uniform-storage fast path below only handles identity RGBA layouts
-    // (missing components 0/1), which would mis-sample these; route them
-    // through the format's decode instead (same /div normalization, writes
-    // the full 4-channel expansion — no allocation).
-    if (info.format === ALPHA || info.format === LUMINANCE || info.format === LUMINANCE_ALPHA) {
-      info.decode(entry, byteOffset, out);
-    } else {
-      const n = info.components;
-      const cs = compSize(info.storage);
-      if (info.normalized) {
-        // Fixed-point normalized: decode to 0..1 (snorm −1..1, clamped at −1).
-        const div = normDivisor(info.storage);
-        const isSigned = info.isSigned;
-        for (let c = 0; c < n; c++) {
-          const raw = readComp(entry, info.storage, byteOffset + c * cs);
-          const x = raw / div;
-          out[c] = isSigned ? (x < -1 ? -1 : x) : x;
-        }
-      } else {
-        // Float storage (or raw fixed-point defensive path): passthrough.
-        for (let c = 0; c < n; c++) out[c] = readComp(entry, info.storage, byteOffset + c * cs);
-      }
-      for (let c = n; c < 4; c++) out[c] = c === 3 ? 1 : 0;
-    }
-  } else {
-    info.decode(entry, byteOffset, out);
-  }
-  if (linearize && info.isSRGB) {
-    out[0] = sRGBToLinear(out[0]);
-    out[1] = sRGBToLinear(out[1]);
-    out[2] = sRGBToLinear(out[2]);
-  }
-}
-
-/**
- * Raw texel read. Out-of-range (level/face/x/y/z) → (0,0,0,1) (all-zero for
- * integer formats). Cube: `face` indexes data[face]; 3D/2D_ARRAY: `z`
- * indexes data[z]. sRGB is linearized (sampling path).
- */
-export function readTexel(
-  img: TextureImage, level: number, face: number, x: number, y: number, z: number,
-  out: Float32Array,
-): void {
-  if (level < 0 || level >= img.levels.length) {
-    writeDefault(out, img.info.isInteger);
-    return;
-  }
-  const lv = img.levels[level];
-  if (x < 0 || x >= lv.width || y < 0 || y >= lv.height) {
-    writeDefault(out, img.info.isInteger);
-    return;
-  }
-  let entry: ArrayBufferView | undefined;
-  if (img.target === TEXTURE_CUBE_MAP) {
-    if (face < 0 || face >= lv.data.length) { writeDefault(out, img.info.isInteger); return; }
-    entry = lv.data[face];
-  } else if (img.target === TEXTURE_3D || img.target === TEXTURE_2D_ARRAY) {
-    if (z < 0 || z >= lv.data.length) { writeDefault(out, img.info.isInteger); return; }
-    entry = lv.data[z];
-  } else {
-    entry = lv.data[0];
-    if (!entry) { writeDefault(out, img.info.isInteger); return; }
-  }
-  readFromEntry(img.info, entry, (y * lv.width + x) * img.info.bytesPerPixel, true, out);
-}
-
-/**
- * texelFetch: raw texel at integer (x,y,z) + explicit level; no filtering,
- * wrap, LOD or sRGB linearization. `z` = 3D slice / array layer / 0.
- * Cube not fetchable. Out-of-range or incomplete → (0,0,0,0).
- */
-export function texelFetch(
-  img: TextureImage, x: number, y: number, z: number,
-  level: number, out: Float32Array,
-): void {
-  if (!img.complete || level < 0 || level >= img.levels.length) {
-    out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
-    return;
-  }
-  const lv = img.levels[level];
-  if (x < 0 || x >= lv.width || y < 0 || y >= lv.height) {
-    out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
-    return;
-  }
-  let entry: ArrayBufferView | undefined;
-  if (img.target === TEXTURE_3D || img.target === TEXTURE_2D_ARRAY) {
-    if (z < 0 || z >= lv.data.length) {
-      out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
-      return;
-    }
-    entry = lv.data[z];
-  } else {
-    entry = lv.data[0];
-  }
-  if (!entry) {
-    out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
-    return;
-  }
-  readFromEntry(img.info, entry, (y * lv.width + x) * img.info.bytesPerPixel, false, out);
 }
 
 /* ================================================================== */
@@ -981,9 +761,8 @@ function sampleSingleLevel(
     return;
   }
   const target = img.target;
-  // Integer formats only allow NEAREST taps (spec; also keeps filter3D's
-  // single-tap path — it has no isInteger guard, matching old sampleLevels
-  // which forced NEAREST for integers in every branch).
+  // Integer textures: NEAREST taps only (parity with sampleLevels; filter3D
+  // has no isInteger guard).
   const filter = img.info.isInteger ? NEAREST : (lambdaGT0 ? plan.posFilter : state.magFilter);
   if (target === TEXTURE_CUBE_MAP) {
     filterCube(img, state, filter, plan.base, coord.v, shadow, refQ, out);
@@ -996,7 +775,7 @@ function sampleSingleLevel(
 }
 
 /** Implicit-LOD sample with a precomputed plan (TextureEnv path). */
-function sampleTextureP(
+export function sampleTextureP(
   img: TextureImage, state: SamplerState, plan: SamplePlan,
   coord: SampleCoord, bias: number, out: Float32Array,
 ): void {
@@ -1016,7 +795,7 @@ function sampleTextureP(
 }
 
 /** Explicit-LOD sample with a precomputed plan (TextureEnv path). */
-function sampleTextureLodP(
+export function sampleTextureLodP(
   img: TextureImage, state: SamplerState, plan: SamplePlan,
   coord: SampleCoord, lod: number, out: Float32Array,
 ): void {
@@ -1035,7 +814,7 @@ function sampleTextureLodP(
 }
 
 /** Shadow sample with a precomputed plan (TextureEnv path). */
-function sampleTextureShadowP(
+export function sampleTextureShadowP(
   img: TextureImage, state: SamplerState, plan: SamplePlan,
   coord: SampleCoord, ref: number, bias: number, out: Float32Array,
 ): void {
@@ -1089,189 +868,6 @@ export function sampleTextureShadow(
     return;
   }
   sampleTextureShadowP(img, state, fillPlan(img, state, _plan), coord, ref, bias, out);
-}
-
-/* ================================================================== */
-/* TextureEnv (codegen-facing)                                         */
-/* ================================================================== */
-
-/** One resolved texture unit (precomputed once per draw). `plan` null → image incomplete (default result, integer alpha rule). */
-type ResolvedUnit =
-  | { img: TextureImage; state: SamplerState; plan: SamplePlan }
-  | { img: TextureImage; state: SamplerState; plan: null };
-
-/**
- * Allocates the scratch (out/outInt/outUint share one ArrayBuffer, plus the
- * per-env coordinate scratch) and binds the per-draw unit table. Called once
- * per draw by the rasterizer. All methods are allocation-free.
- *
- * Per-draw resolve hoist: the unit table is fixed for the whole draw, so every
- * unit is resolved ONCE here (binding → img/state + sampling plan; null =
- * unbound, plan null = incomplete). Per-fragment sample* calls then do a
- * single array lookup + two null checks — no per-fragment resolve() object,
- * no completeness check, no plan computation, no filter-enum re-derivation.
- */
-export function createTextureEnv(units: readonly (TextureUnitBinding | null)[]): TextureEnv {
-  const out = new Float32Array(4);
-  const outInt = new Int32Array(out.buffer);
-  const outUint = new Uint32Array(out.buffer);
-  const v = new Float32Array(4);
-  const dx = new Float32Array(4);
-  const dy = new Float32Array(4);
-  const coord: SampleCoord = { v, dx, dy };
-
-  const resolved: (ResolvedUnit | null)[] = new Array(units.length);
-  for (let i = 0; i < units.length; i++) {
-    const b = units[i];
-    if (!b) {
-      resolved[i] = null;
-    } else if (!b.img.complete) {
-      resolved[i] = { img: b.img, state: b.state, plan: null };
-    } else {
-      resolved[i] = {
-        img: b.img, state: b.state,
-        plan: fillPlan(b.img, b.state, { base: 0, hi: 0, single: false, oneTexel: false, posFilter: 0, mipMin: false, u8Fast: false }),
-      };
-    }
-  }
-
-  /** Resolves the unit; writes the null/incomplete result into env.out and returns null. */
-  function resolve(unit: number): { img: TextureImage; state: SamplerState; plan: SamplePlan } | null {
-    const b = resolved[unit];
-    if (!b) {
-      out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 1;
-      return null;
-    }
-    if (!b.plan) {
-      out[0] = 0; out[1] = 0; out[2] = 0;
-      out[3] = b.img.info.isInteger ? 0 : 1;
-      return null;
-    }
-    return b;
-  }
-
-  return {
-    units,
-    out,
-    outInt,
-    outUint,
-
-    sample2D(unit: number, u: number, vv: number, dux: number, dvx: number, duy: number, dvy: number, bias: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      v[0] = u; v[1] = vv; v[2] = 0;
-      dx[0] = dux; dx[1] = dvx; dx[2] = 0;
-      dy[0] = duy; dy[1] = dvy; dy[2] = 0;
-      sampleTextureP(b.img, b.state, b.plan, coord, bias, out);
-    },
-
-    sample2DLod(unit: number, u: number, vv: number, lod: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      v[0] = u; v[1] = vv; v[2] = 0;
-      sampleTextureLodP(b.img, b.state, b.plan, coord, lod, out);
-    },
-
-    sample3D(unit: number, u: number, vv: number, w: number, dux: number, dvx: number, dwx: number, duy: number, dvy: number, dwy: number, bias: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      v[0] = u; v[1] = vv; v[2] = w;
-      dx[0] = dux; dx[1] = dvx; dx[2] = dwx;
-      dy[0] = duy; dy[1] = dvy; dy[2] = dwy;
-      sampleTextureP(b.img, b.state, b.plan, coord, bias, out);
-    },
-
-    sample3DLod(unit: number, u: number, vv: number, w: number, lod: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      v[0] = u; v[1] = vv; v[2] = w;
-      sampleTextureLodP(b.img, b.state, b.plan, coord, lod, out);
-    },
-
-    sampleCube(unit: number, u: number, vv: number, w: number, dux: number, dvx: number, dwx: number, duy: number, dvy: number, dwy: number, bias: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      v[0] = u; v[1] = vv; v[2] = w;
-      dx[0] = dux; dx[1] = dvx; dx[2] = dwx;
-      dy[0] = duy; dy[1] = dvy; dy[2] = dwy;
-      sampleTextureP(b.img, b.state, b.plan, coord, bias, out);
-    },
-
-    sampleCubeLod(unit: number, u: number, vv: number, w: number, lod: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      v[0] = u; v[1] = vv; v[2] = w;
-      sampleTextureLodP(b.img, b.state, b.plan, coord, lod, out);
-    },
-
-    sample2DArray(unit: number, u: number, vv: number, layer: number, dux: number, dvx: number, duy: number, dvy: number, bias: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      v[0] = u; v[1] = vv; v[2] = layer;
-      dx[0] = dux; dx[1] = dvx; dx[2] = 0;
-      dy[0] = duy; dy[1] = dvy; dy[2] = 0;
-      sampleTextureP(b.img, b.state, b.plan, coord, bias, out);
-    },
-
-    sample2DArrayLod(unit: number, u: number, vv: number, layer: number, lod: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      v[0] = u; v[1] = vv; v[2] = layer;
-      sampleTextureLodP(b.img, b.state, b.plan, coord, lod, out);
-    },
-
-    sample2DShadow(unit: number, u: number, vv: number, ref: number, dux: number, dvx: number, duy: number, dvy: number, bias: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      v[0] = u; v[1] = vv; v[2] = 0;
-      dx[0] = dux; dx[1] = dvx; dx[2] = 0;
-      dy[0] = duy; dy[1] = dvy; dy[2] = 0;
-      sampleTextureShadowP(b.img, b.state, b.plan, coord, ref, bias, out);
-    },
-
-    sampleCubeShadow(unit: number, u: number, vv: number, w: number, ref: number, dux: number, dvx: number, dwx: number, duy: number, dvy: number, dwy: number, bias: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      v[0] = u; v[1] = vv; v[2] = w;
-      dx[0] = dux; dx[1] = dvx; dx[2] = dwx;
-      dy[0] = duy; dy[1] = dvy; dy[2] = dwy;
-      sampleTextureShadowP(b.img, b.state, b.plan, coord, ref, bias, out);
-    },
-
-    sample2DArrayShadow(unit: number, u: number, vv: number, layer: number, ref: number, dux: number, dvx: number, duy: number, dvy: number, bias: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      v[0] = u; v[1] = vv; v[2] = layer;
-      dx[0] = dux; dx[1] = dvx; dx[2] = 0;
-      dy[0] = duy; dy[1] = dvy; dy[2] = 0;
-      sampleTextureShadowP(b.img, b.state, b.plan, coord, ref, bias, out);
-    },
-
-    texelFetch2D(unit: number, x: number, y: number, level: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      texelFetch(b.img, x, y, 0, level, out);
-    },
-
-    texelFetch3D(unit: number, x: number, y: number, z: number, level: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      texelFetch(b.img, x, y, z, level, out);
-    },
-
-    texelFetch2DArray(unit: number, x: number, y: number, layer: number, level: number): void {
-      const b = resolve(unit);
-      if (!b) return;
-      texelFetch(b.img, x, y, layer, level, out);
-    },
-  };
-}
-
-/** Helper: resolves the (img, state) for a unit, with incomplete→null. */
-export function resolveUnit(env: TextureEnv, unit: number): { img: TextureImage; state: SamplerState } | null {
-  const b = env.units[unit];
-  if (!b || !b.img.complete) return null;
-  return { img: b.img, state: b.state };
 }
 
 /** Number of mip levels for a 2D image of the given size (floor(log2(max))+1). */
