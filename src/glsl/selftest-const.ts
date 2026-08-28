@@ -342,11 +342,24 @@ const VERT_SIMPLE = 'attribute vec4 a_position;\nvoid main() { gl_Position = a_p
   const v3 = okShader('#version 300 es\nprecision mediump float;\nstruct S { float x; };\nout vec4 o;\nvoid main() { const S a = S(1.0); const S b = S(1.0); const bool eq = (a == b); o = vec4(float(eq)); }', 300, 'FRAGMENT');
   check(v3 !== null, 'ES 3.00 const struct == accepted');
 
-  // Wrong struct types → error; arrays are never comparable → error.
+  // Wrong struct types → error; arrays are comparable in ES 3.00 only.
   const e1 = errs('struct A { float x; };\nstruct B { float x; };\nvoid main() { bool b = (A(1.0) == B(1.0)); gl_Position = vec4(float(b)); }', 100, 'VERTEX');
   check(hasErr(e1, 3, "'==' : operands of type 'A' and 'B' cannot be compared"), 'struct == of different struct types → error');
-  const e2 = errs('#version 300 es\nvoid main() { float a[2] = float[2](1.0, 2.0); float b[2] = float[2](1.0, 2.0); bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
-  check(hasErr(e2, 2, "'==' : operands of type 'float[2]' and 'float[2]' cannot be compared"), 'array == → error (arrays not comparable)');
+  // ES 3.00: same-size array ==/!= is legal (element-wise, §5.9); ES 1.00
+  // keeps rejecting; 3.00 size mismatch, array-vs-nonarray and struct-with-
+  // array ELEMENT comparisons stay errors (compare-structs-containing-arrays).
+  const e2 = okShader('#version 300 es\nvoid main() { float a[2] = float[2](1.0, 2.0); float b[2] = float[2](1.0, 2.0); bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+  check(e2 !== null, 'ES 3.00 array == accepted (compile-level)');
+  const e2b = okShader('#version 300 es\nvoid main() { float a[2] = float[2](1.0, 2.0); float b[2] = float[2](1.0, 2.0); bool c = (a != b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+  check(e2b !== null, 'ES 3.00 array != accepted (compile-level)');
+  const e2c = errs('#version 300 es\nvoid main() { float a[2] = float[2](1.0, 2.0); float b[3] = float[3](1.0, 2.0, 3.0); bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+  check(hasErr(e2c, 2, "'==' : operands of type 'float[2]' and 'float[3]' cannot be compared"), 'array == size mismatch → error');
+  const e2d = errs('void main() { float a[2]; float b[2]; bool c = (a == b); gl_Position = vec4(float(c)); }', 100, 'VERTEX');
+  check(hasErr(e2d, 1, "'==' : operands of type 'float[2]' and 'float[2]' cannot be compared"), 'ES 1.00 array == → error (arrays not comparable)');
+  const e2f = errs('#version 300 es\nvoid main() { float a[2] = float[2](1.0, 2.0); float b = 1.0; bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+  check(hasErr(e2f, 2, "'==' : operands of type 'float[2]' and 'float' cannot be compared"), 'array vs non-array == → error');
+  const e2e = errs('#version 300 es\nstruct S { float f[2]; };\nvoid main() { S a[2]; S b[2]; bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+  check(hasErr(e2e, 3, "'==' : cannot compare structs containing an array"), 'S[2] == S[2] where S contains an array → error');
 }
 
 /* ------------------------------------------------------------------ */
