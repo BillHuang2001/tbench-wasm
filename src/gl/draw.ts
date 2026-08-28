@@ -1692,19 +1692,21 @@ function captureTransformFeedback(
           }
           const recOff = recBase + tfVarys[k].recOff;
           if (tfVarys[k].integral) {
-            // Integral varyings ride the float32 record as float VALUES; the TF
-            // buffer must hold the exact integer (GLES 3.0 §2.15.2), not the
-            // float bit pattern (vertex-id.html "Via transform feedback",
-            // get-buffer-sub-data-validity.html). Values within float32 exact
-            // range convert losslessly; larger magnitudes need the glsl
-            // bit-exact side channel (src/glsl CONTEXT.md).
+            // Integral varyings ride the float32 record as BIT-PATTERN cells:
+            // glsl codegen packs the 32-bit value's bits into the record cell
+            // via R.u2f (src/glsl CONTEXT.md "uint varying pack"; the int
+            // bit-pack re-apply is paired with this). The TF buffer must hold
+            // the exact integer bits (GLES 3.0 §2.15.2), so copy the record
+            // cell bits RAW through a reinterpret view — never float→int
+            // convert (a denormal bit-pattern cell converts to 0, corrupting
+            // uint TF data — get-buffer-sub-data-validity.html). The store
+            // into dst wraps via ToInt32/ToUint32, preserving the bit pattern
+            // for both signed and unsigned destinations.
             const dst = tfVarys[k].unsigned
               ? new Uint32Array(buf._data, dstByte, c)
               : new Int32Array(buf._data, dstByte, c);
-            for (let j = 0; j < c; j++) {
-              const v = records[recOff + j];
-              dst[j] = tfVarys[k].unsigned ? v >>> 0 : v | 0;
-            }
+            const recU32 = new Uint32Array(records.buffer, records.byteOffset + recOff * 4, c);
+            for (let j = 0; j < c; j++) dst[j] = recU32[j];
           } else {
             new Float32Array(buf._data, dstByte, c).set(records.subarray(recOff, recOff + c));
           }
