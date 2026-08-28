@@ -53,6 +53,20 @@
  *      entries ('gl_DepthRange.near/far/diff', GL_FLOAT, size 1) backed by 3
  *      real float-store slots appended after user uniforms (1.00 vertex /
  *      3.00 both-stages / 1.00 fragment-only / not-used cases).
+ *  19. struct with an ARRAY MEMBER passed by value to a user function
+ *      (sampler-array-struct-function-arg.html pin).
+ *  20. UBO cluster pins (bedbfc5 + 8167f4e): block-level layout(row_major)
+ *      std140 offsets (mat4x3 → 48B, matrixStride 16, rowMajor true) + run,
+ *      member-level row_major / column_major override (u_mat[3] arrayStride
+ *      64, block size 192; block-level row_major + member column_major → 128B),
+ *      precision-mismatched same-name blocks fail the link
+ *      (shader-with-mis-matching-uniform-block.html), block-instance names
+ *      are not values (uniform-block-idents-as-expr.html: bare `InstanceName;`
+ *      and arrayed `b[0];` compile errors, `InstanceName.member;` /
+ *      `InstanceName[0].member;` link), and codegen RUN pins for both
+ *      matrix-row-major-dynamic-indexing.html shaders (member-array dynamic
+ *      index in instance-less AND instance-named blocks, row-major reads).
+ *      Every check fails on the pre-cluster code (HEAD 826dbb6).
  *
  * Run: npx tsx src/glsl/selftest-link.ts
  * Prints "OK" and exits 0 on success.
@@ -2208,6 +2222,379 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
     );
     const l = linkProgram(vs, fs, { limits: { maxDrawBuffers: 8 } });
     check(!l.ok && l.log.includes('exceeds maxDrawBuffers'), `array expansion past maxDrawBuffers → link error (${l.ok ? '' : l.log})`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 20. UBO cluster pins (bedbfc5 + 8167f4e): row-major std140          */
+/*     layout (block-level + member-level override), precision-        */
+/*     matched block linking, block-instance-name value rules, and     */
+/*     codegen RUN pins for the row-major matrix pages (all four CTS   */
+/*     pages diag PASS: matrix-row-major.html,                         */
+/*     matrix-row-major-dynamic-indexing.html,                         */
+/*     shader-with-mis-matching-uniform-block.html,                    */
+/*     uniform-block-idents-as-expr.html).                             */
+/*     Every check here FAILS on the pre-cluster code (HEAD 826dbb6):  */
+/*     (a)/(b) — no rowMajor flag (undefined !== true) and mat4x3      */
+/*     row-major size 48 vs old 16*cols=64; (c) — precision not        */
+/*     compared, link succeeds; (d) — bare instance name compiles;     */
+/*     (e) — 'has no stride' link error / non-row-major reads.         */
+/* ------------------------------------------------------------------ */
+
+{
+  // GL enums for this block.
+  const FLOAT_MAT4x3 = 0x8b6a; // 35690
+
+  /* (a) BLOCK-level layout(row_major): `layout(std140, row_major)
+   *     uniform b { mat4x3 m; };` — mat4x3 = 3 rows x 16B = 48B,
+   *     matrixStride 16 (the ROW stride), rowMajor true (mirrors
+   *     matrix-row-major.html, whose 12-float block payload lays the
+   *     translation row at offset 16). */
+  {
+    const vs = compile(
+      `#version 300 es
+       void main() { gl_Position = vec4(0,0,0,1); }`,
+      'VERTEX',
+      300,
+    );
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       out highp vec4 my_FragColor;
+       layout(std140, row_major) uniform b {
+           mat4x3 m;
+       };
+       void main() {
+           my_FragColor = mat4(m) * vec4(0.0, 0.0, 0.0, 1.0);
+       }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `(a) block-level row_major pair links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const p = l.program;
+      check(
+        p.uniformBlocks.length === 1 && p.uniformBlocks[0].name === 'b' && p.uniformBlocks[0].size === 48,
+        `(a) block 'b' size 48 (got ${JSON.stringify(p.uniformBlocks.map((b) => ({ n: b.name, s: b.size })))})`,
+      );
+      const m = p.uniformBlocks[0].activeUniforms[0];
+      check(
+        m.name === 'm' && m.offset === 0 && m.type === FLOAT_MAT4x3 &&
+          m.matrixStride === 16 && m.rowMajor === true,
+        `(a) member m@0 mat4x3 matrixStride 16 rowMajor true (got ${JSON.stringify(m)})`,
+      );
+      // RUN: rows (0,0,0,0),(0,0,0,1),(0,0,0,0) — the translation COLUMN of
+      // mat4(m) is (row0[3],row1[3],row2[3],1) = (0,1,0,1) → solid green.
+      const store = new Float32Array([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+      const fctx = fragmentCtx(p, [], { blockStores: [store] });
+      p.fragment.run(fctx);
+      const c = fctx.out.color[0];
+      check(
+        c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+        `(a) run: mat4(m)*vec4(0,0,0,1) = [0,1,0,1] green (got [${Array.from(c).join(', ')}])`,
+      );
+    }
+  }
+
+  /* (b) MEMBER-level layout(row_major) + explicit column_major
+   *     override of a block-level row_major (ES 3.00 §4.3.9). */
+  {
+    const vs = compile(
+      `#version 300 es
+       void main() { gl_Position = vec4(0,0,0,1); }`,
+      'VERTEX',
+      300,
+    );
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       uniform Stuff {
+         layout(row_major) mat4 u_mat[3];
+       } stuff;
+       out vec4 o;
+       void main() { o = stuff.u_mat[0][0]; }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `(b) member-level row_major pair links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const p = l.program;
+      check(
+        p.uniformBlocks.length === 1 && p.uniformBlocks[0].name === 'Stuff' && p.uniformBlocks[0].size === 192,
+        `(b) block 'Stuff' size 192 = 3*64 (got ${JSON.stringify(p.uniformBlocks.map((b) => ({ n: b.name, s: b.size })))})`,
+      );
+      const m = new Map(p.uniformBlocks[0].activeUniforms.map((u) => [u.name, u]));
+      const leaf = m.get('stuff.u_mat[0]');
+      check(
+        leaf !== undefined && leaf.offset === 0 && leaf.size === 3 && leaf.type === FLOAT_MAT4 &&
+          leaf.arrayStride === 64 && leaf.rowMajor === true,
+        `(b) 'stuff.u_mat[0]' @0 size 3 arrayStride 64 (4x16 row stride) rowMajor true (got ${JSON.stringify(leaf)})`,
+      );
+    }
+
+    // Explicit member-level column_major overrides the block-level
+    // row_major: m stays column-major (64B, rowMajor false), n inherits
+    // row-major (also 64B for a square mat4 — the rowMajor flag is what
+    // discriminates).
+    const fs2 = compile(
+      `#version 300 es
+       precision mediump float;
+       layout(std140, row_major) uniform S {
+         layout(column_major) mat4 m;
+         mat4 n;
+       } s;
+       out vec4 o;
+       void main() { o = s.m[0] + s.n[0]; }`,
+      'FRAGMENT',
+      300,
+    );
+    const l2 = linkProgram(vs, fs2);
+    check(l2.ok, `(b2) member column_major override links (${l2.ok ? '' : l2.log})`);
+    if (l2.ok) {
+      const p = l2.program;
+      check(
+        p.uniformBlocks.length === 1 && p.uniformBlocks[0].size === 128,
+        `(b2) block size 128 = 64 + 64 (got ${JSON.stringify(p.uniformBlocks.map((b) => b.size))})`,
+      );
+      const m = new Map(p.uniformBlocks[0].activeUniforms.map((u) => [u.name, u]));
+      const mm = m.get('s.m');
+      const mn = m.get('s.n');
+      check(
+        mm !== undefined && mm.offset === 0 && mm.matrixStride === 16 && mm.rowMajor === false,
+        `(b2) 's.m' @0 column-major override rowMajor false (got ${JSON.stringify(mm)})`,
+      );
+      check(
+        mn !== undefined && mn.offset === 64 && mn.matrixStride === 16 && mn.rowMajor === true,
+        `(b2) 's.n' @64 inherits block row_major (got ${JSON.stringify(mn)})`,
+      );
+    }
+  }
+
+  /* (c) Precision-mismatched same-name blocks fail the LINK (ES 3.00
+   *     §4.3.7; shader-with-mis-matching-uniform-block.html — the VS
+   *     declares `mediump vec4 val`, the FS `highp vec4 val`; both
+   *     compile, the link must fail). */
+  {
+    const vs = compile(
+      `#version 300 es
+       uniform Block {
+           mediump vec4 val;
+       };
+       void main()
+       {
+           gl_Position = val;
+       }`,
+      'VERTEX',
+      300,
+    );
+    const fs = compile(
+      `#version 300 es
+       uniform Block {
+           highp vec4 val;
+       };
+       out highp vec4 out_FragColor;
+       void main()
+       {
+           out_FragColor = val;
+       }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs);
+    check(
+      !l.ok && l.log.includes('layout mismatch'),
+      `(c) mediump vs highp same-name block → link error (${l.ok ? 'LINKED' : l.log})`,
+    );
+    // Control: matching precision links.
+    const vs2 = compile(
+      `#version 300 es
+       uniform Block { highp vec4 val; };
+       void main() { gl_Position = val; }`,
+      'VERTEX',
+      300,
+    );
+    const fs2 = compile(
+      `#version 300 es
+       uniform Block { highp vec4 val; };
+       out highp vec4 out_FragColor;
+       void main() { out_FragColor = val; }`,
+      'FRAGMENT',
+      300,
+    );
+    const l2 = linkProgram(vs2, fs2);
+    check(l2.ok, `(c) matching-precision control links (${l2.ok ? '' : l2.log})`);
+  }
+
+  /* (d) Block-instance names are not values (uniform-block-idents-as-
+   *     expr.html): bare `InstanceName;` and arrayed-element `b[0];`
+   *     are compile errors; `InstanceName.member;` / `InstanceName[0]
+   *     .member;` expression statements compile AND link (one-stage
+   *     blocks — no cross-stage precision matching). */
+  {
+    const errCompile = (src: string, want: string, tag: string): void => {
+      const r = compileShader(src, { type: 'FRAGMENT', version: 300 });
+      check(!r.ok && r.errors.some((e) => e.message.includes(want)),
+        `(d) ${tag}: compile error '${want}' (${r.ok ? 'COMPILED' : JSON.stringify(r.errors)})`);
+    };
+    errCompile(
+      `#version 300 es
+       precision mediump float;
+       uniform BlockName { vec4 member; } InstanceName;
+       void f() { InstanceName; }
+       out vec4 o; void main() { f(); o = vec4(1.0); }`,
+      'uniform block instance name cannot be used as a value',
+      'bare InstanceName;',
+    );
+    errCompile(
+      `#version 300 es
+       precision mediump float;
+       uniform BlockName { vec4 member; } InstanceName[1];
+       void f() { InstanceName[0]; }
+       out vec4 o; void main() { f(); o = vec4(1.0); }`,
+      'uniform block instance element cannot be used as a value',
+      'arrayed b[0];',
+    );
+
+    const linkOk = (fsSrc: string, tag: string): void => {
+      const vs = compile(
+        `#version 300 es
+         void main() { gl_Position = vec4(0,0,0,1); }`,
+        'VERTEX',
+        300,
+      );
+      const fs = compile(fsSrc, 'FRAGMENT', 300);
+      const l = linkProgram(vs, fs);
+      check(l.ok, `(d) ${tag}: member-chain expression statement links (${l.ok ? '' : l.log})`);
+    };
+    linkOk(
+      `#version 300 es
+       precision mediump float;
+       uniform BlockName { vec4 member; } InstanceName;
+       void f() { InstanceName.member; }
+       out vec4 o; void main() { f(); o = vec4(1.0); }`,
+      'InstanceName.member;',
+    );
+    linkOk(
+      `#version 300 es
+       precision mediump float;
+       uniform BlockName { vec4 member; } InstanceName[1];
+       void f() { InstanceName[0].member; }
+       out vec4 o; void main() { f(); o = vec4(1.0); }`,
+      'InstanceName[0].member;',
+    );
+  }
+
+  /* (e) RUN pins for matrix-row-major-dynamic-indexing.html. Shader 1:
+   *     instance-less `a { mat4 u_mats[1]; }` with a DYNAMIC member-array
+   *     index (u_mats[u_zero + 0][2][1]) → f = 1 → green. Shader 2:
+   *     instance-named `Stuff { layout(row_major) mat4 u_mat[3];
+   *     layout(row_major) mat4 u_ndx[3]; } stuff` with the member-array
+   *     index derived from a row-major matrix read
+   *     (stuff.u_mat[int(stuff.u_ndx[1][1][3])][2] == vec4(9,10,11,12))
+   *     → green. Pre-fix: shader 2's link threw 'has no stride' (8167f4e),
+   *     and neither read was row-major. */
+  {
+    // Shader 1: `u_mats[u_zero + 0][2][1]` — u_mats[0] rows are
+    // (0,0,0,0),(0,0,1,0),(0,0,0,0),(0,0,0,0); column 2 = (0,1,0,0),
+    // [1] = 1 → color (0,1,0,1).
+    const vs = compile(
+      `#version 300 es
+       void main() { gl_Position = vec4(0,0,0,1); }`,
+      'VERTEX',
+      300,
+    );
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       uniform int u_zero;
+       layout(row_major) uniform a {
+           mat4 u_mats[1];
+       };
+       out vec4 my_FragColor;
+       void main() {
+           float f = u_mats[u_zero + 0][2][1];
+           my_FragColor = vec4(1.0 - f, f, 0.0, 1.0);
+       }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs);
+    check(l.ok, `(e1) row-major dynamic member-array index links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const p = l.program;
+      const uZero = p.uniformMap.get('u_zero');
+      if (uZero) p.intStore[uZero.location] = 0;
+      const fctx = fragmentCtx(p, [], {
+        blockStores: [new Float32Array([0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0])],
+      });
+      p.fragment.run(fctx);
+      const c = fctx.out.color[0];
+      check(
+        c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+        `(e1) run: u_mats[u_zero+0][2][1] = 1 → green (got [${Array.from(c).join(', ')}])`,
+      );
+    }
+
+    // Shader 2: `stuff.u_mat[int(stuff.u_ndx[1][1][3])][2]` — u_ndx[1]
+    // (row-major rows (0,0,0,0),(0,0,0,2),(0,0,0,0),(0,1,0,0)): column 1
+    // = (0,0,0,1), [3] = 1 → u_mat[1] column 2 = (9,10,11,12) → green.
+    const fs2 = compile(
+      `#version 300 es
+       precision mediump float;
+       uniform Stuff {
+         layout(row_major) mat4 u_mat[3];
+         layout(row_major) mat4 u_ndx[3];
+       } stuff;
+       out vec4 my_FragColor;
+       void main() {
+         vec4 row = stuff.u_mat[int(stuff.u_ndx[1][1][3])][2];
+         my_FragColor = row == vec4(9, 10, 11, 12) ? vec4(0, 1, 0, 1) : vec4(1, 0, 0, 1);
+       }`,
+      'FRAGMENT',
+      300,
+    );
+    const l2 = linkProgram(vs, fs2);
+    check(l2.ok, `(e2) instance-named row-major dynamic index links (${l2.ok ? '' : l2.log})`);
+    if (l2.ok) {
+      const p = l2.program;
+      // The exact 96-float block payload from matrix-row-major-dynamic-
+      // indexing.html: u_mat[0..2] at float 0..47, u_ndx[0..2] at 48..95.
+      const store = new Float32Array([
+        1, 2, 3, 4,
+        5, 6, 7, 8,
+        9, 10, 11, 12,
+        13, 14, 15, 16,
+        1, 5, 9, 13,
+        2, 6, 10, 14,
+        3, 7, 11, 15,
+        4, 8, 12, 16,
+        2, 10, 18, 22,
+        4, 12, 20, 28,
+        6, 14, 22, 30,
+        8, 16, 24, 32,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 2,
+        0, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+      ]);
+      const fctx = fragmentCtx(p, [], { blockStores: [store] });
+      p.fragment.run(fctx);
+      const c = fctx.out.color[0];
+      check(
+        c[0] === 0 && c[1] === 1 && c[2] === 0 && c[3] === 1,
+        `(e2) run: u_mat[int(u_ndx[1][1][3])][2] = (9,10,11,12) → green (got [${Array.from(c).join(', ')}])`,
+      );
+    }
   }
 }
 
