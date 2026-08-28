@@ -26,6 +26,19 @@ Runs a curated subset of three.js example pages (`/testsuites/three.js/examples/
 - `--full` is ~500+ pages; expect long runtime. Use `--filter` for iteration.
 - three.js v0.185-dev: WebGLRenderer requests `webgl2` only; missing extensions must be handled gracefully by the renderer (root CONTEXT.md lists them).
 
+## Known Issues (first real-renderer run, wave-5 bundle: 38 pages, 0 passed)
+- **Vertex-stage texture sampling crashes the draw → silent blank pages (28/38 pages)**: the GLSL codegen lowers ALL texture calls to `ctx.tex.<fn>` (`sample2D`, `texelFetch2D`, `texelFetch2DArray`, …), but the VERTEX ctx (`vctx`) built in `src/gl/draw.ts` carries only `textures`/`samplerStates` — NO `tex` field (the FRAGMENT ctx in `src/raster/rasterizer.ts` DOES: `tex: createTextureEnv(dc.textures)`). three.js r185 vertex shaders contain texture sampling in their active flow (morph/skinning/batching chunks — `texelFetch(morphTargetsTexture, ivec3, 0)` on `sampler2DArray`, `texelFetch(morphTexture, ivec2, 0)` on `sampler2D`, batching textures) → generated vertex code throws `TypeError: Cannot read properties of undefined (reading 'texelFetch2DArray')` inside `pm.vertex.run`; `src/gl/api/draw.ts`'s catch converts it to GL INVALID_OPERATION → draw silently skipped → page renders only clear color with ZERO console errors. Blank-baseline proof: reported diff ≈ diff(golden vs flat clear color) for all 28. Fix locus: `src/gl/draw.ts` vctx construction (add the `tex` TextureEnv). Diagnosis recipe: wrap `ctx._state.currentProgram._program.vertex.run` in-page; the wrapper sees the vctx arg (`ctx.tex` MISSING) and the raw exception stack (pattern in `/tmp/imgdiag/diag2.ts`).
+- **GLSL compiler gaps (console errors, per-page)**:
+  - Preprocessor directives inside function-call argument lists: `getTangentFrame( - vViewPosition, normal, #if defined( USE_NORMALMAP ) ...` → `expected ')'` — MeshStandardMaterial/MeshPhongMaterial fragment (animation_skinning_blending, displacementmap, normalmap, physical_clearcoat).
+  - Attribute redefinition `'color'` (`#if defined(USE_COLOR_ALPHA) vec4 color; #elif defined(USE_COLOR) vec3 color;`) + `'*=' operands vec3/vec4 incompatible` — buffergeometry, postprocessing_unreal_bloom.
+  - Struct multi-declarator members (`struct LuminanceData { float m, n, e, s, w; ... };` → `expected ';' after struct member`) — FXAAShader (postprocessing_fxaa, materials_normalmap).
+  - Linker precision mismatch (`uniform 'viewMatrix' precision mismatch (mediump vs highp)`) — PMREMGGXConvolution/SphericalGaussianBlur (animation_keyframes, instancing_dynamic, cubemap_dynamic, displacementmap, clearcoat, transmission, tonemapping).
+  - Attribute location conflicts (`attribute 'position' location 0 conflicts with 'instanceMatrix'`) — instancing_dynamic/raycast, ssao, fxaa.
+  - `'envMap' : redefinition` / `'textureCubeUV' : no matching function` / `'texColor' : redefinition` — BackgroundCubeMaterial (cubemap_dynamic, envmaps, clearcoat, transmission).
+  - `'dHdxy_fwd' : no matching function` / `'perturbNormalArb' : no matching function` — tonemapping bumpmap (derivative-builtin gap).
+- **Pass threshold is strict (0.1% of pixels)**: recognizable-scene pages still FAIL — spline_editor 0.98%, morphtargets_horse 2.74%, afterimage 5.2%, points_waves 10.7%, fxaa 11.9%, displacementmap 12.1% — expected visual differences (AA/precision/postprocessing), not blank.
+- **Pages that DID render recognizably (partial cluster, mean brightness ≈ golden)**: geometry_text, points_waves/billboards/sprites, spline_editor (grid yes, curve no), lines_fat, geometry_shapes, terrain, mirror, texture_anisotropy, materials_video, buffergeometry_instancing, skinning_morph, raycasting_points. All others match the blank baseline.
+
 ## Routing Table
 - `run.ts` → CLI entry point (arg parsing, orchestration, report summary, exit code)
 - `driver.ts` → server + browser + per-page flow (serve, inject, navigate, wait, screenshot, artifacts)
