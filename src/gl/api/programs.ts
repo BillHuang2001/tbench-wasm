@@ -745,8 +745,11 @@ function finalizeLinkSuccess(p: WebGLProgram, vsR: GlslShader, fsR: GlslShader, 
   blockReferenced.set(p, refs);
   const fmap = new Map<string, number>();
   for (const o of fsR.info.outputs) {
-    // gl_FragColor / gl_FragData[N] are not user outputs (ES 3.00 only).
-    if (o.index !== null || o.name.startsWith('gl_Frag')) continue;
+    // Skip dual-source secondary outputs (layout(index=1)) — they share the
+    // primary's color attachment and have no getFragDataLocation mapping.
+    // Primary outputs (index 0) map by name; gl_FragColor / gl_FragData[N]
+    // are not user outputs (ES 3.00 only).
+    if (o.index === 1 || o.name.startsWith('gl_Frag')) continue;
     fmap.set(o.name, o.location ?? 0);
   }
   fragDataMaps.set(p, fmap);
