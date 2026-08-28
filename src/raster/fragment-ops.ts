@@ -668,7 +668,21 @@ export function blitColorSurface(
   const dInfo = dst.info;
   const sbpp = sInfo.bytesPerPixel;
   const dbpp = dInfo.bytesPerPixel;
-  if (filter === 'linear' && !sInfo.isInteger) {
+  // sRGB format conversion is part of the copy (GLES 3.0 §4.3.2): sRGB sources
+  // decode to linear, sRGB destinations re-encode the linear result. Alpha is
+  // never sRGB-encoded (GLES 3.0 §4.1.8). Same-format sRGB→sRGB round-trips
+  // through the identity.
+  const decodeSRGB = sInfo.isSRGB;
+  const encodeSRGB = dInfo.isSRGB;
+  // GLES 3.0 §4.3.2: same-size rects blit WITHOUT filtering (as NEAREST) even
+  // when LINEAR was requested — bilinear weights are exactly 0/1 there and the
+  // sRGB decode→filter→encode round trip would corrupt bytes that a plain copy
+  // keeps byte-exact. Integer formats never filter (gl/ validates; linear on
+  // integer = nearest). The per-pixel sRGB conversion above still applies to
+  // same-size copies.
+  const doLinear = filter === 'linear' && !sInfo.isInteger &&
+    (srcW !== dstW || srcH !== dstH);
+  if (doLinear) {
     // Bilinear with CLAMP_TO_EDGE: continuous source coord
     //   u = (d − dstOrigin + 0.5)·srcSize/dstSize − 0.5
     // texels = srcOrigin + floor(u), weight = frac(u). Integer formats fall
@@ -681,7 +695,7 @@ export function blitColorSurface(
     for (let dy = y0; dy < y1; dy++) {
       const vc = srcY + (dy - dstY + 0.5) * srcH / dstH;
       if (vc < 0 || vc >= sh) continue;
-      const fy = vc - 0.5;
+      const fy = (dy - dstY + 0.5) * srcH / dstH - 0.5;
       const sy0f = Math.floor(fy);
       const wy = fy - sy0f;
       let sy0 = srcY + sy0f;
@@ -692,7 +706,7 @@ export function blitColorSurface(
       for (let dx = x0; dx < x1; dx++) {
         const uc = srcX + (dx - dstX + 0.5) * srcW / dstW;
         if (uc < 0 || uc >= sw) { doff += dbpp; continue; }
-        const fx = uc - 0.5;
+        const fx = (dx - dstX + 0.5) * srcW / dstW - 0.5;
         const sx0f = Math.floor(fx);
         const wx = fx - sx0f;
         let sx0 = srcX + sx0f;
@@ -703,6 +717,14 @@ export function blitColorSurface(
         sInfo.decode(src.data, (sy0 * sw + sx1) * sbpp, _blitT1);
         sInfo.decode(src.data, (sy1 * sw + sx0) * sbpp, _blitT2);
         sInfo.decode(src.data, (sy1 * sw + sx1) * sbpp, _blitT3);
+        if (decodeSRGB) {
+          // sRGB sources filter in LINEAR space (RGB only — alpha is never
+          // sRGB-encoded per GLES 3.0 §4.1.8).
+          _blitT0[0] = sRGBToLinear(_blitT0[0]); _blitT0[1] = sRGBToLinear(_blitT0[1]); _blitT0[2] = sRGBToLinear(_blitT0[2]);
+          _blitT1[0] = sRGBToLinear(_blitT1[0]); _blitT1[1] = sRGBToLinear(_blitT1[1]); _blitT1[2] = sRGBToLinear(_blitT1[2]);
+          _blitT2[0] = sRGBToLinear(_blitT2[0]); _blitT2[1] = sRGBToLinear(_blitT2[1]); _blitT2[2] = sRGBToLinear(_blitT2[2]);
+          _blitT3[0] = sRGBToLinear(_blitT3[0]); _blitT3[1] = sRGBToLinear(_blitT3[1]); _blitT3[2] = sRGBToLinear(_blitT3[2]);
+        }
         const w00 = (1 - wx) * (1 - wy);
         const w10 = wx * (1 - wy);
         const w01 = (1 - wx) * wy;
@@ -711,6 +733,9 @@ export function blitColorSurface(
         _blitOut[1] = _blitT0[1] * w00 + _blitT1[1] * w10 + _blitT2[1] * w01 + _blitT3[1] * w11;
         _blitOut[2] = _blitT0[2] * w00 + _blitT1[2] * w10 + _blitT2[2] * w01 + _blitT3[2] * w11;
         _blitOut[3] = _blitT0[3] * w00 + _blitT1[3] * w10 + _blitT2[3] * w01 + _blitT3[3] * w11;
+        if (encodeSRGB) {
+          _blitOut[0] = linearToSRGB(_blitOut[0]); _blitOut[1] = linearToSRGB(_blitOut[1]); _blitOut[2] = linearToSRGB(_blitOut[2]);
+        }
         dInfo.encode(dst.data, doff, _blitOut[0], _blitOut[1], _blitOut[2], _blitOut[3]);
         doff += dbpp;
       }
@@ -729,6 +754,12 @@ export function blitColorSurface(
         if (uc >= 0 && uc < sw) {
           const sx = Math.max(0, Math.min(sw - 1, srcX + Math.floor((dx - dstX + 0.5) * srcW / dstW)));
           sInfo.decode(src.data, (sy * sw + sx) * sbpp, _blitOut);
+          if (decodeSRGB) {
+            _blitOut[0] = sRGBToLinear(_blitOut[0]); _blitOut[1] = sRGBToLinear(_blitOut[1]); _blitOut[2] = sRGBToLinear(_blitOut[2]);
+          }
+          if (encodeSRGB) {
+            _blitOut[0] = linearToSRGB(_blitOut[0]); _blitOut[1] = linearToSRGB(_blitOut[1]); _blitOut[2] = linearToSRGB(_blitOut[2]);
+          }
           dInfo.encode(dst.data, doff, _blitOut[0], _blitOut[1], _blitOut[2], _blitOut[3]);
         }
         doff += dbpp;
