@@ -62,6 +62,29 @@ export function createKHRParallelShaderCompile(ctx: WebGLRenderingContext): obje
   return buildExtension({ COMPLETION_STATUS_KHR: CExt.COMPLETION_STATUS_KHR });
 }
 
+/** WEBGL_compressed_texture_etc — ETC2/EAC compressed formats (WebGL2; constants only — no decompressor yet). */
+export function createWEBGLCompressedTextureEtc(ctx: WebGLRenderingContext): object {
+  void ctx;
+  return buildExtension({
+    COMPRESSED_R11_EAC: CExt.COMPRESSED_R11_EAC,
+    COMPRESSED_SIGNED_R11_EAC: CExt.COMPRESSED_SIGNED_R11_EAC,
+    COMPRESSED_RG11_EAC: CExt.COMPRESSED_RG11_EAC,
+    COMPRESSED_SIGNED_RG11_EAC: CExt.COMPRESSED_SIGNED_RG11_EAC,
+    COMPRESSED_RGB8_ETC2: CExt.COMPRESSED_RGB8_ETC2,
+    COMPRESSED_SRGB8_ETC2: CExt.COMPRESSED_SRGB8_ETC2,
+    COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2: CExt.COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2,
+    COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2: CExt.COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2,
+    COMPRESSED_RGBA8_ETC2_EAC: CExt.COMPRESSED_RGBA8_ETC2_EAC,
+    COMPRESSED_SRGB8_ALPHA8_ETC2_EAC: CExt.COMPRESSED_SRGB8_ALPHA8_ETC2_EAC,
+  });
+}
+
+/** WEBGL_compressed_texture_etc1 — ETC1 compressed format (WebGL2 per CTS required-extensions; constants only). */
+export function createWEBGLCompressedTextureEtc1(ctx: WebGLRenderingContext): object {
+  void ctx;
+  return buildExtension({ COMPRESSED_RGB_ETC1_WEBGL: CExt.COMPRESSED_RGB_ETC1_WEBGL });
+}
+
 /** WEBGL_render_shared_exponent — RGB9_E5 renderable (no members, verified from extension.xml). */
 export function createWEBGLRenderSharedExponent(ctx: WebGLRenderingContext): object {
   void ctx;
