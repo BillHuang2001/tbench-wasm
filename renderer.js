@@ -9640,6 +9640,10 @@
         return { kind: "decl-stmt", type, declarators: [], loc: locOf(start) };
       }
     }
+    if (type.base.kind === "type-name" && type.base.name === "" && p.atOp(";")) {
+      p.next();
+      return { kind: "empty", loc: locOf(start) };
+    }
     let preNameDims = [];
     if (p.atOp("[")) {
       if (p.version === 100) {
@@ -9878,6 +9882,11 @@
     }
     const type = parseTypeSpec(p, { param: false, member: false });
     type.qualifiers.invariant = true;
+    if (type.base.kind === "type-name" && type.base.name === "" && p.atOp(";")) {
+      p.next();
+      const decl2 = { kind: "layout-decl", qualifiers: type.qualifiers, loc: locOf(start) };
+      return decl2;
+    }
     let returnDims = [];
     if (p.atOp("[")) {
       if (p.version === 100) {
@@ -9954,6 +9963,11 @@
       const declarators2 = parseDeclarators(p, false);
       p.expectOp(";", "expected ';' after declaration");
       const decl2 = { kind: "global-var-decl", type, declarators: declarators2, loc: locOf(start) };
+      return decl2;
+    }
+    if (type.base.kind === "type-name" && type.base.name === "" && p.atOp(";")) {
+      p.next();
+      const decl2 = { kind: "layout-decl", qualifiers: type.qualifiers, loc: locOf(start) };
       return decl2;
     }
     if (p.atOp("{")) {
@@ -10161,6 +10175,9 @@
     }
     let base;
     const bt = p.peek();
+    if (bt.kind === "op" && bt.text === ";" && qualifiers.layout !== void 0) {
+      return { kind: "type-spec", qualifiers, base: { kind: "type-name", name: "", loc: locOf(bt) }, loc: locOf(start) };
+    }
     if (bt.kind === "keyword" && bt.name === "struct") {
       if (ctx.member) p.error(bt.line, "struct definitions are not allowed inside structs");
       else if (ctx.param) p.error(bt.line, "struct definitions are not allowed in function parameters");
@@ -13493,6 +13510,14 @@
         case "global-var-decl":
           analyzeGlobalDecl(d, ctx, info);
           break;
+        case "layout-decl": {
+          const lq = d.qualifiers.layout;
+          if (lq !== void 0) {
+            if (lq.blockLayout !== void 0) ctx.defaultLayout.blockLayout = lq.blockLayout;
+            if (lq.rowMajor !== void 0) ctx.defaultLayout.rowMajor = lq.rowMajor;
+          }
+          break;
+        }
         case "interface-block":
           analyzeInterfaceBlock(d, ctx, info);
           break;
@@ -13873,7 +13898,7 @@
     }
   }
   function analyzeInterfaceBlock(d, ctx, info) {
-    var _a, _b, _c, _d, _e, _f;
+    var _a, _b, _c, _d, _e, _f, _g, _h;
     const q = d.qualifiers;
     const members = [];
     for (const m of d.members) {
@@ -13900,7 +13925,7 @@
     const isVaryingBlock = storage === "out" && ctx.stage === "VERTEX" || storage === "in" && ctx.stage === "FRAGMENT";
     if (!isVaryingBlock) {
       if (storage === "uniform" || storage === void 0) {
-        const blockLayout = (_a = q.layout) == null ? void 0 : _a.blockLayout;
+        const blockLayout = (_b = (_a = q.layout) == null ? void 0 : _a.blockLayout) != null ? _b : ctx.defaultLayout.blockLayout;
         if (blockLayout === "shared" || blockLayout === "packed") {
           ctx.error(d.loc.line, `'layout(${blockLayout})' : only 'std140' uniform block layouts are supported in WebGL`);
         }
@@ -13914,8 +13939,10 @@
           instanceArray: d.instanceName !== null && d.instanceName !== "" && d.arrayDims.length > 0,
           // Block-level layout(row_major) (ES 3.00 §4.3.9) applies to every
           // matrix member unless the member carries its own row_major/column_major.
-          rowMajor: (_c = (_b = q.layout) == null ? void 0 : _b.rowMajor) != null ? _c : false,
-          binding: (_e = (_d = q.layout) == null ? void 0 : _d.binding) != null ? _e : null,
+          // A standalone-decl default (ES 3.00 §4.4) fills in when the block has
+          // no explicit layout(...).
+          rowMajor: (_e = (_d = (_c = q.layout) == null ? void 0 : _c.rowMajor) != null ? _d : ctx.defaultLayout.rowMajor) != null ? _e : false,
+          binding: (_g = (_f = q.layout) == null ? void 0 : _f.binding) != null ? _g : null,
           members: members.map((m) => {
             var _a2, _b2;
             return {
@@ -13939,7 +13966,7 @@
       let element = m.type;
       let memberArraySize = 1;
       while (element.kind === "array") {
-        memberArraySize *= (_f = element.size) != null ? _f : 1;
+        memberArraySize *= (_h = element.size) != null ? _h : 1;
         element = element.element;
       }
       const mq = m.qualifiers;
@@ -14316,6 +14343,17 @@
        * taken by analyzeProgram's pre-pass).
        */
       __publicField(this, "defaultPrecisions", /* @__PURE__ */ new Map());
+      /**
+       * Default layout state set by standalone `layout(...) uniform;` declarations
+       * (GLSL ES 3.00 §4.4 `type_qualifier SEMICOLON`): block layout
+       * (std140/shared/packed) + row_major/column_major apply to subsequent
+       * uniform-block declarations that carry no explicit layout(...) qualifier.
+       * Consumed by analyzeInterfaceBlock (semantics-decl.ts); updated by the
+       * layout-decl case in the ShaderInfo declaration pass (source order).
+       * `layout(location=N) in/out;` standalone forms are accepted but their
+       * location default is deliberately NOT threaded (no CTS page grades it).
+       */
+      __publicField(this, "defaultLayout", {});
       /** Internal: nested loop depth (continue legality). */
       __publicField(this, "loopDepth", 0);
       /** Internal: nested loop+switch depth (break legality). */
@@ -14923,6 +14961,8 @@
         }
         case "interface-block":
           registerInterfaceBlock(d, global, ctx);
+          break;
+        case "layout-decl":
           break;
         case "precision-decl":
           ctx.defaultPrecisions.set(d.base, d.precision);
