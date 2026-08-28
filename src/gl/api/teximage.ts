@@ -110,6 +110,40 @@ function dimLimit(
 const isPow2 = (v: number): boolean => v > 0 && (v & (v - 1)) === 0;
 
 /**
+ * Per-level dimension + level-bound validation (GLES2/3 + WebGL semantics;
+ * CTS texture-size-limit.html / tex-3d-size-limit.html): the maximum
+ * width/height at level L is max(1, maxSize >> L) where maxSize is the
+ * target's size limit, and the maximum level is floor(log2(maxSize)).
+ * TEXTURE_2D_ARRAY layers (depth) are NOT level-scaled; TEXTURE_3D depth IS
+ * (max(1, MAX_3D_TEXTURE_SIZE >> L)). Pushes INVALID_VALUE and returns false
+ * when out of bounds. Uses division (not >>) so huge levels cannot wrap via
+ * JS's mod-32 shift semantics.
+ */
+function validateLevelDims(
+  ctx: WebGLRenderingContext,
+  target: GLenum,
+  level: number,
+  width: number,
+  height: number,
+  depth: number,
+): boolean {
+  const lim = dimLimit(ctx, target);
+  const scale = Math.pow(2, level);
+  const maxW = Math.max(1, Math.floor(lim.maxW / scale));
+  const maxH = Math.max(1, Math.floor(lim.maxH / scale));
+  const maxD = target === C2.TEXTURE_3D ? Math.max(1, Math.floor(lim.maxD / scale)) : lim.maxD;
+  if (width > maxW || height > maxH || depth > maxD) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return false;
+  }
+  if (level > Math.floor(Math.log2(lim.maxDim))) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return false;
+  }
+  return true;
+}
+
+/**
  * Shared texImage2D/texImage3D validation (both forms): target, bound texture,
  * immutability, border, level, dims vs limits. Returns the bound texture, or
  * null with an error pushed.
@@ -149,15 +183,7 @@ function commonTexImageValidation(
     ctx._errors.push(C1.INVALID_VALUE);
     return null;
   }
-  const lim = dimLimit(ctx, target);
-  if (width > lim.maxW || height > lim.maxH || depth > lim.maxD) {
-    ctx._errors.push(C1.INVALID_VALUE);
-    return null;
-  }
-  if (level > Math.floor(Math.log2(lim.maxDim))) {
-    ctx._errors.push(C1.INVALID_VALUE);
-    return null;
-  }
+  if (!validateLevelDims(ctx, target, level, width, height, depth)) return null;
   if (ctx._version === 1 && level > 0 && (!isPow2(width) || !isPow2(height))) {
     ctx._errors.push(C1.INVALID_VALUE);
     return null;
@@ -937,6 +963,11 @@ function commonTexSubValidation(
     ctx._errors.push(C1.INVALID_VALUE);
     return null;
   }
+  const lim = dimLimit(ctx, target);
+  if (level > Math.floor(Math.log2(lim.maxDim))) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return null;
+  }
   if (!hasTextureLevel(tex, target, level)) {
     ctx._errors.push(C1.INVALID_OPERATION);
     return null;
@@ -1248,15 +1279,7 @@ function copyTexImage2DImpl(
     ctx._errors.push(C1.INVALID_VALUE);
     return;
   }
-  const lim = dimLimit(ctx, target);
-  if (width > lim.maxW || height > lim.maxH) {
-    ctx._errors.push(C1.INVALID_VALUE);
-    return;
-  }
-  if (level > Math.floor(Math.log2(lim.maxDim))) {
-    ctx._errors.push(C1.INVALID_VALUE);
-    return;
-  }
+  if (!validateLevelDims(ctx, target, level, width, height, 1)) return;
   if (ctx._version === 1 && level > 0 && (!isPow2(width) || !isPow2(height))) {
     ctx._errors.push(C1.INVALID_VALUE);
     return;
@@ -1331,6 +1354,11 @@ function copyTexSubImage2DImpl(
     ctx._errors.push(C1.INVALID_VALUE);
     return;
   }
+  const lim = dimLimit(ctx, target);
+  if (level > Math.floor(Math.log2(lim.maxDim))) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return;
+  }
   if (!hasTextureLevel(tex, target, level)) {
     ctx._errors.push(C1.INVALID_OPERATION);
     return;
@@ -1377,6 +1405,11 @@ function copyTexSubImage3DImpl(
     return;
   }
   if (level < 0) {
+    ctx._errors.push(C1.INVALID_VALUE);
+    return;
+  }
+  const lim = dimLimit(ctx, target);
+  if (level > Math.floor(Math.log2(lim.maxDim))) {
     ctx._errors.push(C1.INVALID_VALUE);
     return;
   }
