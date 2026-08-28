@@ -503,6 +503,57 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
 }
 
 /* ------------------------------------------------------------------ */
+/* 6b. Texture-offset constant-expression + range rules (GLSL ES 3.00  */
+/*     §8.8; CTS texture-offset-non-constant-offset.html +             */
+/*     texture-offset-out-of-range.html)                               */
+/* ------------------------------------------------------------------ */
+
+{
+  // In-range constant offsets compile (min -8 / max 7 are the WebGL2 bounds).
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, -8)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, 7)); }', 300, 'FRAGMENT');
+  // 3-component offsets (sampler3D) and the other offset-family names.
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler3D s;\nin vec3 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec3(0)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureLodOffset(s, uv, 0.0, ivec2(1)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec4 uv;\nout vec4 c;\nvoid main() { c = textureProjOffset(s, uv, ivec2(1)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec4 uv;\nout vec4 c;\nvoid main() { c = textureProjLodOffset(s, uv, 0.0, ivec2(1)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureGradOffset(s, uv, vec2(1.0), vec2(1.0), ivec2(1)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec4 uv;\nout vec4 c;\nvoid main() { c = textureProjGradOffset(s, uv, vec2(1.0), vec2(1.0), ivec2(1)); }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = texelFetchOffset(s, ivec2(uv), 0, ivec2(0, 1)); }', 300, 'FRAGMENT');
+  // A `const` variable offset IS a constant expression (§4.3.3) — legal.
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { const ivec2 off = ivec2(1, 2); c = textureOffset(s, uv, off); }', 300, 'FRAGMENT');
+  // The trailing float bias comes after the offset — the offset stays checked.
+  okInfo('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, 1), 0.5); }', 300, 'FRAGMENT');
+
+  // Out-of-range CONSTANT offsets are compile errors (below -8 / above 7).
+  const r1 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, -9)); }', 300, 'FRAGMENT');
+  check(hasErr(r1, 6, "'textureOffset' : offset argument out of range [-8, 7]"), 'textureOffset offset -9 → out-of-range error line 6');
+  const r2 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, 8)); }', 300, 'FRAGMENT');
+  check(hasErr(r2, 6, "'textureOffset' : offset argument out of range [-8, 7]"), 'textureOffset offset 8 → out-of-range error line 6');
+
+  // NON-constant offsets are compile errors: a local variable initialized
+  // with a constant is still not a constant expression (CTS
+  // texture-offset-non-constant-offset.html), a uniform read is not, and the
+  // whole offset family is gated.
+  const n1 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() {\n    ivec2 offset = ivec2(0);\n    c = textureOffset(s, uv, offset);\n}', 300, 'FRAGMENT');
+  check(hasErr(n1, 8, "'textureOffset' : offset argument must be a constant integral expression"), 'textureOffset non-const local offset → error line 8');
+  const n2 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nuniform int x;\nin vec2 uv;\nout vec4 c;\nvoid main() { c = textureOffset(s, uv, ivec2(0, x)); }', 300, 'FRAGMENT');
+  check(hasErr(n2, 7, "'textureOffset' : offset argument must be a constant integral expression"), 'textureOffset uniform-derived offset → error line 7');
+  const n3 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() {\n    ivec2 offset = ivec2(0);\n    c = textureLodOffset(s, uv, 0.0, offset);\n}', 300, 'FRAGMENT');
+  check(hasErr(n3, 8, "'textureLodOffset' : offset argument must be a constant integral expression"), 'textureLodOffset non-const offset → error line 8');
+  const n4 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() {\n    ivec2 offset = ivec2(0);\n    c = textureGradOffset(s, uv, vec2(1.0), vec2(1.0), offset);\n}', 300, 'FRAGMENT');
+  check(hasErr(n4, 8, "'textureGradOffset' : offset argument must be a constant integral expression"), 'textureGradOffset non-const offset (5-arg form) → error line 8');
+  const n5 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec4 uv;\nout vec4 c;\nvoid main() {\n    ivec2 offset = ivec2(0);\n    c = textureProjOffset(s, uv, offset);\n}', 300, 'FRAGMENT');
+  check(hasErr(n5, 8, "'textureProjOffset' : offset argument must be a constant integral expression"), 'textureProjOffset non-const offset → error line 8');
+  const n6 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() {\n    ivec2 offset = ivec2(0);\n    c = texelFetchOffset(s, ivec2(uv), 0, offset);\n}', 300, 'FRAGMENT');
+  check(hasErr(n6, 8, "'texelFetchOffset' : offset argument must be a constant integral expression"), 'texelFetchOffset non-const offset → error line 8');
+  // A const variable with an OUT-OF-RANGE value is also rejected (value check
+  // runs on the evaluated constant, not the AST form).
+  const n7 = errs('#version 300 es\nprecision mediump float;\nuniform sampler2D s;\nin vec2 uv;\nout vec4 c;\nvoid main() { const ivec2 off = ivec2(0, 9); c = textureOffset(s, uv, off); }', 300, 'FRAGMENT');
+  check(hasErr(n7, 6, "'textureOffset' : offset argument out of range [-8, 7]"), 'textureOffset const-var offset 9 → out-of-range error line 6');
+}
+
+/* ------------------------------------------------------------------ */
 /* 7. Precision rules                                                  */
 /* ------------------------------------------------------------------ */
 

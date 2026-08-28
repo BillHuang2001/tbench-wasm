@@ -1225,7 +1225,7 @@ function analyzeCall(e: CallExpr, scope: Scope, ctx: SemContext): void {
       return;
     }
     if (matches(name, builtinSignatures(ctx.version)).length > 0 || extensionFunctions.some((s) => s.name === name)) {
-      analyzeBuiltinCall(e, name, ctx);
+      analyzeBuiltinCall(e, name, scope, ctx);
       return;
     }
     ctx.error(e.loc.line, `'${name}' : no matching function`);
@@ -1342,7 +1342,77 @@ function analyzeUserCall(e: CallExpr, sym: FnSymbol, ctx: SemContext): void {
   ctx.currentFunction?.calls.add(sym.siblings[sigs.indexOf(best)]);
 }
 
-function analyzeBuiltinCall(e: CallExpr, name: string, ctx: SemContext): void {
+/**
+ * WebGL 2.0 minimum/maximum program texel offset (GLSL ES 3.00 §8.8:
+ * implementation-defined range; WebGL 2.0 fixes it to [-8, 7] — see
+ * src/gl/state.ts MIN_PROGRAM_TEXEL_OFFSET/MAX_PROGRAM_TEXEL_OFFSET).
+ */
+const MIN_PROGRAM_TEXEL_OFFSET = -8;
+const MAX_PROGRAM_TEXEL_OFFSET = 7;
+
+/** The textureOffset family: the trailing integral-vector argument is a
+ *  CONSTANT integral expression within [MIN_PROGRAM_TEXEL_OFFSET,
+ *  MAX_PROGRAM_TEXEL_OFFSET] (GLSL ES 3.00 §8.8). Note textureGradOffset /
+ *  textureProjGradOffset take (sampler, P, dPdx, dPdy, offset) — the offset
+ *  is still the LAST argument. */
+const TEXEL_OFFSET_FUNCS: ReadonlySet<string> = new Set([
+  'textureOffset',
+  'textureProjOffset',
+  'textureLodOffset',
+  'textureProjLodOffset',
+  'textureGradOffset',
+  'textureProjGradOffset',
+  'texelFetchOffset',
+]);
+
+/**
+ * GLSL ES 3.00 §8.8: the offset argument of the textureOffset family must be a
+ * constant integral expression with every component in
+ * [MIN_PROGRAM_TEXEL_OFFSET, MAX_PROGRAM_TEXEL_OFFSET]. A non-constant offset
+ * (local variable, uniform read, ...) and an out-of-range constant are both
+ * compile errors. Graded by CTS texture-offset-non-constant-offset.html and
+ * texture-offset-out-of-range.html. `evalConstExpr` implements the §4.3.3
+ * constant-expression rules (literals, const variables — global AND local —
+ * constructors of constants, binary/unary ops on constants, ...); a
+ * non-const leaf makes the whole expression non-constant.
+ */
+function checkTexelOffsetArg(e: CallExpr, name: string, scope: Scope, ctx: SemContext): void {
+  if (ctx.version !== 300 || !TEXEL_OFFSET_FUNCS.has(name)) return;
+  // The offset is the trailing integral vector; the optional float bias comes
+  // AFTER it in the signature (textureOffset(s, P, offset[, bias])), so when
+  // the last argument is not a vector the offset is the second-to-last.
+  let arg = e.args[e.args.length - 1];
+  const at = arg.resolvedType;
+  if (at !== undefined && at.kind === 'vector' && (at.base === 'int' || at.base === 'uint')) {
+    // offset is the last argument
+  } else if (e.args.length >= 2) {
+    arg = e.args[e.args.length - 2];
+  } else {
+    return; // signature already failed to match — analysis reported it
+  }
+  if (arg.resolvedType === undefined) return; // analysis already failed
+  const data = evalConstExpr(arg, scope, ctx);
+  if (data === undefined) {
+    ctx.error(arg.loc.line, `'${name}' : offset argument must be a constant integral expression`);
+    return;
+  }
+  for (const v of data) {
+    if (
+      typeof v !== 'number' ||
+      !Number.isInteger(v) ||
+      v < MIN_PROGRAM_TEXEL_OFFSET ||
+      v > MAX_PROGRAM_TEXEL_OFFSET
+    ) {
+      ctx.error(
+        arg.loc.line,
+        `'${name}' : offset argument out of range [${MIN_PROGRAM_TEXEL_OFFSET}, ${MAX_PROGRAM_TEXEL_OFFSET}]`,
+      );
+      return;
+    }
+  }
+}
+
+function analyzeBuiltinCall(e: CallExpr, name: string, scope: Scope, ctx: SemContext): void {
   const all: BuiltinSignature[] = [...matches(name, builtinSignatures(ctx.version))];
   for (const s of extensionFunctions) {
     if (s.name !== name) continue;
@@ -1384,6 +1454,7 @@ function analyzeBuiltinCall(e: CallExpr, name: string, ctx: SemContext): void {
   }
   e.resolvedType = best.ret;
   e.constValue = foldBuiltin(name, best.ret, e.args);
+  checkTexelOffsetArg(e, name, scope, ctx);
 }
 
 /**
