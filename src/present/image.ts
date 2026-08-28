@@ -77,12 +77,19 @@ function decodeViaScratch(source: unknown, width: number, height: number): Decod
   }
   try {
     // Size the scratch canvas to the source's intrinsic size (setting
-    // width/height resets the 2D context state, which is fine — we draw
-    // immediately after). Only reallocates when the size actually changes.
+    // width/height resets the 2D context state). Only reallocates when the
+    // size actually changes.
     if (scratchCanvas !== null && (scratchCanvas.width !== width || scratchCanvas.height !== height)) {
       scratchCanvas.width = width;
       scratchCanvas.height = height;
     }
+    // The scratch is a module-level singleton shared across ALL decodes (and
+    // all contexts on the page). drawImage composites source-over, so a
+    // same-size decode would blend with the previous decode's pixels. Reset
+    // the transform and clear the scratch to transparent before every draw —
+    // only then does getImageData return exact straight-alpha pixels.
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, width, height);
     ctx.drawImage(source as CanvasImageSource, 0, 0);
     const imageData = ctx.getImageData(0, 0, width, height);
     return { ok: true, image: { width, height, data: imageData.data } };
