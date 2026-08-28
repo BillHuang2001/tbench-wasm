@@ -2446,7 +2446,7 @@
       case ONE_MINUS_CONSTANT_ALPHA:
         return 1 - ca;
       case SRC_ALPHA_SATURATE:
-        return Math.min(sa, 1 - dc);
+        return Math.min(sa, 1 - da);
       default:
         return 0;
     }
@@ -2649,8 +2649,10 @@
      * (RGB only) → colorMask → surface write. (DITHER is a no-op — see header.)
      */
     writeColor(L, x, y, colors) {
-      const attach = this.drawBuffers[L];
-      if (attach < 0) return;
+      const db = this.drawBuffers[L];
+      if (db === -1) return;
+      let attach = db;
+      if (attach < 0 && attach !== -1 || attach >= this.fbColors.length) attach = 0;
       const tgt = this.fbColors[attach];
       if (!tgt) return;
       const src = colors[L];
@@ -2662,15 +2664,15 @@
       const blendHere = this.blend.enabled && L === 0;
       if (blendHere) {
         info.decode(tgt.data, off, this.dstScratch);
-        let dr = this.dstScratch[0], dg = this.dstScratch[1], db = this.dstScratch[2], da = this.dstScratch[3];
+        let dr = this.dstScratch[0], dg = this.dstScratch[1], db2 = this.dstScratch[2], da = this.dstScratch[3];
         if (isSRGB) {
           dr = sRGBToLinear(dr);
           dg = sRGBToLinear(dg);
-          db = sRGBToLinear(db);
+          db2 = sRGBToLinear(db2);
         }
         this.linearDst[0] = dr;
         this.linearDst[1] = dg;
-        this.linearDst[2] = db;
+        this.linearDst[2] = db2;
         this.linearDst[3] = da;
         blendColor(
           src,
@@ -3567,16 +3569,63 @@
     readFromEntry(img.info, entry, (y * lv.width + x) * img.info.bytesPerPixel, false, out);
   }
 
+  // src/raster/sampler-aniso.ts
+  function anisoGate(img, state) {
+    return state.maxAnisotropy > 1 && img.target === TEXTURE_2D && isMipmapMinFilter(state.minFilter);
+  }
+  function isMipmapMinFilter(f) {
+    return f === NEAREST_MIPMAP_NEAREST || f === LINEAR_MIPMAP_NEAREST || f === NEAREST_MIPMAP_LINEAR || f === LINEAR_MIPMAP_LINEAR;
+  }
+  function pow2ceilN(x) {
+    let p = 1;
+    while (p < x) p *= 2;
+    return p;
+  }
+  var anisoTapParams = { n: 0, majorU: true };
+  var _mipA = new Float32Array(4);
+  var _mipB = new Float32Array(4);
+  function sample2DAnisoTaps(filter2D2, img, state, plan, filter, level0, level1, f, u, v2, layer, shadow, refQ, lambda, out) {
+    const n = anisoTapParams.n;
+    const majorU = anisoTapParams.majorU;
+    const scale = Math.pow(2, lambda) / (majorU ? img.width : img.height);
+    const invN = 1 / n;
+    out[0] = 0;
+    out[1] = 0;
+    out[2] = 0;
+    out[3] = 0;
+    for (let i = 0; i < n; i++) {
+      const off = ((i + 0.5) / n - 0.5) * scale;
+      const uu = majorU ? u + off : u;
+      const vv = majorU ? v2 : v2 + off;
+      if (level1 >= 0) {
+        filter2D2(img, state, plan, filter, level0, uu, vv, layer, shadow, refQ, _mipA);
+        filter2D2(img, state, plan, filter, level1, uu, vv, layer, shadow, refQ, _mipB);
+        out[0] += (_mipA[0] * (1 - f) + _mipB[0] * f) * invN;
+        out[1] += (_mipA[1] * (1 - f) + _mipB[1] * f) * invN;
+        out[2] += (_mipA[2] * (1 - f) + _mipB[2] * f) * invN;
+        out[3] += (_mipA[3] * (1 - f) + _mipB[3] * f) * invN;
+      } else {
+        filter2D2(img, state, plan, filter, level0, uu, vv, layer, shadow, refQ, _mipA);
+        out[0] += _mipA[0] * invN;
+        out[1] += _mipA[1] * invN;
+        out[2] += _mipA[2] * invN;
+        out[3] += _mipA[3] * invN;
+      }
+    }
+  }
+
   // src/raster/sampler.ts
   var _tap = new Float32Array(4);
   var _c0 = new Float32Array(3);
   var _c1 = new Float32Array(3);
   var _c2 = new Float32Array(3);
-  var _mipA = new Float32Array(4);
-  var _mipB = new Float32Array(4);
+  var _mipA2 = new Float32Array(4);
+  var _mipB2 = new Float32Array(4);
   var _dir = new Float32Array(3);
   var _uv = new Float32Array(2);
   var _cornerSum = new Float32Array(4);
+  var _face = { sc: 0, tc: 0, ma: 0 };
+  var _rho = { x: 0, y: 0 };
   function wrapIndex(c, wrap, size) {
     switch (wrap) {
       case REPEAT: {
@@ -3654,9 +3703,6 @@
     }
     return ref;
   }
-  function isMipmapMinFilter(f) {
-    return f === NEAREST_MIPMAP_NEAREST || f === LINEAR_MIPMAP_NEAREST || f === NEAREST_MIPMAP_LINEAR || f === LINEAR_MIPMAP_LINEAR;
-  }
   function fillPlan(img, state, p) {
     let hi = img.maxLevel;
     const maxAvail = img.levels.length - 1;
@@ -3684,40 +3730,43 @@
   function lodGtZero(img, state, coord, bias) {
     if (state.minLod > 0) return true;
     if (state.maxLod <= 0) return false;
-    if (state.maxAnisotropy > 1 && img.target === TEXTURE_2D && isMipmapMinFilter(state.minFilter)) return null;
+    if (anisoGate(img, state)) return null;
     const dx = coord.dx;
     const dy = coord.dy;
     let rhoX = 0;
     let rhoY = 0;
     if (dx && dy) {
       const target = img.target;
-      let sx, sy, sz;
       if (target === TEXTURE_CUBE_MAP) {
-        sx = img.width;
-        sy = img.height;
-        sz = img.width;
-      } else if (target === TEXTURE_3D) {
-        sx = img.width;
-        sy = img.height;
-        sz = img.depth;
+        if (cubeRho(img, coord.v, dx, dy, _rho)) {
+          rhoX = _rho.x;
+          rhoY = _rho.y;
+        }
       } else {
-        sx = img.width;
-        sy = img.height;
-        sz = 0;
-      }
-      rhoX = Math.abs(dx[0]) * sx;
-      const dyx = Math.abs(dx[1]) * sy;
-      if (dyx > rhoX) rhoX = dyx;
-      if (sz > 0 && dx.length > 2) {
-        const dzx = Math.abs(dx[2]) * sz;
-        if (dzx > rhoX) rhoX = dzx;
-      }
-      rhoY = Math.abs(dy[0]) * sx;
-      const dyy = Math.abs(dy[1]) * sy;
-      if (dyy > rhoY) rhoY = dyy;
-      if (sz > 0 && dy.length > 2) {
-        const dzy = Math.abs(dy[2]) * sz;
-        if (dzy > rhoY) rhoY = dzy;
+        let sx, sy, sz;
+        if (target === TEXTURE_3D) {
+          sx = img.width;
+          sy = img.height;
+          sz = img.depth;
+        } else {
+          sx = img.width;
+          sy = img.height;
+          sz = 0;
+        }
+        rhoX = Math.abs(dx[0]) * sx;
+        const dyx = Math.abs(dx[1]) * sy;
+        if (dyx > rhoX) rhoX = dyx;
+        if (sz > 0 && dx.length > 2) {
+          const dzx = Math.abs(dx[2]) * sz;
+          if (dzx > rhoX) rhoX = dzx;
+        }
+        rhoY = Math.abs(dy[0]) * sx;
+        const dyy = Math.abs(dy[1]) * sy;
+        if (dyy > rhoY) rhoY = dyy;
+        if (sz > 0 && dy.length > 2) {
+          const dzy = Math.abs(dy[2]) * sz;
+          if (dzy > rhoY) rhoY = dzy;
+        }
       }
     }
     if (rhoX === 0 && rhoY === 0) return false;
@@ -3734,43 +3783,52 @@
     let rhoY = 0;
     if (dx && dy) {
       const target = img.target;
-      let sx, sy, sz;
       if (target === TEXTURE_CUBE_MAP) {
-        sx = img.width;
-        sy = img.height;
-        sz = img.width;
-      } else if (target === TEXTURE_3D) {
-        sx = img.width;
-        sy = img.height;
-        sz = img.depth;
+        if (cubeRho(img, coord.v, dx, dy, _rho)) {
+          rhoX = _rho.x;
+          rhoY = _rho.y;
+        }
       } else {
-        sx = img.width;
-        sy = img.height;
-        sz = 0;
-      }
-      rhoX = Math.abs(dx[0]) * sx;
-      const dyx = Math.abs(dx[1]) * sy;
-      if (dyx > rhoX) rhoX = dyx;
-      if (sz > 0 && dx.length > 2) {
-        const dzx = Math.abs(dx[2]) * sz;
-        if (dzx > rhoX) rhoX = dzx;
-      }
-      rhoY = Math.abs(dy[0]) * sx;
-      const dyy = Math.abs(dy[1]) * sy;
-      if (dyy > rhoY) rhoY = dyy;
-      if (sz > 0 && dy.length > 2) {
-        const dzy = Math.abs(dy[2]) * sz;
-        if (dzy > rhoY) rhoY = dzy;
+        let sx, sy, sz;
+        if (target === TEXTURE_3D) {
+          sx = img.width;
+          sy = img.height;
+          sz = img.depth;
+        } else {
+          sx = img.width;
+          sy = img.height;
+          sz = 0;
+        }
+        rhoX = Math.abs(dx[0]) * sx;
+        const dyx = Math.abs(dx[1]) * sy;
+        if (dyx > rhoX) rhoX = dyx;
+        if (sz > 0 && dx.length > 2) {
+          const dzx = Math.abs(dx[2]) * sz;
+          if (dzx > rhoX) rhoX = dzx;
+        }
+        rhoY = Math.abs(dy[0]) * sx;
+        const dyy = Math.abs(dy[1]) * sy;
+        if (dyy > rhoY) rhoY = dyy;
+        if (sz > 0 && dy.length > 2) {
+          const dzy = Math.abs(dy[2]) * sz;
+          if (dzy > rhoY) rhoY = dzy;
+        }
       }
     }
     let rho = rhoX > rhoY ? rhoX : rhoY;
-    if (state.maxAnisotropy > 1 && img.target === TEXTURE_2D && isMipmapMinFilter(state.minFilter)) {
+    if (anisoGate(img, state)) {
+      anisoTapParams.majorU = rhoX >= rhoY;
       if (rhoX === 0 || rhoY === 0) {
         rho = rho / state.maxAnisotropy;
+        anisoTapParams.n = rho === 0 ? 0 : pow2ceilN(state.maxAnisotropy);
       } else {
         const mn = rhoX < rhoY ? rhoX : rhoY;
-        rho = rho / Math.min(state.maxAnisotropy, rho / mn);
+        const ratio = rho / mn;
+        anisoTapParams.n = pow2ceilN(Math.min(Math.ceil(ratio), state.maxAnisotropy));
+        rho = rho / Math.min(state.maxAnisotropy, ratio);
       }
+    } else {
+      anisoTapParams.n = 0;
     }
     const b = bias;
     let lambda = Math.log2(rho) + b;
@@ -3930,7 +3988,7 @@
     }
     return rx >= 0 ? 0 : 1;
   }
-  function projectToFace(face, rx, ry, rz, dst) {
+  function faceMap(face, rx, ry, rz, m) {
     let sc, tc, ma;
     switch (face) {
       case 0:
@@ -3969,13 +4027,43 @@
         ma = -rz;
         break;
     }
+    m.sc = sc;
+    m.tc = tc;
+    m.ma = ma;
+    return ma;
+  }
+  function projectToFace(face, rx, ry, rz, dst) {
+    const ma = faceMap(face, rx, ry, rz, _face);
     if (ma === 0) {
       dst[0] = 0.5;
       dst[1] = 0.5;
       return;
     }
-    dst[0] = (sc / ma + 1) / 2;
-    dst[1] = (tc / ma + 1) / 2;
+    dst[0] = (_face.sc / ma + 1) / 2;
+    dst[1] = (_face.tc / ma + 1) / 2;
+  }
+  function cubeRho(img, v2, dx, dy, rho) {
+    if (dx.length < 3 || dy.length < 3) return false;
+    const face = selectCubeFace(v2[0], v2[1], v2[2]);
+    const ma = faceMap(face, v2[0], v2[1], v2[2], _face);
+    if (ma === 0) return false;
+    const sc = _face.sc;
+    const tc = _face.tc;
+    const M = ma < 0 ? -ma : ma;
+    const sNdx = face === 0 || face === 1 ? 2 : 0;
+    const tNdx = face === 2 || face === 3 ? 2 : 1;
+    const maj = face >> 1;
+    const inv = 0.5 / (M * M);
+    const dmadx = dx[maj] < 0 ? -dx[maj] : dx[maj];
+    const dmady = dy[maj] < 0 ? -dy[maj] : dy[maj];
+    const dsdx = (dx[sNdx] * M - sc * dmadx) * inv;
+    const dtdx = (dx[tNdx] * M - tc * dmadx) * inv;
+    const dsdy = (dy[sNdx] * M - sc * dmady) * inv;
+    const dtdy = (dy[tNdx] * M - tc * dmady) * inv;
+    const size = img.width;
+    rho.x = Math.max(Math.abs(dsdx), Math.abs(dtdx)) * size;
+    rho.y = Math.max(Math.abs(dsdy), Math.abs(dtdy)) * size;
+    return true;
   }
   function inverseFace(face, sc, tc, dst) {
     switch (face) {
@@ -4081,7 +4169,7 @@
       out[3] += cornerW * (_cornerSum[3] / 3);
     }
   }
-  function sampleLevels(img, state, plan, lambda, coord, shadow, refQ, out) {
+  function sampleLevels(img, state, plan, lambda, coord, shadow, refQ, out, aniso) {
     const isInteger = img.info.isInteger;
     let filter;
     let level0;
@@ -4111,7 +4199,8 @@
       }
     }
     const target = img.target;
-    if (!shadow && level1 < 0 && target !== TEXTURE_CUBE_MAP) {
+    const anisoTaps = aniso && anisoTapParams.n >= 2 && lambda > 0;
+    if (!shadow && !anisoTaps && level1 < 0 && target !== TEXTURE_CUBE_MAP) {
       const l0 = img.levels[level0];
       if (l0.width === 1 && l0.height === 1 && (target !== TEXTURE_3D || l0.depth === 1)) {
         const z = target === TEXTURE_2D_ARRAY ? clampLayer(coord.v[2], l0.depth) : 0;
@@ -4121,35 +4210,55 @@
     }
     if (target === TEXTURE_CUBE_MAP) {
       if (level1 >= 0) {
-        filterCube(img, state, filter, level0, coord.v, shadow, refQ, _mipA);
-        filterCube(img, state, filter, level1, coord.v, shadow, refQ, _mipB);
-        out[0] = _mipA[0] * (1 - f) + _mipB[0] * f;
-        out[1] = _mipA[1] * (1 - f) + _mipB[1] * f;
-        out[2] = _mipA[2] * (1 - f) + _mipB[2] * f;
-        out[3] = _mipA[3] * (1 - f) + _mipB[3] * f;
+        filterCube(img, state, filter, level0, coord.v, shadow, refQ, _mipA2);
+        filterCube(img, state, filter, level1, coord.v, shadow, refQ, _mipB2);
+        out[0] = _mipA2[0] * (1 - f) + _mipB2[0] * f;
+        out[1] = _mipA2[1] * (1 - f) + _mipB2[1] * f;
+        out[2] = _mipA2[2] * (1 - f) + _mipB2[2] * f;
+        out[3] = _mipA2[3] * (1 - f) + _mipB2[3] * f;
       } else {
         filterCube(img, state, filter, level0, coord.v, shadow, refQ, out);
       }
     } else if (target === TEXTURE_3D) {
       if (level1 >= 0) {
-        filter3D(img, state, filter, level0, coord.v[0], coord.v[1], coord.v[2], _mipA);
-        filter3D(img, state, filter, level1, coord.v[0], coord.v[1], coord.v[2], _mipB);
-        out[0] = _mipA[0] * (1 - f) + _mipB[0] * f;
-        out[1] = _mipA[1] * (1 - f) + _mipB[1] * f;
-        out[2] = _mipA[2] * (1 - f) + _mipB[2] * f;
-        out[3] = _mipA[3] * (1 - f) + _mipB[3] * f;
+        filter3D(img, state, filter, level0, coord.v[0], coord.v[1], coord.v[2], _mipA2);
+        filter3D(img, state, filter, level1, coord.v[0], coord.v[1], coord.v[2], _mipB2);
+        out[0] = _mipA2[0] * (1 - f) + _mipB2[0] * f;
+        out[1] = _mipA2[1] * (1 - f) + _mipB2[1] * f;
+        out[2] = _mipA2[2] * (1 - f) + _mipB2[2] * f;
+        out[3] = _mipA2[3] * (1 - f) + _mipB2[3] * f;
       } else {
         filter3D(img, state, filter, level0, coord.v[0], coord.v[1], coord.v[2], out);
       }
     } else {
       const layer = target === TEXTURE_2D_ARRAY ? coord.v[2] : 0;
+      if (anisoTaps) {
+        sample2DAnisoTaps(
+          filter2D,
+          img,
+          state,
+          plan,
+          filter,
+          level0,
+          level1,
+          f,
+          coord.v[0],
+          coord.v[1],
+          layer,
+          shadow,
+          refQ,
+          lambda,
+          out
+        );
+        return;
+      }
       if (level1 >= 0) {
-        filter2D(img, state, plan, filter, level0, coord.v[0], coord.v[1], layer, shadow, refQ, _mipA);
-        filter2D(img, state, plan, filter, level1, coord.v[0], coord.v[1], layer, shadow, refQ, _mipB);
-        out[0] = _mipA[0] * (1 - f) + _mipB[0] * f;
-        out[1] = _mipA[1] * (1 - f) + _mipB[1] * f;
-        out[2] = _mipA[2] * (1 - f) + _mipB[2] * f;
-        out[3] = _mipA[3] * (1 - f) + _mipB[3] * f;
+        filter2D(img, state, plan, filter, level0, coord.v[0], coord.v[1], layer, shadow, refQ, _mipA2);
+        filter2D(img, state, plan, filter, level1, coord.v[0], coord.v[1], layer, shadow, refQ, _mipB2);
+        out[0] = _mipA2[0] * (1 - f) + _mipB2[0] * f;
+        out[1] = _mipA2[1] * (1 - f) + _mipB2[1] * f;
+        out[2] = _mipA2[2] * (1 - f) + _mipB2[2] * f;
+        out[3] = _mipA2[3] * (1 - f) + _mipB2[3] * f;
       } else {
         filter2D(img, state, plan, filter, level0, coord.v[0], coord.v[1], layer, shadow, refQ, out);
       }
@@ -4160,43 +4269,61 @@
     const z = img.target === TEXTURE_2D_ARRAY ? clampLayer(coord.v[2], lv.depth) : 0;
     readTexel(img, plan.base, 0, 0, 0, z, out);
   }
-  function sampleSingleLevel(img, state, plan, lambdaGT0, coord, shadow, refQ, out) {
+  function sampleSingleLevel(img, state, plan, lambda, coord, shadow, refQ, out, aniso) {
     if (!shadow && plan.oneTexel) {
       readSingleTexel(img, plan, coord, out);
       return;
     }
     const target = img.target;
-    const filter = img.info.isInteger ? NEAREST : lambdaGT0 ? plan.posFilter : state.magFilter;
+    const filter = img.info.isInteger ? NEAREST : lambda > 0 ? plan.posFilter : state.magFilter;
     if (target === TEXTURE_CUBE_MAP) {
       filterCube(img, state, filter, plan.base, coord.v, shadow, refQ, out);
     } else if (target === TEXTURE_3D) {
       filter3D(img, state, filter, plan.base, coord.v[0], coord.v[1], coord.v[2], out);
     } else {
       const layer = target === TEXTURE_2D_ARRAY ? coord.v[2] : 0;
+      if (aniso && anisoTapParams.n >= 2 && lambda > 0) {
+        sample2DAnisoTaps(
+          filter2D,
+          img,
+          state,
+          plan,
+          filter,
+          plan.base,
+          -1,
+          0,
+          coord.v[0],
+          coord.v[1],
+          layer,
+          shadow,
+          refQ,
+          lambda,
+          out
+        );
+        return;
+      }
       filter2D(img, state, plan, filter, plan.base, coord.v[0], coord.v[1], layer, shadow, refQ, out);
     }
   }
   function sampleTextureP(img, state, plan, coord, bias, out) {
+    const aniso = anisoGate(img, state);
     if (plan.single) {
       if (plan.oneTexel) {
         readSingleTexel(img, plan, coord, out);
         return;
       }
-      const gt0 = lodGtZero(img, state, coord, bias);
-      sampleSingleLevel(
-        img,
-        state,
-        plan,
-        gt0 === null ? computeLod(img, state, coord, bias) > 0 : gt0,
-        coord,
-        false,
-        0,
-        out
-      );
+      let lambda2;
+      if (aniso) {
+        lambda2 = computeLod(img, state, coord, bias);
+      } else {
+        const gt0 = lodGtZero(img, state, coord, bias);
+        lambda2 = gt0 === null ? computeLod(img, state, coord, bias) : gt0 ? 1 : -1;
+      }
+      sampleSingleLevel(img, state, plan, lambda2, coord, false, 0, out, aniso);
       return;
     }
     const lambda = computeLod(img, state, coord, bias);
-    sampleLevels(img, state, plan, lambda, coord, false, 0, out);
+    sampleLevels(img, state, plan, lambda, coord, false, 0, out, aniso);
   }
   function sampleTextureLodP(img, state, plan, coord, lod, out) {
     let lambda = lod;
@@ -4207,29 +4334,31 @@
         readSingleTexel(img, plan, coord, out);
         return;
       }
-      sampleSingleLevel(img, state, plan, lambda > 0, coord, false, 0, out);
+      sampleSingleLevel(img, state, plan, lambda, coord, false, 0, out, false);
       return;
     }
-    sampleLevels(img, state, plan, lambda, coord, false, 0, out);
+    sampleLevels(img, state, plan, lambda, coord, false, 0, out, false);
   }
   function sampleTextureShadowP(img, state, plan, coord, ref, bias, out) {
     const refQ = quantizeShadowRef(ref, img.internalFormat);
+    const aniso = anisoGate(img, state);
     if (plan.single) {
-      const gt0 = lodGtZero(img, state, coord, bias);
-      sampleSingleLevel(
-        img,
-        state,
-        plan,
-        gt0 === null ? computeLod(img, state, coord, bias) > 0 : gt0,
-        coord,
-        true,
-        refQ,
-        out
-      );
+      if (plan.oneTexel) {
+        readSingleTexel(img, plan, coord, out);
+        return;
+      }
+      let lambda2;
+      if (aniso) {
+        lambda2 = computeLod(img, state, coord, bias);
+      } else {
+        const gt0 = lodGtZero(img, state, coord, bias);
+        lambda2 = gt0 === null ? computeLod(img, state, coord, bias) : gt0 ? 1 : -1;
+      }
+      sampleSingleLevel(img, state, plan, lambda2, coord, true, refQ, out, aniso);
       return;
     }
     const lambda = computeLod(img, state, coord, bias);
-    sampleLevels(img, state, plan, lambda, coord, true, refQ, out);
+    sampleLevels(img, state, plan, lambda, coord, true, refQ, out, aniso);
   }
   function sampleTexture(img, state, coord, bias, out) {
     if (!img.complete) {
@@ -4893,13 +5022,35 @@
   function isDepthStencilRenderable(ctx, format) {
     return ctx._version === 2 ? isDepthRenderable(ctx, format) && isStencilRenderable(ctx, format) : W1_DS_RENDERABLE.has(format);
   }
+  function storageFormatKey(format) {
+    switch (format) {
+      case 6408:
+        return 32856;
+      case 6407:
+        return 32849;
+      case 6403:
+        return 33321;
+      case 33319:
+        return 33323;
+      case 6402:
+        return 33189;
+      case 34041:
+        return 35056;
+      case 35904:
+        return 35905;
+      case 35906:
+        return 35907;
+      default:
+        return format;
+    }
+  }
   function surfaceFormatKey(internalFormat) {
     if (internalFormat === C2.RGBA8I) return 36234;
     if (internalFormat === C2.RGB8I) return 36235;
     return internalFormat;
   }
   function resolveAttachmentSurface(entry) {
-    var _a;
+    var _a, _b, _c;
     if (entry.type === "renderbuffer") {
       return entry.renderbuffer._surface;
     }
@@ -4908,15 +5059,21 @@
     if (!image || entry.level < 0) return null;
     const lvl = image.levels[entry.level];
     if (!lvl) return null;
-    const faceIndex = isCubeFace(entry.face) ? cubeFaceIndex(entry.face) : 0;
-    const data = lvl.data[faceIndex];
+    const idx = isCubeFace(entry.face) ? cubeFaceIndex(entry.face) : entry.layer;
+    const data = lvl.data[idx];
     if (!data) return null;
-    const info = (_a = image.info) != null ? _a : getFormat(image.internalFormat);
+    const lvlFmt = (_a = lvl.format) != null ? _a : image.internalFormat;
+    let info = null;
+    if (image.info && image.info.format === lvlFmt) {
+      info = image.info;
+    } else {
+      info = (_c = (_b = getFormat(lvlFmt)) != null ? _b : image.info) != null ? _c : null;
+    }
     if (!info) return null;
     return {
       width: lvl.width,
       height: lvl.height,
-      format: surfaceFormatKey(image.internalFormat),
+      format: surfaceFormatKey(lvlFmt),
       info,
       data,
       stencilData: lvl.stencilData
@@ -5088,7 +5245,7 @@
     return C1.FRAMEBUFFER_COMPLETE;
   }
   function checkAttachment(ctx, entry, kind) {
-    var _a, _b, _c;
+    var _a, _b, _c, _d, _e;
     let format;
     if (entry.type === "renderbuffer") {
       const rb = entry.renderbuffer;
@@ -5100,22 +5257,36 @@
       const tex2 = entry.texture;
       const image = tex2._image;
       if (!image || entry.level < 0) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
-      {
+      if (!tex2._immutable) {
         const baseLevel = (_a = tex2._params[33084]) != null ? _a : 0;
         const maxLevel = (_b = tex2._params[33085]) != null ? _b : 1e3;
+        const maxSize = Math.max(image.width, image.height, image.target === C2.TEXTURE_3D ? image.depth : 1);
+        const q = Math.min(Math.floor(Math.log2(maxSize)) + baseLevel, maxLevel);
+        if (entry.level < baseLevel || entry.level > q) {
+          return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        }
         if (entry.level !== baseLevel) {
-          let q = -1;
-          const n = image.levels.length;
-          for (let l = 0; l < n && l <= maxLevel; l++) {
-            if (image.levels[l]) q = l;
-          }
-          if (entry.level < baseLevel || entry.level > Math.min(q, maxLevel)) {
-            return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
-          }
           const isCube = isCubeFace(entry.face);
+          const is3D = image.target === C2.TEXTURE_3D;
+          const isArray = image.target === C2.TEXTURE_2D_ARRAY;
+          const baseLvl = image.levels[baseLevel];
+          const baseW = baseLvl ? baseLvl.width : image.width;
+          const baseH = baseLvl ? baseLvl.height : image.height;
+          const baseD = baseLvl ? baseLvl.depth : image.depth;
+          const baseFmt = storageFormatKey(baseLvl ? (_c = baseLvl.format) != null ? _c : image.internalFormat : image.internalFormat);
           for (let l = baseLevel; l <= q; l++) {
             const lvl2 = image.levels[l];
             if (!lvl2) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            const shift = l - baseLevel;
+            const expW = Math.max(1, baseW >> shift);
+            const expH = Math.max(1, baseH >> shift);
+            const expD = isArray ? baseD : is3D ? Math.max(1, baseD >> shift) : 1;
+            if (lvl2.width !== expW || lvl2.height !== expH || lvl2.depth !== expD) {
+              return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
+            if (storageFormatKey((_d = lvl2.format) != null ? _d : image.internalFormat) !== baseFmt) {
+              return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
             if (isCube) {
               if (lvl2.data.length !== 6) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
               for (const face of lvl2.data) {
@@ -5139,7 +5310,7 @@
       }
       if (lvl.width === 0 || lvl.height === 0) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
       format = image.internalFormat;
-      if (ctx._version === 1 && ((_c = image.info) == null ? void 0 : _c.isFloat) && (format === 6409 || format === 6410 || format === 6406)) {
+      if (ctx._version === 1 && ((_e = image.info) == null ? void 0 : _e.isFloat) && (format === 6409 || format === 6410 || format === 6406)) {
         return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
       }
     }
@@ -6414,7 +6585,7 @@
     const views = [];
     const n = isCube ? 6 : d;
     for (let i = 0; i < n; i++) views.push(new spec.ctor(count));
-    const level = { width: w, height: h, depth: d, data: views };
+    const level = { width: w, height: h, depth: d, data: views, format: spec.format };
     if (spec.isStencil) level.stencilData = new Uint8Array(perFace * (isCube ? 1 : d));
     return level;
   }
@@ -6452,6 +6623,11 @@
       case C.RGB:
       case C.RGB_INTEGER:
         return 3;
+      case CExt.SRGB_EXT:
+        return 3;
+      // EXT_sRGB source format (texture-srgb-upload.html)
+      case CExt.SRGB_ALPHA_EXT:
+        return 4;
       case C.LUMINANCE_ALPHA:
       case C.RG:
       case C.RG_INTEGER:
@@ -6593,6 +6769,10 @@
       case C.RGB_INTEGER:
         out[3] = 1;
         break;
+      case CExt.SRGB_EXT:
+        out[3] = 1;
+        break;
+      // 3-component sRGB source (EXT_srgb)
       case C.RG:
       case C.RG_INTEGER:
         out[2] = 0;
@@ -6713,7 +6893,14 @@
     if (u.texture2DArray) refreshTextureSamplerBinding(state, u.texture2DArray);
     if (u.texture2DMultisample) refreshTextureSamplerBinding(state, u.texture2DMultisample);
   }
-  function updateCompleteness(texture, version) {
+  function floatLinearExtensionState(ctx) {
+    return {
+      float: ctx._extensions.has("OES_texture_float_linear"),
+      halfFloat: ctx._extensions.has("OES_texture_half_float_linear")
+    };
+  }
+  function updateCompleteness(texture, version, floatLinear) {
+    var _a;
     const img = texture._image;
     if (!img) return;
     const base = Math.max(0, texture._params[33084] | 0);
@@ -6750,7 +6937,7 @@
       const expW = Math.max(1, baseLevel.width >> shift);
       const expH = Math.max(1, baseLevel.height >> shift);
       const expD = isArray ? baseLevel.depth : is3D ? Math.max(1, baseLevel.depth >> shift) : 1;
-      if (lv.width !== expW || lv.height !== expH || lv.depth !== expD) {
+      if (lv.width !== expW || lv.height !== expH || !isCube && lv.depth !== expD) {
         ok = false;
         break;
       }
@@ -6773,6 +6960,15 @@
       const wrapT = smp2 ? smp2._params[10243] : texture._params[10243];
       if (needsMips || wrapS !== C.CLAMP_TO_EDGE || wrapT !== C.CLAMP_TO_EDGE) {
         ok = false;
+      }
+    }
+    if (ok && version === 1 && ((_a = img.info) == null ? void 0 : _a.isFloat)) {
+      const magFilter = smp2 ? smp2._params[10240] : texture._params[10240];
+      const needsLinear = magFilter === C.LINEAR || minFilter !== C.NEAREST && minFilter !== C.NEAREST_MIPMAP_NEAREST;
+      if (needsLinear) {
+        const origin = getLevelOrigin(texture, img.baseLevel);
+        const isHalf = (origin == null ? void 0 : origin.type) === CExt.HALF_FLOAT_OES;
+        if (!(isHalf ? floatLinear == null ? void 0 : floatLinear.halfFloat : floatLinear == null ? void 0 : floatLinear.float)) ok = false;
       }
     }
     img.complete = ok;
@@ -6897,7 +7093,7 @@
             im.width = width;
             im.height = height;
           }
-          if (!spec.isInteger && ctx.unpackColorSpace === "display-p3") {
+          if (ctx.unpackColorSpace === "display-p3") {
             srgbToDisplayP3(im.data);
           }
           const dv2 = new DataView(im.data.buffer, im.data.byteOffset, im.data.byteLength);
@@ -6937,7 +7133,7 @@
             if (view === void 0) break;
             copyRows(p2, view, levelData.width, xoffset, yoffset, width, height, srcRow0, 0);
           }
-          updateCompleteness(texture, ctx._version);
+          updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
           return;
         }
         if (res && !res.ok && res.reason && /security|taint|insecure/i.test(res.reason)) {
@@ -6982,8 +7178,9 @@
       dstBpp,
       dstStencil: levelData.stencilData
     };
-    const srcImageHeight = s.imageHeight > 0 ? s.imageHeight : height;
-    const srcSkipImages = s.skipImages;
+    const is3DEntry = img.target === C.TEXTURE_3D || img.target === C.TEXTURE_2D_ARRAY;
+    const srcImageHeight = is3DEntry && s.imageHeight > 0 ? s.imageHeight : height;
+    const srcSkipImages = is3DEntry ? s.skipImages : 0;
     for (let z = 0; z < depth; z++) {
       const view = views[zoffset + z];
       if (view === void 0) break;
@@ -7026,7 +7223,7 @@
     }
     recordLevelOrigin(texture, level, format, type);
     copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, 0, 0, 0, explicitDims);
-    updateCompleteness(texture, ctx._version);
+    updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
   }
   function uploadTexSubImage(ctx, texture, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels, source, explicitDims = false) {
     const img = texture._image;
@@ -7036,7 +7233,7 @@
     const spec = specForImage(img);
     if (!spec) return;
     copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset, explicitDims);
-    updateCompleteness(texture, ctx._version);
+    updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
   }
   function allocateImmutableStorage(ctx, texture, target, levels, internalformat, width, height, depth) {
     void ctx;
@@ -7065,9 +7262,9 @@
     img.width = width;
     img.height = height;
     img.depth = isCube ? 6 : depth;
-    updateCompleteness(texture, ctx._version);
+    updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
   }
-  function copyFromReadSurface(ctx, levelData, face, spec, x, y, width, height) {
+  function copyFromReadSurface(ctx, levelData, face, spec, x, y, width, height, dstX = 0, dstY = 0) {
     let surface = null;
     try {
       surface = resolveReadSurface(ctx);
@@ -7098,7 +7295,28 @@
           } else {
             surface.info.decode(srcData, (sy * sW + sx) * surface.info.bytesPerPixel, out);
           }
-          spec.pack(view, (dy * levelData.width + dx) * dstBpp, out[0], out[1], out[2], out[3]);
+          switch (spec.format) {
+            case C.LUMINANCE_ALPHA:
+              out[1] = out[3];
+              out[2] = out[0];
+              break;
+            // [L, A, L, A]
+            case C.ALPHA:
+              out[0] = out[3];
+              out[1] = 0;
+              out[2] = 0;
+              break;
+            // [A, 0, 0, A]
+            case C.LUMINANCE:
+              out[1] = out[0];
+              out[2] = out[0];
+              out[3] = 1;
+              break;
+            // [L, L, L, 1]
+            default:
+              break;
+          }
+          spec.pack(view, ((dstY + dy) * levelData.width + dstX + dx) * dstBpp, out[0], out[1], out[2], out[3]);
         }
       }
     } catch {
@@ -7116,7 +7334,9 @@
     if (isCube) {
       const face = cubeFaceIndex2(target);
       for (let f = 0; f < 6; f++) {
-        levelData.data[f] = f !== face && existing && existing.data[f] !== void 0 ? existing.data[f] : void 0;
+        if (f !== face) {
+          levelData.data[f] = existing && existing.data[f] !== void 0 ? existing.data[f] : void 0;
+        }
       }
     }
     img.levels[level] = levelData;
@@ -7131,7 +7351,7 @@
       img.depth = isCube ? 6 : 1;
     }
     copyFromReadSurface(ctx, img.levels[level], cubeFaceIndex2(target), spec, x, y, width, height);
-    updateCompleteness(texture, ctx._version);
+    updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
   }
   function copyTexSubImage(ctx, texture, target, level, xoffset, yoffset, zoffset, x, y, width, height) {
     const img = texture._image;
@@ -7140,30 +7360,11 @@
     if (!levelData) return;
     const spec = specForImage(img);
     if (!spec) return;
-    const tmp = { width, height, depth: 1, data: [new spec.ctor(width * height * spec.bytesPerPixel / spec.bytesPerElement)] };
-    if (spec.isStencil) tmp.stencilData = new Uint8Array(width * height);
-    copyFromReadSurface(ctx, tmp, -1, spec, x, y, width, height);
     const face = cubeFaceIndex2(target);
     const view = levelData.data[face >= 0 ? face : zoffset];
-    const srcView = tmp.data[0];
-    const elemsPerTexel = spec.bytesPerPixel / spec.bytesPerElement;
-    for (let dy = 0; dy < height; dy++) {
-      for (let dx = 0; dx < width; dx++) {
-        const srcElem = (dy * width + dx) * spec.bytesPerPixel / spec.bytesPerElement;
-        const dstElem = ((yoffset + dy) * levelData.width + xoffset + dx) * spec.bytesPerPixel / spec.bytesPerElement;
-        for (let e = 0; e < elemsPerTexel; e++) {
-          view[dstElem + e] = srcView[srcElem + e];
-        }
-      }
-    }
-    if (spec.isStencil && levelData.stencilData && tmp.stencilData) {
-      for (let dy = 0; dy < height; dy++) {
-        for (let dx = 0; dx < width; dx++) {
-          levelData.stencilData[(zoffset * levelData.height + yoffset + dy) * levelData.width + xoffset + dx] = tmp.stencilData[dy * width + dx];
-        }
-      }
-    }
-    updateCompleteness(texture, ctx._version);
+    const dstLevel = { width: levelData.width, height: levelData.height, depth: 1, data: [view] };
+    copyFromReadSurface(ctx, dstLevel, -1, spec, x, y, width, height, xoffset, yoffset);
+    updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
   }
   var ETC2_BYTES_PER_BLOCK = {
     [CExt.COMPRESSED_R11_EAC]: 8,
@@ -7250,7 +7451,7 @@
         }
       }
     }
-    updateCompleteness(texture, ctx._version);
+    updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
   }
   function generateMipmap(ctx, texture, target) {
     const img = texture._image;
@@ -7306,7 +7507,7 @@
       d = nd;
     }
     void ctx;
-    updateCompleteness(texture, ctx._version);
+    updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
   }
 
   // src/gl/native-chain.ts
@@ -23769,6 +23970,578 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
   }
 
+  // src/gl/api/state.ts
+  var GL_ZERO = 0;
+  var GL_ONE = 1;
+  var GL_CONSTANT_COLOR = 32769;
+  var GL_ONE_MINUS_CONSTANT_COLOR = 32770;
+  var GL_CONSTANT_ALPHA = 32771;
+  var GL_ONE_MINUS_CONSTANT_ALPHA = 32772;
+  var CAP_KEYS = {
+    [C1.BLEND]: "BLEND",
+    [C1.CULL_FACE]: "CULL_FACE",
+    [C1.DEPTH_TEST]: "DEPTH_TEST",
+    [C1.DITHER]: "DITHER",
+    [C1.POLYGON_OFFSET_FILL]: "POLYGON_OFFSET_FILL",
+    [C1.SAMPLE_ALPHA_TO_COVERAGE]: "SAMPLE_ALPHA_TO_COVERAGE",
+    [C1.SAMPLE_COVERAGE]: "SAMPLE_COVERAGE",
+    [C1.SCISSOR_TEST]: "SCISSOR_TEST",
+    [C1.STENCIL_TEST]: "STENCIL_TEST"
+  };
+  var CAP_KEYS_V2 = {
+    ...CAP_KEYS,
+    [C2.RASTERIZER_DISCARD]: "RASTERIZER_DISCARD"
+  };
+  var SRC_BLEND_FACTORS = [
+    GL_ZERO,
+    GL_ONE,
+    C1.SRC_COLOR,
+    C1.ONE_MINUS_SRC_COLOR,
+    C1.SRC_ALPHA,
+    C1.ONE_MINUS_SRC_ALPHA,
+    C1.DST_ALPHA,
+    C1.ONE_MINUS_DST_ALPHA,
+    C1.DST_COLOR,
+    C1.ONE_MINUS_DST_COLOR,
+    C1.SRC_ALPHA_SATURATE,
+    GL_CONSTANT_COLOR,
+    GL_ONE_MINUS_CONSTANT_COLOR,
+    GL_CONSTANT_ALPHA,
+    GL_ONE_MINUS_CONSTANT_ALPHA
+  ];
+  var DST_BLEND_FACTORS = SRC_BLEND_FACTORS.filter((f) => f !== C1.SRC_ALPHA_SATURATE);
+  var BLEND_EQUATIONS = [C1.FUNC_ADD, C1.FUNC_SUBTRACT, C1.FUNC_REVERSE_SUBTRACT];
+  var BLEND_EQUATIONS_V2 = [...BLEND_EQUATIONS, C2.MIN, C2.MAX];
+  var SRC1_BLEND_FACTORS = [
+    35065,
+    // SRC1_COLOR_WEBGL
+    34185,
+    // SRC1_ALPHA_WEBGL
+    35066,
+    // ONE_MINUS_SRC1_COLOR_WEBGL
+    35067
+    // ONE_MINUS_SRC1_ALPHA_WEBGL
+  ];
+  function blendFactorSets(ctx) {
+    let src = SRC_BLEND_FACTORS;
+    let dst = DST_BLEND_FACTORS;
+    if (ctx._extensions.has("WEBGL_blend_func_extended")) {
+      src = [...src, ...SRC1_BLEND_FACTORS];
+      dst = [...dst, C1.SRC_ALPHA_SATURATE, ...SRC1_BLEND_FACTORS];
+    }
+    return { src, dst };
+  }
+  function isConstColorFactor(f) {
+    return f === GL_CONSTANT_COLOR || f === GL_ONE_MINUS_CONSTANT_COLOR;
+  }
+  function isConstAlphaFactor(f) {
+    return f === GL_CONSTANT_ALPHA || f === GL_ONE_MINUS_CONSTANT_ALPHA;
+  }
+  function constFactorPairInvalid(src, dst) {
+    return isConstColorFactor(src) && isConstAlphaFactor(dst) || isConstAlphaFactor(src) && isConstColorFactor(dst);
+  }
+  function writeBlendAllDrawBuffers(ctx, e) {
+    const s = ctx._state;
+    for (let i = 0; i < s.limits.MAX_DRAW_BUFFERS; i++) s.blendPerDrawBuffer.set(i, e);
+  }
+  function writeColorMaskAllDrawBuffers(ctx, m) {
+    const s = ctx._state;
+    for (let i = 0; i < s.limits.MAX_DRAW_BUFFERS; i++) s.colorMaskPerDrawBuffer.set(i, [m[0], m[1], m[2], m[3]]);
+  }
+  function blendEquations(ctx) {
+    if (ctx._version === 2) return BLEND_EQUATIONS_V2;
+    if (ctx._extensions.has("EXT_blend_minmax")) return [...BLEND_EQUATIONS, CExt.MIN_EXT, CExt.MAX_EXT];
+    return BLEND_EQUATIONS;
+  }
+  var DEPTH_FUNCS = [
+    C1.NEVER,
+    C1.LESS,
+    C1.EQUAL,
+    C1.LEQUAL,
+    C1.GREATER,
+    C1.NOTEQUAL,
+    C1.GEQUAL,
+    C1.ALWAYS
+  ];
+  var STENCIL_FUNCS = DEPTH_FUNCS;
+  var STENCIL_OPS = [
+    C1.KEEP,
+    C1.ZERO,
+    C1.REPLACE,
+    C1.INCR,
+    C1.DECR,
+    C1.INVERT,
+    C1.INCR_WRAP,
+    C1.DECR_WRAP
+  ];
+  var STENCIL_FACES = [C1.FRONT, C1.BACK, C1.FRONT_AND_BACK];
+  function stencilFaceStates(ctx, face) {
+    switch (face) {
+      case C1.FRONT:
+        return [ctx._state.stencil.front];
+      case C1.BACK:
+        return [ctx._state.stencil.back];
+      case C1.FRONT_AND_BACK:
+        return [ctx._state.stencil.front, ctx._state.stencil.back];
+      default:
+        return null;
+    }
+  }
+  var HINT_MODES = [C1.FASTEST, C1.NICEST, C1.DONT_CARE];
+  function isLost3(ctx) {
+    return ctx._isLost;
+  }
+  function clamp012(v2) {
+    if (Number.isNaN(v2)) return 0;
+    return v2 < 0 ? 0 : v2 > 1 ? 1 : v2;
+  }
+  function installStateApi(proto) {
+    proto.activeTexture = function(texture) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const unit = texture >>> 0;
+      const max = ctx._state.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS;
+      if (unit < C1.TEXTURE0 || unit >= C1.TEXTURE0 + max) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.activeTexture = unit - C1.TEXTURE0;
+    };
+    proto.blendColor = function(red, green, blue, alpha) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      ctx._state.blend.color = [clamp012(red), clamp012(green), clamp012(blue), clamp012(alpha)];
+    };
+    proto.blendEquation = function(mode) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const eqs = blendEquations(ctx);
+      if (!eqs.includes(mode)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.blend.eqRGB = mode;
+      ctx._state.blend.eqAlpha = mode;
+      const s = ctx._state;
+      writeBlendAllDrawBuffers(ctx, {
+        srcRGB: s.blend.srcRGB,
+        dstRGB: s.blend.dstRGB,
+        srcAlpha: s.blend.srcAlpha,
+        dstAlpha: s.blend.dstAlpha,
+        eqRGB: mode,
+        eqAlpha: mode
+      });
+    };
+    proto.blendEquationSeparate = function(modeRGB, modeAlpha) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const eqs = blendEquations(ctx);
+      if (!eqs.includes(modeRGB) || !eqs.includes(modeAlpha)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.blend.eqRGB = modeRGB;
+      ctx._state.blend.eqAlpha = modeAlpha;
+      const s = ctx._state;
+      writeBlendAllDrawBuffers(ctx, {
+        srcRGB: s.blend.srcRGB,
+        dstRGB: s.blend.dstRGB,
+        srcAlpha: s.blend.srcAlpha,
+        dstAlpha: s.blend.dstAlpha,
+        eqRGB: modeRGB,
+        eqAlpha: modeAlpha
+      });
+    };
+    proto.blendFunc = function(sfactor, dfactor) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const { src, dst } = blendFactorSets(ctx);
+      if (!src.includes(sfactor) || !dst.includes(dfactor)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (constFactorPairInvalid(sfactor, dfactor)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      ctx._state.blend.srcRGB = sfactor;
+      ctx._state.blend.dstRGB = dfactor;
+      ctx._state.blend.srcAlpha = sfactor;
+      ctx._state.blend.dstAlpha = dfactor;
+      const s = ctx._state;
+      writeBlendAllDrawBuffers(ctx, {
+        srcRGB: sfactor,
+        dstRGB: dfactor,
+        srcAlpha: sfactor,
+        dstAlpha: dfactor,
+        eqRGB: s.blend.eqRGB,
+        eqAlpha: s.blend.eqAlpha
+      });
+    };
+    proto.blendFuncSeparate = function(srcRGB, dstRGB, srcAlpha, dstAlpha) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const { src, dst } = blendFactorSets(ctx);
+      if (!src.includes(srcRGB) || !dst.includes(dstRGB) || !src.includes(srcAlpha) || !dst.includes(dstAlpha)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (constFactorPairInvalid(srcRGB, dstRGB) || constFactorPairInvalid(srcAlpha, dstAlpha)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      ctx._state.blend.srcRGB = srcRGB;
+      ctx._state.blend.dstRGB = dstRGB;
+      ctx._state.blend.srcAlpha = srcAlpha;
+      ctx._state.blend.dstAlpha = dstAlpha;
+      const s = ctx._state;
+      writeBlendAllDrawBuffers(ctx, {
+        srcRGB,
+        dstRGB,
+        srcAlpha,
+        dstAlpha,
+        eqRGB: s.blend.eqRGB,
+        eqAlpha: s.blend.eqAlpha
+      });
+    };
+    proto.clearColor = function(red, green, blue, alpha) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (ctx._version === 2 || ctx._extensions.has("EXT_color_buffer_half_float")) {
+        ctx._state.clearColor = [Number.isNaN(red) ? 0 : red, Number.isNaN(green) ? 0 : green, Number.isNaN(blue) ? 0 : blue, Number.isNaN(alpha) ? 0 : alpha];
+      } else {
+        ctx._state.clearColor = [clamp012(red), clamp012(green), clamp012(blue), clamp012(alpha)];
+      }
+    };
+    proto.clearDepth = function(depth) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      ctx._state.clearDepth = clamp012(depth);
+    };
+    proto.clearStencil = function(s) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      ctx._state.clearStencil = s | 0;
+    };
+    proto.colorMask = function(red, green, blue, alpha) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const m = [!!red, !!green, !!blue, !!alpha];
+      ctx._state.colorMask = m;
+      writeColorMaskAllDrawBuffers(ctx, m);
+    };
+    proto.cullFace = function(mode) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (mode !== C1.FRONT && mode !== C1.BACK && mode !== C1.FRONT_AND_BACK) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.cullFace = mode;
+    };
+    proto.depthFunc = function(func) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (!DEPTH_FUNCS.includes(func)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.depth.func = func;
+    };
+    proto.depthMask = function(flag) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      ctx._state.depth.mask = !!flag;
+    };
+    proto.depthRange = function(zNear, zFar) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (zNear > zFar) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      ctx._state.depth.range = [clamp012(zNear), clamp012(zFar)];
+    };
+    proto.disable = function(cap) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const table = ctx._version === 2 ? CAP_KEYS_V2 : CAP_KEYS;
+      const key = table[cap];
+      if (key === void 0) {
+        if (ctx._extensions.has("WEBGL_clip_cull_distance") && cap >= 12288 && cap <= 12295) {
+          setClipDistanceEnabled(ctx, cap - 12288, false);
+          return;
+        }
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.caps[key] = false;
+    };
+    proto.enable = function(cap) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const table = ctx._version === 2 ? CAP_KEYS_V2 : CAP_KEYS;
+      const key = table[cap];
+      if (key === void 0) {
+        if (ctx._extensions.has("WEBGL_clip_cull_distance") && cap >= 12288 && cap <= 12295) {
+          setClipDistanceEnabled(ctx, cap - 12288, true);
+          return;
+        }
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.caps[key] = true;
+    };
+    proto.frontFace = function(mode) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (mode !== C1.CW && mode !== C1.CCW) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.frontFace = mode;
+    };
+    proto.hint = function(target, mode) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (!HINT_MODES.includes(mode)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (target === C1.GENERATE_MIPMAP_HINT) {
+        ctx._state.hints.generateMipmap = mode;
+      } else if (target === C2.FRAGMENT_SHADER_DERIVATIVE_HINT && (ctx._version === 2 || ctx._extensions.has("OES_standard_derivatives"))) {
+        ctx._state.hints.fragmentShaderDerivative = mode;
+      } else {
+        ctx._errors.push(C1.INVALID_ENUM);
+      }
+    };
+    proto.isEnabled = function(cap) {
+      const ctx = this;
+      if (isLost3(ctx)) return false;
+      const table = ctx._version === 2 ? CAP_KEYS_V2 : CAP_KEYS;
+      const key = table[cap];
+      if (key === void 0) {
+        if (ctx._extensions.has("WEBGL_clip_cull_distance") && cap >= 12288 && cap <= 12295) {
+          return isClipDistanceEnabled(ctx, cap - 12288);
+        }
+        ctx._errors.push(C1.INVALID_ENUM);
+        return false;
+      }
+      return ctx._state.caps[key];
+    };
+    proto.lineWidth = function(width) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (!(width > 0)) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      ctx._state.lineWidth = width;
+    };
+    proto.pixelStorei = function(pname, param) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const s = ctx._state;
+      const v2 = param | 0;
+      switch (pname) {
+        case C1.UNPACK_ALIGNMENT:
+        case C1.PACK_ALIGNMENT: {
+          if (v2 !== 1 && v2 !== 2 && v2 !== 4 && v2 !== 8) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          if (pname === C1.UNPACK_ALIGNMENT) s.pixelStore.unpack.alignment = v2;
+          else s.pixelStore.pack.alignment = v2;
+          return;
+        }
+        case C1.UNPACK_FLIP_Y_WEBGL: {
+          s.pixelStore.unpack.flipY = v2 !== 0;
+          return;
+        }
+        case C1.UNPACK_PREMULTIPLY_ALPHA_WEBGL: {
+          s.pixelStore.unpack.premultiplyAlpha = v2 !== 0;
+          return;
+        }
+        case C1.UNPACK_COLORSPACE_CONVERSION_WEBGL: {
+          if (v2 !== C1.BROWSER_DEFAULT_WEBGL && v2 !== C1.NONE) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          s.pixelStore.unpack.colorspaceConversion = v2;
+          return;
+        }
+        default:
+          if (ctx._version === 2) {
+            switch (pname) {
+              case C2.UNPACK_ROW_LENGTH:
+                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.unpack.rowLength = v2;
+                return;
+              case C2.UNPACK_SKIP_ROWS:
+                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.unpack.skipRows = v2;
+                return;
+              case C2.UNPACK_SKIP_PIXELS:
+                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.unpack.skipPixels = v2;
+                return;
+              case C2.UNPACK_IMAGE_HEIGHT:
+                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.unpack.imageHeight = v2;
+                return;
+              case C2.UNPACK_SKIP_IMAGES:
+                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.unpack.skipImages = v2;
+                return;
+              case C2.PACK_ROW_LENGTH:
+                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.pack.rowLength = v2;
+                return;
+              case C2.PACK_SKIP_ROWS:
+                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.pack.skipRows = v2;
+                return;
+              case C2.PACK_SKIP_PIXELS:
+                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
+                else s.pixelStore.pack.skipPixels = v2;
+                return;
+            }
+          }
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+      }
+    };
+    proto.polygonOffset = function(factor, units) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (!Number.isFinite(factor) || !Number.isFinite(units)) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      ctx._state.polygonOffset.factor = factor;
+      ctx._state.polygonOffset.units = units;
+    };
+    proto.sampleCoverage = function(value, invert) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      ctx._state.sampleCoverage.value = clamp012(value);
+      ctx._state.sampleCoverage.invert = !!invert;
+    };
+    proto.scissor = function(x, y, width, height) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const xv = x | 0;
+      const yv = y | 0;
+      const wv = width | 0;
+      const hv = height | 0;
+      if (wv < 0 || hv < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      ctx._state.scissor = { x: xv, y: yv, w: wv, h: hv };
+    };
+    proto.stencilFunc = function(func, ref, mask) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (!STENCIL_FUNCS.includes(func)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const r = ref | 0;
+      const m = mask >>> 0;
+      ctx._state.stencil.front.func = func;
+      ctx._state.stencil.front.ref = r;
+      ctx._state.stencil.front.valueMask = m;
+      ctx._state.stencil.back.func = func;
+      ctx._state.stencil.back.ref = r;
+      ctx._state.stencil.back.valueMask = m;
+    };
+    proto.stencilFuncSeparate = function(face, func, ref, mask) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const states = stencilFaceStates(ctx, face);
+      if (states === null) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (!STENCIL_FUNCS.includes(func)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const r = ref | 0;
+      const m = mask >>> 0;
+      for (const st of states) {
+        st.func = func;
+        st.ref = r;
+        st.valueMask = m;
+      }
+    };
+    proto.stencilMask = function(mask) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const m = mask >>> 0;
+      ctx._state.stencil.front.writeMask = m;
+      ctx._state.stencil.back.writeMask = m;
+    };
+    proto.stencilMaskSeparate = function(face, mask) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const states = stencilFaceStates(ctx, face);
+      if (states === null) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const m = mask >>> 0;
+      for (const st of states) st.writeMask = m;
+    };
+    proto.stencilOp = function(fail, zfail, zpass) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      if (!STENCIL_OPS.includes(fail) || !STENCIL_OPS.includes(zfail) || !STENCIL_OPS.includes(zpass)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      ctx._state.stencil.front.fail = fail;
+      ctx._state.stencil.front.depthFail = zfail;
+      ctx._state.stencil.front.depthPass = zpass;
+      ctx._state.stencil.back.fail = fail;
+      ctx._state.stencil.back.depthFail = zfail;
+      ctx._state.stencil.back.depthPass = zpass;
+    };
+    proto.stencilOpSeparate = function(face, fail, zfail, zpass) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const states = stencilFaceStates(ctx, face);
+      if (states === null) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (!STENCIL_OPS.includes(fail) || !STENCIL_OPS.includes(zfail) || !STENCIL_OPS.includes(zpass)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      for (const st of states) {
+        st.fail = fail;
+        st.depthFail = zfail;
+        st.depthPass = zpass;
+      }
+    };
+    proto.viewport = function(x, y, width, height) {
+      const ctx = this;
+      if (isLost3(ctx)) return;
+      const xv = x | 0;
+      const yv = y | 0;
+      const wv = width | 0;
+      const hv = height | 0;
+      if (wv < 0 || hv < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      ctx._state.viewport = { x: xv, y: yv, w: wv, h: hv };
+    };
+  }
+
   // src/gl/draw.ts
   var scratchMap = /* @__PURE__ */ new WeakMap();
   function getScratch(ctx) {
@@ -24268,7 +25041,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     return null;
   }
   function buildAttribs(ctx, pm, req, indices) {
-    var _a, _b;
+    var _a, _b, _c, _d, _e, _f;
     const s = ctx._state;
     const vao = s.vao;
     const maxAttribs = s.limits.MAX_VERTEX_ATTRIBS;
@@ -24303,7 +25076,6 @@ ${inner.map((l) => "  " + l).join("\n")}
         const stride = a.stride === 0 ? a.size * typeSize : a.stride;
         const comps = pa.components;
         const elemCount = a.divisor > 0 ? Math.ceil(req.instanceCount / a.divisor) : req.count;
-        const colOffset = col * (dims ? dims.rows * typeSize : 0);
         const need = elemCount * comps;
         const integer = a.integer;
         const unsigned = integer && (a.type === C1.UNSIGNED_BYTE || a.type === C1.UNSIGNED_SHORT || a.type === C1.UNSIGNED_INT);
@@ -24319,7 +25091,6 @@ ${inner.map((l) => "  " + l).join("\n")}
           dv: new DataView(data),
           typeSize,
           stride,
-          colOffset,
           divisor: a.divisor,
           integer,
           unsigned,
@@ -24345,7 +25116,6 @@ ${inner.map((l) => "  " + l).join("\n")}
         dv,
         typeSize,
         stride,
-        colOffset,
         divisor,
         integer,
         unsigned,
@@ -24360,8 +25130,8 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (unsigned) uintBase += need;
         else intBase += need;
         for (let e = 0; e < elemCount; e++) {
-          const element = divisor > 0 ? e : indices ? indices[e] : req.firstOrOffset + e;
-          const byteOff = aOffset + element * stride + colOffset;
+          const element = divisor > 0 ? ((_c = req.baseInstance) != null ? _c : 0) + e : indices ? ((_d = req.baseVertex) != null ? _d : 0) + indices[e] : req.firstOrOffset + e;
+          const byteOff = aOffset + element * stride;
           for (let c = 0; c < comps; c++) {
             let v2 = 0;
             if (c < aSize && byteOff + c * typeSize + typeSize <= data.byteLength) {
@@ -24375,8 +25145,8 @@ ${inner.map((l) => "  " + l).join("\n")}
         const dst = new Float32Array(sc.floatPool.buffer, floatBase * 4, need);
         floatBase += need;
         for (let e = 0; e < elemCount; e++) {
-          const element = divisor > 0 ? e : indices ? indices[e] : req.firstOrOffset + e;
-          const byteOff = aOffset + element * stride + colOffset;
+          const element = divisor > 0 ? ((_e = req.baseInstance) != null ? _e : 0) + e : indices ? ((_f = req.baseVertex) != null ? _f : 0) + indices[e] : req.firstOrOffset + e;
+          const byteOff = aOffset + element * stride;
           for (let c = 0; c < comps; c++) {
             let v2 = 0;
             if (c < aSize && byteOff + c * typeSize + typeSize <= data.byteLength) {
@@ -24555,7 +25325,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           const unitState = s.textureUnits[unit];
           const tex2 = unitState[key];
           if (!tex2 || !tex2._image) continue;
-          updateCompleteness(tex2, ctx._version);
+          updateCompleteness(tex2, ctx._version, floatLinearExtensionState(ctx));
           const img = tex2._image;
           const st = effectiveSamplerState(tex2, unitState.sampler);
           images[unit] = img;
@@ -24591,7 +25361,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         const tex2 = unitState[key];
         if (!tex2 || !tex2._image) continue;
         if (s.version === 1) {
-          updateCompleteness(tex2, 1);
+          updateCompleteness(tex2, 1, floatLinearExtensionState(ctx));
           if (!tex2._image.complete) continue;
         }
         for (let i = 0; i < textureAtts.length; i++) {
@@ -24953,8 +25723,16 @@ ${inner.map((l) => "  " + l).join("\n")}
     const cursor = (_a = tf._tfCaptureCursor) != null ? _a : 0;
     return tf._primitivesWritten === 0 && cursor !== 0 ? 0 : cursor;
   }
+  function drawBufferAttachmentIs(ctx, index, fmt) {
+    var _a;
+    const fbo = ctx._state.drawFramebuffer;
+    if (!fbo) return false;
+    const att = fbo._attachments.get(C1.COLOR_ATTACHMENT0 + index);
+    if (!att) return false;
+    return (att.type === "renderbuffer" ? att.renderbuffer._internalformat : (_a = att.texture._image) == null ? void 0 : _a.internalFormat) === fmt;
+  }
   function executeDraw(ctx, req) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v;
     const s = ctx._state;
     const prog = s.currentProgram;
     if (prog !== null) ensureProgramLinked(ctx, prog);
@@ -25042,6 +25820,60 @@ ${inner.map((l) => "  " + l).join("\n")}
         }
       }
     }
+    if (s.version === 2) {
+      for (let i = 0; i < s.drawBuffers.length; i++) {
+        const db = s.drawBuffers[i];
+        if (db === C1.NONE) continue;
+        const dbIdx = db - C1.COLOR_ATTACHMENT0;
+        if (!drawBufferAttachmentIs(ctx, dbIdx, C2.RGB9_E5)) continue;
+        const m = (_c = s.colorMaskPerDrawBuffer.get(dbIdx)) != null ? _c : s.colorMask;
+        if ((m[0] || m[1] || m[2] || m[3]) && !(m[0] && m[1] && m[2] && m[3])) {
+          pushError(ctx, C1.INVALID_OPERATION);
+          return;
+        }
+      }
+    }
+    if (ctx._extensions.has("WEBGL_blend_func_extended")) {
+      let activeBuffers = 0;
+      for (let i = 0; i < s.drawBuffers.length; i++) {
+        if (s.drawBuffers[i] !== C1.NONE) activeBuffers++;
+      }
+      if (activeBuffers > s.limits.MAX_DUAL_SOURCE_DRAW_BUFFERS_WEBGL) {
+        for (let i = 0; i < s.drawBuffers.length; i++) {
+          if (s.drawBuffers[i] === C1.NONE) continue;
+          const be = s.blendPerDrawBuffer.get(i);
+          if (SRC1_BLEND_FACTORS.includes((_d = be == null ? void 0 : be.srcRGB) != null ? _d : s.blend.srcRGB) || SRC1_BLEND_FACTORS.includes((_e = be == null ? void 0 : be.dstRGB) != null ? _e : s.blend.dstRGB) || SRC1_BLEND_FACTORS.includes((_f = be == null ? void 0 : be.srcAlpha) != null ? _f : s.blend.srcAlpha) || SRC1_BLEND_FACTORS.includes((_g = be == null ? void 0 : be.dstAlpha) != null ? _g : s.blend.dstAlpha)) {
+            pushError(ctx, C1.INVALID_OPERATION);
+            return;
+          }
+        }
+      }
+      let hasPrimary = false;
+      let hasSecondary = false;
+      const outs = (_h = pm.fragment) == null ? void 0 : _h.outputs;
+      if (outs) {
+        for (const o of outs) {
+          if (o.location !== 0) continue;
+          if (o.index === 1) hasSecondary = true;
+          else hasPrimary = true;
+        }
+      }
+      const blendEnables = s.blendEnablePerDrawBuffer;
+      for (let i = 0; i < s.drawBuffers.length; i++) {
+        if (s.drawBuffers[i] === C1.NONE) continue;
+        const be = s.blendPerDrawBuffer.get(i);
+        if (!SRC1_BLEND_FACTORS.includes((_i = be == null ? void 0 : be.srcRGB) != null ? _i : s.blend.srcRGB) && !SRC1_BLEND_FACTORS.includes((_j = be == null ? void 0 : be.dstRGB) != null ? _j : s.blend.dstRGB) && !SRC1_BLEND_FACTORS.includes((_k = be == null ? void 0 : be.srcAlpha) != null ? _k : s.blend.srcAlpha) && !SRC1_BLEND_FACTORS.includes((_l = be == null ? void 0 : be.dstAlpha) != null ? _l : s.blend.dstAlpha)) {
+          continue;
+        }
+        const m = (_m = s.colorMaskPerDrawBuffer.get(i)) != null ? _m : s.colorMask;
+        if (!(m[0] || m[1] || m[2] || m[3])) continue;
+        const blendEnabled = i === 0 ? s.caps.BLEND : (_n = blendEnables == null ? void 0 : blendEnables.get(i)) != null ? _n : s.caps.BLEND;
+        if (!hasPrimary || blendEnabled && !hasSecondary) {
+          pushError(ctx, C1.INVALID_OPERATION);
+          return;
+        }
+      }
+    }
     const tfState = tfActive ? resolveTfVaryings(pm) : null;
     if (tfActive && tfState !== null && tfBindingConflict(tf, prog, tfState)) {
       pushError(ctx, C1.INVALID_OPERATION);
@@ -25057,7 +25889,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       sc.attribIndices = new Int32Array(maxAttribs);
     }
     const ai = sc.attribIndices;
-    const stride = computeVertexStride((_c = pm.varyings) != null ? _c : []);
+    const stride = computeVertexStride((_o = pm.varyings) != null ? _o : []);
     const totalVary = stride - RECORD_HEADER_FLOATS;
     const totalVerts = req.count * req.instanceCount;
     const needRecords = totalVerts * stride;
@@ -25071,11 +25903,11 @@ ${inner.map((l) => "  " + l).join("\n")}
       sc.outVaryings.fill(0);
       sc.outPosition.fill(0);
     }
-    const scratchSize = (_d = pm.scratchSize) != null ? _d : 0;
-    const intScratchSize = (_e = pm.intScratchSize) != null ? _e : 0;
+    const scratchSize = (_p = pm.scratchSize) != null ? _p : 0;
+    const intScratchSize = (_q = pm.intScratchSize) != null ? _q : 0;
     if (sc.scratch.length < scratchSize) sc.scratch = new Float32Array(Math.max(scratchSize, 64));
     if (sc.intScratch.length < intScratchSize) sc.intScratch = new Int32Array(Math.max(intScratchSize, 64));
-    const blocks = (_f = pm.uniformBlocks) != null ? _f : [];
+    const blocks = (_r = pm.uniformBlocks) != null ? _r : [];
     const blockStores = new Array(blocks.length);
     const blockIntStores = new Array(blocks.length);
     const gl2 = ctx;
@@ -25094,14 +25926,14 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
     }
     const env = buildTextureEnv(ctx, pm);
-    const floatStore = (_g = pm.floatStore) != null ? _g : sc.emptyFloat;
-    const intStore = (_h = pm.intStore) != null ? _h : sc.emptyInt;
+    const floatStore = (_s = pm.floatStore) != null ? _s : sc.emptyFloat;
+    const intStore = (_t = pm.intStore) != null ? _t : sc.emptyInt;
     const vctx = {
       attribs,
       attribIndices: ai,
       vertexId: 0,
       instanceId: 0,
-      drawId: (_i = req.drawId) != null ? _i : 0,
+      drawId: (_u = req.drawId) != null ? _u : 0,
       // gl_DrawID: subdraw index; 0 for single draws
       uniforms: floatStore,
       intUniforms: intStore,
@@ -25142,7 +25974,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         ai[instancedLocs[k].loc] = i / instancedLocs[k].divisor | 0;
       }
       for (let j = 0; j < req.count; j++, r++) {
-        vctx.vertexId = req.indexed ? indices[j] : first + j;
+        vctx.vertexId = req.indexed ? ((_v = req.baseVertex) != null ? _v : 0) + indices[j] : first + j;
         vctx.instanceId = i;
         for (let k = 0; k < vertexLocs.length; k++) ai[vertexLocs[k]] = j;
         run(vctx);
@@ -25203,6 +26035,10 @@ ${inner.map((l) => "  " + l).join("\n")}
         const surf = fb.color[idx];
         if (!surf) continue;
         const cm = (_a = s.colorMaskPerDrawBuffer.get(d)) != null ? _a : s.colorMask;
+        if (drawBufferAttachmentIs(ctx, idx, C2.RGB9_E5) && (cm[0] || cm[1] || cm[2] || cm[3]) && !(cm[0] && cm[1] && cm[2] && cm[3])) {
+          pushError(ctx, C1.INVALID_OPERATION);
+          return;
+        }
         if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) continue;
         const [r, g2, b, a] = s.clearColor;
         try {
@@ -25251,11 +26087,22 @@ ${inner.map((l) => "  " + l).join("\n")}
         return comps * 2;
       case C2.UNSIGNED_INT_2_10_10_10_REV:
         return 4;
+      case C2.UNSIGNED_INT_5_9_9_9_REV:
+        return 4;
+      // packed 9/9/9/5 (RGB only)
       case C2.FLOAT_32_UNSIGNED_INT_24_8_REV:
         return 8;
       default:
         return comps * 4;
     }
+  }
+  function pack9E5Read(r, g2, b) {
+    const maxC = Math.max(r, g2, b);
+    if (maxC <= 2 ** -25) return 0;
+    const exp = Math.max(0, Math.floor(Math.log2(maxC)) + 16);
+    const scale = 2 ** (exp - 24);
+    const m = (v2) => Math.min(511, Math.max(0, Math.round(v2 / scale)));
+    return (exp << 27 | m(r) | m(g2) << 9 | m(b) << 18) >>> 0;
   }
   function makeLocalPack(surf, format, type) {
     const tmp = new Float32Array(4);
@@ -25312,6 +26159,11 @@ ${inner.map((l) => "  " + l).join("\n")}
           decodeSurfaceTexel(surf, so, tmp);
           const v2 = (Math.min(1023, Math.max(0, Math.round(tmp[0] * 1023))) | Math.min(1023, Math.max(0, Math.round(tmp[1] * 1023))) << 10 | Math.min(1023, Math.max(0, Math.round(tmp[2] * 1023))) << 20 | Math.min(3, Math.max(0, Math.round(tmp[3] * 3))) << 30) >>> 0;
           dst[d >> 2] = v2;
+        };
+      case C2.UNSIGNED_INT_5_9_9_9_REV:
+        return (_src, so, dst, d) => {
+          decodeSurfaceTexel(surf, so, tmp);
+          dst[d >> 2] = pack9E5Read(tmp[0], tmp[1], tmp[2]);
         };
       case C1.FLOAT: {
         const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
@@ -25587,6 +26439,10 @@ ${inner.map((l) => "  " + l).join("\n")}
       const surf = fb.color[idx];
       if (!surf) return;
       const cm = (_b = s.colorMaskPerDrawBuffer.get(drawbuffer)) != null ? _b : s.colorMask;
+      if (drawBufferAttachmentIs(ctx, idx, C2.RGB9_E5) && (cm[0] || cm[1] || cm[2] || cm[3]) && !(cm[0] && cm[1] && cm[2] && cm[3])) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
       if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) return;
       if (values instanceof Int32Array || values instanceof Uint32Array) {
         clearColorIntLocal(surf, values, cm, scissor);
@@ -25723,6 +26579,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     return true;
   }
   function validateDrawArrays(ctx, mode, first, count, instanceCount = 1) {
+    mode = mode >>> 0;
     if (!DRAW_MODES.has(mode)) {
       pushError(ctx, C1.INVALID_ENUM);
       return null;
@@ -25737,6 +26594,8 @@ ${inner.map((l) => "  " + l).join("\n")}
   function validateDrawElements(ctx, mode, count, type, offset, opts = {}) {
     var _a;
     const instanceCount = (_a = opts.instanceCount) != null ? _a : 1;
+    mode = mode >>> 0;
+    type = type >>> 0;
     if (!DRAW_MODES.has(mode)) {
       pushError(ctx, C1.INVALID_ENUM);
       return null;
@@ -25854,6 +26713,44 @@ ${inner.map((l) => "  " + l).join("\n")}
         { instanceCount: instanceCounts[instanceCountsOffset + i] }
       );
       if (!req) return;
+      reqs.push(req);
+    }
+    runMultiSubdraws(ctx, reqs);
+  }
+  function executeMultiDrawArraysInstancedBaseInstance(ctx, mode, firsts, firstsOffset, counts, countsOffset, instanceCounts, instanceCountsOffset, baseInstances, baseInstancesOffset, drawcount) {
+    const n = drawcount | 0;
+    if (n <= 0) return;
+    const reqs = [];
+    for (let i = 0; i < n; i++) {
+      const req = validateDrawArrays(
+        ctx,
+        mode,
+        firsts[firstsOffset + i],
+        counts[countsOffset + i],
+        instanceCounts[instanceCountsOffset + i]
+      );
+      if (!req) return;
+      req.baseInstance = baseInstances[baseInstancesOffset + i] >>> 0;
+      reqs.push(req);
+    }
+    runMultiSubdraws(ctx, reqs);
+  }
+  function executeMultiDrawElementsInstancedBaseVertexBaseInstance(ctx, mode, counts, countsOffset, type, offsets, offsetsOffset, instanceCounts, instanceCountsOffset, baseVertices, baseVerticesOffset, baseInstances, baseInstancesOffset, drawcount) {
+    const n = drawcount | 0;
+    if (n <= 0) return;
+    const reqs = [];
+    for (let i = 0; i < n; i++) {
+      const req = validateDrawElements(
+        ctx,
+        mode,
+        counts[countsOffset + i],
+        type,
+        offsets[offsetsOffset + i],
+        { instanceCount: instanceCounts[instanceCountsOffset + i] }
+      );
+      if (!req) return;
+      req.baseVertex = baseVertices[baseVerticesOffset + i] | 0;
+      req.baseInstance = baseInstances[baseInstancesOffset + i] >>> 0;
       reqs.push(req);
     }
     runMultiSubdraws(ctx, reqs);
@@ -26081,7 +26978,7 @@ ${inner.map((l) => "  " + l).join("\n")}
             gl._errors.push(C1.INVALID_OPERATION);
             return;
           }
-          s.drawBuffers = arr2;
+          s.drawBuffers = arr2[0] === BACK2 ? [COLOR_ATTACHMENT02] : arr2;
           return;
         }
         let last = -1;
@@ -26281,7 +27178,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   // src/gl/extensions/multisampled.ts
   var FRAMEBUFFER = 36160;
   var RENDERBUFFER = 36161;
-  var TEXTURE_2D2 = 3553;
+  var TEXTURE_2D3 = 3553;
   var CUBE_POSITIVE_X2 = 34069;
   var CUBE_NEGATIVE_Z2 = 34074;
   var COLOR_ATTACHMENT03 = 36064;
@@ -26290,7 +27187,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   var TEXTURE_SAMPLES_EXT = 37168;
   var TEXTURE_FIXED_SAMPLE_LOCATIONS_EXT = 37169;
   function isTextureTarget(t) {
-    return t === TEXTURE_2D2 || t >= CUBE_POSITIVE_X2 && t <= CUBE_NEGATIVE_Z2;
+    return t === TEXTURE_2D3 || t >= CUBE_POSITIVE_X2 && t <= CUBE_NEGATIVE_Z2;
   }
   function createWEBGLMultisampledRenderToTexture(ctx) {
     return buildExtension(
@@ -26412,7 +27309,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     CONSTANT_ALPHA2,
     ONE_MINUS_CONSTANT_ALPHA2
   ];
-  var BLEND_EQUATIONS = [
+  var BLEND_EQUATIONS2 = [
     C1.FUNC_ADD,
     C1.FUNC_SUBTRACT,
     C1.FUNC_REVERSE_SUBTRACT,
@@ -26460,14 +27357,14 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
     return false;
   }
-  function isConstColorFactor(f) {
+  function isConstColorFactor2(f) {
     return f === CONSTANT_COLOR2 || f === ONE_MINUS_CONSTANT_COLOR2;
   }
-  function isConstAlphaFactor(f) {
+  function isConstAlphaFactor2(f) {
     return f === CONSTANT_ALPHA2 || f === ONE_MINUS_CONSTANT_ALPHA2;
   }
-  function constFactorPairInvalid(a, b) {
-    return isConstColorFactor(a) && isConstAlphaFactor(b) || isConstAlphaFactor(a) && isConstColorFactor(b);
+  function constFactorPairInvalid2(a, b) {
+    return isConstColorFactor2(a) && isConstAlphaFactor2(b) || isConstAlphaFactor2(a) && isConstColorFactor2(b);
   }
   function createOESDrawBuffersIndexed(ctx) {
     blendEnableMap(ctx);
@@ -26507,7 +27404,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (isLost(gl)) return;
         const b = bufIndex(gl, buf);
         if (b < 0) return;
-        if (!BLEND_EQUATIONS.includes(mode)) {
+        if (!BLEND_EQUATIONS2.includes(mode)) {
           gl._errors.push(C1.INVALID_ENUM);
           return;
         }
@@ -26520,7 +27417,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (isLost(gl)) return;
         const b = bufIndex(gl, buf);
         if (b < 0) return;
-        if (!BLEND_EQUATIONS.includes(modeRGB) || !BLEND_EQUATIONS.includes(modeAlpha)) {
+        if (!BLEND_EQUATIONS2.includes(modeRGB) || !BLEND_EQUATIONS2.includes(modeAlpha)) {
           gl._errors.push(C1.INVALID_ENUM);
           return;
         }
@@ -26537,7 +27434,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           gl._errors.push(C1.INVALID_ENUM);
           return;
         }
-        if (constFactorPairInvalid(src, dst)) {
+        if (constFactorPairInvalid2(src, dst)) {
           gl._errors.push(C1.INVALID_OPERATION);
           return;
         }
@@ -26556,7 +27453,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           gl._errors.push(C1.INVALID_ENUM);
           return;
         }
-        if (constFactorPairInvalid(srcRGB, dstRGB) || constFactorPairInvalid(srcAlpha, dstAlpha)) {
+        if (constFactorPairInvalid2(srcRGB, dstRGB) || constFactorPairInvalid2(srcAlpha, dstAlpha)) {
           gl._errors.push(C1.INVALID_OPERATION);
           return;
         }
@@ -26572,6 +27469,903 @@ ${inner.map((l) => "  " + l).join("\n")}
         const bi = bufIndex(gl, buf);
         if (bi < 0) return;
         gl._state.colorMaskPerDrawBuffer.set(bi, [!!r, !!g2, !!b, !!a]);
+      }
+    });
+  }
+
+  // src/gl/api/draw.ts
+  function isLost4(ctx) {
+    return ctx._isLost;
+  }
+  var CLEAR_BUFFERS = /* @__PURE__ */ new Set([
+    C2.COLOR,
+    C2.DEPTH,
+    C2.STENCIL,
+    C2.DEPTH_STENCIL
+  ]);
+  var CLEAR_FV = /* @__PURE__ */ new Set([C2.COLOR, C2.DEPTH, C2.STENCIL]);
+  var CLEAR_IV = /* @__PURE__ */ new Set([C2.COLOR, C2.DEPTH, C2.STENCIL]);
+  var CLEAR_UIV = /* @__PURE__ */ new Set([C2.COLOR]);
+  var SINT_COLOR_FORMATS = /* @__PURE__ */ new Set([
+    C2.R8I,
+    C2.R16I,
+    C2.R32I,
+    C2.RG8I,
+    C2.RG16I,
+    C2.RG32I,
+    C2.RGB8I,
+    C2.RGB16I,
+    C2.RGB32I,
+    C2.RGBA8I,
+    C2.RGBA16I,
+    C2.RGBA32I
+  ]);
+  var UINT_COLOR_FORMATS = /* @__PURE__ */ new Set([
+    C2.R8UI,
+    C2.R16UI,
+    C2.R32UI,
+    C2.RG8UI,
+    C2.RG16UI,
+    C2.RG32UI,
+    C2.RGB8UI,
+    C2.RGB16UI,
+    C2.RGB32UI,
+    C2.RGBA8UI,
+    C2.RGBA16UI,
+    C2.RGBA32UI,
+    C2.RGB10_A2UI
+  ]);
+  function toList(values, Ctor, name) {
+    if (values instanceof Ctor) return values;
+    if (Array.isArray(values) || ArrayBuffer.isView(values)) {
+      return new Ctor(values);
+    }
+    throw new TypeError(`Argument is not of type '${name}'`);
+  }
+  function validateClearBufferArgs(ctx, buffer, drawbuffer) {
+    const s = ctx._state;
+    if (!CLEAR_BUFFERS.has(buffer)) {
+      ctx._errors.push(C1.INVALID_ENUM);
+      return false;
+    }
+    if (drawbuffer < 0 || drawbuffer >= s.limits.MAX_DRAW_BUFFERS) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return false;
+    }
+    if (buffer !== C2.COLOR && drawbuffer !== 0) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    return true;
+  }
+  function clearColorAttachmentClass(ctx, drawbuffer) {
+    var _a, _b, _c;
+    const s = ctx._state;
+    const fbo = s.drawFramebuffer;
+    if (fbo === null) return "float";
+    const db = (_a = s.drawBuffers[drawbuffer]) != null ? _a : C1.NONE;
+    if (db === C1.NONE) return "missing";
+    const att = fbo._attachments.get(db);
+    if (!att) return "missing";
+    const internalFormat = att.type === "renderbuffer" ? att.renderbuffer._internalformat : (_c = (_b = att.texture._image) == null ? void 0 : _b.internalFormat) != null ? _c : 0;
+    if (SINT_COLOR_FORMATS.has(internalFormat)) return "sint";
+    if (UINT_COLOR_FORMATS.has(internalFormat)) return "uint";
+    return "float";
+  }
+  var RP_FORMATS_1 = /* @__PURE__ */ new Set([
+    C1.RGBA,
+    C1.RGB,
+    C1.LUMINANCE,
+    C1.LUMINANCE_ALPHA,
+    C1.ALPHA
+  ]);
+  var RP_TYPES_1 = /* @__PURE__ */ new Set([
+    C1.UNSIGNED_BYTE,
+    C1.BYTE,
+    C1.UNSIGNED_SHORT,
+    C1.SHORT,
+    C1.UNSIGNED_INT,
+    C1.INT,
+    C1.FLOAT,
+    C1.UNSIGNED_SHORT_5_6_5,
+    C1.UNSIGNED_SHORT_4_4_4_4,
+    C1.UNSIGNED_SHORT_5_5_5_1,
+    5131,
+    36193
+  ]);
+  var RP_PAIRS_2 = /* @__PURE__ */ new Set();
+  {
+    const P = (format, ...types) => {
+      for (const t of types) RP_PAIRS_2.add(format << 16 | t);
+    };
+    P(
+      C1.RGBA,
+      C1.UNSIGNED_BYTE,
+      C1.UNSIGNED_SHORT,
+      C1.UNSIGNED_SHORT_5_5_5_1,
+      C1.UNSIGNED_SHORT_4_4_4_4,
+      C2.HALF_FLOAT,
+      C1.FLOAT,
+      C2.UNSIGNED_INT_2_10_10_10_REV
+    );
+    P(C2.RGBA_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
+    P(
+      C1.RGB,
+      C1.UNSIGNED_BYTE,
+      C1.UNSIGNED_SHORT_5_6_5,
+      C2.HALF_FLOAT,
+      C1.FLOAT,
+      C2.UNSIGNED_INT_2_10_10_10_REV
+    );
+    P(C1.RGB, C2.UNSIGNED_INT_5_9_9_9_REV);
+    P(C2.RGB_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
+    P(C2.RG, C1.UNSIGNED_BYTE, C2.HALF_FLOAT, C1.FLOAT);
+    P(C2.RG_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
+    P(C2.RED, C1.UNSIGNED_BYTE, C2.HALF_FLOAT, C1.FLOAT);
+    P(C2.RED_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
+    P(C1.DEPTH_COMPONENT, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT);
+    P(C2.DEPTH_STENCIL, C2.UNSIGNED_INT_24_8, C2.FLOAT_32_UNSIGNED_INT_24_8_REV);
+    P(C1.ALPHA, C1.UNSIGNED_BYTE);
+  }
+  function rpPairKey(format, type) {
+    return format << 16 | type;
+  }
+  function expectedViewForType(type) {
+    switch (type) {
+      case C1.UNSIGNED_BYTE:
+        return "u8";
+      case C1.BYTE:
+        return Int8Array;
+      case C1.UNSIGNED_SHORT:
+      case C1.UNSIGNED_SHORT_5_6_5:
+      case C1.UNSIGNED_SHORT_4_4_4_4:
+      case C1.UNSIGNED_SHORT_5_5_5_1:
+      case 5131:
+      case 36193:
+        return Uint16Array;
+      case C1.SHORT:
+        return Int16Array;
+      case C1.UNSIGNED_INT:
+      case C2.UNSIGNED_INT_2_10_10_10_REV:
+      case C2.UNSIGNED_INT_24_8:
+      case C2.UNSIGNED_INT_5_9_9_9_REV:
+        return Uint32Array;
+      case C1.INT:
+        return Int32Array;
+      case C1.FLOAT:
+      case C2.FLOAT_32_UNSIGNED_INT_24_8_REV:
+        return Float32Array;
+      default:
+        return null;
+    }
+  }
+  function floatReadOK(ctx, type, halfFloat) {
+    if (type === C1.FLOAT) return extSupported(ctx, "EXT_color_buffer_float");
+    if (type === C2.HALF_FLOAT || type === 36193) {
+      return halfFloat && (extSupported(ctx, "EXT_color_buffer_float") || extSupported(ctx, "EXT_color_buffer_half_float"));
+    }
+    if (type === C2.UNSIGNED_INT_10F_11F_11F_REV) return extSupported(ctx, "EXT_color_buffer_float");
+    return false;
+  }
+  function floatStorageReadOK(ctx, format, type) {
+    if (format !== C1.RGBA) return false;
+    if (type === C1.FLOAT) {
+      return extSupported(ctx, "OES_texture_float") || extSupported(ctx, "OES_texture_half_float") || extSupported(ctx, "EXT_color_buffer_half_float");
+    }
+    if (type === 5131 || type === 36193) {
+      return extSupported(ctx, "OES_texture_half_float") || extSupported(ctx, "EXT_color_buffer_half_float");
+    }
+    return false;
+  }
+  function readComboOK(ctx, internalFormat, format, type, floatStorage) {
+    const universalRGBA = format === C1.RGBA && type === C1.UNSIGNED_BYTE;
+    const universalSInt = format === C2.RGBA_INTEGER && type === C1.INT;
+    const universalUInt = format === C2.RGBA_INTEGER && type === C1.UNSIGNED_INT;
+    switch (internalFormat) {
+      // Unsigned normalized color
+      case C1.RGBA:
+      case C1.RGBA8:
+      case C2.RGBA8:
+      case C2.SRGB8_ALPHA8:
+        if (floatStorage) return floatStorageReadOK(ctx, format, type);
+        return universalRGBA;
+      case C1.RGBA4:
+        return format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4);
+      case C1.RGB5_A1:
+        return format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_5_5_1);
+      case C1.RGB565:
+        return format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5) || universalRGBA;
+      case C1.RGB:
+        if (floatStorage) return floatStorageReadOK(ctx, format, type);
+        return format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5) || format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4 || type === C1.UNSIGNED_SHORT_5_5_5_1);
+      case C2.RGB8:
+        return format === C1.RGB && type === C1.UNSIGNED_BYTE || universalRGBA;
+      case C1.LUMINANCE:
+      case C1.LUMINANCE_ALPHA:
+      case C1.ALPHA:
+        if (floatStorage) return floatStorageReadOK(ctx, format, type);
+        return format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4 || type === C1.UNSIGNED_SHORT_5_5_5_1);
+      case C2.R8:
+        return format === C2.RED && type === C1.UNSIGNED_BYTE || universalRGBA;
+      case C2.RG8:
+        return format === C2.RG && type === C1.UNSIGNED_BYTE || universalRGBA;
+      case C2.RGB10_A2:
+        return format === C1.RGBA && type === C2.UNSIGNED_INT_2_10_10_10_REV || universalRGBA;
+      case C2.RGB10_A2UI:
+        return universalUInt;
+      // EXT_texture_norm16 — 16-bit unorm color-renderable surfaces. GL
+      // EXT_texture_norm16: "RGBA/UNSIGNED_SHORT accepted in addition to
+      // RGBA/UNSIGNED_BYTE for 16-bit unorm surfaces" (CTS ext-texture-norm16.html
+      // testNorm16Render reads RGBA/UNSIGNED_SHORT via checkCanvasRect for ALL
+      // formats); R/RG additionally read back via their native RED/RG formats.
+      case CExt.R16_EXT:
+        return format === C1.RGBA && (type === C1.UNSIGNED_SHORT || type === C1.UNSIGNED_BYTE) || format === C2.RED && type === C1.UNSIGNED_SHORT || universalRGBA;
+      case CExt.RG16_EXT:
+        return format === C1.RGBA && (type === C1.UNSIGNED_SHORT || type === C1.UNSIGNED_BYTE) || format === C2.RG && type === C1.UNSIGNED_SHORT || universalRGBA;
+      case CExt.RGBA16_EXT:
+        return format === C1.RGBA && type === C1.UNSIGNED_SHORT || universalRGBA;
+      // Floating point (renderable only with the color-buffer-float extensions).
+      // FLOAT is accepted with format ∈ {RED, RG, RGB, RGBA} for the 16F formats
+      // when EITHER float color-buffer extension is enabled (GLES3 ReadPixels
+      // table: R16F/RG16F/RGBA16F accept RG/RGB/RGBA expansion with FLOAT; the
+      // 32F formats accept the same expansion with FLOAT only — the CTS
+      // ext-color-buffer-float.html reads RGBA/FLOAT from R32F/RG32F).
+      case C2.R16F:
+      case C2.RG16F:
+      case C2.RGBA16F:
+        if (type === C1.FLOAT && (extSupported(ctx, "EXT_color_buffer_float") || extSupported(ctx, "EXT_color_buffer_half_float"))) {
+          return format === C2.RED || format === C2.RG || format === C1.RGB || format === C1.RGBA;
+        }
+        return format === (internalFormat === C2.R16F ? C2.RED : internalFormat === C2.RG16F ? C2.RG : C1.RGBA) && floatReadOK(ctx, type, true);
+      case C2.R32F:
+      case C2.RG32F:
+      case C2.RGBA32F:
+        return (format === C2.RED || format === C2.RG || format === C1.RGB || format === C1.RGBA) && floatReadOK(ctx, type, false);
+      case C2.R11F_G11F_B10F:
+        return (format === C1.RGB || format === C1.RGBA) && floatReadOK(ctx, type, true);
+      case C2.RGB9_E5:
+        return format === C1.RGB && type === C2.UNSIGNED_INT_5_9_9_9_REV || format === C1.RGB && type === C1.FLOAT || format === C1.RGBA && type === C1.FLOAT;
+      // Signed / unsigned integer (native width-matched pair + universal
+      // RGBA_INTEGER/INT | RGBA_INTEGER/UNSIGNED_INT expansion).
+      case C2.R8I:
+        return format === C2.RED_INTEGER && type === C1.BYTE || universalSInt;
+      case C2.R8UI:
+        return format === C2.RED_INTEGER && type === C1.UNSIGNED_BYTE || universalUInt;
+      case C2.R16I:
+        return format === C2.RED_INTEGER && type === C1.SHORT || universalSInt;
+      case C2.R16UI:
+        return format === C2.RED_INTEGER && type === C1.UNSIGNED_SHORT || universalUInt;
+      case C2.R32I:
+        return format === C2.RED_INTEGER && type === C1.INT || universalSInt;
+      case C2.R32UI:
+        return format === C2.RED_INTEGER && type === C1.UNSIGNED_INT || universalUInt;
+      case C2.RG8I:
+        return format === C2.RG_INTEGER && type === C1.BYTE || universalSInt;
+      case C2.RG8UI:
+        return format === C2.RG_INTEGER && type === C1.UNSIGNED_BYTE || universalUInt;
+      case C2.RG16I:
+        return format === C2.RG_INTEGER && type === C1.SHORT || universalSInt;
+      case C2.RG16UI:
+        return format === C2.RG_INTEGER && type === C1.UNSIGNED_SHORT || universalUInt;
+      case C2.RG32I:
+        return format === C2.RG_INTEGER && type === C1.INT || universalSInt;
+      case C2.RG32UI:
+        return format === C2.RG_INTEGER && type === C1.UNSIGNED_INT || universalUInt;
+      case C2.RGB8I:
+        return format === C2.RGB_INTEGER && type === C1.BYTE || universalSInt;
+      case C2.RGB8UI:
+        return format === C2.RGB_INTEGER && type === C1.UNSIGNED_BYTE || universalUInt;
+      case C2.RGB16I:
+        return format === C2.RGB_INTEGER && type === C1.SHORT || universalSInt;
+      case C2.RGB16UI:
+        return format === C2.RGB_INTEGER && type === C1.UNSIGNED_SHORT || universalUInt;
+      case C2.RGB32I:
+        return format === C2.RGB_INTEGER && type === C1.INT || universalSInt;
+      case C2.RGB32UI:
+        return format === C2.RGB_INTEGER && type === C1.UNSIGNED_INT || universalUInt;
+      case C2.RGBA8I:
+        return format === C2.RGBA_INTEGER && type === C1.BYTE || universalSInt;
+      case C2.RGBA8UI:
+        return format === C2.RGBA_INTEGER && type === C1.UNSIGNED_BYTE || universalUInt;
+      case C2.RGBA16I:
+        return format === C2.RGBA_INTEGER && type === C1.SHORT || universalSInt;
+      case C2.RGBA16UI:
+        return format === C2.RGBA_INTEGER && type === C1.UNSIGNED_SHORT || universalUInt;
+      case C2.RGBA32I:
+        return universalSInt;
+      case C2.RGBA32UI:
+        return universalUInt;
+      // Depth / depth-stencil
+      case C1.DEPTH_COMPONENT16:
+        return format === C1.DEPTH_COMPONENT && (type === C1.UNSIGNED_SHORT || type === C1.UNSIGNED_INT);
+      case C2.DEPTH_COMPONENT24:
+        return format === C1.DEPTH_COMPONENT && type === C1.UNSIGNED_INT;
+      case C2.DEPTH_COMPONENT32F:
+        return format === C1.DEPTH_COMPONENT && type === C1.FLOAT;
+      case C2.DEPTH24_STENCIL8:
+        return format === C2.DEPTH_STENCIL && type === C2.UNSIGNED_INT_24_8;
+      case C2.DEPTH32F_STENCIL8:
+        return format === C2.DEPTH_STENCIL && type === C2.FLOAT_32_UNSIGNED_INT_24_8_REV;
+      default:
+        return false;
+    }
+  }
+  function packBytesPerPixel2(format, type) {
+    const comps = format === C1.RGBA || format === C2.RGBA_INTEGER ? 4 : format === C1.RGB || format === C2.RGB_INTEGER ? 3 : format === C1.LUMINANCE_ALPHA || format === C2.RG || format === C2.RG_INTEGER || format === C2.DEPTH_STENCIL ? 2 : 1;
+    switch (type) {
+      case C1.UNSIGNED_BYTE:
+      case C1.BYTE:
+        return comps;
+      case C1.UNSIGNED_SHORT_5_6_5:
+      case C1.UNSIGNED_SHORT_4_4_4_4:
+      case C1.UNSIGNED_SHORT_5_5_5_1:
+      case C1.UNSIGNED_SHORT:
+      case C1.SHORT:
+      case C2.HALF_FLOAT:
+      case 36193:
+        return comps * 2;
+      case C2.UNSIGNED_INT_2_10_10_10_REV:
+        return 4;
+      case C2.UNSIGNED_INT_5_9_9_9_REV:
+        return 4;
+      // packed 9/9/9/5 (RGB only)
+      case C2.FLOAT_32_UNSIGNED_INT_24_8_REV:
+        return 8;
+      default:
+        return comps * 4;
+    }
+  }
+  function alignUp2(n, align2) {
+    return Math.ceil(n / align2) * align2;
+  }
+  function readPixelsComboOK(ctx, format, type) {
+    var _a, _b, _c, _d, _e, _f;
+    const s = ctx._state;
+    const fbo = s.readFramebuffer;
+    if (fbo === null) {
+      return format === C1.RGBA && type === C1.UNSIGNED_BYTE;
+    }
+    const rb = s.version === 2 ? s.readBuffer : C1.COLOR_ATTACHMENT0;
+    const att = fbo._attachments.get(rb);
+    if (!att) return false;
+    const internalFormat = att.type === "renderbuffer" ? att.renderbuffer._internalformat : (_b = (_a = att.texture._image) == null ? void 0 : _a.internalFormat) != null ? _b : 0;
+    const floatStorage = att.type === "renderbuffer" ? !!((_d = (_c = att.renderbuffer._surface) == null ? void 0 : _c.info) == null ? void 0 : _d.isFloat) : !!((_f = (_e = att.texture._image) == null ? void 0 : _e.info) == null ? void 0 : _f.isFloat);
+    return readComboOK(ctx, internalFormat, format, type, floatStorage);
+  }
+  function readPixelsNeeded(ctx, format, type, width, height) {
+    const s = ctx._state;
+    const bpp = packBytesPerPixel2(format, type);
+    const pack = s.pixelStore.pack;
+    const rowLen = pack.rowLength || width;
+    if (s.version === 2 && pack.skipPixels + width > rowLen) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return -1;
+    }
+    const rowStride = alignUp2(rowLen * bpp, pack.alignment);
+    return pack.skipRows * rowStride + pack.skipPixels * bpp + (height > 0 ? rowStride * (height - 1) + width * bpp : 0);
+  }
+  function installDrawApi(proto) {
+    proto.drawArrays = function(mode, first, count) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const req = validateDrawArrays(ctx, mode, first | 0, count | 0, 1);
+      if (!req) return;
+      try {
+        executeDraw(ctx, req);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    };
+    proto.drawElements = function(mode, count, type, offset) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const req = validateDrawElements(ctx, mode, count | 0, type, offset);
+      if (!req) return;
+      try {
+        executeDraw(ctx, req);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    };
+    proto.clear = function(mask) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      if ((mask & ~(C1.COLOR_BUFFER_BIT | C1.DEPTH_BUFFER_BIT | C1.STENCIL_BUFFER_BIT)) !== 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      try {
+        executeClear(ctx, mask);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    };
+    proto.flush = function() {
+      if (isLost4(this)) return;
+    };
+    proto.finish = function() {
+      if (isLost4(this)) return;
+    };
+    proto.readPixels = function(x, y, width, height, format, type, pixels) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      if (pixels === null || pixels === void 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      const s = ctx._state;
+      if (width < 0 || height < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (typeof pixels === "number") {
+        if (s.version !== 2 || !s.pixelPackBuffer) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (pixels < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        const packBuf = s.pixelPackBuffer;
+        if (!packBuf._data) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (!RP_PAIRS_2.has(rpPairKey(format, type))) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        if (!readPixelsComboOK(ctx, format, type)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const needed2 = readPixelsNeeded(ctx, format, type, width, height);
+        if (needed2 < 0) return;
+        if (pixels + needed2 > packBuf._data.byteLength) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        try {
+          executeReadPixels(ctx, x, y, width, height, format, type, pixels);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+        return;
+      }
+      if (!ArrayBuffer.isView(pixels)) {
+        throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
+      }
+      if (s.version === 2) {
+        if (!RP_PAIRS_2.has(rpPairKey(format, type))) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+      } else {
+        if (!RP_FORMATS_1.has(format)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        if (!RP_TYPES_1.has(type)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+      }
+      if (s.pixelPackBuffer) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (!readPixelsComboOK(ctx, format, type)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const want = expectedViewForType(type);
+      if (want === null) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const viewOK = want === "u8" ? pixels instanceof Uint8Array || pixels instanceof Uint8ClampedArray : pixels instanceof want;
+      if (!viewOK) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      const needed = readPixelsNeeded(ctx, format, type, width, height);
+      if (needed < 0) return;
+      if (pixels.byteLength - pixels.byteOffset < needed) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      try {
+        executeReadPixels(ctx, x, y, width, height, format, type, pixels);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    };
+    proto._transferToImageBitmap = function() {
+      return transferToImageBitmapSnapshot(this);
+    };
+    const p2 = proto;
+    if ("drawArraysInstanced" in p2) {
+      p2.drawArraysInstanced = function(mode, first, count, instanceCount) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        const req = validateDrawArrays(ctx, mode, first | 0, count | 0, instanceCount | 0);
+        if (!req) return;
+        try {
+          executeDraw(ctx, req);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+    if ("drawElementsInstanced" in p2) {
+      p2.drawElementsInstanced = function(mode, count, type, offset, instanceCount) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        const req = validateDrawElements(ctx, mode, count | 0, type, offset, { instanceCount: instanceCount | 0 });
+        if (!req) return;
+        try {
+          executeDraw(ctx, req);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+    if ("drawRangeElements" in p2) {
+      p2.drawRangeElements = function(mode, start, end, count, type, offset) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        const req = validateDrawElements(ctx, mode, count | 0, type, offset, { range: [start >>> 0, end >>> 0] });
+        if (!req) return;
+        try {
+          executeDraw(ctx, req);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+    if ("clearBufferfv" in p2) {
+      p2.clearBufferfv = function(buffer, drawbuffer, values) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        const v2 = toList(values, Float32Array, "Float32List");
+        if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
+        if (!CLEAR_FV.has(buffer)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const need = buffer === C2.COLOR ? 4 : 1;
+        if (v2.length < need) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (buffer === C2.COLOR) {
+          const cls = clearColorAttachmentClass(ctx, drawbuffer);
+          if (cls === "missing") return;
+          if (cls !== "float") {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+        }
+        try {
+          executeClearBuffer(ctx, buffer, drawbuffer, v2);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+    if ("clearBufferiv" in p2) {
+      p2.clearBufferiv = function(buffer, drawbuffer, values) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        const v2 = toList(values, Int32Array, "Int32List");
+        if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
+        if (!CLEAR_IV.has(buffer)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const need = buffer === C2.COLOR ? 4 : 1;
+        if (v2.length < need) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (buffer === C2.COLOR) {
+          const cls = clearColorAttachmentClass(ctx, drawbuffer);
+          if (cls === "missing") return;
+          if (cls !== "sint") {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+        }
+        try {
+          executeClearBuffer(ctx, buffer, drawbuffer, v2);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+        try {
+          executeClearBuffer(ctx, buffer, drawbuffer, v2);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+    if ("clearBufferuiv" in p2) {
+      p2.clearBufferuiv = function(buffer, drawbuffer, values) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        const v2 = toList(values, Uint32Array, "Uint32List");
+        if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
+        if (!CLEAR_UIV.has(buffer)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (v2.length < 4) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (buffer === C2.COLOR) {
+          const cls = clearColorAttachmentClass(ctx, drawbuffer);
+          if (cls === "missing") return;
+          if (cls !== "uint") {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+        }
+        try {
+          executeClearBuffer(ctx, buffer, drawbuffer, v2);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+    if ("clearBufferfi" in p2) {
+      p2.clearBufferfi = function(buffer, drawbuffer, depth, stencil) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        if (!CLEAR_BUFFERS.has(buffer)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        if (buffer !== C2.DEPTH_STENCIL) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (drawbuffer !== 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        try {
+          executeClearBuffer(ctx, buffer, drawbuffer, null, depth, stencil);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      };
+    }
+    const mdProto = proto;
+    function installExtensionMethod(proto2, name, fn) {
+      Object.defineProperty(proto2, name, { value: fn, writable: true, configurable: true, enumerable: false });
+    }
+    installExtensionMethod(mdProto, "multiDrawArraysWEBGL", function(mode, firsts, firstsOffset, counts, countsOffset, drawcount) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const firstsArr = toList(firsts, Int32Array, "Int32List");
+      const countsArr = toList(counts, Int32Array, "Int32List");
+      const dc = drawcount | 0;
+      if (dc < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (dc === 0) return;
+      const fo = firstsOffset >>> 0;
+      const co = countsOffset >>> 0;
+      if (fo + dc > firstsArr.length || co + dc > countsArr.length) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      try {
+        executeMultiDrawArrays(ctx, mode, firstsArr, fo, countsArr, co, dc);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    });
+    installExtensionMethod(mdProto, "multiDrawElementsWEBGL", function(mode, counts, countsOffset, type, offsets, offsetsOffset, drawcount) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const countsArr = toList(counts, Int32Array, "Int32List");
+      const offsetsArr = toList(offsets, Int32Array, "Int32List");
+      const dc = drawcount | 0;
+      if (dc < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (dc === 0) return;
+      const co = countsOffset >>> 0;
+      const oo = offsetsOffset >>> 0;
+      if (co + dc > countsArr.length || oo + dc > offsetsArr.length) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      try {
+        executeMultiDrawElements(ctx, mode, countsArr, co, type, offsetsArr, oo, dc);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    });
+    installExtensionMethod(mdProto, "multiDrawArraysInstancedWEBGL", function(mode, firsts, firstsOffset, counts, countsOffset, instanceCounts, instanceCountsOffset, drawcount) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const firstsArr = toList(firsts, Int32Array, "Int32List");
+      const countsArr = toList(counts, Int32Array, "Int32List");
+      const instArr = toList(instanceCounts, Int32Array, "Int32List");
+      const dc = drawcount | 0;
+      if (dc < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (dc === 0) return;
+      const fo = firstsOffset >>> 0;
+      const co = countsOffset >>> 0;
+      const io = instanceCountsOffset >>> 0;
+      if (fo + dc > firstsArr.length || co + dc > countsArr.length || io + dc > instArr.length) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      try {
+        executeMultiDrawArraysInstanced(ctx, mode, firstsArr, fo, countsArr, co, instArr, io, dc);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    });
+    installExtensionMethod(mdProto, "multiDrawElementsInstancedWEBGL", function(mode, counts, countsOffset, type, offsets, offsetsOffset, instanceCounts, instanceCountsOffset, drawcount) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      const countsArr = toList(counts, Int32Array, "Int32List");
+      const offsetsArr = toList(offsets, Int32Array, "Int32List");
+      const instArr = toList(instanceCounts, Int32Array, "Int32List");
+      const dc = drawcount | 0;
+      if (dc < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (dc === 0) return;
+      const co = countsOffset >>> 0;
+      const oo = offsetsOffset >>> 0;
+      const io = instanceCountsOffset >>> 0;
+      if (co + dc > countsArr.length || oo + dc > offsetsArr.length || io + dc > instArr.length) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      try {
+        executeMultiDrawElementsInstanced(ctx, mode, countsArr, co, type, offsetsArr, oo, instArr, io, dc);
+      } catch {
+        ctx._errors.push(C1.INVALID_OPERATION);
+      }
+    });
+  }
+
+  // src/gl/extensions/base-vertex-base-instance.ts
+  function toInt32List(v2, name) {
+    return toList(v2, Int32Array, name);
+  }
+  function toUint32List(v2, name) {
+    return toList(v2, Uint32Array, name);
+  }
+  function checkDrawcount(ctx, drawcount, lengths, offsets) {
+    const dc = drawcount | 0;
+    if (dc < 0) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return -1;
+    }
+    if (dc === 0) return 0;
+    for (let i = 0; i < lengths.length; i++) {
+      if ((offsets[i] >>> 0) + dc > lengths[i]) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return -1;
+      }
+    }
+    return dc;
+  }
+  function createWEBGLDrawInstancedBaseVertexBaseInstance(ctx) {
+    return buildExtension({}, {
+      drawArraysInstancedBaseInstanceWEBGL: (mode, first, count, instanceCount, baseInstance) => {
+        if (isLost(ctx)) return;
+        const req = validateDrawArrays(ctx, mode, first | 0, count | 0, instanceCount | 0);
+        if (!req) return;
+        req.baseInstance = baseInstance >>> 0;
+        try {
+          executeDraw(ctx, req);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      },
+      drawElementsInstancedBaseVertexBaseInstanceWEBGL: (mode, count, type, offset, instanceCount, baseVertex, baseInstance) => {
+        if (isLost(ctx)) return;
+        const req = validateDrawElements(
+          ctx,
+          mode,
+          count | 0,
+          type,
+          offset,
+          { instanceCount: instanceCount | 0 }
+        );
+        if (!req) return;
+        req.baseVertex = baseVertex | 0;
+        req.baseInstance = baseInstance >>> 0;
+        try {
+          executeDraw(ctx, req);
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      }
+    });
+  }
+  function createWEBGLMultiDrawInstancedBaseVertexBaseInstance(ctx) {
+    return buildExtension({}, {
+      multiDrawArraysInstancedBaseInstanceWEBGL: (mode, firsts, firstsOffset, counts, countsOffset, instanceCounts, instanceCountsOffset, baseInstances, baseInstancesOffset, drawcount) => {
+        if (isLost(ctx)) return;
+        const firstsArr = toInt32List(firsts, "Int32List");
+        const countsArr = toInt32List(counts, "Int32List");
+        const instArr = toInt32List(instanceCounts, "Int32List");
+        const baseInstArr = toUint32List(baseInstances, "Uint32List");
+        const dc = checkDrawcount(
+          ctx,
+          drawcount,
+          [firstsArr.length, countsArr.length, instArr.length, baseInstArr.length],
+          [firstsOffset, countsOffset, instanceCountsOffset, baseInstancesOffset]
+        );
+        if (dc <= 0) return;
+        try {
+          executeMultiDrawArraysInstancedBaseInstance(
+            ctx,
+            mode,
+            firstsArr,
+            firstsOffset,
+            countsArr,
+            countsOffset,
+            instArr,
+            instanceCountsOffset,
+            baseInstArr,
+            baseInstancesOffset,
+            dc
+          );
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
+      },
+      multiDrawElementsInstancedBaseVertexBaseInstanceWEBGL: (mode, counts, countsOffset, type, offsets, offsetsOffset, instanceCounts, instanceCountsOffset, baseVertices, baseVerticesOffset, baseInstances, baseInstancesOffset, drawcount) => {
+        if (isLost(ctx)) return;
+        const countsArr = toInt32List(counts, "Int32List");
+        const offsetsArr = toInt32List(offsets, "Int32List");
+        const instArr = toInt32List(instanceCounts, "Int32List");
+        const baseVertsArr = toInt32List(baseVertices, "Int32List");
+        const baseInstArr = toUint32List(baseInstances, "Uint32List");
+        const dc = checkDrawcount(
+          ctx,
+          drawcount,
+          [countsArr.length, offsetsArr.length, instArr.length, baseVertsArr.length, baseInstArr.length],
+          [countsOffset, offsetsOffset, instanceCountsOffset, baseVerticesOffset, baseInstancesOffset]
+        );
+        if (dc <= 0) return;
+        try {
+          executeMultiDrawElementsInstancedBaseVertexBaseInstance(
+            ctx,
+            mode,
+            countsArr,
+            countsOffset,
+            type,
+            offsetsArr,
+            offsetsOffset,
+            instArr,
+            instanceCountsOffset,
+            baseVertsArr,
+            baseVerticesOffset,
+            baseInstArr,
+            baseInstancesOffset,
+            dc
+          );
+        } catch {
+          ctx._errors.push(C1.INVALID_OPERATION);
+        }
       }
     });
   }
@@ -26612,7 +28406,9 @@ ${inner.map((l) => "  " + l).join("\n")}
     { name: "KHR_parallel_shader_compile", versions: [1, 2], status: "implement" },
     { name: "OES_draw_buffers_indexed", versions: [2], status: "implement" },
     { name: "WEBGL_clip_cull_distance", versions: [2], status: "implement" },
+    { name: "WEBGL_draw_instanced_base_vertex_base_instance", versions: [2], status: "implement" },
     { name: "WEBGL_multi_draw", versions: [1, 2], status: "implement" },
+    { name: "WEBGL_multi_draw_instanced_base_vertex_base_instance", versions: [2], status: "implement" },
     { name: "WEBGL_multisampled_render_to_texture", versions: [2], status: "implement" },
     { name: "WEBGL_render_shared_exponent", versions: [2], status: "implement" },
     // ---- 'null' status (CTS tests skip; three.js/Babylon degrade gracefully) ----
@@ -26667,15 +28463,21 @@ ${inner.map((l) => "  " + l).join("\n")}
     const ext = createExtension(ctx, spec);
     cache.set(spec.name, ext);
     if (spec.name === "WEBGL_multi_draw" && version === 1 && !cache.has("ANGLE_instanced_arrays")) {
-      const angleSpec = SPEC_BY_NAME.get("ANGLE_instanced_arrays");
+      const angleSpec = SPEC_BY_NAME.get("angle_instanced_arrays");
       if (angleSpec && angleSpec.status === "implement") {
         cache.set(angleSpec.name, createExtension(ctx, angleSpec));
       }
     }
     if (spec.name === "OES_texture_half_float") {
-      const cb = SPEC_BY_NAME.get("EXT_color_buffer_half_float");
+      const cb = SPEC_BY_NAME.get("ext_color_buffer_half_float");
       if (cb && cb.status === "implement" && cb.versions.includes(version) && !cache.has("EXT_color_buffer_half_float")) {
         cache.set("EXT_color_buffer_half_float", createExtension(ctx, cb));
+      }
+    }
+    if (spec.name === "WEBGL_multi_draw_instanced_base_vertex_base_instance" && !cache.has("WEBGL_multi_draw")) {
+      const mdSpec = SPEC_BY_NAME.get("webgl_multi_draw");
+      if (mdSpec && mdSpec.status === "implement" && mdSpec.versions.includes(version)) {
+        cache.set(mdSpec.name, createExtension(ctx, mdSpec));
       }
     }
     return ext;
@@ -26713,7 +28515,9 @@ ${inner.map((l) => "  " + l).join("\n")}
     WEBGL_clip_cull_distance: createWEBGLClipCullDistance,
     WEBGL_compressed_texture_etc: createWEBGLCompressedTextureEtc,
     WEBGL_compressed_texture_etc1: createWEBGLCompressedTextureEtc1,
+    WEBGL_draw_instanced_base_vertex_base_instance: createWEBGLDrawInstancedBaseVertexBaseInstance,
     WEBGL_multi_draw: createWEBGLMultiDraw,
+    WEBGL_multi_draw_instanced_base_vertex_base_instance: createWEBGLMultiDrawInstancedBaseVertexBaseInstance,
     WEBGL_multisampled_render_to_texture: createWEBGLMultisampledRenderToTexture,
     WEBGL_render_shared_exponent: createWEBGLRenderSharedExponent
   };
@@ -26731,7 +28535,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   var GL_DYNAMIC_READ = 35049;
   var GL_DYNAMIC_COPY = 35050;
   var everBoundBuffers = /* @__PURE__ */ new WeakSet();
-  function isLost3(ctx) {
+  function isLost5(ctx) {
     return ctx._isLost;
   }
   var genericBindings = /* @__PURE__ */ new WeakMap();
@@ -26993,7 +28797,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.deleteBuffer = function(buffer) {
       const ctx = this;
-      if (isLost3(ctx)) return;
+      if (isLost5(ctx)) return;
       if (buffer === null || buffer === void 0) return;
       if (!(buffer instanceof WebGLBuffer)) {
         throw new TypeError(`Argument is not of type 'WebGLBuffer'`);
@@ -27030,7 +28834,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.isBuffer = function(buffer) {
       const ctx = this;
-      if (isLost3(ctx)) return false;
+      if (isLost5(ctx)) return false;
       if (buffer === null || buffer === void 0) return false;
       if (!(buffer instanceof WebGLBuffer)) {
         throw new TypeError(`Argument is not of type 'WebGLBuffer'`);
@@ -27041,7 +28845,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.bindBuffer = function(target, buffer) {
       const ctx = this;
-      if (isLost3(ctx)) return;
+      if (isLost5(ctx)) return;
       if (!isValidBufferTarget(ctx, target)) {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
@@ -27140,7 +28944,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.bufferData = function(target, size, usage) {
       const ctx = this;
-      if (isLost3(ctx)) return;
+      if (isLost5(ctx)) return;
       if (!isValidBufferTarget(ctx, target)) {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
@@ -27211,7 +29015,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.bufferSubData = function(target, offset, data) {
       const ctx = this;
-      if (isLost3(ctx)) return;
+      if (isLost5(ctx)) return;
       if (!isValidBufferTarget(ctx, target)) {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
@@ -27247,7 +29051,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.getBufferParameter = function(target, pname) {
       const ctx = this;
-      if (isLost3(ctx)) return null;
+      if (isLost5(ctx)) return null;
       if (!isValidBufferTarget(ctx, target)) {
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
@@ -27271,7 +29075,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       const p2 = proto;
       p2.bindBufferBase = function(target, index, buffer) {
         const ctx = this;
-        if (isLost3(ctx)) return;
+        if (isLost5(ctx)) return;
         if (target !== C2.UNIFORM_BUFFER && target !== C2.TRANSFORM_FEEDBACK_BUFFER) {
           ctx._errors.push(C1.INVALID_ENUM);
           return;
@@ -27280,7 +29084,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       };
       p2.bindBufferRange = function(target, index, buffer, offset, size) {
         const ctx = this;
-        if (isLost3(ctx)) return;
+        if (isLost5(ctx)) return;
         if (target !== C2.UNIFORM_BUFFER && target !== C2.TRANSFORM_FEEDBACK_BUFFER) {
           ctx._errors.push(C1.INVALID_ENUM);
           return;
@@ -27368,7 +29172,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       p2.getIndexedParameter = function(target, index) {
         var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n;
         const ctx = this;
-        if (isLost3(ctx)) return null;
+        if (isLost5(ctx)) return null;
         const s = ctx._state;
         let max;
         let blendPname = false;
@@ -27458,7 +29262,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       p2.getBufferSubData = function(target, srcByteOffset, dstBuffer, dstOffset, length) {
         var _a, _b;
         const ctx = this;
-        if (isLost3(ctx)) return;
+        if (isLost5(ctx)) return;
         if (!isValidBufferTarget(ctx, target)) {
           ctx._errors.push(C1.INVALID_ENUM);
           return;
@@ -27509,7 +29313,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       };
       p2.copyBufferSubData = function(readTarget, writeTarget, readOffset, writeOffset, size) {
         const ctx = this;
-        if (isLost3(ctx)) return;
+        if (isLost5(ctx)) return;
         if (!isValidBufferTarget(ctx, readTarget) || !isValidBufferTarget(ctx, writeTarget)) {
           ctx._errors.push(C1.INVALID_ENUM);
           return;
@@ -27581,7 +29385,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       const i = pname - DRAW_BUFFER0;
       if (s.drawFramebuffer === null) {
         const db0 = s.drawBuffers[0];
-        return db0 === NONE4 ? NONE4 : BACK3;
+        return db0 === NONE4 || db0 === void 0 ? NONE4 : BACK3;
       }
       return (_a = s.drawBuffers[i]) != null ? _a : NONE4;
     }
@@ -28081,6 +29885,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       return { format: fmt, type };
     }
     if (info == null ? void 0 : info.isFloat) {
+      if (internalFormat === C.RGB9_E5) {
+        return { format: C.RGB, type: C.UNSIGNED_INT_5_9_9_9_REV };
+      }
       if ((internalFormat === C.R16F || internalFormat === C.RG16F || internalFormat === C.RGBA16F) && (ctx._extensions.has("EXT_color_buffer_float") || ctx._extensions.has("EXT_color_buffer_half_float"))) {
         return { format: C.RGBA, type: C.FLOAT };
       }
@@ -28253,588 +30060,8 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
   }
 
-  // src/gl/api/state.ts
-  var GL_ZERO = 0;
-  var GL_ONE = 1;
-  var GL_CONSTANT_COLOR = 32769;
-  var GL_ONE_MINUS_CONSTANT_COLOR = 32770;
-  var GL_CONSTANT_ALPHA = 32771;
-  var GL_ONE_MINUS_CONSTANT_ALPHA = 32772;
-  var CAP_KEYS = {
-    [C1.BLEND]: "BLEND",
-    [C1.CULL_FACE]: "CULL_FACE",
-    [C1.DEPTH_TEST]: "DEPTH_TEST",
-    [C1.DITHER]: "DITHER",
-    [C1.POLYGON_OFFSET_FILL]: "POLYGON_OFFSET_FILL",
-    [C1.SAMPLE_ALPHA_TO_COVERAGE]: "SAMPLE_ALPHA_TO_COVERAGE",
-    [C1.SAMPLE_COVERAGE]: "SAMPLE_COVERAGE",
-    [C1.SCISSOR_TEST]: "SCISSOR_TEST",
-    [C1.STENCIL_TEST]: "STENCIL_TEST"
-  };
-  var CAP_KEYS_V2 = {
-    ...CAP_KEYS,
-    [C2.RASTERIZER_DISCARD]: "RASTERIZER_DISCARD"
-  };
-  var SRC_BLEND_FACTORS = [
-    GL_ZERO,
-    GL_ONE,
-    C1.SRC_COLOR,
-    C1.ONE_MINUS_SRC_COLOR,
-    C1.SRC_ALPHA,
-    C1.ONE_MINUS_SRC_ALPHA,
-    C1.DST_ALPHA,
-    C1.ONE_MINUS_DST_ALPHA,
-    C1.DST_COLOR,
-    C1.ONE_MINUS_DST_COLOR,
-    C1.SRC_ALPHA_SATURATE,
-    GL_CONSTANT_COLOR,
-    GL_ONE_MINUS_CONSTANT_COLOR,
-    GL_CONSTANT_ALPHA,
-    GL_ONE_MINUS_CONSTANT_ALPHA
-  ];
-  var DST_BLEND_FACTORS = SRC_BLEND_FACTORS.filter((f) => f !== C1.SRC_ALPHA_SATURATE);
-  var BLEND_EQUATIONS2 = [C1.FUNC_ADD, C1.FUNC_SUBTRACT, C1.FUNC_REVERSE_SUBTRACT];
-  var BLEND_EQUATIONS_V2 = [...BLEND_EQUATIONS2, C2.MIN, C2.MAX];
-  var SRC1_BLEND_FACTORS = [
-    35065,
-    // SRC1_COLOR_WEBGL
-    34185,
-    // SRC1_ALPHA_WEBGL
-    35066,
-    // ONE_MINUS_SRC1_COLOR_WEBGL
-    35067
-    // ONE_MINUS_SRC1_ALPHA_WEBGL
-  ];
-  function blendFactorSets(ctx) {
-    let src = SRC_BLEND_FACTORS;
-    let dst = DST_BLEND_FACTORS;
-    if (ctx._extensions.has("WEBGL_blend_func_extended")) {
-      src = [...src, ...SRC1_BLEND_FACTORS];
-      dst = [...dst, C1.SRC_ALPHA_SATURATE, ...SRC1_BLEND_FACTORS];
-    }
-    return { src, dst };
-  }
-  function isConstColorFactor2(f) {
-    return f === GL_CONSTANT_COLOR || f === GL_ONE_MINUS_CONSTANT_COLOR;
-  }
-  function isConstAlphaFactor2(f) {
-    return f === GL_CONSTANT_ALPHA || f === GL_ONE_MINUS_CONSTANT_ALPHA;
-  }
-  function constFactorPairInvalid2(src, dst) {
-    return isConstColorFactor2(src) && isConstAlphaFactor2(dst) || isConstAlphaFactor2(src) && isConstColorFactor2(dst);
-  }
-  function writeBlendAllDrawBuffers(ctx, e) {
-    const s = ctx._state;
-    for (let i = 0; i < s.limits.MAX_DRAW_BUFFERS; i++) s.blendPerDrawBuffer.set(i, e);
-  }
-  function writeColorMaskAllDrawBuffers(ctx, m) {
-    const s = ctx._state;
-    for (let i = 0; i < s.limits.MAX_DRAW_BUFFERS; i++) s.colorMaskPerDrawBuffer.set(i, [m[0], m[1], m[2], m[3]]);
-  }
-  function blendEquations(ctx) {
-    if (ctx._version === 2) return BLEND_EQUATIONS_V2;
-    if (ctx._extensions.has("EXT_blend_minmax")) return [...BLEND_EQUATIONS2, CExt.MIN_EXT, CExt.MAX_EXT];
-    return BLEND_EQUATIONS2;
-  }
-  var DEPTH_FUNCS = [
-    C1.NEVER,
-    C1.LESS,
-    C1.EQUAL,
-    C1.LEQUAL,
-    C1.GREATER,
-    C1.NOTEQUAL,
-    C1.GEQUAL,
-    C1.ALWAYS
-  ];
-  var STENCIL_FUNCS = DEPTH_FUNCS;
-  var STENCIL_OPS = [
-    C1.KEEP,
-    C1.ZERO,
-    C1.REPLACE,
-    C1.INCR,
-    C1.DECR,
-    C1.INVERT,
-    C1.INCR_WRAP,
-    C1.DECR_WRAP
-  ];
-  var STENCIL_FACES = [C1.FRONT, C1.BACK, C1.FRONT_AND_BACK];
-  function stencilFaceStates(ctx, face) {
-    switch (face) {
-      case C1.FRONT:
-        return [ctx._state.stencil.front];
-      case C1.BACK:
-        return [ctx._state.stencil.back];
-      case C1.FRONT_AND_BACK:
-        return [ctx._state.stencil.front, ctx._state.stencil.back];
-      default:
-        return null;
-    }
-  }
-  var HINT_MODES = [C1.FASTEST, C1.NICEST, C1.DONT_CARE];
-  function isLost4(ctx) {
-    return ctx._isLost;
-  }
-  function clamp012(v2) {
-    if (Number.isNaN(v2)) return 0;
-    return v2 < 0 ? 0 : v2 > 1 ? 1 : v2;
-  }
-  function installStateApi(proto) {
-    proto.activeTexture = function(texture) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const unit = texture >>> 0;
-      const max = ctx._state.limits.MAX_COMBINED_TEXTURE_IMAGE_UNITS;
-      if (unit < C1.TEXTURE0 || unit >= C1.TEXTURE0 + max) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      ctx._state.activeTexture = unit - C1.TEXTURE0;
-    };
-    proto.blendColor = function(red, green, blue, alpha) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      ctx._state.blend.color = [clamp012(red), clamp012(green), clamp012(blue), clamp012(alpha)];
-    };
-    proto.blendEquation = function(mode) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const eqs = blendEquations(ctx);
-      if (!eqs.includes(mode)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      ctx._state.blend.eqRGB = mode;
-      ctx._state.blend.eqAlpha = mode;
-      const s = ctx._state;
-      writeBlendAllDrawBuffers(ctx, {
-        srcRGB: s.blend.srcRGB,
-        dstRGB: s.blend.dstRGB,
-        srcAlpha: s.blend.srcAlpha,
-        dstAlpha: s.blend.dstAlpha,
-        eqRGB: mode,
-        eqAlpha: mode
-      });
-    };
-    proto.blendEquationSeparate = function(modeRGB, modeAlpha) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const eqs = blendEquations(ctx);
-      if (!eqs.includes(modeRGB) || !eqs.includes(modeAlpha)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      ctx._state.blend.eqRGB = modeRGB;
-      ctx._state.blend.eqAlpha = modeAlpha;
-      const s = ctx._state;
-      writeBlendAllDrawBuffers(ctx, {
-        srcRGB: s.blend.srcRGB,
-        dstRGB: s.blend.dstRGB,
-        srcAlpha: s.blend.srcAlpha,
-        dstAlpha: s.blend.dstAlpha,
-        eqRGB: modeRGB,
-        eqAlpha: modeAlpha
-      });
-    };
-    proto.blendFunc = function(sfactor, dfactor) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const { src, dst } = blendFactorSets(ctx);
-      if (!src.includes(sfactor) || !dst.includes(dfactor)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      if (constFactorPairInvalid2(sfactor, dfactor)) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      ctx._state.blend.srcRGB = sfactor;
-      ctx._state.blend.dstRGB = dfactor;
-      ctx._state.blend.srcAlpha = sfactor;
-      ctx._state.blend.dstAlpha = dfactor;
-      const s = ctx._state;
-      writeBlendAllDrawBuffers(ctx, {
-        srcRGB: sfactor,
-        dstRGB: dfactor,
-        srcAlpha: sfactor,
-        dstAlpha: dfactor,
-        eqRGB: s.blend.eqRGB,
-        eqAlpha: s.blend.eqAlpha
-      });
-    };
-    proto.blendFuncSeparate = function(srcRGB, dstRGB, srcAlpha, dstAlpha) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const { src, dst } = blendFactorSets(ctx);
-      if (!src.includes(srcRGB) || !dst.includes(dstRGB) || !src.includes(srcAlpha) || !dst.includes(dstAlpha)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      if (constFactorPairInvalid2(srcRGB, dstRGB) || constFactorPairInvalid2(srcAlpha, dstAlpha)) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      ctx._state.blend.srcRGB = srcRGB;
-      ctx._state.blend.dstRGB = dstRGB;
-      ctx._state.blend.srcAlpha = srcAlpha;
-      ctx._state.blend.dstAlpha = dstAlpha;
-      const s = ctx._state;
-      writeBlendAllDrawBuffers(ctx, {
-        srcRGB,
-        dstRGB,
-        srcAlpha,
-        dstAlpha,
-        eqRGB: s.blend.eqRGB,
-        eqAlpha: s.blend.eqAlpha
-      });
-    };
-    proto.clearColor = function(red, green, blue, alpha) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      if (ctx._version === 2 || ctx._extensions.has("EXT_color_buffer_half_float")) {
-        ctx._state.clearColor = [Number.isNaN(red) ? 0 : red, Number.isNaN(green) ? 0 : green, Number.isNaN(blue) ? 0 : blue, Number.isNaN(alpha) ? 0 : alpha];
-      } else {
-        ctx._state.clearColor = [clamp012(red), clamp012(green), clamp012(blue), clamp012(alpha)];
-      }
-    };
-    proto.clearDepth = function(depth) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      ctx._state.clearDepth = clamp012(depth);
-    };
-    proto.clearStencil = function(s) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      ctx._state.clearStencil = s | 0;
-    };
-    proto.colorMask = function(red, green, blue, alpha) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const m = [!!red, !!green, !!blue, !!alpha];
-      ctx._state.colorMask = m;
-      writeColorMaskAllDrawBuffers(ctx, m);
-    };
-    proto.cullFace = function(mode) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      if (mode !== C1.FRONT && mode !== C1.BACK && mode !== C1.FRONT_AND_BACK) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      ctx._state.cullFace = mode;
-    };
-    proto.depthFunc = function(func) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      if (!DEPTH_FUNCS.includes(func)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      ctx._state.depth.func = func;
-    };
-    proto.depthMask = function(flag) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      ctx._state.depth.mask = !!flag;
-    };
-    proto.depthRange = function(zNear, zFar) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      if (zNear > zFar) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      ctx._state.depth.range = [clamp012(zNear), clamp012(zFar)];
-    };
-    proto.disable = function(cap) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const table = ctx._version === 2 ? CAP_KEYS_V2 : CAP_KEYS;
-      const key = table[cap];
-      if (key === void 0) {
-        if (ctx._extensions.has("WEBGL_clip_cull_distance") && cap >= 12288 && cap <= 12295) {
-          setClipDistanceEnabled(ctx, cap - 12288, false);
-          return;
-        }
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      ctx._state.caps[key] = false;
-    };
-    proto.enable = function(cap) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const table = ctx._version === 2 ? CAP_KEYS_V2 : CAP_KEYS;
-      const key = table[cap];
-      if (key === void 0) {
-        if (ctx._extensions.has("WEBGL_clip_cull_distance") && cap >= 12288 && cap <= 12295) {
-          setClipDistanceEnabled(ctx, cap - 12288, true);
-          return;
-        }
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      ctx._state.caps[key] = true;
-    };
-    proto.frontFace = function(mode) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      if (mode !== C1.CW && mode !== C1.CCW) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      ctx._state.frontFace = mode;
-    };
-    proto.hint = function(target, mode) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      if (!HINT_MODES.includes(mode)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      if (target === C1.GENERATE_MIPMAP_HINT) {
-        ctx._state.hints.generateMipmap = mode;
-      } else if (target === C2.FRAGMENT_SHADER_DERIVATIVE_HINT && (ctx._version === 2 || ctx._extensions.has("OES_standard_derivatives"))) {
-        ctx._state.hints.fragmentShaderDerivative = mode;
-      } else {
-        ctx._errors.push(C1.INVALID_ENUM);
-      }
-    };
-    proto.isEnabled = function(cap) {
-      const ctx = this;
-      if (isLost4(ctx)) return false;
-      const table = ctx._version === 2 ? CAP_KEYS_V2 : CAP_KEYS;
-      const key = table[cap];
-      if (key === void 0) {
-        if (ctx._extensions.has("WEBGL_clip_cull_distance") && cap >= 12288 && cap <= 12295) {
-          return isClipDistanceEnabled(ctx, cap - 12288);
-        }
-        ctx._errors.push(C1.INVALID_ENUM);
-        return false;
-      }
-      return ctx._state.caps[key];
-    };
-    proto.lineWidth = function(width) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      if (!(width > 0)) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      ctx._state.lineWidth = width;
-    };
-    proto.pixelStorei = function(pname, param) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const s = ctx._state;
-      const v2 = param | 0;
-      switch (pname) {
-        case C1.UNPACK_ALIGNMENT:
-        case C1.PACK_ALIGNMENT: {
-          if (v2 !== 1 && v2 !== 2 && v2 !== 4 && v2 !== 8) {
-            ctx._errors.push(C1.INVALID_VALUE);
-            return;
-          }
-          if (pname === C1.UNPACK_ALIGNMENT) s.pixelStore.unpack.alignment = v2;
-          else s.pixelStore.pack.alignment = v2;
-          return;
-        }
-        case C1.UNPACK_FLIP_Y_WEBGL: {
-          if (v2 !== 0 && v2 !== 1) {
-            ctx._errors.push(C1.INVALID_VALUE);
-            return;
-          }
-          s.pixelStore.unpack.flipY = v2 !== 0;
-          return;
-        }
-        case C1.UNPACK_PREMULTIPLY_ALPHA_WEBGL: {
-          if (v2 !== 0 && v2 !== 1) {
-            ctx._errors.push(C1.INVALID_VALUE);
-            return;
-          }
-          s.pixelStore.unpack.premultiplyAlpha = v2 !== 0;
-          return;
-        }
-        case C1.UNPACK_COLORSPACE_CONVERSION_WEBGL: {
-          if (v2 !== C1.BROWSER_DEFAULT_WEBGL && v2 !== C1.NONE) {
-            ctx._errors.push(C1.INVALID_VALUE);
-            return;
-          }
-          s.pixelStore.unpack.colorspaceConversion = v2;
-          return;
-        }
-        default:
-          if (ctx._version === 2) {
-            switch (pname) {
-              case C2.UNPACK_ROW_LENGTH:
-                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
-                else s.pixelStore.unpack.rowLength = v2;
-                return;
-              case C2.UNPACK_SKIP_ROWS:
-                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
-                else s.pixelStore.unpack.skipRows = v2;
-                return;
-              case C2.UNPACK_SKIP_PIXELS:
-                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
-                else s.pixelStore.unpack.skipPixels = v2;
-                return;
-              case C2.UNPACK_IMAGE_HEIGHT:
-                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
-                else s.pixelStore.unpack.imageHeight = v2;
-                return;
-              case C2.UNPACK_SKIP_IMAGES:
-                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
-                else s.pixelStore.unpack.skipImages = v2;
-                return;
-              case C2.PACK_ROW_LENGTH:
-                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
-                else s.pixelStore.pack.rowLength = v2;
-                return;
-              case C2.PACK_SKIP_ROWS:
-                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
-                else s.pixelStore.pack.skipRows = v2;
-                return;
-              case C2.PACK_SKIP_PIXELS:
-                if (v2 < 0) ctx._errors.push(C1.INVALID_VALUE);
-                else s.pixelStore.pack.skipPixels = v2;
-                return;
-            }
-          }
-          ctx._errors.push(C1.INVALID_ENUM);
-          return;
-      }
-    };
-    proto.polygonOffset = function(factor, units) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      if (!Number.isFinite(factor) || !Number.isFinite(units)) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      ctx._state.polygonOffset.factor = factor;
-      ctx._state.polygonOffset.units = units;
-    };
-    proto.sampleCoverage = function(value, invert) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      ctx._state.sampleCoverage.value = clamp012(value);
-      ctx._state.sampleCoverage.invert = !!invert;
-    };
-    proto.scissor = function(x, y, width, height) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const xv = x | 0;
-      const yv = y | 0;
-      const wv = width | 0;
-      const hv = height | 0;
-      if (wv < 0 || hv < 0) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      ctx._state.scissor = { x: xv, y: yv, w: wv, h: hv };
-    };
-    proto.stencilFunc = function(func, ref, mask) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      if (!STENCIL_FUNCS.includes(func)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      const r = ref | 0;
-      const m = mask >>> 0;
-      ctx._state.stencil.front.func = func;
-      ctx._state.stencil.front.ref = r;
-      ctx._state.stencil.front.valueMask = m;
-      ctx._state.stencil.back.func = func;
-      ctx._state.stencil.back.ref = r;
-      ctx._state.stencil.back.valueMask = m;
-    };
-    proto.stencilFuncSeparate = function(face, func, ref, mask) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const states = stencilFaceStates(ctx, face);
-      if (states === null) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      if (!STENCIL_FUNCS.includes(func)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      const r = ref | 0;
-      const m = mask >>> 0;
-      for (const st of states) {
-        st.func = func;
-        st.ref = r;
-        st.valueMask = m;
-      }
-    };
-    proto.stencilMask = function(mask) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const m = mask >>> 0;
-      ctx._state.stencil.front.writeMask = m;
-      ctx._state.stencil.back.writeMask = m;
-    };
-    proto.stencilMaskSeparate = function(face, mask) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const states = stencilFaceStates(ctx, face);
-      if (states === null) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      const m = mask >>> 0;
-      for (const st of states) st.writeMask = m;
-    };
-    proto.stencilOp = function(fail, zfail, zpass) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      if (!STENCIL_OPS.includes(fail) || !STENCIL_OPS.includes(zfail) || !STENCIL_OPS.includes(zpass)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      ctx._state.stencil.front.fail = fail;
-      ctx._state.stencil.front.depthFail = zfail;
-      ctx._state.stencil.front.depthPass = zpass;
-      ctx._state.stencil.back.fail = fail;
-      ctx._state.stencil.back.depthFail = zfail;
-      ctx._state.stencil.back.depthPass = zpass;
-    };
-    proto.stencilOpSeparate = function(face, fail, zfail, zpass) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const states = stencilFaceStates(ctx, face);
-      if (states === null) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      if (!STENCIL_OPS.includes(fail) || !STENCIL_OPS.includes(zfail) || !STENCIL_OPS.includes(zpass)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      for (const st of states) {
-        st.fail = fail;
-        st.depthFail = zfail;
-        st.depthPass = zpass;
-      }
-    };
-    proto.viewport = function(x, y, width, height) {
-      const ctx = this;
-      if (isLost4(ctx)) return;
-      const xv = x | 0;
-      const yv = y | 0;
-      const wv = width | 0;
-      const hv = height | 0;
-      if (wv < 0 || hv < 0) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      ctx._state.viewport = { x: xv, y: yv, w: wv, h: hv };
-    };
-  }
-
   // src/gl/api/vertex-attrib.ts
-  function isLost5(ctx) {
+  function isLost6(ctx) {
     return ctx._isLost;
   }
   function attribIndex(ctx, index) {
@@ -28901,14 +30128,14 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
     throw new TypeError("Argument is not a Float32List");
   }
-  function toInt32List(v2) {
+  function toInt32List2(v2) {
     if (v2 instanceof DataView) throw new TypeError("Argument is not an Int32List");
     if (v2 instanceof Int32Array) return v2;
     if (Array.isArray(v2)) return Int32Array.from(v2);
     if (ArrayBuffer.isView(v2)) return Int32Array.from(v2);
     throw new TypeError("Argument is not an Int32List");
   }
-  function toUint32List(v2) {
+  function toUint32List2(v2) {
     if (v2 instanceof DataView) throw new TypeError("Argument is not a Uint32List");
     if (v2 instanceof Uint32Array) return v2;
     if (Array.isArray(v2)) return Uint32Array.from(v2);
@@ -28976,21 +30203,21 @@ ${inner.map((l) => "  " + l).join("\n")}
   function installVertexAttribApi(proto) {
     proto.enableVertexAttribArray = function(index) {
       const ctx = this;
-      if (isLost5(ctx)) return;
+      if (isLost6(ctx)) return;
       const i = attribIndex(ctx, index);
       if (i === null) return;
       ctx._state.vao.attribs[i].enabled = true;
     };
     proto.disableVertexAttribArray = function(index) {
       const ctx = this;
-      if (isLost5(ctx)) return;
+      if (isLost6(ctx)) return;
       const i = attribIndex(ctx, index);
       if (i === null) return;
       ctx._state.vao.attribs[i].enabled = false;
     };
     proto.vertexAttribPointer = function(index, size, type, normalized, stride, offset) {
       const ctx = this;
-      if (isLost5(ctx)) return;
+      if (isLost6(ctx)) return;
       const i = attribIndex(ctx, index);
       if (i === null) return;
       const sz = size | 0;
@@ -29024,14 +30251,14 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.vertexAttrib1f = function(index, x) {
       const ctx = this;
-      if (isLost5(ctx)) return;
+      if (isLost6(ctx)) return;
       const i = attribIndex(ctx, index);
       if (i === null) return;
       setConstantFValues(ctx, i, x, 0, 0, 1);
     };
     proto.vertexAttrib1fv = function(index, values) {
       const ctx = this;
-      if (isLost5(ctx)) return;
+      if (isLost6(ctx)) return;
       const i = attribIndex(ctx, index);
       if (i === null) return;
       const a = toFloat32List(values);
@@ -29043,14 +30270,14 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.vertexAttrib2f = function(index, x, y) {
       const ctx = this;
-      if (isLost5(ctx)) return;
+      if (isLost6(ctx)) return;
       const i = attribIndex(ctx, index);
       if (i === null) return;
       setConstantFValues(ctx, i, x, y, 0, 1);
     };
     proto.vertexAttrib2fv = function(index, values) {
       const ctx = this;
-      if (isLost5(ctx)) return;
+      if (isLost6(ctx)) return;
       const i = attribIndex(ctx, index);
       if (i === null) return;
       const a = toFloat32List(values);
@@ -29062,14 +30289,14 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.vertexAttrib3f = function(index, x, y, z) {
       const ctx = this;
-      if (isLost5(ctx)) return;
+      if (isLost6(ctx)) return;
       const i = attribIndex(ctx, index);
       if (i === null) return;
       setConstantFValues(ctx, i, x, y, z, 1);
     };
     proto.vertexAttrib3fv = function(index, values) {
       const ctx = this;
-      if (isLost5(ctx)) return;
+      if (isLost6(ctx)) return;
       const i = attribIndex(ctx, index);
       if (i === null) return;
       const a = toFloat32List(values);
@@ -29081,14 +30308,14 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.vertexAttrib4f = function(index, x, y, z, w) {
       const ctx = this;
-      if (isLost5(ctx)) return;
+      if (isLost6(ctx)) return;
       const i = attribIndex(ctx, index);
       if (i === null) return;
       setConstantFValues(ctx, i, x, y, z, w);
     };
     proto.vertexAttrib4fv = function(index, values) {
       const ctx = this;
-      if (isLost5(ctx)) return;
+      if (isLost6(ctx)) return;
       const i = attribIndex(ctx, index);
       if (i === null) return;
       const a = toFloat32List(values);
@@ -29100,7 +30327,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.getVertexAttrib = function(index, pname) {
       const ctx = this;
-      if (isLost5(ctx)) return null;
+      if (isLost6(ctx)) return null;
       const i = attribIndex(ctx, index);
       if (i === null) return null;
       const attrib = ctx._state.vao.attribs[i];
@@ -29150,7 +30377,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.getVertexAttribOffset = function(index, pname) {
       const ctx = this;
-      if (isLost5(ctx)) return 0;
+      if (isLost6(ctx)) return 0;
       const i = attribIndex(ctx, index);
       if (i === null) return 0;
       if (pname !== C1.VERTEX_ATTRIB_ARRAY_POINTER) {
@@ -29163,7 +30390,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       const p2 = proto;
       p2.vertexAttribIPointer = function(index, size, type, stride, offset) {
         const ctx = this;
-        if (isLost5(ctx)) return;
+        if (isLost6(ctx)) return;
         const i = attribIndex(ctx, index);
         if (i === null) return;
         const sz = size | 0;
@@ -29201,7 +30428,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       };
       p2.vertexAttribI4i = function(index, x, y, z, w) {
         const ctx = this;
-        if (isLost5(ctx)) return;
+        if (isLost6(ctx)) return;
         const i = attribIndex(ctx, index);
         if (i === null) return;
         const g2 = globalStore(ctx)[i];
@@ -29220,10 +30447,10 @@ ${inner.map((l) => "  " + l).join("\n")}
       };
       p2.vertexAttribI4iv = function(index, values) {
         const ctx = this;
-        if (isLost5(ctx)) return;
+        if (isLost6(ctx)) return;
         const i = attribIndex(ctx, index);
         if (i === null) return;
-        const a = toInt32List(values);
+        const a = toInt32List2(values);
         if (a.length < 4) {
           ctx._errors.push(C1.INVALID_VALUE);
           return;
@@ -29244,7 +30471,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       };
       p2.vertexAttribI4ui = function(index, x, y, z, w) {
         const ctx = this;
-        if (isLost5(ctx)) return;
+        if (isLost6(ctx)) return;
         const i = attribIndex(ctx, index);
         if (i === null) return;
         const g2 = globalStore(ctx)[i];
@@ -29263,10 +30490,10 @@ ${inner.map((l) => "  " + l).join("\n")}
       };
       p2.vertexAttribI4uiv = function(index, values) {
         const ctx = this;
-        if (isLost5(ctx)) return;
+        if (isLost6(ctx)) return;
         const i = attribIndex(ctx, index);
         if (i === null) return;
-        const a = toUint32List(values);
+        const a = toUint32List2(values);
         if (a.length < 4) {
           ctx._errors.push(C1.INVALID_VALUE);
           return;
@@ -29287,7 +30514,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       };
       p2.vertexAttribDivisor = function(index, divisor) {
         const ctx = this;
-        if (isLost5(ctx)) return;
+        if (isLost6(ctx)) return;
         const i = attribIndex(ctx, index);
         if (i === null) return;
         ctx._state.vao.attribs[i].divisor = divisor >>> 0;
@@ -29302,7 +30529,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   var RGB9_E52 = 35901;
   var isPow22 = (v2) => v2 > 0 && (v2 & v2 - 1) === 0;
   var everBoundTextures = /* @__PURE__ */ new WeakSet();
-  function isLost6(ctx) {
+  function isLost7(ctx) {
     return ctx._isLost;
   }
   var TextureCtor = WebGLTexture;
@@ -29441,7 +30668,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
   }
   function texParameterImpl(ctx, target, pname, param) {
-    if (isLost6(ctx)) return;
+    if (isLost7(ctx)) return;
     if (!isValidTextureTarget(ctx, target)) {
       ctx._errors.push(C1.INVALID_ENUM);
       return;
@@ -29458,7 +30685,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (!isValidTexParamValue(ctx, pname, param)) return;
     tex2._params[pname] = param;
     if (pname === 10241 || pname === 10240 || pname === 33084 || pname === 33085) {
-      updateCompleteness(tex2, ctx._version);
+      updateCompleteness(tex2, ctx._version, floatLinearExtensionState(ctx));
     }
   }
   function installTexturesApi(proto) {
@@ -29468,7 +30695,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.deleteTexture = function(texture) {
       const ctx = this;
-      if (isLost6(ctx)) return;
+      if (isLost7(ctx)) return;
       if (texture === null || texture === void 0) return;
       if (!(texture instanceof WebGLTexture)) {
         throw new TypeError(`Argument is not of type 'WebGLTexture'`);
@@ -29510,7 +30737,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.isTexture = function(texture) {
       const ctx = this;
-      if (isLost6(ctx)) return false;
+      if (isLost7(ctx)) return false;
       if (texture === null || texture === void 0) return false;
       if (!(texture instanceof WebGLTexture)) return false;
       if (texture._context !== ctx) return false;
@@ -29519,7 +30746,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.bindTexture = function(target, texture) {
       const ctx = this;
-      if (isLost6(ctx)) return;
+      if (isLost7(ctx)) return;
       if (!isValidTextureTarget(ctx, target)) {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
@@ -29556,7 +30783,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.getTexParameter = function(target, pname) {
       const ctx = this;
-      if (isLost6(ctx)) return null;
+      if (isLost7(ctx)) return null;
       if (!isValidTextureTarget(ctx, target)) {
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
@@ -29583,7 +30810,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     proto.generateMipmap = function(target) {
       var _a;
       const ctx = this;
-      if (isLost6(ctx)) return;
+      if (isLost7(ctx)) return;
       if (!isValidTextureTarget(ctx, target)) {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
@@ -29642,7 +30869,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   var UNSIGNED_INT_24_8_WEBGL = 34042;
   var SRGB_EXT = 35904;
   var SRGB_ALPHA_EXT = 35906;
-  function isLost7(ctx) {
+  function isLost8(ctx) {
     return ctx._isLost;
   }
   var CUBE_FACES = [
@@ -30154,14 +31381,25 @@ ${inner.map((l) => "  " + l).join("\n")}
         return 1;
     }
   }
-  function validatePixelsSize(ctx, pixels, width, height, depth, format, type) {
+  function validatePixelsSize(ctx, pixels, width, height, depth, format, type, is3D) {
     const unpack = ctx._state.pixelStore.unpack;
     const srcBpp = bytesPerTexel(ctx, format, type);
     const rowLength = unpack.rowLength > 0 ? unpack.rowLength : width;
     const rowBytes = align(rowLength * srcBpp, unpack.alignment);
     const imageHeight = unpack.imageHeight > 0 ? unpack.imageHeight : height;
-    const paddedRows = Math.max(0, unpack.skipRows + (unpack.skipImages + depth) * imageHeight - (height > 0 ? 1 : 0));
-    const required = paddedRows * rowBytes + (height > 0 ? rowLength * srcBpp : 0) + unpack.skipPixels * srcBpp;
+    if (unpack.skipPixels + width > rowLength) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    if (is3D && unpack.skipRows + height > imageHeight) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return false;
+    }
+    const rowsBeforeLast = Math.max(
+      0,
+      unpack.skipRows + (is3D ? (unpack.skipImages + depth - 1) * imageHeight : 0) + (height - 1)
+    );
+    const required = unpack.skipPixels * srcBpp + rowsBeforeLast * rowBytes + (height > 0 ? width * srcBpp : 0);
     if (typeof pixels === "number") {
       const buf = ctx._state.pixelUnpackBuffer;
       if (buf === null || buf._data === null || pixels + required > buf._size) {
@@ -30285,6 +31523,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       if (isSvgSource(s)) return svgImageDims(s);
       return typeof s.naturalHeight === "number" ? { width: s.naturalWidth, height: s.naturalHeight } : null;
     }
+    if (typeof s.format === "string" && typeof s.displayWidth === "number" && typeof s.displayHeight === "number") {
+      return { width: s.displayWidth, height: s.displayHeight };
+    }
     if (typeof s.width === "number" && typeof s.height === "number") return { width: s.width, height: s.height };
     return null;
   }
@@ -30404,14 +31645,14 @@ ${inner.map((l) => "  " + l).join("\n")}
       if (!w2ValidateFormatType(ctx, internalformat, format, type, pixels)) return;
       if (typeof pixels === "number") {
         if (!w2ValidatePbo(ctx, pixels)) return;
-        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
       } else if (ArrayBuffer.isView(pixels)) {
-        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
       }
     } else {
       if (!w1ValidateFormatType(ctx, internalformat, format, type, pixels)) return;
       if (ArrayBuffer.isView(pixels)) {
-        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
       }
     }
     uploadTexImage(ctx, tex2, target, level, internalformat, width, height, 1, border, format, type, pixels);
@@ -30441,9 +31682,14 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (!w2ValidateFormatType(ctx, internalformat, format, type, pixels)) return;
     if (typeof pixels === "number") {
       if (!w2ValidatePbo(ctx, pixels)) return;
-      if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type)) return;
+      if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type, true)) return;
     } else if (ArrayBuffer.isView(pixels)) {
-      if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type)) return;
+      const unpack = ctx._state.pixelStore.unpack;
+      if (unpack.flipY || unpack.premultiplyAlpha) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type, true)) return;
     }
     uploadTexImage(ctx, tex2, target, level, internalformat, width, height, depth, border, format, type, pixels);
   }
@@ -30629,9 +31875,13 @@ ${inner.map((l) => "  " + l).join("\n")}
       if (!w2ValidateSubFormatType(ctx, tex2._image.internalFormat, format, type)) return;
       if (typeof pixels === "number") {
         if (!w2ValidatePbo(ctx, pixels)) return;
-        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
       } else if (ArrayBuffer.isView(pixels)) {
-        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+        if (!w2TypeMatchesView(type, pixels)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
       } else {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
@@ -30657,7 +31907,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
-      if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+      if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
     }
     uploadTexSubImage(ctx, tex2, target, level, xoffset, yoffset, 0, width, height, 1, format, type, pixels);
   }
@@ -30714,9 +31964,18 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (!w2ValidateSubFormatType(ctx, tex2._image.internalFormat, format, type)) return;
     if (typeof pixels === "number") {
       if (!w2ValidatePbo(ctx, pixels)) return;
-      if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type)) return;
+      if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type, true)) return;
     } else if (ArrayBuffer.isView(pixels)) {
-      if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type)) return;
+      const unpack = ctx._state.pixelStore.unpack;
+      if (unpack.flipY || unpack.premultiplyAlpha) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (!w2TypeMatchesView(type, pixels)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type, true)) return;
     } else {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
@@ -31476,7 +32735,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   function installTexImageApi(proto) {
     proto.texImage2D = function(target, level, internalformat, width, height, border, format, type, pixels) {
       const ctx = this;
-      if (isLost7(ctx)) return;
+      if (isLost8(ctx)) return;
       if (arguments.length === 6) {
         texImage2DDOM(ctx, target, level, internalformat, width, height, border);
         return;
@@ -31494,7 +32753,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.texSubImage2D = function(target, level, xoffset, yoffset, width, height, format, type, pixels) {
       const ctx = this;
-      if (isLost7(ctx)) return;
+      if (isLost8(ctx)) return;
       if (arguments.length === 7) {
         texSubImage2DDOM(ctx, target, level, xoffset, yoffset, width, height, format);
         return;
@@ -31512,29 +32771,35 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.copyTexImage2D = function(target, level, internalformat, x, y, width, height, border) {
       const ctx = this;
-      if (isLost7(ctx)) return;
+      if (isLost8(ctx)) return;
       copyTexImage2DImpl(ctx, target, level, internalformat, x, y, width, height, border);
     };
     proto.copyTexSubImage2D = function(target, level, xoffset, yoffset, x, y, width, height) {
       const ctx = this;
-      if (isLost7(ctx)) return;
+      if (isLost8(ctx)) return;
       copyTexSubImage2DImpl(ctx, target, level, xoffset, yoffset, x, y, width, height);
     };
     proto.compressedTexImage2D = function(target, level, internalformat, width, height, border, data) {
       const ctx = this;
-      if (isLost7(ctx)) return;
+      if (isLost8(ctx)) return;
+      if (ctx._version === 1 && (data === null || data === void 0)) {
+        throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
+      }
       compressedTexImage2DImpl(ctx, target, level, internalformat, width, height, border, data, arguments[7], arguments[8]);
     };
     proto.compressedTexSubImage2D = function(target, level, xoffset, yoffset, width, height, format, data) {
       const ctx = this;
-      if (isLost7(ctx)) return;
+      if (isLost8(ctx)) return;
+      if (ctx._version === 1 && (data === null || data === void 0)) {
+        throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
+      }
       compressedTexSubImage2DImpl(ctx, target, level, xoffset, yoffset, width, height, format, data, arguments[8], arguments[9]);
     };
     if ("texImage3D" in proto) {
       const p = proto;
       p.texImage3D = function(target, level, internalformat, width, height, depth, border, format, type, pixels) {
         const ctx = this;
-        if (isLost7(ctx)) return;
+        if (isLost8(ctx)) return;
         if (arguments.length === 6) {
           texImage3DDOM(ctx, target, level, internalformat, width, height, border);
           return;
@@ -31552,7 +32817,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       };
       p.texSubImage3D = function(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels) {
         const ctx = this;
-        if (isLost7(ctx)) return;
+        if (isLost8(ctx)) return;
         if (arguments.length === 8) {
           texSubImage3DDOM(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth);
           return;
@@ -31570,7 +32835,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       };
       p.texStorage2D = function(target, levels, internalformat, width, height) {
         const ctx = this;
-        if (isLost7(ctx)) return;
+        if (isLost8(ctx)) return;
         if (ctx._version !== 2) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
@@ -31579,7 +32844,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       };
       p.texStorage3D = function(target, levels, internalformat, width, height, depth) {
         const ctx = this;
-        if (isLost7(ctx)) return;
+        if (isLost8(ctx)) return;
         if (ctx._version !== 2) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
@@ -31588,17 +32853,17 @@ ${inner.map((l) => "  " + l).join("\n")}
       };
       p.compressedTexImage3D = function(target, level, internalformat, width, height, depth, border, data) {
         const ctx = this;
-        if (isLost7(ctx)) return;
+        if (isLost8(ctx)) return;
         compressedTexImage3DImpl(ctx, target, level, internalformat, width, height, depth, border, data, arguments[8], arguments[9]);
       };
       p.compressedTexSubImage3D = function(target, level, xoffset, yoffset, zoffset, width, height, depth, format, data) {
         const ctx = this;
-        if (isLost7(ctx)) return;
+        if (isLost8(ctx)) return;
         compressedTexSubImage3DImpl(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, data, arguments[10], arguments[11]);
       };
       p.copyTexSubImage3D = function(target, level, xoffset, yoffset, zoffset, x, y, width, height) {
         const ctx = this;
-        if (isLost7(ctx)) return;
+        if (isLost8(ctx)) return;
         copyTexSubImage3DImpl(ctx, target, level, xoffset, yoffset, zoffset, x, y, width, height);
       };
     }
@@ -31611,7 +32876,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   var FLOAT_MAT3x4 = 35688;
   var FLOAT_MAT4x2 = 35689;
   var FLOAT_MAT4x3 = 35690;
-  function isLost8(ctx) {
+  function isLost9(ctx) {
     return ctx._isLost;
   }
   function toFloat32List2(v2) {
@@ -31621,14 +32886,14 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (ArrayBuffer.isView(v2)) return new Float32Array(v2);
     throw new TypeError("Argument is not a Float32List");
   }
-  function toInt32List2(v2) {
+  function toInt32List3(v2) {
     if (v2 instanceof DataView) throw new TypeError("Argument is not an Int32List");
     if (v2 instanceof Int32Array) return v2;
     if (Array.isArray(v2)) return Int32Array.from(v2);
     if (ArrayBuffer.isView(v2)) return Int32Array.from(v2);
     throw new TypeError("Argument is not an Int32List");
   }
-  function toUint32List2(v2) {
+  function toUint32List3(v2) {
     if (v2 instanceof DataView) throw new TypeError("Argument is not a Uint32List");
     if (v2 instanceof Uint32Array) return v2;
     if (Array.isArray(v2)) return Uint32Array.from(v2);
@@ -31779,7 +33044,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     return type === C1.BOOL || type === C1.BOOL_VEC2 || type === C1.BOOL_VEC3 || type === C1.BOOL_VEC4;
   }
   function uniformScalar(ctx, location, k, family, vals) {
-    if (isLost8(ctx)) return;
+    if (isLost9(ctx)) return;
     const t = prepareUniform(ctx, location);
     if (t === null) return;
     const ok = family === "f" ? typeIsFloatFamily(t.uniform.type, k) : family === "i" ? typeIsIntFamily(t.uniform.type, k) : typeIsUintFamily(t.uniform.type, k);
@@ -31807,7 +33072,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
   }
   function uniformVector(ctx, location, k, family, values, srcOffset, srcLength) {
-    if (isLost8(ctx)) return;
+    if (isLost9(ctx)) return;
     const t = prepareUniform(ctx, location);
     if (t === null) return;
     const ok = family === "f" ? typeIsFloatFamily(t.uniform.type, k) : family === "i" ? typeIsIntFamily(t.uniform.type, k) : typeIsUintFamily(t.uniform.type, k);
@@ -31856,7 +33121,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
   }
   function uniformMatrix(ctx, location, transpose, value, cols, rows, typeConst, srcOffset, srcLength) {
-    if (isLost8(ctx)) return;
+    if (isLost9(ctx)) return;
     const t = prepareUniform(ctx, location);
     if (t === null) return;
     if (t.uniform.type !== typeConst) {
@@ -31933,16 +33198,16 @@ ${inner.map((l) => "  " + l).join("\n")}
       uniformVector(this, location, 4, "f", toFloat32List2(v2), srcOffset, srcLength);
     };
     proto.uniform1iv = function(location, v2, srcOffset = 0, srcLength = 0) {
-      uniformVector(this, location, 1, "i", toInt32List2(v2), srcOffset, srcLength);
+      uniformVector(this, location, 1, "i", toInt32List3(v2), srcOffset, srcLength);
     };
     proto.uniform2iv = function(location, v2, srcOffset = 0, srcLength = 0) {
-      uniformVector(this, location, 2, "i", toInt32List2(v2), srcOffset, srcLength);
+      uniformVector(this, location, 2, "i", toInt32List3(v2), srcOffset, srcLength);
     };
     proto.uniform3iv = function(location, v2, srcOffset = 0, srcLength = 0) {
-      uniformVector(this, location, 3, "i", toInt32List2(v2), srcOffset, srcLength);
+      uniformVector(this, location, 3, "i", toInt32List3(v2), srcOffset, srcLength);
     };
     proto.uniform4iv = function(location, v2, srcOffset = 0, srcLength = 0) {
-      uniformVector(this, location, 4, "i", toInt32List2(v2), srcOffset, srcLength);
+      uniformVector(this, location, 4, "i", toInt32List3(v2), srcOffset, srcLength);
     };
     proto.uniformMatrix2fv = function(location, transpose, value, srcOffset = 0, srcLength = 0) {
       uniformMatrix(this, location, transpose, value, 2, 2, C1.FLOAT_MAT2, srcOffset, srcLength);
@@ -31968,16 +33233,16 @@ ${inner.map((l) => "  " + l).join("\n")}
         uniformScalar(this, location, 4, "ui", [x, y, z, w]);
       };
       p2.uniform1uiv = function(location, v2, srcOffset = 0, srcLength = 0) {
-        uniformVector(this, location, 1, "ui", toUint32List2(v2), srcOffset, srcLength);
+        uniformVector(this, location, 1, "ui", toUint32List3(v2), srcOffset, srcLength);
       };
       p2.uniform2uiv = function(location, v2, srcOffset = 0, srcLength = 0) {
-        uniformVector(this, location, 2, "ui", toUint32List2(v2), srcOffset, srcLength);
+        uniformVector(this, location, 2, "ui", toUint32List3(v2), srcOffset, srcLength);
       };
       p2.uniform3uiv = function(location, v2, srcOffset = 0, srcLength = 0) {
-        uniformVector(this, location, 3, "ui", toUint32List2(v2), srcOffset, srcLength);
+        uniformVector(this, location, 3, "ui", toUint32List3(v2), srcOffset, srcLength);
       };
       p2.uniform4uiv = function(location, v2, srcOffset = 0, srcLength = 0) {
-        uniformVector(this, location, 4, "ui", toUint32List2(v2), srcOffset, srcLength);
+        uniformVector(this, location, 4, "ui", toUint32List3(v2), srcOffset, srcLength);
       };
       p2.uniformMatrix2x3fv = function(location, transpose, value, srcOffset = 0, srcLength = 0) {
         uniformMatrix(this, location, transpose, value, 2, 3, FLOAT_MAT2x3, srcOffset, srcLength);
@@ -32019,7 +33284,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   var UNSIGNED_INT2 = 5125;
   var CUBE_POSITIVE_X3 = 34069;
   var CUBE_NEGATIVE_Z3 = 34074;
-  function isLost9(ctx) {
+  function isLost10(ctx) {
     return ctx._isLost;
   }
   var FboCtor = WebGLFramebuffer;
@@ -32611,7 +33876,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.deleteFramebuffer = function(framebuffer) {
       const ctx = this;
-      if (isLost9(ctx)) return;
+      if (isLost10(ctx)) return;
       if (framebuffer === null || framebuffer === void 0) return;
       if (!(framebuffer instanceof WebGLFramebuffer)) throw new TypeError("Argument is not of type 'WebGLFramebuffer'");
       if (framebuffer._context !== ctx) {
@@ -32642,7 +33907,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.bindFramebuffer = function(target, framebuffer) {
       const ctx = this;
-      if (isLost9(ctx)) return;
+      if (isLost10(ctx)) return;
       if (!isValidFramebufferTarget(ctx, target)) {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
@@ -32670,7 +33935,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.framebufferRenderbuffer = function(target, attachment, renderbuffertarget, renderbuffer) {
       const ctx = this;
-      if (isLost9(ctx)) return;
+      if (isLost10(ctx)) return;
       const rb = renderbuffer === null || renderbuffer === void 0 ? null : validateRbo(ctx, renderbuffer);
       if (renderbuffer !== null && renderbuffer !== void 0 && rb === null) return;
       if (!isValidFramebufferTarget(ctx, target)) {
@@ -32703,7 +33968,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.framebufferTexture2D = function(target, attachment, textarget, texture, level) {
       const ctx = this;
-      if (isLost9(ctx)) return;
+      if (isLost10(ctx)) return;
       const tex2 = texture === null || texture === void 0 ? null : validateTex(ctx, texture);
       if (texture !== null && texture !== void 0 && tex2 === null) return;
       if (!isValidFramebufferTarget(ctx, target)) {
@@ -32778,7 +34043,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.getFramebufferAttachmentParameter = function(target, attachment, pname) {
       const ctx = this;
-      if (isLost9(ctx)) return null;
+      if (isLost10(ctx)) return null;
       if (!isValidFramebufferTarget(ctx, target)) {
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
@@ -32887,7 +34152,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.deleteRenderbuffer = function(renderbuffer) {
       const ctx = this;
-      if (isLost9(ctx)) return;
+      if (isLost10(ctx)) return;
       if (renderbuffer === null || renderbuffer === void 0) return;
       if (!(renderbuffer instanceof WebGLRenderbuffer)) throw new TypeError("Argument is not of type 'WebGLRenderbuffer'");
       if (renderbuffer._context !== ctx) {
@@ -32923,7 +34188,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.bindRenderbuffer = function(target, renderbuffer) {
       const ctx = this;
-      if (isLost9(ctx)) return;
+      if (isLost10(ctx)) return;
       if (target !== C1.RENDERBUFFER) {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
@@ -32935,7 +34200,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.renderbufferStorage = function(target, internalformat, width, height) {
       const ctx = this;
-      if (isLost9(ctx)) return;
+      if (isLost10(ctx)) return;
       if (target !== C1.RENDERBUFFER) {
         ctx._errors.push(C1.INVALID_ENUM);
         return;
@@ -32962,7 +34227,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.getRenderbufferParameter = function(target, pname) {
       const ctx = this;
-      if (isLost9(ctx)) return null;
+      if (isLost10(ctx)) return null;
       if (target !== C1.RENDERBUFFER) {
         ctx._errors.push(C1.INVALID_ENUM);
         return null;
@@ -32999,7 +34264,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("framebufferTextureLayer" in proto) {
       p2.framebufferTextureLayer = function(target, attachment, texture, level, layer) {
         const ctx = this;
-        if (isLost9(ctx)) return;
+        if (isLost10(ctx)) return;
         const tex2 = texture === null || texture === void 0 ? null : validateTex(ctx, texture);
         if (texture !== null && texture !== void 0 && tex2 === null) return;
         if (!isValidFramebufferTarget(ctx, target)) {
@@ -33046,7 +34311,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("renderbufferStorageMultisample" in proto) {
       p2.renderbufferStorageMultisample = function(target, samples, internalformat, width, height) {
         const ctx = this;
-        if (isLost9(ctx)) return;
+        if (isLost10(ctx)) return;
         if (target !== C1.RENDERBUFFER) {
           ctx._errors.push(C1.INVALID_ENUM);
           return;
@@ -33087,7 +34352,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("drawBuffers" in proto) {
       p2.drawBuffers = function(buffers) {
         const ctx = this;
-        if (isLost9(ctx)) return;
+        if (isLost10(ctx)) return;
         const s = ctx._state;
         let arr2;
         try {
@@ -33104,7 +34369,7 @@ ${inner.map((l) => "  " + l).join("\n")}
             ctx._errors.push(C1.INVALID_OPERATION);
             return;
           }
-          s.drawBuffers = arr2;
+          s.drawBuffers = arr2.length === 1 && arr2[0] === BACK4 ? [COLOR_ATTACHMENT04] : arr2;
           return;
         }
         const fbo = s.drawFramebuffer;
@@ -33133,7 +34398,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("readBuffer" in proto) {
       p2.readBuffer = function(src) {
         const ctx = this;
-        if (isLost9(ctx)) return;
+        if (isLost10(ctx)) return;
         const s = ctx._state;
         if (src === NONE5) {
           s.readBuffer = src;
@@ -33166,7 +34431,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("invalidateFramebuffer" in proto) {
       p2.invalidateFramebuffer = function(target, attachments) {
         const ctx = this;
-        if (isLost9(ctx)) return;
+        if (isLost10(ctx)) return;
         if (!isValidFramebufferTarget(ctx, target)) {
           ctx._errors.push(C1.INVALID_ENUM);
           return;
@@ -33176,7 +34441,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       };
       p2.invalidateSubFramebuffer = function(target, attachments, x, y, width, height) {
         const ctx = this;
-        if (isLost9(ctx)) return;
+        if (isLost10(ctx)) return;
         if (!isValidFramebufferTarget(ctx, target)) {
           ctx._errors.push(C1.INVALID_ENUM);
           return;
@@ -33194,7 +34459,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("blitFramebuffer" in proto) {
       p2.blitFramebuffer = function(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter) {
         const ctx = this;
-        if (isLost9(ctx)) return;
+        if (isLost10(ctx)) return;
         const s = ctx._state;
         const allowedMask = C1.COLOR_BUFFER_BIT | C1.DEPTH_BUFFER_BIT | C1.STENCIL_BUFFER_BIT;
         if ((mask & ~allowedMask) !== 0) {
@@ -33416,769 +34681,6 @@ ${inner.map((l) => "  " + l).join("\n")}
       return false;
     }
     return true;
-  }
-
-  // src/gl/api/draw.ts
-  function isLost10(ctx) {
-    return ctx._isLost;
-  }
-  var CLEAR_BUFFERS = /* @__PURE__ */ new Set([
-    C2.COLOR,
-    C2.DEPTH,
-    C2.STENCIL,
-    C2.DEPTH_STENCIL
-  ]);
-  var CLEAR_FV = /* @__PURE__ */ new Set([C2.COLOR, C2.DEPTH, C2.STENCIL]);
-  var CLEAR_IV = /* @__PURE__ */ new Set([C2.COLOR, C2.DEPTH, C2.STENCIL]);
-  var CLEAR_UIV = /* @__PURE__ */ new Set([C2.COLOR]);
-  var SINT_COLOR_FORMATS = /* @__PURE__ */ new Set([
-    C2.R8I,
-    C2.R16I,
-    C2.R32I,
-    C2.RG8I,
-    C2.RG16I,
-    C2.RG32I,
-    C2.RGB8I,
-    C2.RGB16I,
-    C2.RGB32I,
-    C2.RGBA8I,
-    C2.RGBA16I,
-    C2.RGBA32I
-  ]);
-  var UINT_COLOR_FORMATS = /* @__PURE__ */ new Set([
-    C2.R8UI,
-    C2.R16UI,
-    C2.R32UI,
-    C2.RG8UI,
-    C2.RG16UI,
-    C2.RG32UI,
-    C2.RGB8UI,
-    C2.RGB16UI,
-    C2.RGB32UI,
-    C2.RGBA8UI,
-    C2.RGBA16UI,
-    C2.RGBA32UI,
-    C2.RGB10_A2UI
-  ]);
-  function toList(values, Ctor, name) {
-    if (values instanceof Ctor) return values;
-    if (Array.isArray(values) || ArrayBuffer.isView(values)) {
-      return new Ctor(values);
-    }
-    throw new TypeError(`Argument is not of type '${name}'`);
-  }
-  function validateClearBufferArgs(ctx, buffer, drawbuffer) {
-    const s = ctx._state;
-    if (!CLEAR_BUFFERS.has(buffer)) {
-      ctx._errors.push(C1.INVALID_ENUM);
-      return false;
-    }
-    if (drawbuffer < 0 || drawbuffer >= s.limits.MAX_DRAW_BUFFERS) {
-      ctx._errors.push(C1.INVALID_VALUE);
-      return false;
-    }
-    if (buffer !== C2.COLOR && drawbuffer !== 0) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return false;
-    }
-    return true;
-  }
-  function clearColorAttachmentClass(ctx, drawbuffer) {
-    var _a, _b, _c;
-    const s = ctx._state;
-    const fbo = s.drawFramebuffer;
-    if (fbo === null) return "float";
-    const db = (_a = s.drawBuffers[drawbuffer]) != null ? _a : C1.NONE;
-    if (db === C1.NONE) return "missing";
-    const att = fbo._attachments.get(db);
-    if (!att) return "missing";
-    const internalFormat = att.type === "renderbuffer" ? att.renderbuffer._internalformat : (_c = (_b = att.texture._image) == null ? void 0 : _b.internalFormat) != null ? _c : 0;
-    if (SINT_COLOR_FORMATS.has(internalFormat)) return "sint";
-    if (UINT_COLOR_FORMATS.has(internalFormat)) return "uint";
-    return "float";
-  }
-  var RP_FORMATS_1 = /* @__PURE__ */ new Set([
-    C1.RGBA,
-    C1.RGB,
-    C1.LUMINANCE,
-    C1.LUMINANCE_ALPHA,
-    C1.ALPHA
-  ]);
-  var RP_TYPES_1 = /* @__PURE__ */ new Set([
-    C1.UNSIGNED_BYTE,
-    C1.BYTE,
-    C1.UNSIGNED_SHORT,
-    C1.SHORT,
-    C1.UNSIGNED_INT,
-    C1.INT,
-    C1.FLOAT,
-    C1.UNSIGNED_SHORT_5_6_5,
-    C1.UNSIGNED_SHORT_4_4_4_4,
-    C1.UNSIGNED_SHORT_5_5_5_1,
-    5131,
-    36193
-  ]);
-  var RP_PAIRS_2 = /* @__PURE__ */ new Set();
-  {
-    const P = (format, ...types) => {
-      for (const t of types) RP_PAIRS_2.add(format << 16 | t);
-    };
-    P(
-      C1.RGBA,
-      C1.UNSIGNED_BYTE,
-      C1.UNSIGNED_SHORT,
-      C1.UNSIGNED_SHORT_5_5_5_1,
-      C1.UNSIGNED_SHORT_4_4_4_4,
-      C2.HALF_FLOAT,
-      C1.FLOAT,
-      C2.UNSIGNED_INT_2_10_10_10_REV
-    );
-    P(C2.RGBA_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
-    P(
-      C1.RGB,
-      C1.UNSIGNED_BYTE,
-      C1.UNSIGNED_SHORT_5_6_5,
-      C2.HALF_FLOAT,
-      C1.FLOAT,
-      C2.UNSIGNED_INT_2_10_10_10_REV
-    );
-    P(C2.RGB_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
-    P(C2.RG, C1.UNSIGNED_BYTE, C2.HALF_FLOAT, C1.FLOAT);
-    P(C2.RG_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
-    P(C2.RED, C1.UNSIGNED_BYTE, C2.HALF_FLOAT, C1.FLOAT);
-    P(C2.RED_INTEGER, C1.BYTE, C1.UNSIGNED_BYTE, C1.SHORT, C1.UNSIGNED_SHORT, C1.INT, C1.UNSIGNED_INT);
-    P(C1.DEPTH_COMPONENT, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT);
-    P(C2.DEPTH_STENCIL, C2.UNSIGNED_INT_24_8, C2.FLOAT_32_UNSIGNED_INT_24_8_REV);
-    P(C1.ALPHA, C1.UNSIGNED_BYTE);
-  }
-  function rpPairKey(format, type) {
-    return format << 16 | type;
-  }
-  function expectedViewForType(type) {
-    switch (type) {
-      case C1.UNSIGNED_BYTE:
-        return "u8";
-      case C1.BYTE:
-        return Int8Array;
-      case C1.UNSIGNED_SHORT:
-      case C1.UNSIGNED_SHORT_5_6_5:
-      case C1.UNSIGNED_SHORT_4_4_4_4:
-      case C1.UNSIGNED_SHORT_5_5_5_1:
-      case 5131:
-      case 36193:
-        return Uint16Array;
-      case C1.SHORT:
-        return Int16Array;
-      case C1.UNSIGNED_INT:
-      case C2.UNSIGNED_INT_2_10_10_10_REV:
-      case C2.UNSIGNED_INT_24_8:
-        return Uint32Array;
-      case C1.INT:
-        return Int32Array;
-      case C1.FLOAT:
-      case C2.FLOAT_32_UNSIGNED_INT_24_8_REV:
-        return Float32Array;
-      default:
-        return null;
-    }
-  }
-  function floatReadOK(ctx, type, halfFloat) {
-    if (type === C1.FLOAT) return extSupported(ctx, "EXT_color_buffer_float");
-    if (type === C2.HALF_FLOAT || type === 36193) {
-      return halfFloat && (extSupported(ctx, "EXT_color_buffer_float") || extSupported(ctx, "EXT_color_buffer_half_float"));
-    }
-    if (type === C2.UNSIGNED_INT_10F_11F_11F_REV) return extSupported(ctx, "EXT_color_buffer_float");
-    return false;
-  }
-  function floatStorageReadOK(ctx, format, type) {
-    if (format !== C1.RGBA) return false;
-    if (type === C1.FLOAT) {
-      return extSupported(ctx, "OES_texture_float") || extSupported(ctx, "EXT_color_buffer_half_float");
-    }
-    if (type === 5131 || type === 36193) {
-      return extSupported(ctx, "OES_texture_half_float") || extSupported(ctx, "EXT_color_buffer_half_float");
-    }
-    return false;
-  }
-  function readComboOK(ctx, internalFormat, format, type, floatStorage) {
-    const universalRGBA = format === C1.RGBA && type === C1.UNSIGNED_BYTE;
-    const universalSInt = format === C2.RGBA_INTEGER && type === C1.INT;
-    const universalUInt = format === C2.RGBA_INTEGER && type === C1.UNSIGNED_INT;
-    switch (internalFormat) {
-      // Unsigned normalized color
-      case C1.RGBA:
-      case C1.RGBA8:
-      case C2.RGBA8:
-      case C2.SRGB8_ALPHA8:
-        if (floatStorage) return floatStorageReadOK(ctx, format, type);
-        return universalRGBA;
-      case C1.RGBA4:
-        return format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4);
-      case C1.RGB5_A1:
-        return format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_5_5_1);
-      case C1.RGB565:
-        return format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5) || universalRGBA;
-      case C1.RGB:
-        if (floatStorage) return floatStorageReadOK(ctx, format, type);
-        return format === C1.RGB && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_5_6_5) || format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4 || type === C1.UNSIGNED_SHORT_5_5_5_1);
-      case C2.RGB8:
-        return format === C1.RGB && type === C1.UNSIGNED_BYTE || universalRGBA;
-      case C1.LUMINANCE:
-      case C1.LUMINANCE_ALPHA:
-      case C1.ALPHA:
-        if (floatStorage) return floatStorageReadOK(ctx, format, type);
-        return format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.UNSIGNED_SHORT_4_4_4_4 || type === C1.UNSIGNED_SHORT_5_5_5_1);
-      case C2.R8:
-        return format === C2.RED && type === C1.UNSIGNED_BYTE || universalRGBA;
-      case C2.RG8:
-        return format === C2.RG && type === C1.UNSIGNED_BYTE || universalRGBA;
-      case C2.RGB10_A2:
-        return format === C1.RGBA && type === C2.UNSIGNED_INT_2_10_10_10_REV || universalRGBA;
-      case C2.RGB10_A2UI:
-        return universalUInt;
-      // EXT_texture_norm16 — 16-bit unorm color-renderable surfaces. GL
-      // EXT_texture_norm16: "RGBA/UNSIGNED_SHORT accepted in addition to
-      // RGBA/UNSIGNED_BYTE for 16-bit unorm surfaces" (CTS ext-texture-norm16.html
-      // testNorm16Render reads RGBA/UNSIGNED_SHORT via checkCanvasRect for ALL
-      // formats); R/RG additionally read back via their native RED/RG formats.
-      case CExt.R16_EXT:
-        return format === C1.RGBA && (type === C1.UNSIGNED_SHORT || type === C1.UNSIGNED_BYTE) || format === C2.RED && type === C1.UNSIGNED_SHORT || universalRGBA;
-      case CExt.RG16_EXT:
-        return format === C1.RGBA && (type === C1.UNSIGNED_SHORT || type === C1.UNSIGNED_BYTE) || format === C2.RG && type === C1.UNSIGNED_SHORT || universalRGBA;
-      case CExt.RGBA16_EXT:
-        return format === C1.RGBA && type === C1.UNSIGNED_SHORT || universalRGBA;
-      // Floating point (renderable only with the color-buffer-float extensions).
-      // FLOAT is accepted with format ∈ {RED, RG, RGB, RGBA} for the 16F formats
-      // when EITHER float color-buffer extension is enabled (GLES3 ReadPixels
-      // table: R16F/RG16F/RGBA16F accept RG/RGB/RGBA expansion with FLOAT; the
-      // 32F formats accept the same expansion with FLOAT only — the CTS
-      // ext-color-buffer-float.html reads RGBA/FLOAT from R32F/RG32F).
-      case C2.R16F:
-      case C2.RG16F:
-      case C2.RGBA16F:
-        if (type === C1.FLOAT && (extSupported(ctx, "EXT_color_buffer_float") || extSupported(ctx, "EXT_color_buffer_half_float"))) {
-          return format === C2.RED || format === C2.RG || format === C1.RGB || format === C1.RGBA;
-        }
-        return format === (internalFormat === C2.R16F ? C2.RED : internalFormat === C2.RG16F ? C2.RG : C1.RGBA) && floatReadOK(ctx, type, true);
-      case C2.R32F:
-      case C2.RG32F:
-      case C2.RGBA32F:
-        return (format === C2.RED || format === C2.RG || format === C1.RGB || format === C1.RGBA) && floatReadOK(ctx, type, false);
-      case C2.R11F_G11F_B10F:
-        return (format === C1.RGB || format === C1.RGBA) && floatReadOK(ctx, type, true);
-      // Signed / unsigned integer (native width-matched pair + universal
-      // RGBA_INTEGER/INT | RGBA_INTEGER/UNSIGNED_INT expansion).
-      case C2.R8I:
-        return format === C2.RED_INTEGER && type === C1.BYTE || universalSInt;
-      case C2.R8UI:
-        return format === C2.RED_INTEGER && type === C1.UNSIGNED_BYTE || universalUInt;
-      case C2.R16I:
-        return format === C2.RED_INTEGER && type === C1.SHORT || universalSInt;
-      case C2.R16UI:
-        return format === C2.RED_INTEGER && type === C1.UNSIGNED_SHORT || universalUInt;
-      case C2.R32I:
-        return format === C2.RED_INTEGER && type === C1.INT || universalSInt;
-      case C2.R32UI:
-        return format === C2.RED_INTEGER && type === C1.UNSIGNED_INT || universalUInt;
-      case C2.RG8I:
-        return format === C2.RG_INTEGER && type === C1.BYTE || universalSInt;
-      case C2.RG8UI:
-        return format === C2.RG_INTEGER && type === C1.UNSIGNED_BYTE || universalUInt;
-      case C2.RG16I:
-        return format === C2.RG_INTEGER && type === C1.SHORT || universalSInt;
-      case C2.RG16UI:
-        return format === C2.RG_INTEGER && type === C1.UNSIGNED_SHORT || universalUInt;
-      case C2.RG32I:
-        return format === C2.RG_INTEGER && type === C1.INT || universalSInt;
-      case C2.RG32UI:
-        return format === C2.RG_INTEGER && type === C1.UNSIGNED_INT || universalUInt;
-      case C2.RGB8I:
-        return format === C2.RGB_INTEGER && type === C1.BYTE || universalSInt;
-      case C2.RGB8UI:
-        return format === C2.RGB_INTEGER && type === C1.UNSIGNED_BYTE || universalUInt;
-      case C2.RGB16I:
-        return format === C2.RGB_INTEGER && type === C1.SHORT || universalSInt;
-      case C2.RGB16UI:
-        return format === C2.RGB_INTEGER && type === C1.UNSIGNED_SHORT || universalUInt;
-      case C2.RGB32I:
-        return format === C2.RGB_INTEGER && type === C1.INT || universalSInt;
-      case C2.RGB32UI:
-        return format === C2.RGB_INTEGER && type === C1.UNSIGNED_INT || universalUInt;
-      case C2.RGBA8I:
-        return format === C2.RGBA_INTEGER && type === C1.BYTE || universalSInt;
-      case C2.RGBA8UI:
-        return format === C2.RGBA_INTEGER && type === C1.UNSIGNED_BYTE || universalUInt;
-      case C2.RGBA16I:
-        return format === C2.RGBA_INTEGER && type === C1.SHORT || universalSInt;
-      case C2.RGBA16UI:
-        return format === C2.RGBA_INTEGER && type === C1.UNSIGNED_SHORT || universalUInt;
-      case C2.RGBA32I:
-        return universalSInt;
-      case C2.RGBA32UI:
-        return universalUInt;
-      // Depth / depth-stencil
-      case C1.DEPTH_COMPONENT16:
-        return format === C1.DEPTH_COMPONENT && (type === C1.UNSIGNED_SHORT || type === C1.UNSIGNED_INT);
-      case C2.DEPTH_COMPONENT24:
-        return format === C1.DEPTH_COMPONENT && type === C1.UNSIGNED_INT;
-      case C2.DEPTH_COMPONENT32F:
-        return format === C1.DEPTH_COMPONENT && type === C1.FLOAT;
-      case C2.DEPTH24_STENCIL8:
-        return format === C2.DEPTH_STENCIL && type === C2.UNSIGNED_INT_24_8;
-      case C2.DEPTH32F_STENCIL8:
-        return format === C2.DEPTH_STENCIL && type === C2.FLOAT_32_UNSIGNED_INT_24_8_REV;
-      default:
-        return false;
-    }
-  }
-  function packBytesPerPixel2(format, type) {
-    const comps = format === C1.RGBA || format === C2.RGBA_INTEGER ? 4 : format === C1.RGB || format === C2.RGB_INTEGER ? 3 : format === C1.LUMINANCE_ALPHA || format === C2.RG || format === C2.RG_INTEGER || format === C2.DEPTH_STENCIL ? 2 : 1;
-    switch (type) {
-      case C1.UNSIGNED_BYTE:
-      case C1.BYTE:
-        return comps;
-      case C1.UNSIGNED_SHORT_5_6_5:
-      case C1.UNSIGNED_SHORT_4_4_4_4:
-      case C1.UNSIGNED_SHORT_5_5_5_1:
-      case C1.UNSIGNED_SHORT:
-      case C1.SHORT:
-      case C2.HALF_FLOAT:
-      case 36193:
-        return comps * 2;
-      case C2.UNSIGNED_INT_2_10_10_10_REV:
-        return 4;
-      case C2.FLOAT_32_UNSIGNED_INT_24_8_REV:
-        return 8;
-      default:
-        return comps * 4;
-    }
-  }
-  function alignUp2(n, align2) {
-    return Math.ceil(n / align2) * align2;
-  }
-  function readPixelsComboOK(ctx, format, type) {
-    var _a, _b, _c, _d, _e, _f;
-    const s = ctx._state;
-    const fbo = s.readFramebuffer;
-    if (fbo === null) {
-      return format === C1.RGBA && type === C1.UNSIGNED_BYTE;
-    }
-    const rb = s.version === 2 ? s.readBuffer : C1.COLOR_ATTACHMENT0;
-    const att = fbo._attachments.get(rb);
-    if (!att) return false;
-    const internalFormat = att.type === "renderbuffer" ? att.renderbuffer._internalformat : (_b = (_a = att.texture._image) == null ? void 0 : _a.internalFormat) != null ? _b : 0;
-    const floatStorage = att.type === "renderbuffer" ? !!((_d = (_c = att.renderbuffer._surface) == null ? void 0 : _c.info) == null ? void 0 : _d.isFloat) : !!((_f = (_e = att.texture._image) == null ? void 0 : _e.info) == null ? void 0 : _f.isFloat);
-    return readComboOK(ctx, internalFormat, format, type, floatStorage);
-  }
-  function readPixelsNeeded(ctx, format, type, width, height) {
-    const s = ctx._state;
-    const bpp = packBytesPerPixel2(format, type);
-    const pack = s.pixelStore.pack;
-    const rowLen = pack.rowLength || width;
-    if (s.version === 2 && pack.skipPixels + width > rowLen) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return -1;
-    }
-    const rowStride = alignUp2(rowLen * bpp, pack.alignment);
-    return pack.skipRows * rowStride + pack.skipPixels * bpp + (height > 0 ? rowStride * (height - 1) + width * bpp : 0);
-  }
-  function installDrawApi(proto) {
-    proto.drawArrays = function(mode, first, count) {
-      const ctx = this;
-      if (isLost10(ctx)) return;
-      const req = validateDrawArrays(ctx, mode, first | 0, count | 0, 1);
-      if (!req) return;
-      try {
-        executeDraw(ctx, req);
-      } catch {
-        ctx._errors.push(C1.INVALID_OPERATION);
-      }
-    };
-    proto.drawElements = function(mode, count, type, offset) {
-      const ctx = this;
-      if (isLost10(ctx)) return;
-      const req = validateDrawElements(ctx, mode, count | 0, type, offset);
-      if (!req) return;
-      try {
-        executeDraw(ctx, req);
-      } catch {
-        ctx._errors.push(C1.INVALID_OPERATION);
-      }
-    };
-    proto.clear = function(mask) {
-      const ctx = this;
-      if (isLost10(ctx)) return;
-      if ((mask & ~(C1.COLOR_BUFFER_BIT | C1.DEPTH_BUFFER_BIT | C1.STENCIL_BUFFER_BIT)) !== 0) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      try {
-        executeClear(ctx, mask);
-      } catch {
-        ctx._errors.push(C1.INVALID_OPERATION);
-      }
-    };
-    proto.flush = function() {
-      if (isLost10(this)) return;
-    };
-    proto.finish = function() {
-      if (isLost10(this)) return;
-    };
-    proto.readPixels = function(x, y, width, height, format, type, pixels) {
-      const ctx = this;
-      if (isLost10(ctx)) return;
-      if (pixels === null || pixels === void 0) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      const s = ctx._state;
-      if (width < 0 || height < 0) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      if (typeof pixels === "number") {
-        if (s.version !== 2 || !s.pixelPackBuffer) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        if (pixels < 0) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        const packBuf = s.pixelPackBuffer;
-        if (!packBuf._data) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        if (!RP_PAIRS_2.has(rpPairKey(format, type))) {
-          ctx._errors.push(C1.INVALID_ENUM);
-          return;
-        }
-        if (!readPixelsComboOK(ctx, format, type)) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        const needed2 = readPixelsNeeded(ctx, format, type, width, height);
-        if (needed2 < 0) return;
-        if (pixels + needed2 > packBuf._data.byteLength) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        try {
-          executeReadPixels(ctx, x, y, width, height, format, type, pixels);
-        } catch {
-          ctx._errors.push(C1.INVALID_OPERATION);
-        }
-        return;
-      }
-      if (!ArrayBuffer.isView(pixels)) {
-        throw new TypeError(`Argument is not of type 'ArrayBufferView'`);
-      }
-      if (s.version === 2) {
-        if (!RP_PAIRS_2.has(rpPairKey(format, type))) {
-          ctx._errors.push(C1.INVALID_ENUM);
-          return;
-        }
-      } else {
-        if (!RP_FORMATS_1.has(format)) {
-          ctx._errors.push(C1.INVALID_ENUM);
-          return;
-        }
-        if (!RP_TYPES_1.has(type)) {
-          ctx._errors.push(C1.INVALID_ENUM);
-          return;
-        }
-      }
-      if (s.pixelPackBuffer) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      if (!readPixelsComboOK(ctx, format, type)) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      const want = expectedViewForType(type);
-      if (want === null) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      const viewOK = want === "u8" ? pixels instanceof Uint8Array || pixels instanceof Uint8ClampedArray : pixels instanceof want;
-      if (!viewOK) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      const needed = readPixelsNeeded(ctx, format, type, width, height);
-      if (needed < 0) return;
-      if (pixels.byteLength - pixels.byteOffset < needed) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      try {
-        executeReadPixels(ctx, x, y, width, height, format, type, pixels);
-      } catch {
-        ctx._errors.push(C1.INVALID_OPERATION);
-      }
-    };
-    proto._transferToImageBitmap = function() {
-      return transferToImageBitmapSnapshot(this);
-    };
-    const p2 = proto;
-    if ("drawArraysInstanced" in p2) {
-      p2.drawArraysInstanced = function(mode, first, count, instanceCount) {
-        const ctx = this;
-        if (isLost10(ctx)) return;
-        const req = validateDrawArrays(ctx, mode, first | 0, count | 0, instanceCount | 0);
-        if (!req) return;
-        try {
-          executeDraw(ctx, req);
-        } catch {
-          ctx._errors.push(C1.INVALID_OPERATION);
-        }
-      };
-    }
-    if ("drawElementsInstanced" in p2) {
-      p2.drawElementsInstanced = function(mode, count, type, offset, instanceCount) {
-        const ctx = this;
-        if (isLost10(ctx)) return;
-        const req = validateDrawElements(ctx, mode, count | 0, type, offset, { instanceCount: instanceCount | 0 });
-        if (!req) return;
-        try {
-          executeDraw(ctx, req);
-        } catch {
-          ctx._errors.push(C1.INVALID_OPERATION);
-        }
-      };
-    }
-    if ("drawRangeElements" in p2) {
-      p2.drawRangeElements = function(mode, start, end, count, type, offset) {
-        const ctx = this;
-        if (isLost10(ctx)) return;
-        const req = validateDrawElements(ctx, mode, count | 0, type, offset, { range: [start >>> 0, end >>> 0] });
-        if (!req) return;
-        try {
-          executeDraw(ctx, req);
-        } catch {
-          ctx._errors.push(C1.INVALID_OPERATION);
-        }
-      };
-    }
-    if ("clearBufferfv" in p2) {
-      p2.clearBufferfv = function(buffer, drawbuffer, values) {
-        const ctx = this;
-        if (isLost10(ctx)) return;
-        const v2 = toList(values, Float32Array, "Float32List");
-        if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
-        if (!CLEAR_FV.has(buffer)) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        const need = buffer === C2.COLOR ? 4 : 1;
-        if (v2.length < need) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (buffer === C2.COLOR) {
-          const cls = clearColorAttachmentClass(ctx, drawbuffer);
-          if (cls === "missing") return;
-          if (cls !== "float") {
-            ctx._errors.push(C1.INVALID_OPERATION);
-            return;
-          }
-        }
-        try {
-          executeClearBuffer(ctx, buffer, drawbuffer, v2);
-        } catch {
-          ctx._errors.push(C1.INVALID_OPERATION);
-        }
-      };
-    }
-    if ("clearBufferiv" in p2) {
-      p2.clearBufferiv = function(buffer, drawbuffer, values) {
-        const ctx = this;
-        if (isLost10(ctx)) return;
-        const v2 = toList(values, Int32Array, "Int32List");
-        if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
-        if (!CLEAR_IV.has(buffer)) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        const need = buffer === C2.COLOR ? 4 : 1;
-        if (v2.length < need) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (buffer === C2.COLOR) {
-          const cls = clearColorAttachmentClass(ctx, drawbuffer);
-          if (cls === "missing") return;
-          if (cls !== "sint") {
-            ctx._errors.push(C1.INVALID_OPERATION);
-            return;
-          }
-        }
-        try {
-          executeClearBuffer(ctx, buffer, drawbuffer, v2);
-        } catch {
-          ctx._errors.push(C1.INVALID_OPERATION);
-        }
-        try {
-          executeClearBuffer(ctx, buffer, drawbuffer, v2);
-        } catch {
-          ctx._errors.push(C1.INVALID_OPERATION);
-        }
-      };
-    }
-    if ("clearBufferuiv" in p2) {
-      p2.clearBufferuiv = function(buffer, drawbuffer, values) {
-        const ctx = this;
-        if (isLost10(ctx)) return;
-        const v2 = toList(values, Uint32Array, "Uint32List");
-        if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
-        if (!CLEAR_UIV.has(buffer)) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        if (v2.length < 4) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (buffer === C2.COLOR) {
-          const cls = clearColorAttachmentClass(ctx, drawbuffer);
-          if (cls === "missing") return;
-          if (cls !== "uint") {
-            ctx._errors.push(C1.INVALID_OPERATION);
-            return;
-          }
-        }
-        try {
-          executeClearBuffer(ctx, buffer, drawbuffer, v2);
-        } catch {
-          ctx._errors.push(C1.INVALID_OPERATION);
-        }
-      };
-    }
-    if ("clearBufferfi" in p2) {
-      p2.clearBufferfi = function(buffer, drawbuffer, depth, stencil) {
-        const ctx = this;
-        if (isLost10(ctx)) return;
-        if (!CLEAR_BUFFERS.has(buffer)) {
-          ctx._errors.push(C1.INVALID_ENUM);
-          return;
-        }
-        if (buffer !== C2.DEPTH_STENCIL) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        if (drawbuffer !== 0) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        try {
-          executeClearBuffer(ctx, buffer, drawbuffer, null, depth, stencil);
-        } catch {
-          ctx._errors.push(C1.INVALID_OPERATION);
-        }
-      };
-    }
-    const mdProto = proto;
-    function installExtensionMethod(proto2, name, fn) {
-      Object.defineProperty(proto2, name, { value: fn, writable: true, configurable: true, enumerable: false });
-    }
-    installExtensionMethod(mdProto, "multiDrawArraysWEBGL", function(mode, firsts, firstsOffset, counts, countsOffset, drawcount) {
-      const ctx = this;
-      if (isLost10(ctx)) return;
-      const firstsArr = toList(firsts, Int32Array, "Int32List");
-      const countsArr = toList(counts, Int32Array, "Int32List");
-      const dc = drawcount | 0;
-      if (dc < 0) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      if (dc === 0) return;
-      const fo = firstsOffset >>> 0;
-      const co = countsOffset >>> 0;
-      if (fo + dc > firstsArr.length || co + dc > countsArr.length) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      try {
-        executeMultiDrawArrays(ctx, mode, firstsArr, fo, countsArr, co, dc);
-      } catch {
-        ctx._errors.push(C1.INVALID_OPERATION);
-      }
-    });
-    installExtensionMethod(mdProto, "multiDrawElementsWEBGL", function(mode, counts, countsOffset, type, offsets, offsetsOffset, drawcount) {
-      const ctx = this;
-      if (isLost10(ctx)) return;
-      const countsArr = toList(counts, Int32Array, "Int32List");
-      const offsetsArr = toList(offsets, Int32Array, "Int32List");
-      const dc = drawcount | 0;
-      if (dc < 0) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      if (dc === 0) return;
-      const co = countsOffset >>> 0;
-      const oo = offsetsOffset >>> 0;
-      if (co + dc > countsArr.length || oo + dc > offsetsArr.length) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      try {
-        executeMultiDrawElements(ctx, mode, countsArr, co, type, offsetsArr, oo, dc);
-      } catch {
-        ctx._errors.push(C1.INVALID_OPERATION);
-      }
-    });
-    installExtensionMethod(mdProto, "multiDrawArraysInstancedWEBGL", function(mode, firsts, firstsOffset, counts, countsOffset, instanceCounts, instanceCountsOffset, drawcount) {
-      const ctx = this;
-      if (isLost10(ctx)) return;
-      const firstsArr = toList(firsts, Int32Array, "Int32List");
-      const countsArr = toList(counts, Int32Array, "Int32List");
-      const instArr = toList(instanceCounts, Int32Array, "Int32List");
-      const dc = drawcount | 0;
-      if (dc < 0) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      if (dc === 0) return;
-      const fo = firstsOffset >>> 0;
-      const co = countsOffset >>> 0;
-      const io = instanceCountsOffset >>> 0;
-      if (fo + dc > firstsArr.length || co + dc > countsArr.length || io + dc > instArr.length) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      try {
-        executeMultiDrawArraysInstanced(ctx, mode, firstsArr, fo, countsArr, co, instArr, io, dc);
-      } catch {
-        ctx._errors.push(C1.INVALID_OPERATION);
-      }
-    });
-    installExtensionMethod(mdProto, "multiDrawElementsInstancedWEBGL", function(mode, counts, countsOffset, type, offsets, offsetsOffset, instanceCounts, instanceCountsOffset, drawcount) {
-      const ctx = this;
-      if (isLost10(ctx)) return;
-      const countsArr = toList(counts, Int32Array, "Int32List");
-      const offsetsArr = toList(offsets, Int32Array, "Int32List");
-      const instArr = toList(instanceCounts, Int32Array, "Int32List");
-      const dc = drawcount | 0;
-      if (dc < 0) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      if (dc === 0) return;
-      const co = countsOffset >>> 0;
-      const oo = offsetsOffset >>> 0;
-      const io = instanceCountsOffset >>> 0;
-      if (co + dc > countsArr.length || oo + dc > offsetsArr.length || io + dc > instArr.length) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      try {
-        executeMultiDrawElementsInstanced(ctx, mode, countsArr, co, type, offsetsArr, oo, instArr, io, dc);
-      } catch {
-        ctx._errors.push(C1.INVALID_OPERATION);
-      }
-    });
   }
 
   // src/gl/api/webgl2.ts
