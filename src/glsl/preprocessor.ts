@@ -61,6 +61,11 @@ export type PreprocessResult =
 export interface PreprocessOptions {
   /** Highest GLSL version the CONTEXT supports (100 = WebGL1, 300 = WebGL2). */
   version: 100 | 300;
+  /**
+   * Shader stage. FRAGMENT shaders get the predefined GL_FRAGMENT_PRECISION_HIGH
+   * macro (defined to 1); VERTEX shaders (and stage-less callers) do not.
+   */
+  type?: 'VERTEX' | 'FRAGMENT';
   /** Extra preprocessor defines injected before the source (object-like). */
   defines?: Record<string, string>;
   /** Extensions the context supports; `#extension X : require|enable` of an unsupported name is an error. */
@@ -1159,6 +1164,25 @@ export function preprocess(source: string, opts: PreprocessOptions): PreprocessR
     opts,
   };
   initMacros(st.macros);
+  // GLSL ES 1.00 §4.5.3 / 3.00 §3.9.5: GL_FRAGMENT_PRECISION_HIGH is defined to
+  // 1 in FRAGMENT shaders when highp precision is supported in fragment
+  // shaders. gl/ reports HIGH_FLOAT/HIGH_INT fragment support via
+  // getShaderPrecisionFormat, so the macro MUST be defined here for fragment
+  // stages — CTS conformance/glsl/misc/shader-precision-format-obeyed.html
+  // compiles a fragment shader whose `#ifdef GL_FRAGMENT_PRECISION_HIGH` gates
+  // the real code. VERTEX shaders must NOT get the macro (undefined there per
+  // spec, so `#ifdef` in a vertex shader takes the else branch). A plain
+  // object-like macro with body `1`, exactly like a user `#define`.
+  if (opts.type === 'FRAGMENT') {
+    st.macros.set('GL_FRAGMENT_PRECISION_HIGH', {
+      name: 'GL_FRAGMENT_PRECISION_HIGH',
+      params: null,
+      body: tokenize(charsOf('1')).filter((t) => t.text !== '\n'),
+      paramIndex: new Map(),
+      rawArgs: [],
+      kind: 'normal',
+    });
+  }
   if (opts.defines) {
     for (const [name, value] of Object.entries(opts.defines)) {
       if (name === 'defined') {
