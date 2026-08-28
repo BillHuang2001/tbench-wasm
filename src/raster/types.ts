@@ -293,6 +293,19 @@ export interface BlendState {
   eqRGB: GLenum; eqAlpha: GLenum;
   color: [number, number, number, number];
 }
+/**
+ * Per-draw-buffer blend parameters (OES_draw_buffers_indexed). One entry per
+ * draw buffer d ∈ 0..MAX_DRAW_BUFFERS-1. Buffer 0's `enabled` always mirrors
+ * the global BLEND cap; buffers > 0 use the extension's per-buffer enable.
+ * Factor/equation/color fields fall back to the base blend state per field
+ * (gl/ resolves the fallbacks when building the entries).
+ */
+export interface BlendPerDrawBufferEntry {
+  enabled: boolean;
+  srcRGB: GLenum; dstRGB: GLenum; srcAlpha: GLenum; dstAlpha: GLenum;
+  eqRGB: GLenum; eqAlpha: GLenum;
+  color: [number, number, number, number];
+}
 export interface DepthTestState { enabled: boolean; func: GLenum; }
 export interface StencilFaceState {
   func: GLenum; ref: number; valueMask: number; writeMask: number;
@@ -349,6 +362,12 @@ export interface DrawCall {
   /** Per fragment-output-location masks (index = output location). */
   colorMask: readonly ColorMask[];
   blend: BlendState;
+  /**
+   * Optional per-draw-buffer blend state (OES_draw_buffers_indexed): entry d
+   * governs draw buffer d. Absent → the global `blend` state applies to every
+   * output (core GLES 3.0: BLEND applies to all draw buffers).
+   */
+  blendPerDrawBuffer?: readonly BlendPerDrawBufferEntry[];
   depthTest: DepthTestState;
   depthMask: boolean;
   stencilTest: StencilTestState;

@@ -22,8 +22,10 @@
  *    applied only in the fragment color-write path (RGB channels only — alpha
  *    is never sRGB-encoded per GLES 3.0 §4.1.8). Clear and blit pass values
  *    through unconverted (glClearColor is written as-is per spec).
- *  - Blending applies to output location 0 only (GLES 3.0 §4.1.7: with
- *    multiple color outputs, blending is applied to the first one).
+ *  - Blending applies per output location. Core GLES 3.0: the global BLEND cap
+ *    governs every draw buffer. With OES_draw_buffers_indexed active, gl/
+ *    attaches DrawCall.blendPerDrawBuffer (entry per draw buffer; buffer 0
+ *    mirrors the global cap) and each output blends with its own entry.
  *  - Dither: the DITHER state is accepted (gl.enable/getParameter) but the
  *    dithering algorithm is a NO-OP. The GL/WebGL specs leave the algorithm
  *    implementation-defined, and every shipping WebGL implementation (ANGLE,
@@ -46,7 +48,7 @@
  */
 
 import type {
-  ColorMask, DrawCall, FragmentExecCtx, FragmentOps, RasterState,
+  BlendPerDrawBufferEntry, ColorMask, DrawCall, FragmentExecCtx, FragmentOps, RasterState,
   ScissorState, StencilFaceState, Surface,
 } from './types';
 import { getDepthData, getStencilData } from './surface';
@@ -235,6 +237,8 @@ export class FragmentOpsImpl implements FragmentOps {
   private readonly depthTestEnabled: boolean;
   private readonly depthMask: boolean;
   private readonly blend: DrawCall['blend'];
+  /** Optional per-draw-buffer blend state (OES_draw_buffers_indexed). */
+  private readonly blendPerDrawBuffer: readonly BlendPerDrawBufferEntry[] | undefined;
   private readonly colorMask: readonly ColorMask[];
   private readonly drawBuffers: readonly number[];
   private readonly fbColors: readonly (Surface | null)[];
@@ -258,6 +262,7 @@ export class FragmentOpsImpl implements FragmentOps {
     this.depthTestEnabled = dc.depthTest.enabled;
     this.depthMask = dc.depthMask;
     this.blend = dc.blend;
+    this.blendPerDrawBuffer = dc.blendPerDrawBuffer;
     this.colorMask = dc.colorMask;
     this.drawBuffers = dc.drawBuffers;
     this.fbColors = dc.fb.color;
@@ -353,8 +358,9 @@ export class FragmentOpsImpl implements FragmentOps {
 
   /**
    * Writes one fragment color output (location L) through the full pipeline:
-   * blend (location 0 only, linear space for sRGB targets) → sRGB encode
-   * (RGB only) → colorMask → surface write. (DITHER is a no-op — see header.)
+   * blend (per-draw-buffer state when the DrawCall carries it, else the global
+   * BLEND state — always in linear space for sRGB targets) → sRGB encode (RGB
+   * only) → colorMask → surface write. (DITHER is a no-op — see header.)
    */
   private writeColor(L: number, x: number, y: number, colors: readonly Float32Array[]): void {
     const db = this.drawBuffers[L];
@@ -377,7 +383,13 @@ export class FragmentOpsImpl implements FragmentOps {
     const off = (y * tgt.width + x) * info.bytesPerPixel;
     let r = src[0], g = src[1], b = src[2], a = src[3];
     const isSRGB = info.isSRGB;
-    const blendHere = this.blend.enabled && L === 0;
+    // Per-draw-buffer blend (OES_draw_buffers_indexed): when the DrawCall
+    // carries per-draw-buffer entries, output L blends with entry L (buffer 0's
+    // entry always mirrors the global BLEND cap); otherwise the global blend
+    // state applies to every output (core GLES 3.0: BLEND applies to all draw
+    // buffers).
+    const bEntry = this.blendPerDrawBuffer ? this.blendPerDrawBuffer[L] : undefined;
+    const blendHere = bEntry ? bEntry.enabled : this.blend.enabled;
     if (blendHere) {
       // Decode the destination (as-stored values; dstScratch keeps them for
       // the colorMask read-modify-write below), linearize for sRGB targets,
@@ -391,8 +403,13 @@ export class FragmentOpsImpl implements FragmentOps {
       this.linearDst[0] = dr; this.linearDst[1] = dg; this.linearDst[2] = db; this.linearDst[3] = da;
       blendColor(
         src, this.linearDst, this.blendOut,
-        this.blend.srcRGB, this.blend.dstRGB, this.blend.srcAlpha, this.blend.dstAlpha,
-        this.blend.eqRGB, this.blend.eqAlpha, this.blend.color,
+        bEntry ? bEntry.srcRGB : this.blend.srcRGB,
+        bEntry ? bEntry.dstRGB : this.blend.dstRGB,
+        bEntry ? bEntry.srcAlpha : this.blend.srcAlpha,
+        bEntry ? bEntry.dstAlpha : this.blend.dstAlpha,
+        bEntry ? bEntry.eqRGB : this.blend.eqRGB,
+        bEntry ? bEntry.eqAlpha : this.blend.eqAlpha,
+        bEntry ? bEntry.color : this.blend.color,
       );
       r = this.blendOut[0]; g = this.blendOut[1]; b = this.blendOut[2]; a = this.blendOut[3];
     }
