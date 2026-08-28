@@ -876,6 +876,68 @@ void main() { gl_Position = vec4(0.0); }
 }
 
 /* ------------------------------------------------------------------ */
+/* ES 3.00 array function signatures: `float[2] f()` + `int[2] a`      */
+/* ------------------------------------------------------------------ */
+
+{
+  // Array RETURN types: dims before the name (`float[2] f()`), recorded on
+  // FunctionPrototype.returnDims. Semantics may still reject the body until
+  // the semantics wave lands — these pin the PARSE contract.
+  const ast = parseOk('#version 300 es\nfloat[2] f() { return float[2](1.0, 2.0); }\n', 300);
+  const fn = fdef(ast.declarations[0]);
+  check(fn.prototype.name === 'f' && fn.prototype.returnType.base.kind === 'type-name' && fn.prototype.returnType.base.name === 'float', 'array-return fn name/type');
+  const rd = fn.prototype.returnDims;
+  check(rd.length === 1, `array-return one dim: ${rd.length}`);
+  lit(rd[0], 2, 'int');
+  // Non-array returns keep `[]` (no dims) — the field is always present.
+  const ast2 = parseOk('#version 300 es\nfloat g() { return 0.0; }\n', 300);
+  check(fdef(ast2.declarations[0]).prototype.returnDims.length === 0, 'plain return has empty returnDims');
+  const ast3 = parseOk('float h() { return 0.0; }\n', 100);
+  check(fdef(ast3.declarations[0]).prototype.returnDims.length === 0, '1.00 plain return has empty returnDims');
+}
+
+{
+  // Pre-name PARAM dims (`int[2] a`), merged before post-name dims.
+  const ast = parseOk('#version 300 es\nbool isSuccess(int[2] a) { return true; }\n', 300);
+  const p0 = fdef(ast.declarations[0]).prototype.params[0];
+  check(p0.name === 'a' && p0.type.base.kind === 'type-name' && p0.type.base.name === 'int', 'pre-name param name/type');
+  check(p0.arrayDims.length === 1, `pre-name param one dim: ${p0.arrayDims.length}`);
+  lit(p0.arrayDims[0], 2, 'int');
+  // Post-name dims still parse (`float a[3]`), and pre+post merge in order.
+  const ast2 = parseOk('#version 300 es\nfloat f(float a[3]);\n', 300);
+  const q0 = fproto(ast2.declarations[0]).params[0];
+  check(q0.arrayDims.length === 1, `post-name param one dim: ${q0.arrayDims.length}`);
+  lit(q0.arrayDims[0], 3, 'int');
+  const ast3 = parseOk('#version 300 es\nint f(int[2] a[3]);\n', 300);
+  const r0 = fproto(ast3.declarations[0]).params[0];
+  check(r0.arrayDims.length === 2, `pre+post merge count: ${r0.arrayDims.length}`);
+  lit(r0.arrayDims[0], 2, 'int');
+  lit(r0.arrayDims[1], 3, 'int');
+}
+
+{
+  // Version 1.00 rejects both forms (error + recovery, no cascades).
+  const errs1 = parseFail('float[2] f();\n', 100);
+  check(errs1.length === 1, `array-return-100 count: ${errs1.length}`);
+  check(errs1[0].line === 1, `array-return-100 line: ${errs1[0].line}`);
+  check(errs1[0].message.includes('GLSL ES 3.00'), `array-return-100 msg: ${errs1[0].message}`);
+  const errs2 = parseFail('float f(int[2] a);\n', 100);
+  check(errs2.length === 1, `pre-name-param-100 count: ${errs2.length}`);
+  check(errs2[0].line === 1, `pre-name-param-100 line: ${errs2[0].line}`);
+  check(errs2[0].message.includes('GLSL ES 3.00'), `pre-name-param-100 msg: ${errs2[0].message}`);
+}
+
+{
+  // Pre-name dims are only valid on function return types: `float[2] x;` is
+  // invalid (dims must follow the name in declarations) — reported, not
+  // silently dropped.
+  const errs = parseFail('#version 300 es\nfloat[2] x;\n', 300);
+  check(errs.length === 1, `decl-pre-name-dims count: ${errs.length}`);
+  check(errs[0].line === 2, `decl-pre-name-dims line: ${errs[0].line}`);
+  check(errs[0].message === 'array dimensions before the name are only allowed for function return types', `decl-pre-name-dims msg: ${errs[0].message}`);
+}
+
+/* ------------------------------------------------------------------ */
 /* ES 3.00 array constructor: float[3](...)                            */
 /* ------------------------------------------------------------------ */
 

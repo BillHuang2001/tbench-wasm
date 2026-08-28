@@ -112,6 +112,12 @@ export interface FunctionPrototype extends Node {
   kind: 'function-prototype';
   name: string;
   returnType: TypeSpec;
+  /**
+   * Array dimensions of the return type (GLSL ES 3.00: `float[2] f()`).
+   * `[]` = non-array return type. `[null]` cannot occur (unsized returns are
+   * rejected at parse time).
+   */
+  returnDims: Expr[];
   params: ParamDecl[];
 }
 

@@ -294,6 +294,17 @@ function parseInvariantDecl(p: Parser): ExternalDecl {
   type.qualifiers.invariant = true;
   // `invariant <type> <name>(...)` — invariant on a function is invalid;
   // parse it anyway (semantics rejects) so recovery stays clean.
+  // Array return dims (`invariant float[2] f()`) follow the same version
+  // rule as plain function declarations (ES 3.00 only).
+  let returnDims: Expr[] = [];
+  if (p.atOp('[')) {
+    if (p.version === 100) {
+      p.error(p.peek().line, 'array return types require GLSL ES 3.00');
+      skipBalanced(p, '[', ']');
+    } else {
+      returnDims = parseArrayDims(p, false);
+    }
+  }
   const nameT = p.peek();
   const t3 = p.peek(1);
   if (nameT.kind === 'identifier' && t3.kind === 'op' && t3.text === '(') {
@@ -305,6 +316,7 @@ function parseInvariantDecl(p: Parser): ExternalDecl {
       kind: 'function-prototype',
       name: nameT.name,
       returnType: type,
+      returnDims,
       params,
       loc: locOf(start),
     };
@@ -318,6 +330,9 @@ function parseInvariantDecl(p: Parser): ExternalDecl {
     }
     p.expectOp(';');
     return prototype;
+  }
+  if (returnDims.length > 0) {
+    p.error(nameT.line, 'array dimensions before the name are only allowed for function return types');
   }
   const declarators = parseDeclarators(p, false);
   p.expectOp(';', "expected ';' after declaration");
@@ -373,6 +388,19 @@ function parseDeclarationOrFunction(p: Parser): ExternalDecl | null {
   if (p.atOp('{')) {
     return parseInterfaceBlock(p, type);
   }
+  // GLSL ES 3.00: array dimensions may precede the name for array RETURN
+  // types (`float[2] f()`). Invalid in 1.00 — report and recover by
+  // consuming the brackets so the rest of the declaration parses cleanly.
+  const dimsOpen = p.peek();
+  let returnDims: Expr[] = [];
+  if (p.atOp('[')) {
+    if (p.version === 100) {
+      p.error(dimsOpen.line, 'array return types require GLSL ES 3.00');
+      skipBalanced(p, '[', ']');
+    } else {
+      returnDims = parseArrayDims(p, false);
+    }
+  }
   const nameT = p.peek();
   if (nameT.kind !== 'identifier') {
     // Empty first declarator (`float;`, `float, a = 0.0;`) — legal per the
@@ -399,6 +427,7 @@ function parseDeclarationOrFunction(p: Parser): ExternalDecl | null {
       kind: 'function-prototype',
       name: nameT.name,
       returnType: type,
+      returnDims,
       params,
       loc: locOf(start),
     };
@@ -412,6 +441,12 @@ function parseDeclarationOrFunction(p: Parser): ExternalDecl | null {
     }
     p.expectOp(';', "expected ';' after function prototype");
     return prototype;
+  }
+  if (returnDims.length > 0) {
+    // Pre-name dims are only valid on function return types; a declaration
+    // like `float[2] x;` is invalid (dims must follow the name there) —
+    // report so the shader fails instead of silently dropping the dims.
+    p.error(dimsOpen.line, 'array dimensions before the name are only allowed for function return types');
   }
   const declarators = parseDeclarators(p, false);
   p.expectOp(';', "expected ';' after declaration");
@@ -859,12 +894,26 @@ function parseParamDecl(p: Parser): ParamDecl {
   const start = p.peek();
   const type = parseTypeSpec(p, { param: true, member: false });
   let name = '';
+  // GLSL ES 3.00: array dims may also precede the parameter name
+  // (`bool isSuccess(int[2] a)`). Invalid in 1.00 — report and recover by
+  // consuming the brackets so the rest of the parameter list parses cleanly.
+  let preNameDims: Expr[] = [];
+  if (p.atOp('[')) {
+    if (p.version === 100) {
+      p.error(p.peek().line, 'array dimensions before the parameter name require GLSL ES 3.00');
+      skipBalanced(p, '[', ']');
+    } else {
+      preNameDims = parseArrayDims(p, true);
+    }
+  }
   const nt = p.peek();
   if (nt.kind === 'identifier') {
     p.next();
     name = nt.name;
   }
-  const arrayDims = parseArrayDims(p, true);
+  const postNameDims = parseArrayDims(p, true);
+  // Pre-name dims come FIRST (`int[2] a[3]` → [2, 3]).
+  const arrayDims = preNameDims.concat(postNameDims);
   return { kind: 'param-decl', name, type, arrayDims, loc: locOf(start) };
 }
 
