@@ -969,6 +969,16 @@ function sourceDims(source: unknown): { width: number; height: number } | null {
     if (isSvgSource(s)) return svgImageDims(s);
     return typeof s.naturalHeight === 'number' ? { width: s.naturalWidth, height: s.naturalHeight } : null;
   }
+  // VideoFrame duck-type (native texImage2D and 2D drawImage both accept
+  // VideoFrame). Display size, not coded size — that is what drawImage paints.
+  // Mirror of present/image.ts decodeImageSource (c2) branch.
+  if (
+    typeof s.format === 'string' &&
+    typeof s.displayWidth === 'number' &&
+    typeof s.displayHeight === 'number'
+  ) {
+    return { width: s.displayWidth, height: s.displayHeight };
+  }
   if (typeof s.width === 'number' && typeof s.height === 'number') return { width: s.width, height: s.height };
   return null;
 }
