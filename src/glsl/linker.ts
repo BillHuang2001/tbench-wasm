@@ -43,14 +43,14 @@
  * declaration order (matched fs inputs read the same offsets). Struct varyings
  * flatten to per-member leaves ('v.m'), each with its own (index, offset).
  */
-import type { Stmt, StructDefinition, StructMemberDecl, TranslationUnit } from './ast.js';
+import type { Stmt, StructDefinition, TranslationUnit } from './ast.js';
 import type { LinkLimits, LinkOptions, LinkResult, Shader, ShaderUses, TransformFeedbackSpec, UniformBlockDecl, UniformDecl } from './compiler.js';
 import type { AttribInfo, FragmentExecCtx, Program, TransformFeedbackVarying, UniformBlockInfo, UniformBlockMemberInfo, UniformInfo, VaryingInfo, VertexExecCtx } from './program.js';
 import { generateFragmentStage, generateVertexStage, R } from './codegen/index.js';
 import type { BlockMemberLayout, CodegenLayout, StageCodegenResult, UniformSlot, VaryingLayout } from './codegen/index.js';
 import { flatComponents, isIntegralFamily } from './codegen/env.js';
 import { isIntegral, isSampler, toGLenum, typeComponents, typeEquals, typeName } from './types.js';
-import type { GLSLType, Precision, TypeQualifiers } from './types.js';
+import type { GLSLType } from './types.js';
 
 /* ------------------------------------------------------------------ */
 /* Limits (WebGL minimums per version; gl/ passes its own via opts)    */
@@ -271,7 +271,7 @@ function emitType(path: string, t: GLSLType, cursor: number, st: AllocState): { 
 /** One merged default-block uniform (same name in both stages). */
 interface MergedUniform {
   /** The vertex-stage declaration when declared in both stages (the first
-   *  seen); the fragment twin is kept separately for precision/struct checks. */
+   *  seen); the fragment twin is kept separately for struct-identity checks. */
   decl: UniformDecl;
   fsDecl: UniformDecl | null;
   inVs: boolean;
@@ -279,76 +279,8 @@ interface MergedUniform {
 }
 
 /* ------------------------------------------------------------------ */
-/* Cross-stage precision + struct-identity matching                    */
+/* Cross-stage struct-identity matching                                */
 /* ------------------------------------------------------------------ */
-
-/**
- * Replay the stage's `precision` statements to get the effective default
- * precision map (GLSL ES §4.5.3). NOTE the deliberate divergence from
- * semantics' defaultPrecisions: semantics seeds the VERTEX int default as
- * 'mediump', but the SPEC default is highp, and
- * shader-with-global-variable-precision-mismatch.html depends on the spec
- * default (VS `uniform int foo;` = highp vs FS default mediump must fail).
- * Sampler defaults are never consulted (sampler precision is exempt from the
- * comparison).
- */
-function stageDefaultPrecisions(shader: Shader): Map<string, Precision> {
-  const m = new Map<string, Precision>();
-  if (shader.type === 'VERTEX') {
-    m.set('float', 'highp');
-    m.set('int', 'highp');
-  } else {
-    m.set('int', 'mediump');
-  }
-  for (const d of shader.ast.declarations) {
-    if (d.kind === 'precision-decl') m.set(d.base, d.precision);
-  }
-  return m;
-}
-
-/** Effective precision of a type: the explicit qualifier, else the default in
- *  effect at the declaration (arrays unwrap to their element; uint shares the
- *  int default). bool/sampler/struct → null (bool has no precision; sampler
- *  precision is exempt from the cross-stage comparison). */
-function effectivePrecision(explicit: Precision | undefined, t: GLSLType, defaults: Map<string, Precision>): Precision | null {
-  if (explicit !== undefined) return explicit;
-  let e = t;
-  while (e.kind === 'array') e = e.element;
-  switch (e.kind) {
-    case 'scalar':
-    case 'vector':
-      return e.base === 'float' || e.base === 'int' || e.base === 'uint'
-        ? (defaults.get(e.base === 'uint' ? 'int' : e.base) ?? null)
-        : null;
-    case 'matrix':
-      return defaults.get('float') ?? null;
-    default:
-      return null; // sampler / struct / bool
-  }
-}
-
-/**
- * Locate the definition of user struct `name` in one stage's AST (either a
- * bare `struct S { ... };` or an inline `struct S { ... } v;` definition) and
- * return the effective precision of each member, in declaration order, or
- * null when the struct is not defined in that stage. Struct-member precision
- * is NOT part of ShaderInfo (UniformDecl carries only the uniform's own
- * precision) — the AST qualifiers + replayed defaults are the only source.
- */
-function structMemberPrecisions(shader: Shader, structName: string): (Precision | null)[] | null {
-  const defaults = stageDefaultPrecisions(shader);
-  for (const d of shader.ast.declarations) {
-    let members: StructMemberDecl[] | null = null;
-    if (d.kind === 'struct-decl' && d.name === structName) members = d.members;
-    else if (d.kind === 'global-var-decl' && d.type.base.kind === 'struct-definition' && d.type.base.name === structName) {
-      members = d.type.base.members;
-    }
-    if (members !== null) {
-      return members.map((m) => effectivePrecision(m.type.qualifiers.precision, m.type.resolved ?? { kind: 'void' }, defaults));
-    }
-  }
-  return null;
-}
 
 /**
  * Unwrap every array layer of a type (struct arrays compare their element
@@ -363,21 +295,25 @@ function unwrapArrays(t: GLSLType): GLSLType {
 /**
  * Member-level structural identity for matched struct uniforms (GLSL ES 1.00
  * §4.2.4 — same name, same sequence of type names, same type definitions and
- * field names; the CTS also requires matching member precision). The top-level
- * `typeEquals` check only compares struct NAMES, so two same-named structs
- * with different members link today — this rejects them. `a` is the vertex
- * decl, `b` the fragment decl (both have the SAME struct name — typeEquals
- * passed). Returns an error string or null when the definitions agree.
+ * field names). The top-level `typeEquals` check only compares struct NAMES,
+ * so two same-named structs with different members link today — this rejects
+ * them. `a` is the vertex decl, `b` the fragment decl (both have the SAME
+ * struct name — typeEquals passed). Returns an error string or null when the
+ * definitions agree.
+ *
+ * Member PRECISION is deliberately NOT compared: real-world shaders (three.js
+ * built-in materials) declare shared uniforms without an explicit precision
+ * while the stages default to different precisions (highp vertex default vs
+ * mediump fragment default), and ANGLE links those successfully — only TYPE
+ * conflicts are link errors for uniforms.
  */
-function structUniformConflict(a: UniformDecl, b: UniformDecl, vs: Shader, fs: Shader): string | null {
+function structUniformConflict(a: UniformDecl, b: UniformDecl): string | null {
   const sa = unwrapArrays(a.type);
   const sb = unwrapArrays(b.type);
   if (sa.kind !== 'struct' || sb.kind !== 'struct') return null; // typeEquals already rejected
   if (sa.members.length !== sb.members.length) {
     return `linker: uniform '${a.name}' struct '${sa.name}' member count mismatch`;
   }
-  const pa = structMemberPrecisions(vs, sa.name);
-  const pb = structMemberPrecisions(fs, sb.name);
   for (let i = 0; i < sa.members.length; i++) {
     const ma = sa.members[i];
     const mb = sb.members[i];
@@ -387,53 +323,17 @@ function structUniformConflict(a: UniformDecl, b: UniformDecl, vs: Shader, fs: S
     if (!typeEquals(ma.type, mb.type)) {
       return `linker: uniform '${a.name}' struct '${sa.name}' member '${ma.name}' type mismatch`;
     }
-    const precA = pa !== null && pa.length === sa.members.length ? pa[i] : null;
-    const precB = pb !== null && pb.length === sb.members.length ? pb[i] : null;
-    if (precA !== null && precB !== null && precA !== precB) {
-      return `linker: uniform '${a.name}' struct '${sa.name}' member '${ma.name}' precision mismatch (${precA} vs ${precB})`;
-    }
-  }
-  return null;
-}
-
-/**
- * Effective precision of a top-level default-block uniform: the explicit
- * qualifier on its declaration (AST), else the stage default for its base
- * type. Samplers/bool return null (exempt / no precision).
- */
-function uniformPrecision(shader: Shader, name: string, type: GLSLType): Precision | null {
-  const defaults = stageDefaultPrecisions(shader);
-  for (const d of shader.ast.declarations) {
-    if (d.kind !== 'global-var-decl') continue;
-    for (const dec of d.declarators) {
-      if (dec.name === name) return effectivePrecision(d.type.qualifiers.precision, type, defaults);
-    }
-  }
-  // No AST declaration found (should not happen for a merged uniform) — fall
-  // back to the recorded effective precision.
-  return null;
-}
-
-/** Cross-stage precision consistency for one matched default-block uniform:
- *  float/int/uint types compare their effective precision; structs compare
- *  member-by-member (name/type/precision); samplers and bools are exempt. */
-function uniformPrecisionConflict(a: UniformDecl, b: UniformDecl, vs: Shader, fs: Shader): string | null {
-  const ta = unwrapArrays(a.type);
-  if (ta.kind === 'struct') {
-    return structUniformConflict(a, b, vs, fs);
-  }
-  const pa = uniformPrecision(vs, a.name, a.type);
-  const pb = uniformPrecision(fs, b.name, b.type);
-  if (pa !== null && pb !== null && pa !== pb) {
-    return `linker: uniform '${a.name}' precision mismatch (${pa} vs ${pb})`;
   }
   return null;
 }
 
 /** Combine vs + fs default-block uniforms by name; same name must be
- *  type-identical in both stages (GLSL link rule) and, when the type is
- *  float/int/uint or a struct, must carry the same precision (structs compare
- *  member-by-member — see uniformPrecisionConflict). */
+ *  type-identical in both stages (GLSL link rule) and, when the type is a
+ *  struct, the definitions must be member-identical (see
+ *  structUniformConflict). Uniform PRECISION is deliberately NOT compared
+ *  across stages — ANGLE links highp VS × mediump FS shared uniforms
+ *  (three.js built-in materials rely on it); only type/struct-identity
+ *  conflicts are link errors. */
 function mergeUniforms(vs: Shader, fs: Shader): MergedUniform[] | { error: string } {
   const byName = new Map<string, MergedUniform>();
   const order: string[] = [];
@@ -448,8 +348,9 @@ function mergeUniforms(vs: Shader, fs: Shader): MergedUniform[] | { error: strin
       } else {
         ex.inFs = true;
         ex.fsDecl = decl;
-        // Both stages now known: cross-stage precision/struct-identity check.
-        return uniformPrecisionConflict(ex.decl, decl, vs, fs);
+        // Both stages now known: cross-stage struct-identity check (member
+        // precision mismatches are tolerated — see structUniformConflict).
+        return structUniformConflict(ex.decl, decl);
       }
       return null;
     }
