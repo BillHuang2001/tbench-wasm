@@ -105,4 +105,12 @@ export function installContextApi(proto: WebGLRenderingContext): void {
       return null;
     }
   };
+
+  // WebGL 1.0 IDL legacy method — spec no-op (this implementation holds no
+  // compiler resources). Installed as an OWN property so the method cannot
+  // resolve through the native prototype chain (which would throw "Illegal
+  // invocation" on our non-native `this` — offscreencanvas/methods-2.html).
+  proto.releaseShaderCompiler = function (this: WebGLRenderingContext) {
+    // no-op per spec
+  };
 }

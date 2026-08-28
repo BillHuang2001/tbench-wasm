@@ -316,6 +316,8 @@ export class WebGLRenderingContext {
   getProgramInfoLog(program: WebGLProgram): string | null { throw new Error('GL stub'); }
   getShaderSource(shader: WebGLShader): string | null { throw new Error('GL stub'); }
   getShaderPrecisionFormat(shadertype: GLenum, precisiontype: GLenum): WebGLShaderPrecisionFormat | null { throw new Error('GL stub'); }
+  /** WebGL 1.0 IDL legacy method — spec no-op (implemented in api/context.ts). */
+  releaseShaderCompiler(): void { throw new Error('GL stub'); }
   getAttribLocation(program: WebGLProgram, name: string): GLint { throw new Error('GL stub'); }
   getUniformLocation(program: WebGLProgram, name: string): WebGLUniformLocation | null { throw new Error('GL stub'); }
   bindAttribLocation(program: WebGLProgram, index: GLuint, name: string): void { throw new Error('GL stub'); }
@@ -431,10 +433,35 @@ export interface WebGLRenderingContext {
   getExtension(name: 'WEBGL_multi_draw'): WEBGL_multi_draw | null;
 }
 
+/**
+ * WebIDL interface methods are NON-enumerable on the prototype (native Chrome
+ * layout — `for (var i in gl)` sees only constants). The api/ mixins assign
+ * methods with plain `proto.x = fn`, which CREATES an enumerable property
+ * whenever the name is not already an own property (all WebGL1 methods on the
+ * WebGL2 prototype). Re-define every function-valued own property as
+ * non-enumerable — CTS offscreencanvas/methods-2.html fails on any extra
+ * enumerable method, while the constants-and-properties tests require the
+ * constants visible via for-in, so non-function properties (constants,
+ * accessors) are left untouched. Safe against later assignment-based installs
+ * (entry.ts's installAll): the properties are writable data properties, so a
+ * plain assignment updates only the value and preserves the descriptor.
+ */
+export function makePrototypeMethodsNonEnumerable(proto: object): void {
+  for (const name of Object.getOwnPropertyNames(proto)) {
+    const desc = Object.getOwnPropertyDescriptor(proto, name);
+    if (desc && typeof desc.value === 'function') {
+      desc.enumerable = false;
+      Object.defineProperty(proto, name, desc);
+    }
+  }
+}
+
 // Install WebGL1 constants on the prototype (gl.COLOR_BUFFER_BIT etc.).
 installConstants(WebGLRenderingContext.prototype, C1);
 // Wire the api/ prototype mixins (idempotent — entry.ts also calls installAll).
 installAll(WebGLRenderingContext.prototype);
+// Match the native WebIDL layout: prototype methods are non-enumerable.
+makePrototypeMethodsNonEnumerable(WebGLRenderingContext.prototype);
 
 // Browser instanceof compatibility: re-chain this prototype under the NATIVE
 // WebGLRenderingContext prototype so `gl instanceof WebGLRenderingContext` (the
