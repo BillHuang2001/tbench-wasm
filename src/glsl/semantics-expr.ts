@@ -457,7 +457,18 @@ export function analyzeExpr(e: Expr, scope: Scope, ctx: SemContext): void {
       const last = e.exprs[e.exprs.length - 1];
       if (last !== undefined && last.resolvedType !== undefined) {
         e.resolvedType = last.resolvedType;
-        e.constValue = last.constValue;
+        // ES 3.00: the sequence operator NEVER yields a constant expression
+        // (ESSL 3.00 §5.9 — CTS sequence-operator-returns-non-constant.html:
+        // `const float a = (0.0, 1.0);` and `float a[(2, 3)];` must fail).
+        // ES 1.00 folds ONLY when EVERY operand is itself a constant — the
+        // ogles CorrectComma_frag build test requires `const vec4 v =
+        // (vec4(1,2,3,4), vec4(5,6,7,8));` to compile. A non-constant operand
+        // keeps the sequence operator so its side effects still run (`int i =
+        // (g = 1, 0);` must assign g — the unconditional last-operand fold
+        // dropped it).
+        if (ctx.version === 100 && e.exprs.every((x) => x.constValue !== undefined)) {
+          e.constValue = last.constValue;
+        }
       }
       e.lvalue = false; // comma result is never an lvalue
       return;

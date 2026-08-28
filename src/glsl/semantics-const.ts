@@ -179,9 +179,20 @@ export function evalConstExpr(e: Expr, scope: Scope, ctx: SemContext): (number |
       return evalConstExpr(c[0] ? e.whenTrue : e.whenFalse, scope, ctx);
     }
     case 'comma': {
-      // The comma operator's value is its LAST operand.
+      // ES 3.00: the sequence operator NEVER yields a constant expression
+      // (ESSL 3.00 §5.9 — CTS sequence-operator-returns-non-constant.html:
+      // `const float a = (0.0, 1.0);` must fail to compile). ES 1.00 folds
+      // ONLY when every operand is a constant expression (the ogles
+      // CorrectComma_frag build test requires `const vec4 v = (vec4(1,2,3,4),
+      // vec4(5,6,7,8));` to compile); a non-constant operand (user call,
+      // assignment) keeps the sequence non-constant.
+      if (ctx.version !== 100) return undefined;
       const last = e.exprs[e.exprs.length - 1];
-      return last === undefined ? undefined : evalConstExpr(last, scope, ctx);
+      if (last === undefined) return undefined;
+      for (const x of e.exprs) {
+        if (evalConstExpr(x, scope, ctx) === undefined) return undefined;
+      }
+      return evalConstExpr(last, scope, ctx);
     }
     case 'call':
       return evalConstCall(e, scope, ctx);
