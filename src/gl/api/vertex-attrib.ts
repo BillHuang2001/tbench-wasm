@@ -26,11 +26,15 @@
  *  - vertexAttrib*f(v): sets the constant generic value (constantF, default
  *    (v...,0,0,1) fill) — does NOT touch the enabled state (the array is used
  *    when enabled, the constant otherwise). fv: values shorter than needed →
- *    INVALID_OPERATION; wrong value type → TypeError (WebIDL Float32List).
+ *    INVALID_VALUE (CTS gl-vertex-attrib); wrong value type → TypeError
+ *    (WebIDL Float32List).
  *  - vertexAttribI4i/iv/I4ui/uiv (WebGL2): set constantI/constantUI
  *    (WebIDL long / unsigned long converted).
  *  - vertexAttribDivisor (WebGL2): stores state.vao.attribs[index].divisor.
- *  - getVertexAttrib: CURRENT_VERTEX_ATTRIB → Float32Array copy of constantF;
+ *  - getVertexAttrib: CURRENT_VERTEX_ATTRIB → fresh copy of the current
+ *    generic value, typed by the most recent constant setter (Float32Array
+ *    after vertexAttrib*f(v), Int32Array after vertexAttribI4i/iv, Uint32Array
+ *    after vertexAttribI4ui/uiv — WebGL2; default float (0,0,0,1));
  *    VERTEX_ATTRIB_ARRAY_ENABLED/SIZE/STRIDE/TYPE/NORMALIZED/POINTER (0) /
  *    BUFFER_BINDING from the attrib; WebGL2 adds VERTEX_ATTRIB_ARRAY_INTEGER /
  *    VERTEX_ATTRIB_ARRAY_DIVISOR (INVALID_ENUM on WebGL1). Other pnames →
@@ -168,6 +172,33 @@ function toUint32List(v: Uint32List): Uint32Array {
   throw new TypeError('Argument is not a Uint32List');
 }
 
+/**
+ * The generic (constant) vertex attrib value has a TYPE that follows the MOST
+ * RECENT constant setter: vertexAttrib{1,2,3,4}f(v) → float,
+ * vertexAttribI4{i,iv} → int, vertexAttribI4{ui,uiv} → uint. WebGL2's
+ * getVertexAttrib(index, CURRENT_VERTEX_ATTRIB) returns a Float32Array,
+ * Int32Array or Uint32Array copy accordingly (conformance2/attribs/
+ * gl-vertex-attrib.html checks the exact array type after every setter). The
+ * default before any call is float (0,0,0,1) — the spec's generic attribute
+ * default.
+ *
+ * state.ts's VertexAttribState carries the three value arrays (constantF/
+ * constantI/constantUI) but no "which one is current" flag; the flag is
+ * attached lazily HERE (per attrib object) so state.ts stays untouched. Attrib
+ * objects are never exposed to the page, so the extra field cannot trip the
+ * CTS constants-and-properties enumeration. Absent flag ⇒ float.
+ */
+type CurrentKind = 'f' | 'i' | 'ui';
+type AttribWithKind = VertexAttribState & { _currentKind?: CurrentKind };
+
+function currentKind(a: VertexAttribState): CurrentKind {
+  return (a as AttribWithKind)._currentKind ?? 'f';
+}
+
+function setCurrentKind(a: VertexAttribState, k: CurrentKind): void {
+  (a as AttribWithKind)._currentKind = k;
+}
+
 /** Shared vertexAttrib{f,fv} constant-setter. */
 function setConstantF(attrib: VertexAttribState, vals: Float32Array, needed: number): void {
   const c = attrib.constantF;
@@ -175,6 +206,7 @@ function setConstantF(attrib: VertexAttribState, vals: Float32Array, needed: num
   c[1] = needed > 1 ? vals[1] : 0;
   c[2] = needed > 2 ? vals[2] : 0;
   c[3] = needed > 3 ? vals[3] : 1;
+  setCurrentKind(attrib, 'f');
 }
 
 export function installVertexAttribApi(proto: WebGLRenderingContext): void {
@@ -236,11 +268,13 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return;
     const i = attribIndex(ctx, index);
     if (i === null) return;
-    const c = ctx._state.vao.attribs[i].constantF;
+    const attrib = ctx._state.vao.attribs[i];
+    const c = attrib.constantF;
     c[0] = x;
     c[1] = 0;
     c[2] = 0;
     c[3] = 1;
+    setCurrentKind(attrib, 'f');
   };
 
   proto.vertexAttrib1fv = function (this: WebGLRenderingContext, index: GLuint, values: Float32List): void {
@@ -250,7 +284,7 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
     if (i === null) return;
     const a = toFloat32List(values);
     if (a.length < 1) {
-      ctx._errors.push(C1.INVALID_OPERATION);
+      ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
     setConstantF(ctx._state.vao.attribs[i], a, 1);
@@ -261,11 +295,13 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return;
     const i = attribIndex(ctx, index);
     if (i === null) return;
-    const c = ctx._state.vao.attribs[i].constantF;
+    const attrib = ctx._state.vao.attribs[i];
+    const c = attrib.constantF;
     c[0] = x;
     c[1] = y;
     c[2] = 0;
     c[3] = 1;
+    setCurrentKind(attrib, 'f');
   };
 
   proto.vertexAttrib2fv = function (this: WebGLRenderingContext, index: GLuint, values: Float32List): void {
@@ -275,7 +311,7 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
     if (i === null) return;
     const a = toFloat32List(values);
     if (a.length < 2) {
-      ctx._errors.push(C1.INVALID_OPERATION);
+      ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
     setConstantF(ctx._state.vao.attribs[i], a, 2);
@@ -286,11 +322,13 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return;
     const i = attribIndex(ctx, index);
     if (i === null) return;
-    const c = ctx._state.vao.attribs[i].constantF;
+    const attrib = ctx._state.vao.attribs[i];
+    const c = attrib.constantF;
     c[0] = x;
     c[1] = y;
     c[2] = z;
     c[3] = 1;
+    setCurrentKind(attrib, 'f');
   };
 
   proto.vertexAttrib3fv = function (this: WebGLRenderingContext, index: GLuint, values: Float32List): void {
@@ -300,7 +338,7 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
     if (i === null) return;
     const a = toFloat32List(values);
     if (a.length < 3) {
-      ctx._errors.push(C1.INVALID_OPERATION);
+      ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
     setConstantF(ctx._state.vao.attribs[i], a, 3);
@@ -311,11 +349,13 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
     if (isLost(ctx)) return;
     const i = attribIndex(ctx, index);
     if (i === null) return;
-    const c = ctx._state.vao.attribs[i].constantF;
+    const attrib = ctx._state.vao.attribs[i];
+    const c = attrib.constantF;
     c[0] = x;
     c[1] = y;
     c[2] = z;
     c[3] = w;
+    setCurrentKind(attrib, 'f');
   };
 
   proto.vertexAttrib4fv = function (this: WebGLRenderingContext, index: GLuint, values: Float32List): void {
@@ -325,7 +365,7 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
     if (i === null) return;
     const a = toFloat32List(values);
     if (a.length < 4) {
-      ctx._errors.push(C1.INVALID_OPERATION);
+      ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
     setConstantF(ctx._state.vao.attribs[i], a, 4);
@@ -339,7 +379,14 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
     const attrib = ctx._state.vao.attribs[i];
     switch (pname) {
       case C1.CURRENT_VERTEX_ATTRIB:
-        return new Float32Array(attrib.constantF); // copy
+        // Fresh copy whose TYPE follows the most recent constant setter
+        // (float / int / uint — WebGL2 integer current values; the float
+        // default (0,0,0,1) applies before any setter call).
+        switch (currentKind(attrib)) {
+          case 'i': return new Int32Array(attrib.constantI);
+          case 'ui': return new Uint32Array(attrib.constantUI);
+          default: return new Float32Array(attrib.constantF);
+        }
       case C1.VERTEX_ATTRIB_ARRAY_ENABLED:
         return attrib.enabled;
       case C1.VERTEX_ATTRIB_ARRAY_SIZE:
@@ -436,11 +483,13 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return;
       const i = attribIndex(ctx, index);
       if (i === null) return;
-      const c = ctx._state.vao.attribs[i].constantI;
+      const attrib = ctx._state.vao.attribs[i];
+      const c = attrib.constantI;
       c[0] = x | 0;
       c[1] = y | 0;
       c[2] = z | 0;
       c[3] = w | 0;
+      setCurrentKind(attrib, 'i');
     };
 
     p2.vertexAttribI4iv = function (this: WebGL2RenderingContext, index: GLuint, values: Int32List): void {
@@ -450,14 +499,16 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
       if (i === null) return;
       const a = toInt32List(values);
       if (a.length < 4) {
-        ctx._errors.push(C1.INVALID_OPERATION);
+        ctx._errors.push(C1.INVALID_VALUE);
         return;
       }
-      const c = ctx._state.vao.attribs[i].constantI;
+      const attrib = ctx._state.vao.attribs[i];
+      const c = attrib.constantI;
       c[0] = a[0];
       c[1] = a[1];
       c[2] = a[2];
       c[3] = a[3];
+      setCurrentKind(attrib, 'i');
     };
 
     p2.vertexAttribI4ui = function (this: WebGL2RenderingContext, index: GLuint, x: GLuint, y: GLuint, z: GLuint, w: GLuint): void {
@@ -465,11 +516,13 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
       if (isLost(ctx)) return;
       const i = attribIndex(ctx, index);
       if (i === null) return;
-      const c = ctx._state.vao.attribs[i].constantUI;
+      const attrib = ctx._state.vao.attribs[i];
+      const c = attrib.constantUI;
       c[0] = x >>> 0;
       c[1] = y >>> 0;
       c[2] = z >>> 0;
       c[3] = w >>> 0;
+      setCurrentKind(attrib, 'ui');
     };
 
     p2.vertexAttribI4uiv = function (this: WebGL2RenderingContext, index: GLuint, values: Uint32List): void {
@@ -479,14 +532,16 @@ export function installVertexAttribApi(proto: WebGLRenderingContext): void {
       if (i === null) return;
       const a = toUint32List(values);
       if (a.length < 4) {
-        ctx._errors.push(C1.INVALID_OPERATION);
+        ctx._errors.push(C1.INVALID_VALUE);
         return;
       }
-      const c = ctx._state.vao.attribs[i].constantUI;
+      const attrib = ctx._state.vao.attribs[i];
+      const c = attrib.constantUI;
       c[0] = a[0];
       c[1] = a[1];
       c[2] = a[2];
       c[3] = a[3];
+      setCurrentKind(attrib, 'ui');
     };
 
     p2.vertexAttribDivisor = function (this: WebGL2RenderingContext, index: GLuint, divisor: GLuint): void {

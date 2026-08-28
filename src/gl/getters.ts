@@ -381,8 +381,14 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
       );
 
     // ---- Misc state ----
-    case C.SHADER_COMPILER: return true; // software compiler always available
-    case C.NUM_SHADER_BINARY_FORMATS: return 0; // no binary shader formats
+    // SHADER_COMPILER / SHADER_BINARY_FORMATS / NUM_SHADER_BINARY_FORMATS are
+    // NOT queryable via getParameter in WebGL: the spec ("No Shader Binaries":
+    // "querying shader binary formats and the availability of a shader
+    // compiler via getParameter is not supported in the WebGL API") and CTS
+    // gl-enum-tests (BOTH WebGL1 and WebGL2 — the pnames are in the shared
+    // INVALID_ENUM list) require INVALID_ENUM here, so they intentionally have
+    // no case and fall through to the default below. The context constants
+    // themselves remain installed (constants-and-properties*).
     case C.COMPRESSED_TEXTURE_FORMATS: return new Uint32Array(0); // no compressed formats
     case C.SUBPIXEL_BITS: return 8;
     case C.IMPLEMENTATION_COLOR_READ_FORMAT:
