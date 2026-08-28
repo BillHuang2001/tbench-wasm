@@ -560,6 +560,44 @@ function checkAttachment(
     const tex = entry.texture;
     const image = tex._image;
     if (!image || entry.level < 0) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+    // GLES3 §4.4.5 (pg 213): when the attached level is NOT the texture's
+    // TEXTURE_BASE_LEVEL, the level must lie in [levelbase, q] (q = highest
+    // defined level, capped by TEXTURE_MAX_LEVEL) and the texture must be
+    // mipmap complete. When the attached level IS the base level, only that
+    // level's image must be defined (checked below). CTS
+    // framebuffer-texture-level1.html: attaching level 1 with base level 0
+    // (only level 1 defined) is INCOMPLETE_ATTACHMENT until TEXTURE_BASE_LEVEL
+    // is raised to 1; mipmap-fbo.html: attaching level 1 of a texture with
+    // only level 0 defined is INCOMPLETE_ATTACHMENT.
+    {
+      const baseLevel = tex._params[0x813c] ?? 0;
+      const maxLevel = tex._params[0x813d] ?? 1000;
+      if (entry.level !== baseLevel) {
+        // q = highest level with a defined image, clamped to TEXTURE_MAX_LEVEL.
+        let q = -1;
+        const n = image.levels.length;
+        for (let l = 0; l < n && l <= maxLevel; l++) {
+          if (image.levels[l]) q = l;
+        }
+        if (entry.level < baseLevel || entry.level > Math.min(q, maxLevel)) {
+          return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+        }
+        // Mipmap complete over [baseLevel, q]: every level's image must exist.
+        const isCube = isCubeFace(entry.face);
+        for (let l = baseLevel; l <= q; l++) {
+          const lvl = image.levels[l];
+          if (!lvl) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+          if (isCube) {
+            if (lvl.data.length !== 6) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            for (const face of lvl.data) {
+              if (!face) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+            }
+          } else if (!lvl.data[0]) {
+            return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+          }
+        }
+      }
+    }
     const lvl = image.levels[entry.level];
     if (!lvl) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
     if (isCubeFace(entry.face)) {
@@ -586,13 +624,12 @@ function checkAttachment(
   switch (kind) {
     case 'color':
       if (!isColorRenderable(ctx, format)) {
-        // Objective-mandated WebGL2 deviation: RGB8 (and unsized RGB, which
-        // resolves to RGB8) is NOT color-renderable. For TEXTURE attachments
-        // the deviation reports FRAMEBUFFER_UNSUPPORTED; RGB8 RENDERBUFFERS are
-        // color-renderable per GLES3 Table 3.13 → COMPLETE
-        // (read-pixels-from-rgb8-into-pbo-bug.html hard-asserts).
+        // RGB8 (and unsized RGB, which resolves to RGB8) is color-renderable
+        // per GLES3 Table 3.13 — COMPLETE for both renderbuffer and texture
+        // attachments (CTS rgb-format-support.html, framebuffer-render-to-layer.html
+        // hard-require COMPLETE for RGB/RGB8 textures).
         if (ctx._version === 2 && (format === 0x8051 /* RGB8 */ || format === 0x1907 /* RGB (unsized → RGB8) */)) {
-          return entry.type === 'texture' ? C1.FRAMEBUFFER_UNSUPPORTED : null;
+          return null;
         }
         return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
       }
@@ -606,8 +643,51 @@ function checkAttachment(
   }
 }
 
-/** Resolve one attachment point of a framebuffer to its surface (null when unset/invalid). */
+/** Resolve one attachment point of a framebuffer to its surface (null when unset/invalid).
+ *  DEPTH_STENCIL images (renderbuffer or texture) are attached to BOTH the
+ *  DEPTH_ATTACHMENT and STENCIL_ATTACHMENT points (WebGL2 framebufferRenderbuffer
+ *  stores the DS record under both keys; WebGL1 under DEPTH_STENCIL_ATTACHMENT).
+ *  The draw engine (src/gl/draw.ts executeBlitFramebuffer) blits the depth AND
+ *  stencil planes of a surface whenever it resolves, regardless of the blit
+ *  mask, so this resolver must expose the planes separately:
+ *   - STENCIL_ATTACHMENT of a DS image → a STENCIL-plane-scoped view of the DS
+ *     surface (raster's blitDepthStencilSurface then copies ONLY the stencil
+ *     plane — CTS blitframebuffer-stencil-only.html expects a stencil-only blit
+ *     to leave the dest depth plane untouched).
+ *   - DEPTH_ATTACHMENT of a DS image → null (a depth-plane view would make a
+ *     stencil-only blit copy depth too; a full-surface resolve copies both
+ *     planes. Fixing the per-plane mask handling belongs in draw.ts). */
 export function getAttachmentSurface(fbo: WebGLFramebuffer, attachment: GLenum): Surface | null {
+  if (attachment === DEPTH_ATTACHMENT) {
+    const entry = fbo._attachments.get(DEPTH_ATTACHMENT);
+    if (!entry) return null;
+    const surf = resolveAttachmentSurface(entry);
+    if (surf && surf.info.isDepth && surf.info.isStencil) return null; // DS image
+    return surf;
+  }
+  if (attachment === STENCIL_ATTACHMENT) {
+    let entry = fbo._attachments.get(STENCIL_ATTACHMENT);
+    let surf = entry ? resolveAttachmentSurface(entry) : null;
+    if (!surf) {
+      // WebGL1 stores DS images under DEPTH_STENCIL_ATTACHMENT only.
+      const ds = fbo._attachments.get(DEPTH_STENCIL_ATTACHMENT);
+      if (ds) surf = resolveAttachmentSurface(ds);
+    }
+    if (!surf) return null;
+    if (surf.info.isDepth && surf.info.isStencil && surf.stencilData) {
+      // DS image: expose only the stencil plane (see header comment).
+      const info = getFormat(C1.STENCIL_INDEX8);
+      if (!info) return null;
+      return {
+        width: surf.width,
+        height: surf.height,
+        format: C1.STENCIL_INDEX8,
+        info,
+        data: surf.stencilData,
+      };
+    }
+    return surf; // already stencil-only
+  }
   const entry = fbo._attachments.get(attachment);
   if (!entry) return null;
   return resolveAttachmentSurface(entry);
