@@ -400,18 +400,14 @@ function inlineCall(
         const lv = emitLValue(rawArgs[i], env);
         if (lv.prelude) lines.push(lv.prelude);
         if (storage === 'inout') {
-          const temps = conv.map((v) => toTemp(v, env));
-          for (const t of temps) for (const p of t.pre!) lines.push(`${p};`);
-          argTemps.push(temps);
+          argTemps.push(materializeArg(conv, env, lines));
         } else {
           argTemps.push([]); // out: no in-value
         }
         outArgs.push({ paramIndex: i, targets: lv.targets, dualTargets: lv.dualTargets ?? null, copyBack: lv.copyBack });
       } else {
         // in (or const-in): read the value at this arg position.
-        const temps = conv.map((v) => toTemp(v, env));
-        for (const t of temps) for (const p of t.pre!) lines.push(`${p};`);
-        argTemps.push(temps);
+        argTemps.push(materializeArg(conv, env, lines));
       }
     }
 
@@ -613,29 +609,38 @@ function convertArg(vals: Value[], from: GLSLType, to: GLSLType): Value[] {
   return vals.map((v) => ({ v: convertScalar(v.v, fb, tb), pre: v.pre }));
 }
 
-/** Materialize ONE value into a fresh temp — ALWAYS, even without pre, so
- *  side-effectful arg expressions (assignments) run at their exact arg
- *  position (left-to-right interleaving with later args' preludes).
- *  Dual mode: float values temp all THREE planes (3 temps; the pre lines run
- *  in order: v first, then dx/dy — the dx/dy strings may reference temps
- *  set by the v line's folded pre). */
-function toTemp(v: Value, env: CodegenEnv): Value {
-  const t = env.allocTemp();
-  if (env.dual && v.dx !== undefined && v.dy !== undefined) {
-    const td = env.allocTemp();
-    const td2 = env.allocTemp();
-    return {
-      v: t,
-      dx: td,
-      dy: td2,
-      pre: [
-        `${t} = ${v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v}`,
-        `${td} = ${v.dx}`,
-        `${td2} = ${v.dy}`,
-      ],
-    };
-  }
-  return { v: t, pre: [`${t} = ${v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v}`] };
+/**
+ * Materialize ONE arg's component values into temps, pushing the assignments
+ * into `lines` at the exact arg position (GLSL left-to-right evaluation).
+ * EVERY component is temped — even without pre — so side-effectful v-strings
+ * (assignments, ++/--) run HERE, before later args (binding them at the
+ * param-bind lines instead would reorder effects across args). Pres that are
+ * SHARED by identity across components (a nested array-returning call's ONE
+ * [iife] array on every component) run exactly ONCE: the first component
+ * folds them into its temp assignment, later components read the call's
+ * retTemps directly — folding a shared pre into every temp would re-run the
+ * callee once per component. Dual mode: float values temp all THREE planes
+ * (3 temps; the pre runs in the v line, the dx/dy strings may reference its
+ * temps). The returned Values carry the temp names (no pre — the lines are
+ * already in `lines`).
+ */
+function materializeArg(vals: Value[], env: CodegenEnv, lines: string[]): Value[] {
+  const seen = new Set<string[]>();
+  return vals.map((v) => {
+    const p = v.pre;
+    const first = !(p && p.length > 0) || !seen.has(p);
+    if (p && p.length > 0) seen.add(p);
+    const t = env.allocTemp();
+    const vv = p && p.length > 0 ? (first ? foldPre(p, v.v) : v.v) : v.v;
+    if (env.dual && v.dx !== undefined && v.dy !== undefined) {
+      const td = env.allocTemp();
+      const td2 = env.allocTemp();
+      lines.push(`${t} = ${vv};`, `${td} = ${v.dx};`, `${td2} = ${v.dy};`);
+      return { v: t, dx: td, dy: td2 };
+    }
+    lines.push(`${t} = ${vv};`);
+    return { v: t };
+  });
 }
 
 /** All local variable names declared anywhere in a function body (params are

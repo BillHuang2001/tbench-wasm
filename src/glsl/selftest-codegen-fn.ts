@@ -14,10 +14,14 @@
  *
  * Prints "OK" and exits 0 on success.
  */
-import type { FunctionDefinition, TranslationUnit } from './ast.js';
+import type {
+  DeclStmt, Expr, ExprStmt, FunctionDefinition, GlobalVarDecl, LiteralExpr, ParamDecl,
+  ReturnStmt, Stmt, TranslationUnit, TypeSpec,
+} from './ast.js';
+import type { GLSLType } from './types.js';
 import { compileShader } from './compiler.js';
 import { CodegenEnv } from './codegen/env.js';
-import { installUserFunctions } from './codegen/functions.js';
+import { installUserFunctions, installUserGlobals } from './codegen/functions.js';
 import { emitStatements } from './codegen/statements.js';
 import type { CodegenLayout } from './codegen/index.js';
 import { R } from './codegen/runtime.js';
@@ -490,6 +494,314 @@ function runVertex(src: string, opts?: { version?: 100 | 300 }): RunResult {
     r.ctx.out.position[0] === 6,
     `struct param with array member by value: useS(s) === 6 (got ${r.ctx.out.position[0]})`,
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* ES 3.00 arrays (hand-built ASTs)                                    */
+/*                                                                     */
+/* The GLSL ES 3.00 array features below (array-returning functions,   */
+/* array ==/!=, whole-array assignment, .length()) are typed by the    */
+/* semantics stage in a PARALLEL wave — at this HEAD compileShader     */
+/* rejects them, so the ASTs are built by hand (every node carries     */
+/* resolvedType), exactly like selftest-codegen-expr.ts. The driver    */
+/* installs user functions + globals, emits main, runs it, and asserts */
+/* on the resulting ctx state.                                         */
+/* ------------------------------------------------------------------ */
+
+const LOC = { line: 1, column: 0 };
+const iT = (): GLSLType => ({ kind: 'scalar', base: 'int' });
+const fT = (): GLSLType => ({ kind: 'scalar', base: 'float' });
+const bT = (): GLSLType => ({ kind: 'scalar', base: 'bool' });
+const vec4T = (): GLSLType => ({ kind: 'vector', base: 'float', size: 4 });
+const arrT = (elem: GLSLType, size: number): GLSLType => ({ kind: 'array', element: elem, size });
+
+function lit(v: number | boolean, t: GLSLType): LiteralExpr {
+  return {
+    kind: 'literal', loc: LOC, value: v,
+    literalType: (t.kind === 'scalar' ? t.base : 'float') as 'int' | 'uint' | 'float' | 'bool',
+    resolvedType: t, constValue: v,
+  };
+}
+function ident(name: string, t: GLSLType): Expr {
+  return { kind: 'identifier', loc: LOC, name, resolvedType: t };
+}
+function call(name: string, args: Expr[], t: GLSLType): Expr {
+  return { kind: 'call', loc: LOC, callee: { kind: 'identifier', loc: LOC, name, resolvedType: { kind: 'void' } }, args, resolvedType: t };
+}
+function arrCtor(name: string, size: number, args: Expr[], t: GLSLType): Expr {
+  return {
+    kind: 'call', loc: LOC,
+    callee: {
+      kind: 'index', loc: LOC,
+      object: { kind: 'identifier', loc: LOC, name, resolvedType: { kind: 'void' } },
+      index: lit(size, iT()), resolvedType: { kind: 'void' },
+    },
+    args, resolvedType: t,
+  };
+}
+function memCall(obj: Expr, t: GLSLType): Expr {
+  return { kind: 'call', loc: LOC, callee: { kind: 'member', loc: LOC, object: obj, name: 'length', resolvedType: { kind: 'void' } }, args: [], resolvedType: t };
+}
+function idx(obj: Expr, index: Expr, t: GLSLType): Expr {
+  return { kind: 'index', loc: LOC, object: obj, index, resolvedType: t };
+}
+function assignE(target: Expr, value: Expr, t: GLSLType): Expr {
+  return { kind: 'assign', loc: LOC, op: '=', target, value, resolvedType: t };
+}
+function bin(op: string, l: Expr, r: Expr, t: GLSLType): Expr {
+  return { kind: 'binary', loc: LOC, op: op as never, left: l, right: r, resolvedType: t };
+}
+function unary(op: string, operand: Expr, t: GLSLType): Expr {
+  return { kind: 'unary', loc: LOC, op: op as never, operand, resolvedType: t };
+}
+function tern(cond: Expr, a: Expr, b: Expr, t: GLSLType): Expr {
+  return { kind: 'ternary', loc: LOC, cond, whenTrue: a, whenFalse: b, resolvedType: t };
+}
+function ret(value: Expr | null): ReturnStmt {
+  return { kind: 'return', loc: LOC, value };
+}
+function exprStmt(e: Expr): ExprStmt {
+  return { kind: 'expr-stmt', loc: LOC, expr: e };
+}
+function typeSpec(t: GLSLType, storage?: string): TypeSpec {
+  return { kind: 'type-spec', loc: LOC, qualifiers: storage ? { storage: storage as never } : {}, base: { kind: 'type-name', loc: LOC, name: 'int' }, resolved: t };
+}
+function declStmt(name: string, baseT: GLSLType, init: Expr | null, arrayDims: Expr[] = []): DeclStmt {
+  return {
+    kind: 'decl-stmt', loc: LOC,
+    type: typeSpec(baseT),
+    declarators: [{ kind: 'var-declarator', loc: LOC, name, arrayDims, init }],
+  };
+}
+function globalVar(name: string, baseT: GLSLType, init: Expr | null): GlobalVarDecl {
+  return {
+    kind: 'global-var-decl', loc: LOC,
+    type: typeSpec(baseT),
+    declarators: [{ kind: 'var-declarator', loc: LOC, name, arrayDims: [], init }],
+  };
+}
+function param(name: string, baseT: GLSLType, arrayDims: Expr[], storage?: string): ParamDecl {
+  return { kind: 'param-decl', loc: LOC, name, type: typeSpec(baseT, storage), arrayDims };
+}
+function fnDef(name: string, params: ParamDecl[], retT: GLSLType, retDims: Expr[], body: Stmt[]): FunctionDefinition {
+  return {
+    kind: 'function-definition', loc: LOC,
+    prototype: {
+      kind: 'function-prototype', loc: LOC, name,
+      returnType: typeSpec(retT),
+      returnDims: retDims,
+      params,
+    },
+    body: { kind: 'compound', loc: LOC, body },
+  };
+}
+function mainFn(body: Stmt[]): FunctionDefinition {
+  return fnDef('main', [], { kind: 'void' }, [], body);
+}
+function tu300(decls: TranslationUnit['declarations']): TranslationUnit {
+  return { kind: 'translation-unit', loc: LOC, version: 300, declarations: decls };
+}
+
+function runTu300(u: TranslationUnit): { body: string; ctx: Record<string, any> } {
+  const main = findFn(u, 'main');
+  const env = new CodegenEnv('VERTEX', baseLayout(300));
+  installUserFunctions(u, env);
+  const ginit = installUserGlobals(u, env);
+  const stmts = emitStatements(main.body.body, env);
+  const body = [...(env.temps.length ? [`var ${env.temps.join(', ')};`] : []), ...ginit, ...stmts].join('\n');
+  const fn = new Function('ctx', 'R', body);
+  const ctx: Record<string, any> = {
+    out: { position: [0, 0, 0, 0], pointSize: 0 },
+    scratch: new Float32Array(Math.max(env.scratchSize, 16)),
+    intScratch: new Int32Array(Math.max(env.intScratchSize, 16)),
+  };
+  fn(ctx, R);
+  return { body, ctx };
+}
+
+/* 26. array-returning function: result assigned to a local, indexed       */
+/*     (`(f())[0]` directly) — values must be exact.                       */
+{
+  const u = tu300([
+    fnDef('f', [], arrT(iT(), 2), [lit(2, iT())], [
+      ret(arrCtor('int', 2, [lit(1, iT()), lit(2, iT())], arrT(iT(), 2))),
+    ]),
+    mainFn([
+      declStmt('a', iT(), null, [lit(2, iT())]),
+      declStmt('x', iT(), null, []),
+      exprStmt(assignE(ident('a', arrT(iT(), 2)), call('f', [], arrT(iT(), 2)), arrT(iT(), 2))),
+      exprStmt(assignE(ident('x', iT()), idx(call('f', [], arrT(iT(), 2)), lit(0, iT()), iT()), iT())),
+      exprStmt(assignE(ident('gl_Position', vec4T()), call('vec4', [bin('+', bin('+', idx(ident('a', arrT(iT(), 2)), lit(0, iT()), iT()), idx(ident('a', arrT(iT(), 2)), lit(1, iT()), iT()), fT()), ident('x', iT()), fT())], vec4T()), vec4T())),
+    ]),
+  ]);
+  const r = runTu300(u);
+  check(r.ctx.out.position[0] === 4, `array return: a=f(); x=(f())[0]; a[0]+a[1]+x === 4 (got ${r.ctx.out.position[0]})`);
+}
+
+/* 27. side effects exactly once: `plus();` and `createArray() ==          */
+/*     int[2](1,1)` — the callee's IIFE must run ONCE, not once per        */
+/*     returned component (shared-pre dedup).                              */
+{
+  const u = tu300([
+    globalVar('g', iT(), lit(0, iT())),
+    fnDef('plus', [], arrT(iT(), 2), [lit(2, iT())], [
+      exprStmt(unary('++', ident('g', iT()), iT())),
+      ret(arrCtor('int', 2, [ident('g', iT()), ident('g', iT())], arrT(iT(), 2))),
+    ]),
+    fnDef('createArray', [], arrT(iT(), 2), [lit(2, iT())], [
+      exprStmt(unary('++', ident('g', iT()), iT())),
+      ret(arrCtor('int', 2, [lit(1, iT()), lit(1, iT())], arrT(iT(), 2))),
+    ]),
+    mainFn([
+      declStmt('eq', bT(), null, []),
+      exprStmt(call('plus', [], arrT(iT(), 2))),
+      exprStmt(assignE(ident('eq', bT()), bin('==', call('createArray', [], arrT(iT(), 2)), arrCtor('int', 2, [lit(1, iT()), lit(1, iT())], arrT(iT(), 2)), bT()), bT())),
+      exprStmt(assignE(ident('gl_Position', vec4T()), call('vec4', [tern(bin('&&', bin('==', ident('g', iT()), lit(2, iT()), bT()), ident('eq', bT()), bT()), lit(1, fT()), lit(0, fT()), fT())], vec4T()), vec4T())),
+    ]),
+  ]);
+  const r = runTu300(u);
+  check(r.ctx.out.position[0] === 1, `array call side effects once: plus(); createArray()==int[2](1,1); g===2 (got ${r.ctx.out.position[0]})`);
+}
+
+/* 28. .length(): local, function call result, constructor result.         */
+{
+  const u = tu300([
+    fnDef('f', [], arrT(iT(), 2), [lit(2, iT())], [
+      ret(arrCtor('int', 2, [lit(7, iT()), lit(7, iT())], arrT(iT(), 2))),
+    ]),
+    mainFn([
+      declStmt('a', iT(), null, [lit(3, iT())]),
+      declStmt('n', iT(), null, []),
+      declStmt('ok', bT(), null, []),
+      exprStmt(assignE(ident('ok', bT()), bin('==', memCall(ident('a', arrT(iT(), 3)), iT()), lit(3, iT()), bT()), bT())),
+      exprStmt(assignE(ident('n', iT()), memCall(call('f', [], arrT(iT(), 2)), iT()), iT())),
+      exprStmt(assignE(ident('gl_Position', vec4T()), call('vec4', [tern(bin('&&', bin('&&', ident('ok', bT()), bin('==', ident('n', iT()), lit(2, iT()), bT()), bT()), bin('==', memCall(arrCtor('int', 1, [lit(0, iT())], arrT(iT(), 1)), iT()), lit(1, iT()), bT()), bT()), lit(1, fT()), lit(0, fT()), fT())], vec4T()), vec4T())),
+    ]),
+  ]);
+  const r = runTu300(u);
+  check(r.ctx.out.position[0] === 1, `array .length(): a.length()==3 && (f()).length()==2 && (int[1](0)).length()==1 (got ${r.ctx.out.position[0]})`);
+}
+
+/* 29. array ==/!= on locals: (a==b) && (a!=c) for a==b, c differing.      */
+{
+  const u = tu300([
+    mainFn([
+      declStmt('a', iT(), null, [lit(2, iT())]),
+      declStmt('b', iT(), null, [lit(2, iT())]),
+      declStmt('c', iT(), null, [lit(2, iT())]),
+      exprStmt(assignE(idx(ident('a', arrT(iT(), 2)), lit(0, iT()), iT()), lit(1, iT()), iT())),
+      exprStmt(assignE(idx(ident('a', arrT(iT(), 2)), lit(1, iT()), iT()), lit(2, iT()), iT())),
+      exprStmt(assignE(idx(ident('b', arrT(iT(), 2)), lit(0, iT()), iT()), lit(1, iT()), iT())),
+      exprStmt(assignE(idx(ident('b', arrT(iT(), 2)), lit(1, iT()), iT()), lit(2, iT()), iT())),
+      exprStmt(assignE(idx(ident('c', arrT(iT(), 2)), lit(0, iT()), iT()), lit(1, iT()), iT())),
+      exprStmt(assignE(idx(ident('c', arrT(iT(), 2)), lit(1, iT()), iT()), lit(3, iT()), iT())),
+      exprStmt(assignE(ident('gl_Position', vec4T()), call('vec4', [tern(bin('&&', bin('==', ident('a', arrT(iT(), 2)), ident('b', arrT(iT(), 2)), bT()), bin('!=', ident('a', arrT(iT(), 2)), ident('c', arrT(iT(), 2)), bT()), bT()), lit(1, fT()), lit(0, fT()), fT())], vec4T()), vec4T())),
+    ]),
+  ]);
+  const r = runTu300(u);
+  check(r.ctx.out.position[0] === 1, `array ==/!=: (a==b) && (a!=c) for a==b, c differs (got ${r.ctx.out.position[0]})`);
+}
+
+/* 30. short-circuit: array == must NOT run when the && left side is       */
+/*     false, nor in the un-taken ternary arm; must run exactly once in    */
+/*     the taken arm (calls counter).                                      */
+{
+  const u = tu300([
+    globalVar('calls', iT(), lit(0, iT())),
+    fnDef('minus', [], bT(), [], [ret(lit(false, bT()))]),
+    fnDef('plus', [], arrT(iT(), 2), [lit(2, iT())], [
+      exprStmt(unary('++', ident('calls', iT()), iT())),
+      ret(arrCtor('int', 2, [lit(1, iT()), lit(1, iT())], arrT(iT(), 2))),
+    ]),
+    mainFn([
+      declStmt('a', iT(), null, [lit(2, iT())]),
+      declStmt('r1', bT(), null, []),
+      declStmt('r2', bT(), null, []),
+      declStmt('r3', bT(), null, []),
+      exprStmt(assignE(idx(ident('a', arrT(iT(), 2)), lit(0, iT()), iT()), lit(1, iT()), iT())),
+      exprStmt(assignE(idx(ident('a', arrT(iT(), 2)), lit(1, iT()), iT()), lit(1, iT()), iT())),
+      exprStmt(assignE(ident('r1', bT()), bin('&&', call('minus', [], bT()), bin('==', ident('a', arrT(iT(), 2)), call('plus', [], arrT(iT(), 2)), bT()), bT()), bT())),
+      exprStmt(assignE(ident('r2', bT()), tern(lit(true, bT()), lit(true, bT()), bin('==', ident('a', arrT(iT(), 2)), call('plus', [], arrT(iT(), 2)), bT()), bT()), bT())),
+      exprStmt(assignE(ident('r3', bT()), tern(lit(false, bT()), lit(true, bT()), bin('==', ident('a', arrT(iT(), 2)), call('plus', [], arrT(iT(), 2)), bT()), bT()), bT())),
+      exprStmt(assignE(ident('gl_Position', vec4T()), call('vec4', [tern(bin('&&', bin('&&', bin('&&', bin('==', ident('calls', iT()), lit(1, iT()), bT()), ident('r3', bT()), bT()), unary('!', ident('r1', bT()), bT()), bT()), ident('r2', bT()), bT()), lit(1, fT()), lit(0, fT()), fT())], vec4T()), vec4T())),
+    ]),
+  ]);
+  const r = runTu300(u);
+  check(r.ctx.out.position[0] === 1, `array == short-circuit: minus()&&(a==plus()) skips plus; ternary arms lazy; calls===1 (got ${r.ctx.out.position[0]})`);
+}
+
+/* 31. decl-init from call `int a[2] = bar(1);`, array ARG passing         */
+/*     isSuccess(dup(9)), and `return foo();` (wrap returns bar(7)).       */
+{
+  const u = tu300([
+    fnDef('bar', [param('x', iT(), [])], arrT(iT(), 2), [lit(2, iT())], [
+      ret(arrCtor('int', 2, [ident('x', iT()), bin('+', ident('x', iT()), lit(1, iT()), iT())], arrT(iT(), 2))),
+    ]),
+    fnDef('dup', [param('x', iT(), [])], arrT(iT(), 2), [lit(2, iT())], [
+      ret(arrCtor('int', 2, [ident('x', iT()), ident('x', iT())], arrT(iT(), 2))),
+    ]),
+    fnDef('isSuccess', [param('v', iT(), [lit(2, iT())])], bT(), [], [
+      ret(bin('==', idx(ident('v', arrT(iT(), 2)), lit(0, iT()), iT()), idx(ident('v', arrT(iT(), 2)), lit(1, iT()), iT()), bT())),
+    ]),
+    fnDef('wrap', [], arrT(iT(), 2), [lit(2, iT())], [
+      ret(call('bar', [lit(7, iT())], arrT(iT(), 2))),
+    ]),
+    mainFn([
+      declStmt('a', iT(), call('bar', [lit(1, iT())], arrT(iT(), 2)), [lit(2, iT())]),
+      declStmt('w', iT(), null, [lit(2, iT())]),
+      declStmt('ok', bT(), null, []),
+      exprStmt(assignE(ident('ok', bT()), call('isSuccess', [call('dup', [lit(9, iT())], arrT(iT(), 2))], bT()), bT())),
+      exprStmt(assignE(ident('w', iT()), call('wrap', [], arrT(iT(), 2)), arrT(iT(), 2))),
+      exprStmt(assignE(ident('gl_Position', vec4T()), call('vec4', [tern(bin('&&', bin('&&', bin('&&', bin('==', idx(ident('a', arrT(iT(), 2)), lit(0, iT()), iT()), lit(1, iT()), bT()), bin('==', idx(ident('a', arrT(iT(), 2)), lit(1, iT()), iT()), lit(2, iT()), bT()), bT()), bin('==', idx(ident('w', arrT(iT(), 2)), lit(0, iT()), iT()), lit(7, iT()), bT()), bT()), ident('ok', bT()), bT()), lit(1, fT()), lit(0, fT()), fT())], vec4T()), vec4T())),
+    ]),
+  ]);
+  const r = runTu300(u);
+  check(r.ctx.out.position[0] === 1, `array decl-init/args/return-of-call: a=bar(1); w=wrap()=bar(7); isSuccess(dup(9)) (got ${r.ctx.out.position[0]})`);
+}
+
+/* 32. (a = b)[0] and (a = b).length(): whole-array assignment is an       */
+/*     expression whose value is the array (indexed / .length() on it).    */
+{
+  const u = tu300([
+    mainFn([
+      declStmt('a', iT(), null, [lit(2, iT())]),
+      declStmt('b', iT(), null, [lit(2, iT())]),
+      declStmt('x', iT(), null, []),
+      declStmt('n', iT(), null, []),
+      exprStmt(assignE(idx(ident('b', arrT(iT(), 2)), lit(0, iT()), iT()), lit(5, iT()), iT())),
+      exprStmt(assignE(idx(ident('b', arrT(iT(), 2)), lit(1, iT()), iT()), lit(6, iT()), iT())),
+      exprStmt(assignE(ident('x', iT()), idx(assignE(ident('a', arrT(iT(), 2)), ident('b', arrT(iT(), 2)), arrT(iT(), 2)), lit(0, iT()), iT()), iT())),
+      exprStmt(assignE(ident('n', iT()), memCall(assignE(ident('a', arrT(iT(), 2)), ident('b', arrT(iT(), 2)), arrT(iT(), 2)), iT()), iT())),
+      exprStmt(assignE(ident('gl_Position', vec4T()), call('vec4', [tern(bin('&&', bin('&&', bin('&&', bin('==', ident('x', iT()), lit(5, iT()), bT()), bin('==', idx(ident('a', arrT(iT(), 2)), lit(1, iT()), iT()), lit(6, iT()), bT()), bT()), bin('==', ident('n', iT()), lit(2, iT()), bT()), bT()), bin('==', idx(ident('a', arrT(iT(), 2)), lit(0, iT()), iT()), lit(5, iT()), bT()), bT()), lit(1, fT()), lit(0, fT()), fT())], vec4T()), vec4T())),
+    ]),
+  ]);
+  const r = runTu300(u);
+  check(r.ctx.out.position[0] === 1, `(a=b)[0]===5 && a[1]===6 && (a=b).length()===2 && a[0]===5 (got ${r.ctx.out.position[0]})`);
+}
+
+/* 33. sequence ((++j), (a == func(j))): the compare must see j AFTER      */
+/*     the increment (left-to-right evaluation).                           */
+{
+  const u = tu300([
+    fnDef('func', [param('v', iT(), [])], arrT(iT(), 2), [lit(2, iT())], [
+      ret(arrCtor('int', 2, [ident('v', iT()), ident('v', iT())], arrT(iT(), 2))),
+    ]),
+    mainFn([
+      declStmt('a', iT(), null, [lit(2, iT())]),
+      declStmt('j', iT(), lit(4, iT()), []),
+      declStmt('ok', bT(), null, []),
+      exprStmt(assignE(idx(ident('a', arrT(iT(), 2)), lit(0, iT()), iT()), lit(5, iT()), iT())),
+      exprStmt(assignE(idx(ident('a', arrT(iT(), 2)), lit(1, iT()), iT()), lit(5, iT()), iT())),
+      exprStmt(assignE(ident('ok', bT()), {
+        kind: 'comma', loc: LOC,
+        exprs: [unary('++', ident('j', iT()), iT()), bin('==', ident('a', arrT(iT(), 2)), call('func', [ident('j', iT())], arrT(iT(), 2)), bT())],
+        resolvedType: bT(),
+      }, bT())),
+      exprStmt(assignE(ident('gl_Position', vec4T()), call('vec4', [tern(ident('ok', bT()), lit(1, fT()), lit(0, fT()), fT())], vec4T()), vec4T())),
+    ]),
+  ]);
+  const r = runTu300(u);
+  check(r.ctx.out.position[0] === 1, `sequence ((++j), (a==func(j))): func sees j===5 (got ${r.ctx.out.position[0]})`);
 }
 
 /* ------------------------------------------------------------------ */

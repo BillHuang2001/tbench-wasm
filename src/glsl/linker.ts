@@ -742,7 +742,26 @@ interface BlockLeaf {
   size: number;
 }
 
-/** Collect the flattened leaves of member type `t` at `path`/`byteOffset`. */
+/** Descend the members of struct `t` at `path`/`byteOffset` (member offsets
+ *  come from the std140 walk). Never emits a leaf for the struct itself. */
+function descendStructLeaves(
+  path: string,
+  t: Extract<GLSLType, { kind: 'struct' }>,
+  byteOffset: number,
+  out: BlockLeaf[],
+): void {
+  let off = 0;
+  for (const m of t.members) {
+    off = roundUp(off, std140Align(m.type));
+    collectBlockLeaves(`${path}.${m.name}`, m.type, byteOffset + off, out);
+    off += std140Size(m.type);
+  }
+}
+
+/** Collect the flattened leaves of member type `t` at `path`/`byteOffset`.
+ *  INVARIANT: no leaf ever carries a struct type — arrays of structs expand
+ *  EVERY element into per-member leaves ('lights[0].intensity', ...), so
+ *  toGLenum/typeComponents/isIntegral/typeName never see a struct. */
 function collectBlockLeaves(
   path: string,
   t: GLSLType,
@@ -750,15 +769,22 @@ function collectBlockLeaves(
   out: BlockLeaf[],
 ): void {
   if (t.kind === 'struct') {
-    let off = 0;
-    for (const m of t.members) {
-      off = roundUp(off, std140Align(m.type));
-      collectBlockLeaves(`${path}.${m.name}`, m.type, byteOffset + off, out);
-      off += std140Size(m.type);
-    }
+    descendStructLeaves(path, t, byteOffset, out);
     return;
   }
   if (t.kind === 'array') {
+    if (t.element.kind === 'struct') {
+      // Array of structs: one leaf group PER ELEMENT at path `${path}[k]`
+      // (getActiveUniform convention — a struct has no GLenum, so a single
+      // '[0]' entry cannot represent it). Nested array members recurse and
+      // keep their own '[0]' leaf with size = array length.
+      const n = t.size ?? 0;
+      const stride = std140ArrayStride(t.element);
+      for (let k = 0; k < n; k++) {
+        descendStructLeaves(`${path}[${k}]`, t.element, byteOffset + k * stride, out);
+      }
+      return;
+    }
     out.push({
       path: `${path}[0]`,
       type: t.element,
@@ -1396,7 +1422,10 @@ interface OutputLayoutResult {
 
 /** Fragment output locations. ES 1.00: gl_FragColor → 0, gl_FragData[i] → i
  *  (layout key 'gl_FragData' → base 0; codegen adds the index). ES 3.00: user
- *  outs with explicit layout(location=) or auto-assigned 0,1,2,... */
+ *  outs with explicit layout(location=) or the single-output default 0; ARRAY
+ *  outputs expand to one Program output entry PER SLOT (ShaderInfo carries the
+ *  declaration entry + per-element '<name>[k]' entries — see compiler.ts
+ *  OutputDecl). */
 function layoutOutputs(fs: Shader, limits: LinkLimits): OutputLayoutResult | { error: string } {
   const map = new Map<string, number>();
   const outputs: { location: number; type: number }[] = [];
@@ -1415,26 +1444,81 @@ function layoutOutputs(fs: Shader, limits: LinkLimits): OutputLayoutResult | { e
       }
     }
   } else {
-    const occupied = new Set<number>();
-    let next = 0;
+    // GLSL ES 3.00 §4.3.8.2 (WebGL2): every output variable needs an explicit
+    // layout(location=) unless it is the shader's ONLY output variable (which
+    // then auto-assigns location 0 — CTS draw-buffers / gl-get-frag-data).
+    let declCount = 0;
+    for (const o of fs.info.outputs) if (parseOutputElement(o.name) === null) declCount++;
+    const occupied = new Map<number, string>(); // location → owning declaration
     for (const o of fs.info.outputs) {
-      let loc = o.location;
-      if (loc === null) {
-        while (occupied.has(next)) next++;
-        loc = next;
+      const el = parseOutputElement(o.name);
+      if (el !== null) {
+        // Per-element entry of an array output: location = base + k. The
+        // declaration entry (processed first — semantics emits it before the
+        // elements) owns the whole range.
+        const base = map.get(el.base);
+        if (base === undefined) {
+          return { error: `linker: output '${o.name}' has no declaration entry` };
+        }
+        const loc = base + el.k;
+        if (loc >= limits.maxDrawBuffers) {
+          return { error: `linker: output '${o.name}' location ${loc} exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
+        }
+        const owner = occupied.get(loc);
+        if (owner !== undefined && owner !== el.base) {
+          return { error: `linker: output '${o.name}' location ${loc} conflicts with another output` };
+        }
+        occupied.set(loc, el.base);
+        map.set(o.name, loc);
+        outputs.push({ location: loc, type: toGLenum(o.type) });
+        continue;
       }
-      if (loc >= limits.maxDrawBuffers) {
-        return { error: `linker: output '${o.name}' location ${loc} exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
+      // Declaration entry.
+      let base: number;
+      if (o.location === null) {
+        if (declCount > 1) {
+          return { error: `linker: output '${o.name}' must declare layout(location=) when the fragment shader has multiple outputs` };
+        }
+        base = 0; // single output variable → location 0
+      } else {
+        base = o.location;
       }
-      if (occupied.has(loc)) {
-        return { error: `linker: output '${o.name}' location ${loc} conflicts with another output` };
+      if (base >= limits.maxDrawBuffers) {
+        return { error: `linker: output '${o.name}' location ${base} exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
       }
-      occupied.add(loc);
-      map.set(o.name, loc);
-      outputs.push({ location: loc, type: toGLenum(o.type) });
+      map.set(o.name, base);
+      if (o.arraySize === 1) {
+        const owner = occupied.get(base);
+        if (owner !== undefined) {
+          return { error: `linker: output '${o.name}' location ${base} conflicts with another output` };
+        }
+        occupied.set(base, o.name);
+        outputs.push({ location: base, type: toGLenum(o.type) });
+      } else {
+        // Claim the whole [base, base+arraySize) range; the per-slot Program
+        // output entries come from the element entries below.
+        for (let k = 0; k < o.arraySize; k++) {
+          const loc = base + k;
+          if (loc >= limits.maxDrawBuffers) {
+            return { error: `linker: output '${o.name}' location ${loc} exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
+          }
+          const owner = occupied.get(loc);
+          if (owner !== undefined && owner !== o.name) {
+            return { error: `linker: output '${o.name}' location ${loc} conflicts with another output` };
+          }
+          occupied.set(loc, o.name);
+        }
+      }
     }
   }
   return { map, outputs };
+}
+
+/** '<name>[k]' suffix of an array-output ELEMENT entry (null = declaration). */
+function parseOutputElement(name: string): { base: string; k: number } | null {
+  const m = /^(.*)\[(\d+)\]$/.exec(name);
+  if (m === null) return null;
+  return { base: m[1], k: Number(m[2]) };
 }
 
 /* ------------------------------------------------------------------ */

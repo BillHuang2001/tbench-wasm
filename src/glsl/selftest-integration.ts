@@ -1505,6 +1505,37 @@ let uboDual: Program | null = null;
   }
 }
 
+/* ================================================================== */
+/* 11. ES 3.00 unsized array constructors `T[](...)` (runtime values)  */
+/* ================================================================== */
+
+{
+  /** Compile an ES 3.00 vertex shader, link, run once, return out.position. */
+  const run = (src: string): Float32Array => {
+    const vs = compile(src, 'VERTEX', 300);
+    const fs = compile('#version 300 es\nprecision mediump float; out vec4 o; void main() { o = vec4(0.0); }', 'FRAGMENT', 300);
+    const l = linkProgram(vs, fs);
+    check(l.ok, `unsized ctor pair links (${l.ok ? '' : l.log})`);
+    if (!l.ok) return new Float32Array(0);
+    const p = l.program;
+    const vctx = vertexCtx(p);
+    p.vertex.run(vctx);
+    return vctx.out.position;
+  };
+  // T[](...) ≡ T[N](...) with N = argument count — values must land intact.
+  {
+    const pos = run(`#version 300 es
+      void main() { float a[2] = float[](1.5, 2.5); gl_Position = vec4(a[0], a[1], 0.0, 1.0); }`);
+    check(pos[0] === 1.5 && pos[1] === 2.5, `runtime float[](...): [1.5,2.5] (got ${pos[0]},${pos[1]})`);
+  }
+  {
+    const pos = run(`#version 300 es
+      struct S { float x; };
+      void main() { S s[2] = S[](S(1.0), S(2.0)); gl_Position = vec4(s[0].x, s[1].x, 0.0, 1.0); }`);
+    check(pos[0] === 1 && pos[1] === 2, `runtime S[](...): [1,2] (got ${pos[0]},${pos[1]})`);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
 /* ------------------------------------------------------------------ */

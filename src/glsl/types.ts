@@ -104,6 +104,8 @@ export interface TypeQualifiers {
 export interface LayoutQualifiers {
   location?: number;
   binding?: number;
+  /** Explicit uniform-block layout id (`std140`/`shared`/`packed`), if any. */
+  blockLayout?: string;
 }
 
 /* ------------------------------------------------------------------ */

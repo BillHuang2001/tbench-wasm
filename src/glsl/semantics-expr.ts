@@ -549,8 +549,10 @@ function containsSampler(t: GLSLType): boolean {
  * §5.7/§5.8: "The assignment and equality operators are not defined for
  * structures that contain arrays or sampler types"; "structures containing
  * arrays ... may not be used as the target of an assignment". The CTS
- * struct-assign/struct-equals pages require struct-with-array assignment and
- * comparison to fail to compile.
+ * struct-assign/struct-equals pages require struct-with-array ASSIGNMENT to
+ * fail to compile at BOTH versions; struct-with-array ==/!= is rejected at
+ * version 100 only — ES 3.00 compares element-wise, recursively (CTS
+ * compare-structs-containing-arrays.html) — so callers gate on ctx.version.
  */
 function containsArray(t: GLSLType): boolean {
   switch (t.kind) {
@@ -694,20 +696,45 @@ function analyzeBinary(e: BinaryExpr, scope: Scope, ctx: SemContext): void {
         ok = sameBase(lt.base, rt.base, ctx.version) !== null;
       } else if (lt.kind === 'matrix' && rt.kind === 'matrix' && lt.cols === rt.cols && lt.rows === rt.rows) ok = true;
       // GLSL ES 1.00 §5.9 / ES 3.00 §5.9: equality is defined for STRUCTS of
-      // the same type (result: one bool); ARRAYS are never comparable.
-      // Structs containing a sampler are NOT comparable (samplers may not be
-      // struct members per §4.1.7 — the CTS struct-equals page requires the
-      // comparison to fail to compile).
+      // the same type (result: one bool). ES 3.00 §5.9 ALSO defines equality
+      // for ARRAYS (element-wise, same element type + same size); ES 1.00
+      // arrays are never comparable. Structs containing a sampler are NOT
+      // comparable at ANY version (samplers may not be struct members per
+      // §4.1.7 — the CTS struct-equals page requires the comparison to fail
+      // to compile). Structs containing ARRAYS: rejected at version 100
+      // (GLSL ES 1.00 §5.9; CTS struct-equals.html), ALLOWED at version 300
+      // (element-wise, recursively — the CTS compare-structs-containing-
+      // arrays.html page requires `b == c` on structs with array members to
+      // compile and render correctly).
       else if (lt.kind === 'struct' && rt.kind === 'struct') {
         if (containsSampler(lt)) {
           ctx.error(e.loc.line, `'${e.op}' : cannot compare structs containing a sampler`);
           return;
         }
-        if (containsArray(lt)) {
+        if (ctx.version === 100 && containsArray(lt)) {
           ctx.error(e.loc.line, `'${e.op}' : cannot compare structs containing an array`);
           return;
         }
         ok = typeEquals(lt, rt);
+      } else if (lt.kind === 'array' && rt.kind === 'array') {
+        if (ctx.version === 300 && typeEquals(lt, rt)) {
+          // ES 3.00: array equality compares ELEMENT-wise. Struct elements
+          // are comparable at 300 (element-wise, recursively — CTS compare-
+          // structs-containing-arrays.html); version 100 never reaches this
+          // block (outer guard) and falls through to the generic
+          // 'cannot be compared' error. Sampler elements stay rejected.
+          // Scalar/vector/matrix elements need no extra check. NOT
+          // const-folded — array-typed nodes carry no scalar constValue, and
+          // the comparison is a runtime element-wise op (codegen's concern).
+          const el = lt.element;
+          if (el.kind === 'struct' && containsSampler(el)) {
+            ctx.error(e.loc.line, `'${e.op}' : cannot compare structs containing a sampler`);
+            return;
+          }
+          ok = true;
+        }
+        // version 100 (or a 300 size/element mismatch) → ok stays false and
+        // the 'cannot be compared' error below fires.
       }
       if (!ok) {
         ctx.error(e.loc.line, `'${e.op}' : operands of type '${typeName(lt)}' and '${typeName(rt)}' cannot be compared`);
@@ -792,17 +819,27 @@ function analyzeAssign(e: AssignExpr, scope: Scope, ctx: SemContext): void {
       ctx.error(e.value.loc.line, `cannot convert from '${typeName(vt)}' to '${typeName(tt)}'`);
       return;
     }
-    // GLSL ES: structs containing a sampler or an ARRAY cannot be assigned
-    // (samplers may not be struct members; arrays may not be assignment
-    // targets — spec §5.7/§5.8; the CTS struct-assign page requires both to
-    // fail to compile).
-    if (containsSampler(tt)) {
-      ctx.error(e.loc.line, `'=' : cannot assign a struct containing a sampler`);
-      return;
-    }
-    if (containsArray(tt)) {
-      ctx.error(e.loc.line, `'=' : cannot assign a struct containing an array`);
-      return;
+    // GLSL ES 3.00 §5.8: whole-array assignment is legal (element + size
+    // match already enforced by convertible/typeEquals above). ES 1.00 has
+    // no array assignment — arrays may not be assignment targets there.
+    if (tt.kind === 'array') {
+      if (ctx.version === 100) {
+        ctx.error(e.loc.line, `'=' : cannot assign to an array in GLSL ES 1.00`);
+        return;
+      }
+    } else {
+      // GLSL ES: structs containing a sampler or an ARRAY cannot be assigned
+      // (samplers may not be struct members; structures containing arrays may
+      // not be assignment targets — spec §5.7/§5.8; the CTS struct-assign
+      // page requires both to fail to compile, in 100 AND 300).
+      if (containsSampler(tt)) {
+        ctx.error(e.loc.line, `'=' : cannot assign a struct containing a sampler`);
+        return;
+      }
+      if (containsArray(tt)) {
+        ctx.error(e.loc.line, `'=' : cannot assign a struct containing an array`);
+        return;
+      }
     }
     e.resolvedType = tt;
     if (e.target.constValue !== undefined && e.value.constValue !== undefined) {
@@ -1198,6 +1235,32 @@ function analyzeCall(e: CallExpr, scope: Scope, ctx: SemContext): void {
     analyzeArrayConstructor(e, callee, scope, ctx);
     return;
   }
+  // GLSL ES 3.00 §5.9: `.length()` is defined on ARRAYS — and, per the
+  // ESSL 3.20 clarification the CTS array-length-side-effects page relies on,
+  // on ANY expression of array type (`a.length()`, `(f()).length()`,
+  // `(int[1](0)).length()`, `(a = b).length()`). The callee object is
+  // analyzed for its side effects even though only its type is used; the
+  // result is a plain int and is deliberately NOT const-folded (the call may
+  // have side effects — `(f()).length()` must still evaluate f()).
+  if (callee.kind === 'member' && callee.name === 'length') {
+    analyzeExpr(callee.object, scope, ctx);
+    const ot = callee.object.resolvedType;
+    if (ot === undefined) {
+      ctx.error(e.loc.line, `'(' : invalid function or constructor call`);
+      return;
+    }
+    if (ot.kind !== 'array') {
+      ctx.error(e.loc.line, `'.length()' : only defined for arrays`);
+      return;
+    }
+    if (e.args.length !== 0) {
+      ctx.error(e.loc.line, `'.length()' : function takes no arguments`);
+      return;
+    }
+    e.resolvedType = { kind: 'scalar', base: 'int' };
+    e.lvalue = false;
+    return;
+  }
   ctx.error(e.loc.line, `'(' : invalid function or constructor call`);
 }
 
@@ -1590,7 +1653,7 @@ function analyzeMatrixConstructor(
   e.resolvedType = t;
 }
 
-/** `T[size](...)` array constructor (ES 3.00 only). `callee` is the IndexExpr. */
+/** `T[size](...)` / `T[](...)` array constructor (ES 3.00 only). `callee` is the IndexExpr. */
 function analyzeArrayConstructor(e: CallExpr, callee: IndexExpr, scope: Scope, ctx: SemContext): void {
   if (ctx.version === 100) {
     ctx.error(e.loc.line, `'[' : array constructors require GLSL ES 3.00`);
@@ -1604,11 +1667,22 @@ function analyzeArrayConstructor(e: CallExpr, callee: IndexExpr, scope: Scope, c
     ctx.error(e.loc.line, `'${inner.name}' : cannot construct an array of this type`);
     return;
   }
-  analyzeExpr(callee.index, scope, ctx);
-  const sz = callee.index.constValue;
-  if (typeof sz !== 'number' || !Number.isInteger(sz) || sz <= 0) {
-    ctx.error(callee.index.loc.line, `'[' : array constructor size must be a constant positive integer`);
-    return;
+  let sz: number;
+  if (callee.unsized === true) {
+    // `T[](...)` — GLSL ES 3.00 §5.4.6: the size is the argument count.
+    // Rewrite the placeholder index to a real literal so downstream
+    // consumers (codegen, const folding) see an ordinary sized constructor.
+    sz = e.args.length;
+    callee.index = { kind: 'literal', value: sz, literalType: 'int', loc: callee.index.loc };
+    callee.unsized = false;
+  } else {
+    analyzeExpr(callee.index, scope, ctx);
+    const cv = callee.index.constValue;
+    if (typeof cv !== 'number' || !Number.isInteger(cv) || cv <= 0) {
+      ctx.error(callee.index.loc.line, `'[' : array constructor size must be a constant positive integer`);
+      return;
+    }
+    sz = cv;
   }
   if (e.args.length !== sz) {
     ctx.error(e.loc.line, `'${inner.name}[${sz}]' : constructor requires ${sz} argument(s)`);

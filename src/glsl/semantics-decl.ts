@@ -341,10 +341,12 @@ function isValidInputType(t: GLSLType): boolean {
   return t.kind === 'matrix';
 }
 
-/** 3.00 fragment outputs: exactly vec4 / ivec4 / uvec4 (per the OutputDecl
- * contract — FLOAT_VEC4 / INT_VEC4 / UINT_VEC4). */
-function isVec4(t: GLSLType): boolean {
-  return t.kind === 'vector' && t.size === 4 && (t.base === 'float' || t.base === 'int' || t.base === 'uint');
+/** 3.00 fragment outputs (GLSL ES 3.00 §4.3.6): float/int/uint SCALARS and
+ * VECTORS, or arrays of those. bool scalars/vectors, matrices, structs and
+ * arrays of any of these are compile errors. */
+function isValidOutputElement(t: GLSLType): boolean {
+  if (t.kind === 'array') return isValidOutputElement(t.element);
+  return (t.kind === 'scalar' || t.kind === 'vector') && t.base !== 'bool';
 }
 
 /** GLSL ES 3.00: integral varyings (vertex outs / fragment ins) must be flat. */
@@ -521,15 +523,24 @@ function analyzeGlobalDecl(d: GlobalVarDecl, ctx: SemContext, info: ShaderInfo):
           checkFlatIntegral(ctx, name, element, q, line);
           info.varyings.push(varyingOf(name, element, arraySize, q));
         } else {
-          if (arraySize !== 1 || !isVec4(element)) {
-            ctx.error(line, `'${name}' : fragment shader outputs must be vec4, ivec4 or uvec4`);
+          if (!isValidOutputElement(element)) {
+            ctx.error(line, `'${name}' : fragment shader outputs must be float, int or uint scalars, vectors, or arrays of these`);
           }
-          info.outputs.push({
-            name,
-            index: null,
-            location: q.layout?.location ?? null,
-            type: element,
-          });
+          const explicitLoc = q.layout?.location ?? null;
+          info.outputs.push({ name, index: null, location: explicitLoc, type: element, arraySize });
+          if (arraySize > 1) {
+            // One per-element entry per slot, named '<name>[k]', with the
+            // FINAL location (explicit base, or 0 — the single-output
+            // default the linker requires; the linker rejects unlocated
+            // outputs whenever there is more than one output variable, so
+            // the base is always known here). gl-side getFragDataLocation
+            // reads these entries ('fragColor', 'fragColor[0]',
+            // 'fragColor[1]', ...) directly.
+            const base = explicitLoc ?? 0;
+            for (let k = 0; k < arraySize; k++) {
+              info.outputs.push({ name: `${name}[${k}]`, index: null, location: base + k, type: element, arraySize: 1 });
+            }
+          }
         }
         break;
       case 'uniform': // default-block uniforms only (blocks are separate)
@@ -581,6 +592,14 @@ function analyzeInterfaceBlock(d: InterfaceBlockDecl, ctx: SemContext, info: Sha
   if (!isVaryingBlock) {
     // Uniform blocks (or unsupported combos — recorded nowhere, linker rejects).
     if (storage === 'uniform' || storage === undefined) {
+      const blockLayout = q.layout?.blockLayout;
+      // WebGL2 supports only std140 uniform block layouts (default when no
+      // layout qualifier is present). `shared`/`packed` must fail compilation
+      // (spec: "fail either the compilation or linking stages"; the CTS
+      // uniform-block-layouts page requires a compile failure).
+      if (blockLayout === 'shared' || blockLayout === 'packed') {
+        ctx.error(d.loc.line, `'layout(${blockLayout})' : only 'std140' uniform block layouts are supported in WebGL`);
+      }
       const blk: UniformBlockDecl = {
         name: d.blockName,
         instanceName: d.instanceName,
@@ -1001,10 +1020,10 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
           ctx.error(fragOut.fragDataLine, `'gl_FragData' : index ${idx} out of range [0, ${maxBuffers - 1}]`);
         }
       }
-      info.outputs.push({ name: `gl_FragData[${idx}]`, index: idx, location: null, type: VEC4_FLOAT });
+      info.outputs.push({ name: `gl_FragData[${idx}]`, index: idx, location: null, type: VEC4_FLOAT, arraySize: 1 });
     }
     if (fragOut.fragColorWritten) {
-      info.outputs.push({ name: 'gl_FragColor', index: null, location: null, type: VEC4_FLOAT });
+      info.outputs.push({ name: 'gl_FragColor', index: null, location: null, type: VEC4_FLOAT, arraySize: 1 });
     }
   }
 }

@@ -32,7 +32,7 @@
  */
 import type { Expr } from '../ast.js';
 import type { GLSLType } from '../types.js';
-import { typeName } from '../types.js';
+import { typeEquals, typeName } from '../types.js';
 import {
   CodegenEnv,
   LocalVar,
@@ -776,6 +776,12 @@ function isPathExpr(e: Expr): boolean {
  * as a bare expression statement and discard the value. p.lvalue stays false →
  * emitLValue throws "not an lvalue" for write attempts.
  *
+ * Materialization goes through materializeSharedPre: SHARED pres (an
+ * array-returning call carries ONE [iife] on every component) run ONCE — the
+ * naive fold-per-component temping would re-run the callee per component. The
+ * resulting temps ARE the flat compNames (the materialization buffer becomes
+ * p.pre).
+ *
  * DUAL MODE: float components materialize as (v, dx, dy) temp triples with the
  * plane names recorded in dxNames/dyNames (allocTemp names violate the
  * `compNames[c]+'_dy'` convention — leafDual/leafDualWrite consult dyNames).
@@ -784,28 +790,27 @@ function isPathExpr(e: Expr): boolean {
 function walkObject(e: Expr, env: CodegenEnv): P {
   if (isPathExpr(e)) return walk(e, env);
   const t = e.resolvedType!;
-  const vals = emitExpr(e, env);
+  const vals = materializeSharedPre(emitExpr(e, env), env);
   const n = flatComponents(t);
   const floatness = flatFloatness(t);
   const compNames: string[] = [];
   const dxNames: (string | null)[] = [];
   const dyNames: (string | null)[] = [];
   const pre: string[] = [];
+  const seen = new Set<string[]>();
   for (let c = 0; c < n; c++) {
     const v = vals[c];
-    const tn = env.allocTemp();
-    compNames.push(tn);
-    const vv = v.pre && v.pre.length ? foldPre(v.pre, v.v) : v.v;
+    if (v.pre && v.pre.length > 0 && !seen.has(v.pre)) {
+      seen.add(v.pre);
+      pre.push(...v.pre);
+    }
+    compNames.push(v.v);
     if (env.dual && floatness[c]) {
-      const tx = env.allocTemp();
-      const ty = env.allocTemp();
-      dxNames.push(tx);
-      dyNames.push(ty);
-      pre.push(`${tn} = ${vv}`, `${tx} = ${v.dx ?? '0'}`, `${ty} = ${v.dy ?? '0'}`);
+      dxNames.push(v.dx ?? '0');
+      dyNames.push(v.dy ?? '0');
     } else {
       dxNames.push(null);
       dyNames.push(null);
-      pre.push(`${tn} = ${vv}`);
     }
   }
   const p = freshP(t);
@@ -992,6 +997,47 @@ export function materialize(vals: Value[], env: CodegenEnv): Value[] {
     }
     return { v: t, pre };
   });
+}
+
+/**
+ * Materialize EVERY value into a fresh temp, running each value's pre exactly
+ * ONCE — pres SHARED by array identity across components (multi-component
+ * call results carry ONE `[iife]` array on every component; array assignments
+ * in dual mode share one write-composite array) are deduped, so the callee /
+ * side effects never re-run per component. Unlike materialize(), no-pre
+ * values are temped too — their v-strings may embed GLSL side effects
+ * (assignment composites `(a0 = b0)` fold into v, not pre), and temping them
+ * pins those effects at their exact position. Processing is left-to-right
+ * (GLSL evaluation order): per component, emit the deduped pre lines, then
+ * the temp assignment (+ dual planes in dual mode).
+ *
+ * All returned values carry the SAME `pre` array (the materialization
+ * buffer) — consumers must dedupe by identity (emitPres) or fold it once
+ * (walkObject, the struct/array compare path, .length()); folding per
+ * component would re-run the buffer.
+ */
+export function materializeSharedPre(vals: Value[], env: CodegenEnv): Value[] {
+  const pre: string[] = [];
+  const seen = new Set<string[]>();
+  const out: Value[] = [];
+  for (const v of vals) {
+    const p = v.pre;
+    if (p && p.length > 0 && !seen.has(p)) {
+      seen.add(p);
+      pre.push(...p);
+    }
+    const t = env.allocTemp();
+    pre.push(`${t} = ${v.v}`);
+    if (env.dual && v.dx !== undefined && v.dy !== undefined) {
+      const tx = env.allocTemp();
+      const ty = env.allocTemp();
+      pre.push(`${tx} = ${v.dx}`, `${ty} = ${v.dy}`);
+      out.push({ v: t, dx: tx, dy: ty, pre });
+    } else {
+      out.push({ v: t, pre });
+    }
+  }
+  return out;
 }
 
 /**
@@ -1233,16 +1279,38 @@ function emitBinary(e: Extract<Expr, { kind: 'binary' }>, env: CodegenEnv): Valu
     }
     case '==':
     case '!=': {
-      // GLSL ES 1.00 §5.9 / ES 3.00 §5.9: ==/!= on same-typed STRUCTS is
-      // legal (member-wise comparison; semantics guarantees identical
-      // type/name — const operands fold at semantics, this is the runtime
-      // path). The operand Values come back in flat member order; compare
-      // recursively and join: == → all members, != → any member.
-      if (lt.kind === 'struct' && rt.kind === 'struct') {
-        const avSrc = emitExpr(e.left, env);
-        const bvSrc = emitExpr(e.right, env);
-        const parts = structCompareParts(op, lt, avSrc, bvSrc);
-        return [{ v: `(${parts.join(op === '==' ? ' && ' : ' || ')})` }];
+      // GLSL ES 1.00 §5.9 / ES 3.00 §5.9: ==/!= on same-typed STRUCTS and
+      // ARRAYS (ES 3.00 §5.9: element-wise) is legal; semantics guarantees
+      // identical type (const operands fold at semantics, this is the runtime
+      // path). The operand Values come back in flat member/element order;
+      // compare recursively and join: == → all members, != → any member.
+      // Both operand component sets are materialized FIRST (left fully before
+      // right — GLSL evaluation order) via materializeSharedPre, so shared
+      // pres (an array-returning call's single [iife] on every component)
+      // run exactly ONCE — the naive fold-per-leaf would re-run the callee
+      // per compared component. structCompareParts then compares pure temps.
+      if ((lt.kind === 'struct' || lt.kind === 'array') && typeEquals(lt, rt)) {
+        const avSrc = materializeSharedPre(emitExpr(e.left, env), env);
+        const bvSrc = materializeSharedPre(emitExpr(e.right, env), env);
+        const pre: string[] = [];
+        const seen = new Set<string[]>();
+        for (const v of avSrc) {
+          if (v.pre && v.pre.length > 0 && !seen.has(v.pre)) {
+            seen.add(v.pre);
+            pre.push(...v.pre);
+          }
+        }
+        for (const v of bvSrc) {
+          if (v.pre && v.pre.length > 0 && !seen.has(v.pre)) {
+            seen.add(v.pre);
+            pre.push(...v.pre);
+          }
+        }
+        const strip = (v: Value): Value => ({ v: v.v });
+        const parts = structCompareParts(op, lt, avSrc.map(strip), bvSrc.map(strip));
+        const out: Value = { v: `(${parts.join(op === '==' ? ' && ' : ' || ')})` };
+        if (pre.length > 0) out.pre = pre;
+        return [out];
       }
       // semantics: ALWAYS resolves to scalar bool (all-components compare).
       const cb = commonBase(lb, rb);
@@ -1951,7 +2019,14 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
 }
 
 function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Value[] {
-  const cond = materialize(emitExpr(e.cond, env), env)[0];
+  // The condition is a scalar bool embedded in EVERY result component's
+  // selects (and in the guarded arm hoists below) — hoist it ONCE when it
+  // carries side effects (Value.pre chains OR side effects folded into its v
+  // string — user calls nested in comparators), so per-component duplication
+  // cannot re-run them (BUG: multi-component ternary condition side effects
+  // ran n times). Pure conditions pass through unchanged (broadcastScalar).
+  const sharedPre: string[] = [];
+  const cond = broadcastScalar(emitExpr(e.cond, env)[0], e.cond, env, sharedPre);
   const a = emitExpr(e.whenTrue, env);
   const b = emitExpr(e.whenFalse, env);
   const n = flatComponents(e.resolvedType!);
@@ -1960,14 +2035,20 @@ function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Va
   // (v-only); its pres join the result's pre so materialized cond temps are
   // set even when only the dx/dy planes are consumed (dFdx(cond ? a : b)).
   const dual = env.dual && hasFloatLeaves(e.resolvedType!);
+  // Distinct arm pre arrays by IDENTITY: a multi-component user call shares
+  // ONE pre array (the inliner's IIFE). Only the FIRST component with a given
+  // pre embeds it in its guarded hoist; later components just read the temps
+  // it sets (their guarded lines run after comp0's in 0..n-1 order).
+  // Embedding the pre per component would run the arm's side effects once per
+  // component (BUG: multi-component ternary arm side effects ran n times).
+  const seenAPre = new Set<readonly string[]>();
+  const seenBPre = new Set<readonly string[]>();
   for (let c = 0; c < n; c++) {
     const ac = a[c];
     const bc = b[c];
     const ap = ac.pre && ac.pre.length > 0 ? ac.pre : null;
     const bp = bc.pre && bc.pre.length > 0 ? bc.pre : null;
     const pre: string[] = [];
-    const cp = cond.pre;
-    if (cp) pre.push(...cp);
     if (ap === null && bp === null) {
       // FAST PATH (no arm materializes — pres are the only reason
       // materialize would hoist): the select folds the raw arm strings, which
@@ -1998,8 +2079,16 @@ function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Va
     // set).
     const ta = ap !== null ? env.allocTemp() : null;
     const tb = bp !== null ? env.allocTemp() : null;
-    if (ta) pre.push(`${ta} = (${cond.v} ? (${foldPre(ap!, ac.v)}) : ${ta})`);
-    if (tb) pre.push(`${tb} = (${cond.v} ? ${tb} : (${foldPre(bp!, bc.v)}))`);
+    const aFirst = ap !== null && !seenAPre.has(ap);
+    if (aFirst) seenAPre.add(ap);
+    const bFirst = bp !== null && !seenBPre.has(bp);
+    if (bFirst) seenBPre.add(bp);
+    if (ta) {
+      pre.push(`${ta} = (${cond.v} ? ${aFirst ? `(${foldPre(ap!, ac.v)})` : `(${ac.v})`} : ${ta})`);
+    }
+    if (tb) {
+      pre.push(`${tb} = (${cond.v} ? ${tb} : ${bFirst ? `(${foldPre(bp!, bc.v)})` : `(${bc.v})`})`);
+    }
     const av = ta ?? ac.v;
     const bv = tb ?? bc.v;
     const val: Value =
@@ -2012,6 +2101,16 @@ function emitTernary(e: Extract<Expr, { kind: 'ternary' }>, env: CodegenEnv): Va
         : { v: `(${cond.v} ? (${av}) : (${bv}))` };
     if (pre.length > 0) val.pre = pre;
     out.push(val);
+  }
+  if (sharedPre.length > 0) {
+    // Attach the cond hoist ONLY to component 0 (the FIRST emitted/consumed
+    // component): statement emitters dedupe pres by array identity and
+    // expression-context consumers fold each component's pre INLINE in
+    // 0..n-1 order — comp0's pre runs first and sets the hoist temp, later
+    // components just read it (mirrors emitArith's sharedPre handling). A
+    // shared array on EVERY component would re-run the hoisted side effects
+    // per component in expression contexts.
+    out[0].pre = out[0].pre ? [...sharedPre, ...out[0].pre] : sharedPre;
   }
   return out;
 }
@@ -2071,6 +2170,33 @@ function emitCall(e: Extract<Expr, { kind: 'call' }>, env: CodegenEnv): Value[] 
     const elem = t.kind === 'array' ? t.element : undefined;
     if (!elem) throw new Error('codegen: indexed callee is not an array constructor');
     return emitArrayCtor(e.args, elem, t, env);
+  }
+  if (callee.kind === 'member') {
+    // `.length()` on an array-typed expression (GLSL ES 3.00 §5.9): the
+    // result is the STATIC element count, but the OBJECT's side effects
+    // still evaluate exactly once (`(a = b).length()` runs the assignment;
+    // `(f()).length()` runs the call). Materialize the object's components
+    // (shared pres — the call's single [iife] — run once) and keep only the
+    // materialization lines; the object's VALUE strings are discarded.
+    if (callee.name === 'length') {
+      const objType = callee.object.resolvedType;
+      if (!objType || objType.kind !== 'array') {
+        throw new Error(`codegen: '.length()' on a non-array type`);
+      }
+      const objVals = materializeSharedPre(emitExpr(callee.object, env), env);
+      const pre: string[] = [];
+      const seen = new Set<string[]>();
+      for (const v of objVals) {
+        if (v.pre && v.pre.length > 0 && !seen.has(v.pre)) {
+          seen.add(v.pre);
+          pre.push(...v.pre);
+        }
+      }
+      const out: Value = { v: String(objType.size ?? 0) };
+      if (pre.length > 0) out.pre = pre;
+      return [out];
+    }
+    throw new Error(`codegen: unsupported member call '${callee.name}'`);
   }
   throw new Error('codegen: unsupported call callee');
 }

@@ -297,7 +297,10 @@ function parseNumber(text: string, version: 100 | 300): NumberResult {
   if (isFloat || suffix !== '') {
     // Float: f/F suffix, or a fractional/exponent form.
     if (!FLOAT_RE.test(core)) return { ok: false, message: `invalid numeric literal '${text}'` };
-    return { ok: true, n: { kind: 'float', value: parseFloat(core) } };
+    // GLSL float literals are IEEE single-precision (GLSL ES 3.00 §4.1.4):
+    // values too large round to ±Infinity, too small to ±0 (or subnormal).
+    // Math.fround gives exactly that from the double parse.
+    return { ok: true, n: { kind: 'float', value: Math.fround(parseFloat(core)) } };
   }
   const n = parseInteger(core, text, version);
   if (!n.ok) return n;

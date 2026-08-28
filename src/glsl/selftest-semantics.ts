@@ -264,6 +264,50 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   check(info2.uniformBlocks[0].instanceName === 'inst' && info2.uniformBlocks[0].arraySize === 2, 'block array instance → arraySize 2');
 }
 
+{
+  // WebGL2 supports ONLY std140 uniform block layouts. Explicit `packed` /
+  // `shared` must FAIL COMPILATION (spec §'Only std140 layout supported in
+  // uniform blocks'; CTS conformance2/glsl3/uniform-block-layouts.html
+  // declares fShaderSuccess:false and grades the compile result). Sources are
+  // the CTS page's fragment shaders verbatim.
+  const packedSrc =
+    '#version 300 es\nprecision mediump float;\nout vec4 my_FragColor;\nlayout(packed) uniform foo { vec4 bar; };\nvoid main() { my_FragColor = bar; }';
+  const packedErrs = errs(packedSrc, 300, 'FRAGMENT');
+  // `packed` is a GLSL ES 1.00 future-reserved word, so it is rejected at the
+  // LEXER ('reserved word') before the block-layout check in semantics runs;
+  // either way compilation fails with a message mentioning packed.
+  check(
+    packedErrs.length > 0 && packedErrs.some((e) => e.message.includes('packed')),
+    'layout(packed) uniform block → compile error mentioning packed',
+  );
+
+  const sharedSrc =
+    '#version 300 es\nprecision mediump float;\nout vec4 my_FragColor;\nlayout(shared) uniform foo { vec4 bar; };\nvoid main() { my_FragColor = bar; }';
+  const sharedErrs = errs(sharedSrc, 300, 'FRAGMENT');
+  check(
+    hasErr(sharedErrs, 4, "'layout(shared)' : only 'std140' uniform block layouts are supported in WebGL"),
+    'layout(shared) uniform block → compile error at block line',
+  );
+
+  // Layout ids mixed with other qualifiers are still rejected.
+  const mixedErrs = errs('#version 300 es\nprecision mediump float;\nlayout(shared, binding=0) uniform foo { vec4 bar; };\nout vec4 c;\nvoid main() { c = bar; }', 300, 'FRAGMENT');
+  check(
+    hasErr(mixedErrs, 3, "'layout(shared)' : only 'std140' uniform block layouts are supported in WebGL"),
+    'layout(shared, binding=0) uniform block → compile error',
+  );
+
+  // Explicit std140, no layout qualifier (default is std140), binding-only,
+  // and std140+binding combinations all compile.
+  okInfo('#version 300 es\nprecision mediump float;\nlayout(std140) uniform foo { vec4 bar; };\nout vec4 c;\nvoid main() { c = bar; }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nuniform foo { vec4 bar; };\nout vec4 c;\nvoid main() { c = bar; }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nlayout(binding=0) uniform foo { vec4 bar; };\nout vec4 c;\nvoid main() { c = bar; }', 300, 'FRAGMENT');
+  okInfo('#version 300 es\nprecision mediump float;\nlayout(std140, binding=0) uniform foo { vec4 bar; };\nout vec4 c;\nvoid main() { c = bar; }', 300, 'FRAGMENT');
+
+  // Varying interface blocks (vertex out / fragment in) are NOT affected.
+  okInfo('#version 300 es\nlayout(location=0) out vec4 c;\nout Block { vec4 p; } b;\nvoid main() { b.p = vec4(1.0); c = b.p; }', 300, 'VERTEX');
+  okInfo('#version 300 es\nprecision mediump float;\nin Block { vec4 p; } b;\nout vec4 c;\nvoid main() { c = b.p; }', 300, 'FRAGMENT');
+}
+
 /* ------------------------------------------------------------------ */
 /* 5. ShaderInfo — fragment outputs                                    */
 /* ------------------------------------------------------------------ */
@@ -284,11 +328,39 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
 
   const info4 = okInfo('#version 300 es\nprecision mediump float;\nlayout(location=3) out vec4 c;\nout vec4 d;\nvoid main() { c = vec4(1.0); d = vec4(2.0); }', 300, 'FRAGMENT');
   check(info4.outputs.length === 2, '3.00: two outputs');
-  check(info4.outputs[0].name === 'c' && info4.outputs[0].location === 3, 'layout(location=3) output');
-  check(info4.outputs[1].name === 'd' && info4.outputs[1].location === null, 'output without layout → location null');
+  check(info4.outputs[0].name === 'c' && info4.outputs[0].location === 3 && info4.outputs[0].arraySize === 1, 'layout(location=3) output');
+  check(info4.outputs[1].name === 'd' && info4.outputs[1].location === null && info4.outputs[1].arraySize === 1, 'output without layout → location null');
   check(info4.outputs[0].index === null, '3.00 output index null');
 
   okInfo('#version 300 es\nprecision mediump float;\nout ivec4 i;\nout uvec4 u;\nvoid main() { i = ivec4(1); u = uvec4(1u); }', 300, 'FRAGMENT'); // ivec4/uvec4 outputs OK
+
+  // GLSL ES 3.00 §4.3.6: fragment outputs are float/int/uint scalars,
+  // vectors, or arrays of those. `out vec3` / `out float` / `out int` are
+  // legal; the OLD strict vec4-only contract is gone (CTS vertex-id /
+  // draw-buffers need scalar-int and array outputs).
+  const vec3 = okInfo('#version 300 es\nprecision mediump float;\nout vec3 c;\nvoid main() { c = vec3(1.0); }', 300, 'FRAGMENT');
+  check(vec3.outputs.length === 1 && vec3.outputs[0].name === 'c' && vec3.outputs[0].arraySize === 1, '3.00 out vec3 → scalar declaration entry');
+  checkType(vec3.outputs[0].type, V3, '3.00 out vec3 element type');
+
+  const iOut = okInfo('#version 300 es\nout int oI;\nvoid main() { oI = 7; }', 300, 'FRAGMENT');
+  check(iOut.outputs.length === 1 && iOut.outputs[0].name === 'oI' && iOut.outputs[0].arraySize === 1, '3.00 out int → scalar declaration entry');
+  checkType(iOut.outputs[0].type, I, '3.00 out int element type');
+
+  // ARRAY output: one declaration entry (arraySize, element type, explicit
+  // location or null) followed by one per-element entry PER SLOT, named
+  // '<name>[k]' with the FINAL location (explicit base or the single-output
+  // default 0) — gl-side getFragDataLocation consumes these directly.
+  const arr = okInfo('#version 300 es\nprecision mediump float;\nout vec4 fragColor[2];\nvoid main() { fragColor[0] = vec4(1.0); fragColor[1] = vec4(2.0); }', 300, 'FRAGMENT');
+  check(arr.outputs.length === 3, `3.00 out vec4[2] → 1 declaration + 2 element entries (got ${arr.outputs.length})`);
+  check(arr.outputs[0].name === 'fragColor' && arr.outputs[0].arraySize === 2 && arr.outputs[0].location === null, 'array declaration: bare name, arraySize 2, location null');
+  checkType(arr.outputs[0].type, V4, 'array declaration element type');
+  check(arr.outputs[1].name === 'fragColor[0]' && arr.outputs[1].location === 0 && arr.outputs[1].arraySize === 1, 'element entry fragColor[0] → location 0');
+  check(arr.outputs[2].name === 'fragColor[1]' && arr.outputs[2].location === 1 && arr.outputs[2].arraySize === 1, 'element entry fragColor[1] → location 1');
+
+  const arrLoc = okInfo('#version 300 es\nprecision mediump float;\nlayout(location = 2) out vec4 a[3];\nvoid main() { a[0] = vec4(1.0); }', 300, 'FRAGMENT');
+  check(arrLoc.outputs.length === 4, 'explicit-location array → 1 + 3 entries');
+  check(arrLoc.outputs[0].name === 'a' && arrLoc.outputs[0].location === 2 && arrLoc.outputs[0].arraySize === 3, 'array declaration carries explicit base 2');
+  check(arrLoc.outputs[1].location === 2 && arrLoc.outputs[2].location === 3 && arrLoc.outputs[3].location === 4, 'array elements at 2,3,4');
 
   const e1 = errs('precision mediump float;\nvoid main() { gl_FragColor = vec4(1.0); gl_FragData[0] = vec4(1.0); }', 100, 'FRAGMENT');
   check(hasErr(e1, 2, "'gl_FragData' : cannot write both gl_FragColor and gl_FragData"), 'gl_FragColor + gl_FragData → error');
@@ -299,11 +371,17 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
   const e3 = errs('#extension GL_EXT_draw_buffers : enable\nprecision mediump float;\nvoid main() { gl_FragData[4] = vec4(1.0); }', 100, 'FRAGMENT', ['GL_EXT_draw_buffers']);
   check(hasErr(e3, 3, "'gl_FragData' : index 4 out of range [0, 3]"), 'gl_FragData[4] with EXT → out of range');
 
-  const e4 = errs('#version 300 es\nprecision mediump float;\nout vec3 c;\nvoid main() { c = vec3(1.0); }', 300, 'FRAGMENT');
-  check(hasErr(e4, 3, "'c' : fragment shader outputs must be vec4, ivec4 or uvec4"), '3.00 out vec3 → error (strict vec4 contract)');
+  const eBool = errs('#version 300 es\nprecision mediump float;\nout bool oB;\nvoid main() { oB = true; }', 300, 'FRAGMENT');
+  check(eBool.length > 0 && eBool[0].message.includes('fragment shader outputs must be float, int or uint'), '3.00 out bool → error');
 
-  const e5 = errs('#version 300 es\nprecision mediump float;\nout vec4 c[2];\nvoid main() { c[0] = vec4(1.0); }', 300, 'FRAGMENT');
-  check(e5.length > 0 && e5[0].message.includes('fragment shader outputs must be vec4'), '3.00 out vec4[2] (array) → error');
+  const eMat = errs('#version 300 es\nprecision mediump float;\nout mat4 oM;\nvoid main() { oM = mat4(1.0); }', 300, 'FRAGMENT');
+  check(eMat.length > 0 && eMat[0].message.includes('fragment shader outputs must be float, int or uint'), '3.00 out mat4 → error');
+
+  const eStruct = errs('#version 300 es\nprecision mediump float;\nstruct S { vec4 c; };\nout S oS;\nvoid main() { oS.c = vec4(1.0); }', 300, 'FRAGMENT');
+  check(eStruct.length > 0 && eStruct[0].message.includes('fragment shader outputs must be float, int or uint'), '3.00 out struct → error');
+
+  const eArrBool = errs('#version 300 es\nprecision mediump float;\nout bool oB[2];\nvoid main() { oB[0] = true; }', 300, 'FRAGMENT');
+  check(eArrBool.length > 0 && eArrBool[0].message.includes('fragment shader outputs must be float, int or uint'), '3.00 out bool[2] → error');
 }
 
 /* ------------------------------------------------------------------ */
@@ -725,9 +803,11 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
     'FRAGMENT',
   );
 
-  // Structs containing arrays are not assignable / not comparable (GLSL ES
-  // 1.00 §5.7/§5.8; CTS struct-assign.html / struct-equals.html) — the rule
-  // is version-independent (100 AND 300).
+  // Structs containing arrays are not ASSIGNABLE (GLSL ES 1.00 §5.7/§5.8; CTS
+  // struct-assign.html) — version-independent (100 AND 300). ==/!= on structs
+  // containing arrays: rejected at 100 (GLSL ES 1.00 §5.9; CTS struct-equals.
+  // html), ALLOWED at 300 (element-wise, recursively — CTS compare-structs-
+  // containing-arrays.html).
   const s1 = errs(
     'precision mediump float;\nstruct S { float f[3]; };\nvoid main() {\n  S a, b;\n  a = b;\n  gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n}',
     100,
@@ -752,13 +832,132 @@ function checkType(t: GLSLType, expected: GLSLType, label: string): void {
     'FRAGMENT',
   );
   check(hasErr(s4, 6, "'=' : cannot assign a struct containing an array"), '3.00 struct-with-array assignment → error line 6');
-  const s5 = errs(
-    '#version 300 es\nstruct S { float f[3]; };\nout vec4 o;\nvoid main() {\n  S a, b;\n  bool c = (a == b);\n  o = vec4(1.0);\n}',
+  // ES 3.00: struct-with-array == is LEGAL (element-wise, recursively).
+  const s5 = okInfo(
+    '#version 300 es\nprecision mediump float;\nstruct S { float f[3]; };\nout vec4 o;\nvoid main() {\n  S a, b;\n  bool c = (a == b);\n  o = vec4(1.0);\n}',
     300,
     'FRAGMENT',
   );
-  check(hasErr(s5, 6, "'==' : cannot compare structs containing an array"), '3.00 struct-with-array == → error line 6');
+  check(s5 !== null, '3.00 struct-with-array == accepted (locals)');
+  // ES 1.00: the same comparison on UNIFORM struct operands stays rejected
+  // (the uniform-struct-with-array declaration itself is legal at 100).
+  const s6 = errs(
+    'struct S { float a[2]; };\nuniform S us;\nvoid main() { bool b = (us == us); gl_Position = vec4(float(b)); }',
+    100,
+    'VERTEX',
+  );
+  check(hasErr(s6, 3, "'==' : cannot compare structs containing an array"), '1.00 uniform struct-with-array == → error line 3');
+  // ES 3.00: plain struct-with-array == on LOCAL variables, mirroring the CTS
+  // compare-structs-containing-arrays.html page (bool array members, member
+  // assignments, comparison inside an expression).
+  const s7 = okInfo(
+    '#version 300 es\nstruct MyStruct { bool a[2]; };\nvoid main() { MyStruct b; b.a[0] = true; b.a[1] = false; MyStruct c; c.a[0] = true; c.a[1] = false; bool x = (b == c); gl_Position = vec4(float(x)); }',
+    300,
+    'VERTEX',
+  );
+  check(s7 !== null, '3.00 struct-with-array == accepted (CTS page mirror, locals)');
 }
+
+/* ------------------------------------------------------------------ */
+/* 16. ES 3.00 arrays: returns, ==/!=, assignment, .length()           */
+/*     (CTS conformance2/glsl3/{array-as-return-value,array-equality,  */
+/*      array-in-complex-expression,array-complex-indexing,            */
+/*      array-length-side-effects}.html — semantics-level only;        */
+/*      runtime emit is codegen's concern)                             */
+/* ------------------------------------------------------------------ */
+
+// Array return types (`float[2] f()`) — accepted at 300 (parser rejects 100).
+const a1 = okInfo('#version 300 es\nint[2] f() { return int[2](1, 2); }\nvoid main() { }', 300, 'VERTEX');
+check(a1 !== null, 'int[2] return type accepted (ES 3.00)');
+const a2 = okInfo('#version 300 es\nfloat[2] f() { return float[2](1.0, 2.0); }\nvoid main() { }', 300, 'VERTEX');
+check(a2 !== null, 'float[2] return type accepted (ES 3.00, vertex)');
+// Return-value/type mismatch → convertible(vt, int[2]) fails.
+const a3 = errs('#version 300 es\nint[2] f() { return 1.0; }\nvoid main() { }', 300, 'VERTEX');
+check(hasErr(a3, 2, "cannot convert from 'float' to 'int[2]'"), 'array return type mismatch → error line 2');
+// Returning a returned array (array-as-return-value fshaderReturnReturnedArray).
+const a3b = okInfo('#version 300 es\nint[2] foo() { return int[2](1, 2); }\nint[2] bar() { return foo(); }\nvoid main() { }', 300, 'VERTEX');
+check(a3b !== null, 'returning a returned array accepted (ES 3.00)');
+// Array param + array-arg call (array-as-return-value fshaderReturnedArrayAsParameter).
+const a4 = okInfo('#version 300 es\nbool isSuccess(int[2] a) { return a[0] == 1; }\nvoid main() { bool b = isSuccess(int[2](1, 2)); gl_Position = vec4(float(b)); }', 300, 'VERTEX');
+check(a4 !== null, 'array param + array-arg call accepted (ES 3.00)');
+// Array ==/!= at 300 (locals).
+const a5 = okInfo('#version 300 es\nvoid main() { int a[2] = int[2](1, 2); int b[2] = int[2](1, 2); bool c = (a == b) && (a != b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+check(a5 !== null, 'array ==/!= accepted (ES 3.00 locals)');
+// Size mismatch → 'cannot be compared'.
+const a6 = errs('#version 300 es\nvoid main() { int a[2]; int b[3]; bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+check(hasErr(a6, 2, "'==' : operands of type 'int[2]' and 'int[3]' cannot be compared"), 'array == size mismatch → error line 2');
+// ES 1.00 array == stays rejected.
+const a7 = errs('void main() { int a[2]; int b[2]; bool c = (a == b); gl_Position = vec4(float(c)); }', 100, 'VERTEX');
+check(hasErr(a7, 1, "'==' : operands of type 'int[2]' and 'int[2]' cannot be compared"), 'ES 1.00 array == → error line 1');
+// Array assignment: 300 accepted, 100 rejected.
+const a8 = okInfo('#version 300 es\nvoid main() { int a[3]; int b[3]; a = b; gl_Position = vec4(1.0); }', 300, 'VERTEX');
+check(a8 !== null, 'array assignment accepted (ES 3.00)');
+const a9 = errs('void main() { int a[3]; int b[3]; a = b; gl_Position = vec4(1.0); }', 100, 'VERTEX');
+check(hasErr(a9, 1, "'=' : cannot assign to an array in GLSL ES 1.00"), 'ES 1.00 array assignment → error line 1');
+// .length() on every array-valued expression form (array-length-side-effects).
+const a10 = okInfo('#version 300 es\nvoid main() { int a[3]; int n = a.length(); gl_Position = vec4(float(n)); }', 300, 'VERTEX');
+check(a10 !== null, 'a.length() accepted');
+const a11 = okInfo('#version 300 es\nint[2] f() { return int[2](1, 2); }\nvoid main() { int n = (f()).length(); gl_Position = vec4(float(n)); }', 300, 'VERTEX');
+check(a11 !== null, '(f()).length() accepted');
+const a12 = okInfo('#version 300 es\nvoid main() { int a[3]; int b[3]; int c = (a = b).length(); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+check(a12 !== null, '(a = b).length() accepted');
+const a13 = okInfo('#version 300 es\nvoid main() { int a = (int[1](0)).length(); gl_Position = vec4(float(a)); }', 300, 'VERTEX');
+check(a13 !== null, '(int[1](0)).length() accepted');
+// Array-of-struct equality at 300: plain S and S-with-array-member both
+// accepted (array == compares elements element-wise; struct-with-array
+// elements compare recursively at 300 — compare-structs-containing-arrays).
+const a14 = okInfo('#version 300 es\nstruct S { int x; };\nvoid main() { S a[3]; S b[3]; bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+check(a14 !== null, 'S[3] == S[3] accepted (S without arrays)');
+const a15 = okInfo('#version 300 es\nstruct S { int f[2]; };\nvoid main() { S a[3]; S b[3]; bool c = (a == b); gl_Position = vec4(float(c)); }', 300, 'VERTEX');
+check(a15 !== null, 'S[3] == S[3] with S containing an array accepted (ES 3.00)');
+// Indexing an array-valued expression result (array-complex-indexing).
+const a16 = okInfo('#version 300 es\nvoid main() { float a[2] = float[2](0.0, 0.0); float b[2] = float[2](2.0, 1.0); float c = (a = b)[0]; gl_Position = vec4(c); }', 300, 'VERTEX');
+check(a16 !== null, '(a = b)[0] indexing accepted');
+// Complex-expression contexts (array-in-complex-expression): short-circuit
+// && / || / ternary / comma with array == operands.
+const a17 = okInfo('#version 300 es\nint g = 0;\nint[2] plus() { ++g; return int[2](g, g); }\nbool minus() { --g; return false; }\nvoid main() { int a[2] = int[2](0, 0); minus() && (a == plus()); gl_Position = vec4(float(g)); }', 300, 'VERTEX');
+check(a17 !== null, '&& short-circuit with array == accepted');
+const a18 = okInfo('#version 300 es\nint g = 0;\nint[2] plus() { ++g; return int[2](g, g); }\nvoid main() { int a[2] = int[2](0, 0); (g == 0) ? true : (a == plus()); gl_Position = vec4(float(g)); }', 300, 'VERTEX');
+check(a18 !== null, 'ternary with array == arm accepted');
+const a19 = okInfo('#version 300 es\nint[2] func(int param) { return int[2](param, param); }\nvoid main() { int a[2]; int j = 0; bool result = ((++j), (a == func(j))); gl_Position = vec4(float(result)); }', 300, 'VERTEX');
+check(a19 !== null, 'comma sequence with array == accepted');
+// Multi-dim return types are illegal (arrays of arrays — GLSL ES 3.00 §4.1.9).
+const a20 = errs('#version 300 es\nfloat[2][3] f() { return float[2][3](0.0); }\nvoid main() { }', 300, 'VERTEX');
+check(hasErr(a20, 2, "'[' : arrays of arrays are not allowed in function return types"), 'multi-dim return type → error line 2');
+
+/* ------------------------------------------------------------------ */
+/* ES 3.00 unsized array constructors `T[](...)`                       */
+/* ------------------------------------------------------------------ */
+
+// `T[](...)` ≡ `T[N](...)` with N = argument count (GLSL ES 3.00 §5.4.6) —
+// const-array-init.html / const-struct-from-array-as-function-parameter.html.
+const u1 = okInfo('#version 300 es\nprecision mediump float;\nconst vec4 c[2] = vec4[] (vec4(0.6), vec4(-0.6));\nout vec4 o;\nvoid main() { o = c[0] + c[1]; }', 300, 'FRAGMENT');
+check(u1 !== null, 'const global array init via unsized ctor vec4[](...)');
+const u2 = okInfo('#version 300 es\nprecision mediump float;\nconst vec4 c[2] = vec4[] (vec4(0.6), vec4(-0.6));\nconst vec4 d[2] = vec4[] (c[1], c[0]);\nout vec4 o;\nvoid main() { o = d[0] + d[1]; }', 300, 'FRAGMENT');
+check(u2 !== null, 'unsized ctor initializer reading const-array elements');
+const u3 = okInfo('#version 300 es\nstruct S { float member; };\nconst S s[2] = S[]( S(1.), S(2.));\nvoid main() { }', 300, 'VERTEX');
+check(u3 !== null, 'struct-array unsized ctor S[](...)');
+const u4 = okInfo('#version 300 es\nprecision mediump float;\nvoid main() { float a[2] = float[](1.0, 2.0); }', 300, 'FRAGMENT');
+check(u4 !== null, 'local unsized ctor float[](...)');
+// Sized-vs-unsized equivalence: the same const-array declaration works with
+// float[2](...) and float[](...) side by side.
+const u5 = okInfo('#version 300 es\nprecision mediump float;\nconst float a[2] = float[2](1.0, 2.0);\nconst float b[2] = float[](1.0, 2.0);\nout vec4 o;\nvoid main() { o = vec4(a[0], b[1], 0.0, 1.0); }', 300, 'FRAGMENT');
+check(u5 !== null, 'sized float[2](...) and unsized float[](...) const inits both accepted');
+// ES 1.00 has no array constructors at all — the unsized form fails too.
+const u6 = errs('void main() { float a[2] = float[](1.0, 2.0); gl_Position = vec4(a[0], a[1], 0.0, 1.0); }', 100, 'VERTEX');
+check(hasErr(u6, 1, "'[' : array constructors require GLSL ES 3.00"), 'ES 1.00 float[](...) → error line 1');
+// Wrong element type stays an error (per-arg convertibility).
+const u7 = errs('#version 300 es\nprecision mediump float;\nvoid main() { float a[2] = float[](1.0, vec2(2.0)); }', 300, 'FRAGMENT');
+check(hasErr(u7, 3, "cannot convert from 'vec2' to 'float'"), 'unsized ctor element type mismatch → error line 3');
+// Sized ctor arity error stays (regression).
+const u8 = errs('#version 300 es\nprecision mediump float;\nvoid main() { float a[2] = float[3](1.0, 2.0); }', 300, 'FRAGMENT');
+check(hasErr(u8, 3, "'float[3]' : constructor requires 3 argument(s)"), 'sized ctor arity error stays');
+// Bare `T[]` NOT followed by `(` is rejected (the marker never reaches codegen).
+const u9 = errs('#version 300 es\nprecision mediump float;\nout vec4 o;\nvoid main() { o = vec4[]; }', 300, 'FRAGMENT');
+check(hasErr(u9, 4, "'vec4' : type name used as a value"), 'bare T[] in expression → error line 4');
+// `a[]` on a VARIABLE is rejected by semantics (was a parse error before).
+const u10 = errs('#version 300 es\nprecision mediump float;\nout vec4 o;\nvoid main() { float a = 1.0; o = vec4(a[]); }', 300, 'FRAGMENT');
+check(hasErr(u10, 4, "'[' : cannot index a value of type 'float'"), '`a[]` on a variable → error line 4');
 
 /* ------------------------------------------------------------------ */
 /* Summary                                                             */

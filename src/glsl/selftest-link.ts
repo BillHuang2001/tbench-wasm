@@ -43,6 +43,12 @@
  *      → the leaf; round-trip run.
  *  16. struct-ELEMENT member arrays still expand per element ('u.a[0].c',
  *      'u.a[1].c' — a struct-array member has no GLenum for one entry).
+ *  17. UBO arrays of structs (uniform-blocks-with-arrays.html crash pin):
+ *      struct members flatten per element ('d.s.a', 'd.s.b'), arrays of
+ *      structs expand EVERY element ('lights[0].intensity'/'lights[1].intensity'
+ *      @0/@16, size 1), structs containing arrays recurse
+ *      ('lights[0].intensity[0]' size 3 stride 16, offsets 0/48), and the
+ *      arrayed-block variant ('ld[0].lights[0].intensity' ... @0/16/32/48).
  *  18. gl_DepthRange builtin uniform reflection: usage-gated active-uniform
  *      entries ('gl_DepthRange.near/far/diff', GL_FLOAT, size 1) backed by 3
  *      real float-store slots appended after user uniforms (1.00 vertex /
@@ -1772,6 +1778,187 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
 }
 
 /* ------------------------------------------------------------------ */
+/* 17. UBO arrays of structs (uniform-blocks-with-arrays.html crash    */
+/*     pin): struct members flatten per element; arrays of structs     */
+/*     expand EVERY element; structs containing arrays recurse;        */
+/*     arrayed-block variant. Before the collectBlockLeaves fix the    */
+/*     leaf for `light_t lights[2]` carried the STRUCT type →          */
+/*     memberInfo's toGLenum threw 'struct type light_t has no         */
+/*     GLenum' → linkProgram threw → CTS page 'Loading program         */
+/*     failed'.                                                        */
+/* ------------------------------------------------------------------ */
+
+{
+  // (a) NON-array struct member: flattened 'd.s.a'/'d.s.b' leaves.
+  const vsa = compile(
+    `#version 300 es
+     struct Pair { vec2 a; float b; };
+     uniform Data { Pair s; } d;
+     in vec4 aPos;
+     void main(){ gl_Position = aPos + vec4(d.s.a.x, d.s.a.y, d.s.b, 0.0); }`,
+    'VERTEX',
+    300,
+  );
+  const fsa = compile(`#version 300 es
+     precision mediump float; out vec4 o; void main(){ o = vec4(1.0); }`, 'FRAGMENT', 300);
+  const la = linkProgram(vsa, fsa);
+  check(la.ok, `(a) struct-member block links (${la.ok ? '' : la.log})`);
+  if (la.ok) {
+    const p = la.program;
+    check(p.uniformBlocks.length === 1 && p.uniformBlocks[0].size === 16,
+      `(a) block size 16 (got ${JSON.stringify(p.uniformBlocks.map((b) => b.size))})`);
+    const m = new Map(p.uniformBlocks[0].activeUniforms.map((u) => [u.name, u]));
+    check(
+      m.get('d.s.a')?.offset === 0 && m.get('d.s.a')?.type === FLOAT_VEC2 && m.get('d.s.a')?.size === 1 &&
+        m.get('d.s.b')?.offset === 8 && m.get('d.s.b')?.type === FLOAT && m.get('d.s.b')?.size === 1,
+      `(a) flattened members d.s.a@0 vec2, d.s.b@8 float (got ${JSON.stringify([...m].map(([k, v]) => [k, v.offset, v.type, v.size]))})`,
+    );
+    const store = new Float32Array(4);
+    store[0] = 1; store[1] = 2; store[2] = 3; // d.s.a, d.s.b
+    const vctx = vertexCtx(p, {
+      blockStores: [store],
+      attribs: [new Float32Array([0, 0, 0, 1])],
+      attribIndices: new Int32Array([0]),
+    });
+    p.vertex.run(vctx);
+    check(vctx.out.position[0] === 1 && vctx.out.position[1] === 2 && vctx.out.position[2] === 3,
+      `(a) vertex reads struct members (got [${Array.from(vctx.out.position).join(', ')}])`);
+  }
+
+  // (b) EXACT crash scenario: array of structs in an instance-less block.
+  const vsb = compile(
+    `#version 300 es
+     in vec4 aPos;
+     void main(){ gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fsb = compile(
+    `#version 300 es
+     precision highp float;
+     out vec4 o;
+     struct light_t { vec4 intensity; };
+     layout(std140) uniform lightData { light_t lights[2]; };
+     void main(){ o = lights[0].intensity + lights[1].intensity; }`,
+    'FRAGMENT',
+    300,
+  );
+  const lb = linkProgram(vsb, fsb);
+  check(lb.ok, `(b) array-of-structs block links (${lb.ok ? '' : lb.log})`);
+  if (lb.ok) {
+    const p = lb.program;
+    check(p.uniformBlocks.length === 1 && p.uniformBlocks[0].name === 'lightData' && p.uniformBlocks[0].size === 32,
+      `(b) block 'lightData' size 32 (got ${JSON.stringify(p.uniformBlocks)})`);
+    const m = new Map(p.uniformBlocks[0].activeUniforms.map((u) => [u.name, u]));
+    check(
+      m.get('lights[0].intensity')?.offset === 0 && m.get('lights[0].intensity')?.type === FLOAT_VEC4 &&
+        m.get('lights[0].intensity')?.size === 1 && m.get('lights[0].intensity')?.arrayStride === 0 &&
+        m.get('lights[1].intensity')?.offset === 16 && m.get('lights[1].intensity')?.type === FLOAT_VEC4 &&
+        m.get('lights[1].intensity')?.size === 1 && m.get('lights[1].intensity')?.arrayStride === 0,
+      `(b) per-element leaves lights[0].intensity@0 / lights[1].intensity@16 size 1 (got ${JSON.stringify([...m].map(([k, v]) => [k, v.offset, v.type, v.size, v.arrayStride]))})`,
+    );
+    const um = p.uniforms.filter((u) => u.blockIndex === 0);
+    check(
+      um.length === 2 && um.every((u) => u.location === -1) &&
+        um.map((u) => u.name).join(',') === 'lights[0].intensity,lights[1].intensity',
+      `(b) Program.uniforms block members (got ${JSON.stringify(um)})`,
+    );
+    const store = new Float32Array(8); // 32 bytes
+    store[0] = 1; store[1] = 2; store[2] = 3; store[3] = 4; // lights[0].intensity
+    store[4] = 10; store[5] = 20; store[6] = 30; store[7] = 40; // lights[1].intensity
+    const fctx = fragmentCtx(p, [], { blockStores: [store] });
+    p.fragment.run(fctx);
+    const c = fctx.out.color[0];
+    check(c[0] === 11 && c[1] === 22 && c[2] === 33 && c[3] === 44,
+      `(b) fragment reads both elements: [11,22,33,44] (got [${Array.from(c).join(', ')}])`);
+  }
+
+  // (c) array of structs containing ARRAYS: nested member arrays recurse.
+  const vsc = compile(
+    `#version 300 es
+     in vec4 aPos;
+     void main(){ gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fsc = compile(
+    `#version 300 es
+     precision highp float;
+     out vec4 o;
+     struct light_t { vec4 intensity[3]; };
+     layout(std140) uniform lightData { light_t lights[2]; };
+     void main(){ o = lights[0].intensity[1] + lights[1].intensity[2]; }`,
+    'FRAGMENT',
+    300,
+  );
+  const lc = linkProgram(vsc, fsc);
+  check(lc.ok, `(c) structs-containing-arrays block links (${lc.ok ? '' : lc.log})`);
+  if (lc.ok) {
+    const p = lc.program;
+    check(p.uniformBlocks.length === 1 && p.uniformBlocks[0].size === 96,
+      `(c) block size 96 (got ${JSON.stringify(p.uniformBlocks.map((b) => b.size))})`);
+    const m = new Map(p.uniformBlocks[0].activeUniforms.map((u) => [u.name, u]));
+    check(
+      m.get('lights[0].intensity[0]')?.offset === 0 && m.get('lights[0].intensity[0]')?.size === 3 &&
+        m.get('lights[0].intensity[0]')?.arrayStride === 16 && m.get('lights[0].intensity[0]')?.type === FLOAT_VEC4 &&
+        m.get('lights[1].intensity[0]')?.offset === 48 && m.get('lights[1].intensity[0]')?.size === 3 &&
+        m.get('lights[1].intensity[0]')?.arrayStride === 16 && m.get('lights[1].intensity[0]')?.type === FLOAT_VEC4,
+      `(c) nested leaves lights[0].intensity[0]@0 / lights[1].intensity[0]@48 size 3 stride 16 (got ${JSON.stringify([...m].map(([k, v]) => [k, v.offset, v.size, v.arrayStride]))})`,
+    );
+    const store = new Float32Array(24); // 96 bytes
+    store[4] = 1; // lights[0].intensity[1] (offset 16)
+    store[20] = 2; // lights[1].intensity[2] (offset 80)
+    const fctx = fragmentCtx(p, [], { blockStores: [store] });
+    p.fragment.run(fctx);
+    const c = fctx.out.color[0];
+    check(c[0] === 3 && c[1] === 0 && c[2] === 0 && c[3] === 0,
+      `(c) const-indexed reads: [3,0,0,0] (got [${Array.from(c).join(', ')}])`);
+  }
+
+  // (d) ARRAYED block containing an array of structs: per-element groups.
+  const vsd = compile(
+    `#version 300 es
+     in vec4 aPos;
+     void main(){ gl_Position = aPos; }`,
+    'VERTEX',
+    300,
+  );
+  const fsd = compile(
+    `#version 300 es
+     precision highp float;
+     out vec4 o;
+     struct light_t { vec4 intensity; };
+     uniform lightData { light_t lights[2]; } ld[2];
+     void main(){ o = ld[0].lights[1].intensity + ld[1].lights[0].intensity; }`,
+    'FRAGMENT',
+    300,
+  );
+  const ldd = linkProgram(vsd, fsd);
+  check(ldd.ok, `(d) arrayed block links (${ldd.ok ? '' : ldd.log})`);
+  if (ldd.ok) {
+    const p = ldd.program;
+    check(
+      p.uniformBlocks.length === 2 && p.uniformBlocks[0].name === 'ld[0]' && p.uniformBlocks[1].name === 'ld[1]' &&
+        p.uniformBlocks[0].index === 0 && p.uniformBlocks[1].index === 0 && p.uniformBlocks[0].size === 32,
+      `(d) 'ld[0]','ld[1]' shared index 0 size 32 (got ${JSON.stringify(p.uniformBlocks)})`,
+    );
+    const m0 = new Map(p.uniformBlocks[0].activeUniforms.map((u) => [u.name, u]));
+    const m1 = new Map(p.uniformBlocks[1].activeUniforms.map((u) => [u.name, u]));
+    check(
+      m0.get('ld[0].lights[0].intensity')?.offset === 0 && m0.get('ld[0].lights[1].intensity')?.offset === 16 &&
+        m1.get('ld[1].lights[0].intensity')?.offset === 32 && m1.get('ld[1].lights[1].intensity')?.offset === 48,
+      `(d) per-element leaves @0/16/32/48 (got ${JSON.stringify([...m0, ...m1].map(([k, v]) => [k, v.offset]))})`,
+    );
+    const um = p.uniforms.filter((u) => u.blockIndex === 0);
+    check(
+      um.length === 4 && um.map((u) => u.name).join(',') ===
+        'ld[0].lights[0].intensity,ld[0].lights[1].intensity,ld[1].lights[0].intensity,ld[1].lights[1].intensity',
+      `(d) Program.uniforms block members (got ${JSON.stringify(um.map((u) => u.name))})`,
+    );
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 19. struct with an ARRAY MEMBER passed by value to a user function  */
 /*     (pinned regression for CTS conformance/glsl/bugs/sampler-array- */
 /*     struct-function-arg.html). Before the `array` case in           */
@@ -1843,6 +2030,184 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
         `useSampler result color from tex.out (got [${Array.from(fctx.out.color[0]).join(', ')}])`,
       );
     }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Fragment output layout (ES 3.00): arrays, scalars, locations        */
+/* ------------------------------------------------------------------ */
+
+{
+  const LIM = { maxDrawBuffers: 8 };
+  const vs = compile('#version 300 es\nvoid main() { gl_Position = vec4(0,0,0,1); }', 'VERTEX', 300);
+
+  // ARRAY output: 8 slots at 0..7 (draw-buffers MRT style, no explicit
+  // location — the ONLY output variable → base 0).
+  {
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       out vec4 my_FragData[8];
+       void main() { my_FragData[0] = vec4(1.0); my_FragData[7] = vec4(2.0); }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs, { limits: LIM });
+    check(l.ok, `8-slot array output links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const outs = l.program.fragment.outputs;
+      check(
+        outs.length === 8 && outs.every((o, i) => o.location === i && o.type === FLOAT_VEC4),
+        `array output → 8 per-slot entries 0..7 FLOAT_VEC4 (got ${JSON.stringify(outs)})`,
+      );
+      const fctx = fragmentCtx(l.program);
+      fctx.out.color = Array.from({ length: 8 }, () => new Float32Array(4));
+      l.program.fragment.run(fctx);
+      check(
+        fctx.out.color[0][0] === 1 && fctx.out.color[7][0] === 2 && fctx.out.color[3][0] === 0,
+        `array output run writes slots 0 and 7 (got ${fctx.out.color[0][0]},${fctx.out.color[7][0]})`,
+      );
+    }
+  }
+
+  // Explicit layout(location=2) on an array → slots 2,3,4.
+  {
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       layout(location = 2) out vec4 a[3];
+       void main() { a[1] = vec4(1.0); }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs, { limits: LIM });
+    check(l.ok, `explicit-location array links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const outs = l.program.fragment.outputs;
+      check(
+        outs.length === 3 && outs[0].location === 2 && outs[1].location === 3 && outs[2].location === 4,
+        `explicit array base 2 → slots 2,3,4 (got ${JSON.stringify(outs)})`,
+      );
+    }
+  }
+
+  // Non-contiguous explicit scalar locations (gl-get-frag-data-location).
+  {
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       layout(location = 2) out vec4 fragColor0;
+       layout(location = 0) out vec4 fragColor1;
+       void main() { fragColor0 = vec4(0,1,0,1); fragColor1 = vec4(1,0,0,1); }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs, { limits: LIM });
+    check(l.ok, `explicit non-contiguous scalar outputs link (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const outs = l.program.fragment.outputs;
+      check(
+        outs.length === 2 && outs[0].location === 2 && outs[1].location === 0,
+        `scalar outputs at 2 and 0 (got ${JSON.stringify(outs)})`,
+      );
+      const fctx = fragmentCtx(l.program);
+      fctx.out.color = Array.from({ length: 3 }, () => new Float32Array(4));
+      l.program.fragment.run(fctx);
+      check(
+        fctx.out.color[2][1] === 1 && fctx.out.color[0][0] === 1,
+        `run writes color[2] and color[0] (got ${fctx.out.color[2][1]},${fctx.out.color[0][0]})`,
+      );
+    }
+  }
+
+  // Scalar INT output (vertex-id): type GL_INT, run writes the int value.
+  {
+    const vsI = compile(
+      `#version 300 es
+       flat out highp int vVertexID;
+       void main() { vVertexID = gl_VertexID; gl_Position = vec4(0,0,0,1); }`,
+      'VERTEX',
+      300,
+    );
+    const fs = compile(
+      `#version 300 es
+       flat in highp int vVertexID;
+       out highp int oVertexID;
+       void main() { oVertexID = vVertexID; }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vsI, fs, { limits: LIM });
+    check(l.ok, `scalar int output links (${l.ok ? '' : l.log})`);
+    if (l.ok) {
+      const p = l.program;
+      check(
+        p.fragment.outputs.length === 1 && p.fragment.outputs[0].location === 0 && p.fragment.outputs[0].type === INT,
+        `int output → [{0, GL_INT}] (got ${JSON.stringify(p.fragment.outputs)})`,
+      );
+      const vctx = vertexCtx(p, { vertexId: 12345 });
+      p.vertex.run(vctx);
+      const fctx = fragmentCtx(p, [vctx.out.varyings]);
+      p.fragment.run(fctx);
+      check(fctx.out.color[0][0] === 12345, `int output run writes 12345 (got ${fctx.out.color[0][0]})`);
+    }
+  }
+
+  // Location conflicts are link errors (explicit duplicate + array overlap).
+  {
+    const fsDup = compile(
+      `#version 300 es
+       precision mediump float;
+       layout(location = 0) out vec4 a;
+       layout(location = 0) out vec4 b;
+       void main() { a = vec4(1.0); b = vec4(2.0); }`,
+      'FRAGMENT',
+      300,
+    );
+    const ld = linkProgram(vs, fsDup, { limits: LIM });
+    check(!ld.ok && ld.log.includes('conflicts with another output'), `duplicate location 0 → link error (${ld.ok ? '' : ld.log})`);
+
+    const fsOver = compile(
+      `#version 300 es
+       precision mediump float;
+       layout(location = 0) out vec4 a[2];
+       layout(location = 1) out vec4 b;
+       void main() { a[0] = vec4(1.0); b = vec4(2.0); }`,
+      'FRAGMENT',
+      300,
+    );
+    const lo = linkProgram(vs, fsOver, { limits: LIM });
+    check(!lo.ok && lo.log.includes('conflicts with another output'), `array/slot overlap → link error (${lo.ok ? '' : lo.log})`);
+  }
+
+  // Multiple output variables without explicit locations → link error
+  // (WEBGL_blend_func_extended 'locations300' expectation).
+  {
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       out vec4 color0;
+       out vec4 color1;
+       void main() { color0 = vec4(1.0); color1 = vec4(2.0); }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs, { limits: LIM });
+    check(!l.ok && l.log.includes("must declare layout(location=)"), `multi-output without locations → link error (${l.ok ? '' : l.log})`);
+  }
+
+  // maxDrawBuffers bound check on array expansion.
+  {
+    const fs = compile(
+      `#version 300 es
+       precision mediump float;
+       layout(location = 6) out vec4 a[3];
+       void main() { a[0] = vec4(1.0); }`,
+      'FRAGMENT',
+      300,
+    );
+    const l = linkProgram(vs, fs, { limits: { maxDrawBuffers: 8 } });
+    check(!l.ok && l.log.includes('exceeds maxDrawBuffers'), `array expansion past maxDrawBuffers → link error (${l.ok ? '' : l.log})`);
   }
 }
 

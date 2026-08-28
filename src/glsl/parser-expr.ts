@@ -213,9 +213,25 @@ function parsePostfixExpr(p: Parser): Expr {
     if (t.kind !== 'op') break;
     if (t.text === '[') {
       p.next();
-      const index = parseExpression(p);
-      p.expectOp(']');
-      e = { kind: 'index', object: e, index, loc: e.loc };
+      if (e.kind === 'identifier' && p.atOp(']')) {
+        // ES 3.00 unsized array constructor callee `T[](...)`: the size is
+        // omitted and derived from the argument count. Parsed as a marker
+        // IndexExpr (`unsized`, placeholder index); semantics accepts it only
+        // as a call callee and rejects every other use (e.g. `a[]` on a
+        // variable, bare `T[]` in an expression).
+        p.next();
+        e = {
+          kind: 'index',
+          object: e,
+          index: { kind: 'literal', value: -1, literalType: 'int', loc: e.loc },
+          unsized: true,
+          loc: e.loc,
+        };
+      } else {
+        const index = parseExpression(p);
+        p.expectOp(']');
+        e = { kind: 'index', object: e, index, loc: e.loc };
+      }
     } else if (t.text === '.') {
       p.next();
       const nameT = p.expectIdentifier();
