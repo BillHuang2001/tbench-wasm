@@ -355,7 +355,14 @@ function checkFlatIntegral(ctx: SemContext, name: string, element: GLSLType, q: 
 }
 
 function attrOf(name: string, element: GLSLType, arraySize: number, q: TypeQualifiers): AttributeDecl {
-  return { name, type: element, arraySize, location: q.layout?.location ?? null };
+  return {
+    name,
+    type: element,
+    arraySize,
+    location: q.layout?.location ?? null,
+    // Set to true by scanUses when the VERTEX shader reads the attribute.
+    used: false,
+  };
 }
 
 function varyingOf(name: string, element: GLSLType, arraySize: number, q: TypeQualifiers): VaryingDecl {
@@ -765,6 +772,20 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
     // param / inner struct with the same name shadows it (Scope.declare now
     // allows cross-scope shadowing), so such loads must NOT mark it.
     if (!isShadowed(id.name)) markVaryingUsed(id.name);
+    // Vertex attributes: the same shadow-aware rule marks the attribute USED,
+    // so the linker only lays out ACTIVE attributes (unused declarations
+    // occupy no generic slots — native behavior; ogles CorrectFull_vert
+    // declares 21 attributes but uses 7 and must link with maxVertexAttribs
+    // 16). Attributes are read-only, so every resolved load is a read.
+    if (ctx.stage === 'VERTEX' && !isShadowed(id.name)) markAttribUsed(id.name);
+  };
+
+  /** Mark the vertex attribute with ShaderInfo key `key` as READ. No-op in the
+   *  fragment stage and for non-attribute names. */
+  const markAttribUsed = (key: string): void => {
+    if (ctx.stage !== 'VERTEX') return;
+    const a = info.attributes.find((aa) => aa.name === key);
+    if (a !== undefined) a.used = true;
   };
 
   /** Mark the fragment varying with ShaderInfo key `key` as READ. Keys: plain

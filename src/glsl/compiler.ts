@@ -103,6 +103,10 @@ export interface AttributeDecl {
   type: GLSLType; // element type (arrays: element)
   arraySize: number; // 1 for non-arrays
   location: number | null;
+  /** Set to true by scanUses when the VERTEX shader reads the attribute.
+   *  Inactive attributes consume no generic slots at link (native behavior)
+   *  and are omitted from getActiveAttrib/getAttribLocation. */
+  used: boolean;
 }
 
 /**

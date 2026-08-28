@@ -1329,6 +1329,7 @@ function layoutAttributes(vs: Shader, opts: LinkOptions, limits: LinkLimits): At
   };
 
   for (const a of vs.info.attributes) {
+    if (!a.used) continue; // inactive attributes consume no generic slots (native behavior; getActiveAttrib omits them)
     const elemLocations = a.type.kind === 'matrix' ? a.type.cols : 1;
     const need = elemLocations * a.arraySize;
     let loc: number;
