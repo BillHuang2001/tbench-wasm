@@ -726,13 +726,22 @@ function bytesPerTexel(ctx: WebGLRenderingContext, format: GLenum, type: GLenum)
 /**
  * Required source-bytes for (width, height, depth) per UNPACK_* state, then
  * check the actual source (ArrayBufferView size or PBO range). Pushes the
- * error and returns false when the source is too small.
+ * error and returns false when the source is too small. `is3D` selects the
+ * texImage3D/texSubImage3D formula — the call sites pass depth=1 for both 2D
+ * and 3D-depth-1 uploads, so the ENTRYPOINT must decide (2D ignores
+ * UNPACK_IMAGE_HEIGHT/UNPACK_SKIP_IMAGES; those are 3D-only params).
  *
- * WebGL 1.0 §5.14.8 / WebGL 2.0 §3.7: every row is padded to UNPACK_ALIGNMENT
- * EXCEPT the last row of the last image, which is stored unpadded
- * (`rowLength * bytesPerPixel` — the CTS fillTexture helpers allocate exactly
- * this). Required = padded rows before the last row + unpadded last row
- * (+ skipPixels), in bytes.
+ * WebGL 2.0 §3.7.2 unpack constraints (only WebGL2 can set these params; in
+ * WebGL1 they are all defaults so the checks never fire there):
+ *   DataStoreWidth = (UNPACK_ROW_LENGTH ? ROW_LENGTH : width)
+ *   → INVALID_OPERATION if skipPixels + width > DataStoreWidth
+ *   texImage3D/texSubImage3D: DataStoreHeight = (UNPACK_IMAGE_HEIGHT ? IMAGE_HEIGHT : height)
+ *   → INVALID_OPERATION if skipRows + height > DataStoreHeight
+ *
+ * Size: every row is padded to UNPACK_ALIGNMENT EXCEPT the last row of the
+ * last image, which holds only `width` texels and is unpadded (GLES3 §3.8.2 —
+ * the CTS computeImageSizes2D/3D allocate exactly this). Required =
+ * skipPixels*bpp + padded rows before the last row + width*bpp, in bytes.
  */
 function validatePixelsSize(
   ctx: WebGLRenderingContext,
@@ -742,15 +751,28 @@ function validatePixelsSize(
   depth: number,
   format: GLenum,
   type: GLenum,
+  is3D: boolean,
 ): boolean {
   const unpack = ctx._state.pixelStore.unpack;
   const srcBpp = bytesPerTexel(ctx, format, type);
   const rowLength = unpack.rowLength > 0 ? unpack.rowLength : width;
   const rowBytes = align(rowLength * srcBpp, unpack.alignment);
   const imageHeight = unpack.imageHeight > 0 ? unpack.imageHeight : height;
-  // Rows before the unpadded last row (0 when nothing is uploaded, e.g. height 0).
-  const paddedRows = Math.max(0, unpack.skipRows + (unpack.skipImages + depth) * imageHeight - (height > 0 ? 1 : 0));
-  const required = paddedRows * rowBytes + (height > 0 ? rowLength * srcBpp : 0) + unpack.skipPixels * srcBpp;
+  if (unpack.skipPixels + width > rowLength) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return false;
+  }
+  if (is3D && unpack.skipRows + height > imageHeight) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return false;
+  }
+  // Rows before the unpadded last row of the last image (0 when nothing is
+  // uploaded, e.g. height 0). Skipped rows/images are full padded strides.
+  const rowsBeforeLast = Math.max(
+    0,
+    unpack.skipRows + (is3D ? (unpack.skipImages + depth - 1) * imageHeight : 0) + (height - 1),
+  );
+  const required = unpack.skipPixels * srcBpp + rowsBeforeLast * rowBytes + (height > 0 ? width * srcBpp : 0);
   if (typeof pixels === 'number') {
     // WebGL2 PIXEL_UNPACK_BUFFER offset path (w2ValidatePbo checked the binding).
     const buf = ctx._state.pixelUnpackBuffer;
@@ -1105,14 +1127,14 @@ function texImage2DBuffer(
     if (!w2ValidateFormatType(ctx, internalformat, format, type, pixels)) return;
     if (typeof pixels === 'number') {
       if (!w2ValidatePbo(ctx, pixels)) return;
-      if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+      if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
     } else if (ArrayBuffer.isView(pixels)) {
-      if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+      if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
     }
   } else {
     if (!w1ValidateFormatType(ctx, internalformat, format, type, pixels)) return;
     if (ArrayBuffer.isView(pixels)) {
-      if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+      if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
     }
   }
   uploadTexImage(ctx, tex, target, level, internalformat, width, height, 1, border, format, type, pixels);
@@ -1167,9 +1189,9 @@ function texImage3DBuffer(
   if (!w2ValidateFormatType(ctx, internalformat, format, type, pixels)) return;
   if (typeof pixels === 'number') {
     if (!w2ValidatePbo(ctx, pixels)) return;
-    if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type)) return;
+    if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type, true)) return;
   } else if (ArrayBuffer.isView(pixels)) {
-    if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type)) return;
+    if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type, true)) return;
   }
   uploadTexImage(ctx, tex, target, level, internalformat, width, height, depth, border, format, type, pixels);
 }
@@ -1405,9 +1427,9 @@ function texSubImage2DBuffer(
     if (!w2ValidateSubFormatType(ctx, tex._image!.internalFormat, format, type)) return;
     if (typeof pixels === 'number') {
       if (!w2ValidatePbo(ctx, pixels)) return;
-      if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+      if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
     } else if (ArrayBuffer.isView(pixels)) {
-      if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+      if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
     } else {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
@@ -1433,7 +1455,7 @@ function texSubImage2DBuffer(
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
-    if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type)) return;
+    if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
   }
   uploadTexSubImage(ctx, tex, target, level, xoffset, yoffset, 0, width, height, 1, format, type, pixels);
 }
@@ -1532,9 +1554,9 @@ function texSubImage3DBuffer(
   if (!w2ValidateSubFormatType(ctx, tex._image!.internalFormat, format, type)) return;
   if (typeof pixels === 'number') {
     if (!w2ValidatePbo(ctx, pixels)) return;
-    if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type)) return;
+    if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type, true)) return;
   } else if (ArrayBuffer.isView(pixels)) {
-    if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type)) return;
+    if (!validatePixelsSize(ctx, pixels, width, height, depth, format, type, true)) return;
   } else {
     ctx._errors.push(C1.INVALID_OPERATION);
     return;
