@@ -1385,6 +1385,31 @@ function layoutAttributes(vs: Shader, opts: LinkOptions, limits: LinkLimits): At
   };
 
   for (const a of vs.info.attributes) {
+    if (a.builtin === true) {
+      // Built-in vertex inputs (gl_VertexID / gl_InstanceID / gl_DrawID,
+      // WebGL2 — pushed by semantics only when the shader READS them,
+      // appended after all user attributes): ACTIVE with location -1 per spec
+      // (ACTIVE_ATTRIBUTES/getActiveAttrib count them; getAttribLocation
+      // returns -1). They consume no generic attrib slots and stay OUT of
+      // attribLocations — codegen reads them from ctx.vertexId /
+      // ctx.instanceId / ctx.drawId, never ctx.attribs[loc]. `integral: false`
+      // deliberately: the flag means "needs integer vertex-array backing" for
+      // the gl draw-validation guard (src/gl/draw.ts L1592-1602:
+      // `pa.integral && pa.location < maxAttribs` → vao.attribs[pa.location]).
+      // Built-ins are never fetched from vertex arrays, so integral=true with
+      // location -1 would index vao.attribs[-1] (undefined) → TypeError on
+      // every draw of a gl_VertexID program. Type stays INT (getActiveAttrib
+      // reports a.type).
+      infos.push({
+        name: a.name,
+        location: -1,
+        type: toGLenum(a.type),
+        size: a.arraySize,
+        components: typeComponents(a.type),
+        integral: false,
+      });
+      continue;
+    }
     if (!a.used) continue; // inactive attributes consume no generic slots (native behavior; getActiveAttrib omits them)
     const elemLocations = a.type.kind === 'matrix' ? a.type.cols : 1;
     const need = elemLocations * a.arraySize;

@@ -1026,4 +1026,33 @@ function scanUses(ast: TranslationUnit, ctx: SemContext, uses: ShaderUses, info:
       info.outputs.push({ name: 'gl_FragColor', index: null, location: null, type: VEC4_FLOAT, arraySize: 1 });
     }
   }
+
+  // WebGL2 spec (active-built-in-attribs.html): USED built-in vertex inputs
+  // (gl_VertexID / gl_InstanceID / gl_DrawID) are ACTIVE attributes —
+  // ACTIVE_ATTRIBUTES counts them, getActiveAttrib reports type INT / size 1,
+  // getAttribLocation returns -1. Append them AFTER user attributes; the
+  // linker assigns location -1 and keeps them out of attribLocations (codegen
+  // reads ctx.vertexId/instanceId/drawId, never ctx.attribs[loc]). Version
+  // 300 only (WebGL1 has no gl_VertexID/gl_InstanceID/gl_DrawID builtins).
+  // The uses.* flags can only be set when the identifier RESOLVED (recordRead
+  // early-returns on unresolved identifiers), and gl_DrawID only resolves
+  // when GL_ANGLE_multi_draw is enabled (registerBuiltins gates extension-
+  // tagged entries) — so a bare gl_DrawID use without the extension stays a
+  // compile error exactly as before (selftest-semantics pins it).
+  if (ctx.version === 300 && ctx.stage === 'VERTEX') {
+    const builtinInt: GLSLType = { kind: 'scalar', base: 'int' };
+    const pushBuiltinAttrib = (name: string): void => {
+      info.attributes.push({
+        name,
+        type: builtinInt,
+        arraySize: 1,
+        location: null,
+        used: true,
+        builtin: true,
+      });
+    };
+    if (uses.vertexId) pushBuiltinAttrib('gl_VertexID');
+    if (uses.instanceId) pushBuiltinAttrib('gl_InstanceID');
+    if (uses.drawId) pushBuiltinAttrib('gl_DrawID');
+  }
 }
