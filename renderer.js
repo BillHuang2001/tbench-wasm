@@ -922,7 +922,8 @@
       constantF: new Float32Array([0, 0, 0, 1]),
       // spec default (0,0,0,1)
       constantI: new Int32Array([0, 0, 0, 1]),
-      constantUI: new Uint32Array([0, 0, 0, 1])
+      constantUI: new Uint32Array([0, 0, 0, 1]),
+      genericKind: "f"
     };
   }
   function defaultVAOState(numAttribs) {
@@ -1179,6 +1180,10 @@
   var ONE_MINUS_CONSTANT_COLOR = 32770;
   var CONSTANT_ALPHA = 32771;
   var ONE_MINUS_CONSTANT_ALPHA = 32772;
+  var SRC1_COLOR = 35065;
+  var ONE_MINUS_SRC1_COLOR = 35066;
+  var SRC1_ALPHA = 34185;
+  var ONE_MINUS_SRC1_ALPHA = 35067;
   var MIN = 32775;
   var MAX = 32776;
   var FUNC_SUBTRACT = 32778;
@@ -1887,6 +1892,16 @@
     const shift = off % d.BYTES_PER_ELEMENT * 8;
     d[i] = d[i] & ~(255 << shift) | (v2 & 255) << shift;
   }
+  function writeIntBits(data, off, bpe, bits) {
+    if (bpe === 1) writeU8At(data, off, bits);
+    else if (bpe === 2) writeU16At(data, off, bits & 65535);
+    else writeU32At(data, off, bits >>> 0);
+  }
+  function readIntBits(data, off, bpe) {
+    if (bpe === 1) return readU8At(data, off) & 255;
+    if (bpe === 2) return readU16At(data, off) & 65535;
+    return readU32At(data, off);
+  }
   function stdExp(n) {
     const exp = [0, 1, 2, 3].slice(0, n);
     for (let i = n; i < 4; i++) exp.push(i === 3 ? FILL_ONE : FILL_ZERO);
@@ -2371,6 +2386,10 @@
   }
 
   // src/raster/fragment-ops.ts
+  var _f322 = new Float32Array(1);
+  var _u322 = new Uint32Array(_f322.buffer);
+  var _10A2_SHIFT = [22, 12, 2, 0];
+  var _10A2_MASK = [1023, 1023, 1023, 3];
   function applyStencilOp(op, current, ref) {
     switch (op) {
       case KEEP:
@@ -2415,7 +2434,7 @@
         return true;
     }
   }
-  function rgbFactor(f, sc, dc, sa, da, cc, ca) {
+  function rgbFactor(f, sc, dc, sa, da, cc, ca, s1c, s1a) {
     switch (f) {
       case ZERO:
         return 0;
@@ -2447,11 +2466,22 @@
         return 1 - ca;
       case SRC_ALPHA_SATURATE:
         return Math.min(sa, 1 - da);
+      // Dual-source blending (GLES 3.0 table 4.2): SRC1_* read the SECONDARY
+      // fragment color (output index 1). SRC1_COLOR = the secondary's channel,
+      // SRC1_ALPHA = the secondary's alpha.
+      case SRC1_COLOR:
+        return s1c;
+      case ONE_MINUS_SRC1_COLOR:
+        return 1 - s1c;
+      case SRC1_ALPHA:
+        return s1a;
+      case ONE_MINUS_SRC1_ALPHA:
+        return 1 - s1a;
       default:
         return 0;
     }
   }
-  function alphaFactor(f, sa, da, ca) {
+  function alphaFactor(f, sa, da, ca, s1a) {
     switch (f) {
       case ZERO:
         return 0;
@@ -2477,14 +2507,24 @@
         return 1 - ca;
       case SRC_ALPHA_SATURATE:
         return 1;
+      // Dual-source blending: the alpha equation uses the secondary's ALPHA for
+      // every SRC1_* factor (GLES 3.0 table 4.2).
+      case SRC1_COLOR:
+      case SRC1_ALPHA:
+        return s1a;
+      case ONE_MINUS_SRC1_COLOR:
+      case ONE_MINUS_SRC1_ALPHA:
+        return 1 - s1a;
       default:
         return 0;
     }
   }
-  function blendColor(src, dst, out, srcRGB, dstRGB, srcAlpha, dstAlpha, eqRGB, eqAlpha, constColor) {
+  function blendColor(src, dst, out, srcRGB, dstRGB, srcAlpha, dstAlpha, eqRGB, eqAlpha, constColor, src1) {
     const sr = src[0], sg = src[1], sb = src[2], sa = src[3];
     const dr = dst[0], dg = dst[1], db = dst[2], da = dst[3];
     const cr = constColor[0], cg = constColor[1], cb = constColor[2], ca = constColor[3];
+    const s1r = src1 ? src1[0] : 0, s1g = src1 ? src1[1] : 0;
+    const s1b = src1 ? src1[2] : 0, s1a = src1 ? src1[3] : 0;
     if (eqRGB === MIN || eqRGB === MAX) {
       if (eqRGB === MIN) {
         out[0] = Math.min(sr, dr);
@@ -2496,12 +2536,12 @@
         out[2] = Math.max(sb, db);
       }
     } else {
-      const fsr = rgbFactor(srcRGB, sr, dr, sa, da, cr, ca);
-      const fdr = rgbFactor(dstRGB, sr, dr, sa, da, cr, ca);
-      const fsg = rgbFactor(srcRGB, sg, dg, sa, da, cg, ca);
-      const fdg = rgbFactor(dstRGB, sg, dg, sa, da, cg, ca);
-      const fsb = rgbFactor(srcRGB, sb, db, sa, da, cb, ca);
-      const fdb = rgbFactor(dstRGB, sb, db, sa, da, cb, ca);
+      const fsr = rgbFactor(srcRGB, sr, dr, sa, da, cr, ca, s1r, s1a);
+      const fdr = rgbFactor(dstRGB, sr, dr, sa, da, cr, ca, s1r, s1a);
+      const fsg = rgbFactor(srcRGB, sg, dg, sa, da, cg, ca, s1g, s1a);
+      const fdg = rgbFactor(dstRGB, sg, dg, sa, da, cg, ca, s1g, s1a);
+      const fsb = rgbFactor(srcRGB, sb, db, sa, da, cb, ca, s1b, s1a);
+      const fdb = rgbFactor(dstRGB, sb, db, sa, da, cb, ca, s1b, s1a);
       if (eqRGB === FUNC_SUBTRACT) {
         out[0] = fsr * sr - fdr * dr;
         out[1] = fsg * sg - fdg * dg;
@@ -2519,8 +2559,8 @@
     if (eqAlpha === MIN || eqAlpha === MAX) {
       out[3] = eqAlpha === MIN ? Math.min(sa, da) : Math.max(sa, da);
     } else {
-      const fsa = alphaFactor(srcAlpha, sa, da, ca);
-      const fda = alphaFactor(dstAlpha, sa, da, ca);
+      const fsa = alphaFactor(srcAlpha, sa, da, ca, s1a);
+      const fda = alphaFactor(dstAlpha, sa, da, ca, s1a);
       if (eqAlpha === FUNC_SUBTRACT) out[3] = fsa * sa - fda * da;
       else if (eqAlpha === FUNC_REVERSE_SUBTRACT) out[3] = fda * da - fsa * sa;
       else out[3] = fsa * sa + fda * da;
@@ -2549,6 +2589,8 @@
       __publicField(this, "depthTestEnabled");
       __publicField(this, "depthMask");
       __publicField(this, "blend");
+      /** Optional per-draw-buffer blend state (OES_draw_buffers_indexed). */
+      __publicField(this, "blendPerDrawBuffer");
       __publicField(this, "colorMask");
       __publicField(this, "drawBuffers");
       __publicField(this, "fbColors");
@@ -2571,6 +2613,7 @@
       this.depthTestEnabled = dc.depthTest.enabled;
       this.depthMask = dc.depthMask;
       this.blend = dc.blend;
+      this.blendPerDrawBuffer = dc.blendPerDrawBuffer;
       this.colorMask = dc.colorMask;
       this.drawBuffers = dc.drawBuffers;
       this.fbColors = dc.fb.color;
@@ -2612,7 +2655,7 @@
       return true;
     }
     /** Depth write + stencil zpass + blend + sRGB + colorMask + write. */
-    finalize(x, y, frontFacing, depth, colors) {
+    finalize(x, y, frontFacing, depth, colors, secondary) {
       let stIdx = 0;
       let stCur = 0;
       let stFace = null;
@@ -2636,7 +2679,7 @@
         if (this.depthMask && this.depthData) this.depthData[y * this.depthWidth + x] = depth;
       }
       const n = Math.min(colors.length, this.drawBuffers.length);
-      for (let L = 0; L < n; L++) this.writeColor(L, x, y, colors);
+      for (let L = 0; L < n; L++) this.writeColor(L, x, y, colors, secondary);
     }
     /** Stencil write with writeMask: (newVal & mask) | (current & ~mask). */
     applyStencilOpAt(idx, cur, face, op) {
@@ -2645,10 +2688,13 @@
     }
     /**
      * Writes one fragment color output (location L) through the full pipeline:
-     * blend (location 0 only, linear space for sRGB targets) → sRGB encode
-     * (RGB only) → colorMask → surface write. (DITHER is a no-op — see header.)
+     * blend (per-draw-buffer state when the DrawCall carries it, else the global
+     * BLEND state — always in linear space for sRGB targets) → sRGB encode (RGB
+     * only) → colorMask → surface write. (DITHER is a no-op — see header.)
+     * `secondary` = the per-location SECONDARY fragment colors (dual-source
+     * index-1 outputs); `secondary[L]` feeds the SRC1_* blend factors.
      */
-    writeColor(L, x, y, colors) {
+    writeColor(L, x, y, colors, secondary) {
       const db = this.drawBuffers[L];
       if (db === -1) return;
       let attach = db;
@@ -2659,10 +2705,15 @@
       if (!src) return;
       const info = tgt.info;
       const off = (y * tgt.width + x) * info.bytesPerPixel;
+      if (info.isInteger) {
+        this.writeIntColor(tgt, off, src, this.colorMask[L]);
+        return;
+      }
       let r = src[0], g2 = src[1], b = src[2], a = src[3];
       const isSRGB = info.isSRGB;
-      const blendHere = this.blend.enabled && L === 0;
-      if (blendHere) {
+      const bEntry = this.blendPerDrawBuffer ? this.blendPerDrawBuffer[L] : void 0;
+      const blendHere = bEntry ? bEntry.enabled : this.blend.enabled;
+      if (blendHere && !info.isInteger) {
         info.decode(tgt.data, off, this.dstScratch);
         let dr = this.dstScratch[0], dg = this.dstScratch[1], db2 = this.dstScratch[2], da = this.dstScratch[3];
         if (isSRGB) {
@@ -2678,13 +2729,14 @@
           src,
           this.linearDst,
           this.blendOut,
-          this.blend.srcRGB,
-          this.blend.dstRGB,
-          this.blend.srcAlpha,
-          this.blend.dstAlpha,
-          this.blend.eqRGB,
-          this.blend.eqAlpha,
-          this.blend.color
+          bEntry ? bEntry.srcRGB : this.blend.srcRGB,
+          bEntry ? bEntry.dstRGB : this.blend.dstRGB,
+          bEntry ? bEntry.srcAlpha : this.blend.srcAlpha,
+          bEntry ? bEntry.dstAlpha : this.blend.dstAlpha,
+          bEntry ? bEntry.eqRGB : this.blend.eqRGB,
+          bEntry ? bEntry.eqAlpha : this.blend.eqAlpha,
+          bEntry ? bEntry.color : this.blend.color,
+          secondary ? secondary[L] : null
         );
         r = this.blendOut[0];
         g2 = this.blendOut[1];
@@ -2705,6 +2757,40 @@
         if (!mask[3]) a = this.dstScratch[3];
       }
       info.encode(tgt.data, off, r, g2, b, a);
+    }
+    /**
+     * Integer color-buffer write (integer branch of writeColor): bit-reinterpret
+     * each output component's float32 bit pattern into the target storage. Per
+     * GLES 3.0 §4.1.7 integer-conversion (wrap) semantics, signed and unsigned
+     * storage share the same bits: bpe=4 → full 32 bits, bpe=2 → low 16, bpe=1 →
+     * low 8. RGB10_A2UI (packed u32 — one texel per element, 4 components) packs
+     * per-component 10/10/10/2-bit fields from the 32-bit patterns. colorMask:
+     * masked channels keep their CURRENT STORED BITS (raw read via the
+     * formats.ts bit accessors — a value decode would lose the bit pattern).
+     */
+    writeIntColor(tgt, off, src, mask) {
+      const info = tgt.info;
+      const n = info.components;
+      const bpe = info.storage === "u8" || info.storage === "i8" ? 1 : info.storage === "u16" || info.storage === "i16" ? 2 : 4;
+      if (info.bytesPerPixel !== n * bpe) {
+        let packed = 0;
+        for (let j = 0; j < 4; j++) {
+          _f322[0] = src[j];
+          let bits = _u322[0] & _10A2_MASK[j];
+          if (mask && !mask[j]) {
+            bits = readU32At(tgt.data, off) >> _10A2_SHIFT[j] & _10A2_MASK[j];
+          }
+          packed |= bits << _10A2_SHIFT[j];
+        }
+        writeU32At(tgt.data, off, packed >>> 0);
+        return;
+      }
+      for (let j = 0; j < n; j++) {
+        _f322[0] = src[j];
+        let bits = _u322[0];
+        if (mask && !mask[j]) bits = readIntBits(tgt.data, off + j * bpe, bpe);
+        writeIntBits(tgt.data, off + j * bpe, bpe, bits);
+      }
     }
   };
   function runQuad(rs, qx, qy, inside) {
@@ -2728,6 +2814,16 @@
           c[2] = 0;
           c[3] = 1;
         }
+        const secOuts = ctx.out.secondary;
+        if (secOuts) {
+          for (let l = 0; l < nOut; l++) {
+            const s = secOuts[l];
+            s[0] = 0;
+            s[1] = 0;
+            s[2] = 0;
+            s[3] = 1;
+          }
+        }
         setupFragmentCtx(ctx, x, y, rs.quadDepth[p], rs.quadW[p], rs.quadV, rs.totalVaryComponents, p);
         ctx.pointCoord[0] = rs.quadPointCoord[2 * p];
         ctx.pointCoord[1] = rs.quadPointCoord[2 * p + 1];
@@ -2740,7 +2836,8 @@
           y,
           rs.frontFacing,
           prog.fragment.usesFragDepth ? ctx.out.fragDepth : rs.quadDepth[p],
-          ctx.out.color
+          ctx.out.color,
+          ctx.out.secondary
         );
       }
     }
@@ -2760,6 +2857,16 @@
       c[2] = 0;
       c[3] = 1;
     }
+    const secOuts = ctx.out.secondary;
+    if (secOuts) {
+      for (let l = 0; l < outColors.length; l++) {
+        const s = secOuts[l];
+        s[0] = 0;
+        s[1] = 0;
+        s[2] = 0;
+        s[3] = 1;
+      }
+    }
     setupFragmentCtx(ctx, x, y, depth, w, rs.quadV, total, pixel);
     ctx.pointCoord[0] = rs.quadPointCoord[2 * pixel];
     ctx.pointCoord[1] = rs.quadPointCoord[2 * pixel + 1];
@@ -2771,7 +2878,8 @@
         y,
         rs.frontFacing,
         dc.program.fragment.usesFragDepth ? ctx.out.fragDepth : depth,
-        ctx.out.color
+        ctx.out.color,
+        ctx.out.secondary
       );
     }
   }
@@ -2887,20 +2995,25 @@
   var _blitT3 = new Float32Array(4);
   var _blitOut = new Float32Array(4);
   function blitColorSurface(src, dst, srcX, srcY, srcW, srcH, dstX, dstY, dstW, dstH, filter) {
-    if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return;
+    if (srcW === 0 || srcH === 0 || dstW === 0 || dstH === 0) return;
     const sw = src.width, sh = src.height;
     const dw = dst.width, dh = dst.height;
-    const x0 = Math.max(0, dstX);
-    const y0 = Math.max(0, dstY);
-    const x1 = Math.min(dw, dstX + dstW);
-    const y1 = Math.min(dh, dstY + dstH);
+    const x0 = Math.max(0, Math.min(dstX, dstX + dstW));
+    const y0 = Math.max(0, Math.min(dstY, dstY + dstH));
+    const x1 = Math.min(dw, Math.max(dstX, dstX + dstW));
+    const y1 = Math.min(dh, Math.max(dstY, dstY + dstH));
     if (x0 >= x1 || y0 >= y1) return;
     const sInfo = src.info;
     const dInfo = dst.info;
     const sbpp = sInfo.bytesPerPixel;
     const dbpp = dInfo.bytesPerPixel;
-    if (filter === "linear" && !sInfo.isInteger) {
+    const decodeSRGB = sInfo.isSRGB;
+    const encodeSRGB = dInfo.isSRGB;
+    const doLinear = filter === "linear" && !sInfo.isInteger && (srcW !== dstW || srcH !== dstH);
+    if (doLinear) {
       for (let dy = y0; dy < y1; dy++) {
+        const vc = srcY + (dy - dstY + 0.5) * srcH / dstH;
+        if (vc < 0 || vc >= sh) continue;
         const fy = (dy - dstY + 0.5) * srcH / dstH - 0.5;
         const sy0f = Math.floor(fy);
         const wy = fy - sy0f;
@@ -2910,6 +3023,11 @@
         sy1 = Math.max(0, Math.min(sh - 1, sy1));
         let doff = (dy * dw + x0) * dbpp;
         for (let dx = x0; dx < x1; dx++) {
+          const uc = srcX + (dx - dstX + 0.5) * srcW / dstW;
+          if (uc < 0 || uc >= sw) {
+            doff += dbpp;
+            continue;
+          }
           const fx = (dx - dstX + 0.5) * srcW / dstW - 0.5;
           const sx0f = Math.floor(fx);
           const wx = fx - sx0f;
@@ -2921,6 +3039,20 @@
           sInfo.decode(src.data, (sy0 * sw + sx1) * sbpp, _blitT1);
           sInfo.decode(src.data, (sy1 * sw + sx0) * sbpp, _blitT2);
           sInfo.decode(src.data, (sy1 * sw + sx1) * sbpp, _blitT3);
+          if (decodeSRGB) {
+            _blitT0[0] = sRGBToLinear(_blitT0[0]);
+            _blitT0[1] = sRGBToLinear(_blitT0[1]);
+            _blitT0[2] = sRGBToLinear(_blitT0[2]);
+            _blitT1[0] = sRGBToLinear(_blitT1[0]);
+            _blitT1[1] = sRGBToLinear(_blitT1[1]);
+            _blitT1[2] = sRGBToLinear(_blitT1[2]);
+            _blitT2[0] = sRGBToLinear(_blitT2[0]);
+            _blitT2[1] = sRGBToLinear(_blitT2[1]);
+            _blitT2[2] = sRGBToLinear(_blitT2[2]);
+            _blitT3[0] = sRGBToLinear(_blitT3[0]);
+            _blitT3[1] = sRGBToLinear(_blitT3[1]);
+            _blitT3[2] = sRGBToLinear(_blitT3[2]);
+          }
           const w00 = (1 - wx) * (1 - wy);
           const w10 = wx * (1 - wy);
           const w01 = (1 - wx) * wy;
@@ -2929,18 +3061,38 @@
           _blitOut[1] = _blitT0[1] * w00 + _blitT1[1] * w10 + _blitT2[1] * w01 + _blitT3[1] * w11;
           _blitOut[2] = _blitT0[2] * w00 + _blitT1[2] * w10 + _blitT2[2] * w01 + _blitT3[2] * w11;
           _blitOut[3] = _blitT0[3] * w00 + _blitT1[3] * w10 + _blitT2[3] * w01 + _blitT3[3] * w11;
+          if (encodeSRGB) {
+            _blitOut[0] = linearToSRGB(_blitOut[0]);
+            _blitOut[1] = linearToSRGB(_blitOut[1]);
+            _blitOut[2] = linearToSRGB(_blitOut[2]);
+          }
           dInfo.encode(dst.data, doff, _blitOut[0], _blitOut[1], _blitOut[2], _blitOut[3]);
           doff += dbpp;
         }
       }
     } else {
       for (let dy = y0; dy < y1; dy++) {
+        const vc = srcY + (dy - dstY + 0.5) * srcH / dstH;
+        if (vc < 0 || vc >= sh) continue;
         const sy = Math.max(0, Math.min(sh - 1, srcY + Math.floor((dy - dstY + 0.5) * srcH / dstH)));
         let doff = (dy * dw + x0) * dbpp;
         for (let dx = x0; dx < x1; dx++) {
-          const sx = Math.max(0, Math.min(sw - 1, srcX + Math.floor((dx - dstX + 0.5) * srcW / dstW)));
-          sInfo.decode(src.data, (sy * sw + sx) * sbpp, _blitOut);
-          dInfo.encode(dst.data, doff, _blitOut[0], _blitOut[1], _blitOut[2], _blitOut[3]);
+          const uc = srcX + (dx - dstX + 0.5) * srcW / dstW;
+          if (uc >= 0 && uc < sw) {
+            const sx = Math.max(0, Math.min(sw - 1, srcX + Math.floor((dx - dstX + 0.5) * srcW / dstW)));
+            sInfo.decode(src.data, (sy * sw + sx) * sbpp, _blitOut);
+            if (decodeSRGB) {
+              _blitOut[0] = sRGBToLinear(_blitOut[0]);
+              _blitOut[1] = sRGBToLinear(_blitOut[1]);
+              _blitOut[2] = sRGBToLinear(_blitOut[2]);
+            }
+            if (encodeSRGB) {
+              _blitOut[0] = linearToSRGB(_blitOut[0]);
+              _blitOut[1] = linearToSRGB(_blitOut[1]);
+              _blitOut[2] = linearToSRGB(_blitOut[2]);
+            }
+            dInfo.encode(dst.data, doff, _blitOut[0], _blitOut[1], _blitOut[2], _blitOut[3]);
+          }
           doff += dbpp;
         }
       }
@@ -3333,9 +3485,9 @@
   }
 
   // src/raster/sampler-raw.ts
-  var _f322 = new Float32Array(1);
-  var _i32 = new Int32Array(_f322.buffer);
-  var _u322 = new Uint32Array(_f322.buffer);
+  var _f323 = new Float32Array(1);
+  var _i32 = new Int32Array(_f323.buffer);
+  var _u323 = new Uint32Array(_f323.buffer);
   function writeDefault(out, isInteger) {
     out[0] = 0;
     out[1] = 0;
@@ -3397,8 +3549,8 @@
       case "u8": {
         const d = entry;
         for (let c = 0; c < n; c++) {
-          _u322[0] = d[byteOffset + c];
-          out[c] = _f322[0];
+          _u323[0] = d[byteOffset + c];
+          out[c] = _f323[0];
         }
         break;
       }
@@ -3406,7 +3558,7 @@
         const d = entry;
         for (let c = 0; c < n; c++) {
           _i32[0] = d[byteOffset + c];
-          out[c] = _f322[0];
+          out[c] = _f323[0];
         }
         break;
       }
@@ -3414,8 +3566,8 @@
         const d = entry;
         const o = byteOffset >> 1;
         for (let c = 0; c < n; c++) {
-          _u322[0] = d[o + c];
-          out[c] = _f322[0];
+          _u323[0] = d[o + c];
+          out[c] = _f323[0];
         }
         break;
       }
@@ -3424,7 +3576,7 @@
         const o = byteOffset >> 1;
         for (let c = 0; c < n; c++) {
           _i32[0] = d[o + c];
-          out[c] = _f322[0];
+          out[c] = _f323[0];
         }
         break;
       }
@@ -3432,8 +3584,8 @@
         const d = entry;
         const o = byteOffset >> 2;
         for (let c = 0; c < n; c++) {
-          _u322[0] = d[o + c];
-          out[c] = _f322[0];
+          _u323[0] = d[o + c];
+          out[c] = _f323[0];
         }
         break;
       }
@@ -3442,7 +3594,7 @@
         const o = byteOffset >> 2;
         for (let c = 0; c < n; c++) {
           _i32[0] = d[o + c];
-          out[c] = _f322[0];
+          out[c] = _f323[0];
         }
         break;
       }
@@ -4732,6 +4884,8 @@
     }
     const colorOuts = [];
     for (let i = 0; i <= maxLocation; i++) colorOuts.push(new Float32Array(4));
+    const secondaryOuts = [];
+    for (let i = 0; i <= maxLocation; i++) secondaryOuts.push(new Float32Array(4));
     const pm = dc.program;
     const intUniforms = (_a = pm.intStore) != null ? _a : EMPTY_INT_STORE;
     const blocks = (_b = pm.uniformBlocks) != null ? _b : [];
@@ -4782,7 +4936,7 @@
       scratch,
       intScratch,
       tex: createTextureEnv(dc.textures),
-      out: { color: colorOuts, fragDepth: 0 },
+      out: { color: colorOuts, secondary: secondaryOuts, fragDepth: 0 },
       discarded: false
     };
     return {
@@ -5666,6 +5820,7 @@
     return decodeViaScratch(source, width, height);
   }
   function decodeImageSource(source) {
+    var _a, _b;
     if (source === null || typeof source !== "object") {
       return { ok: false, reason: "source is not an object" };
     }
@@ -5676,6 +5831,15 @@
     if (typeof v2.naturalWidth === "number") {
       if (typeof v2.naturalHeight !== "number" || v2.naturalWidth <= 0 || v2.naturalHeight <= 0 || v2.complete !== true) {
         return { ok: false, reason: "image is not loaded or has no intrinsic size" };
+      }
+      const src = String((_b = (_a = v2.currentSrc) != null ? _a : v2.src) != null ? _b : "");
+      if (/image\/svg\+xml/i.test(src) || /\.svg(\?|#|$)/i.test(src)) {
+        const w = v2.width;
+        const h = v2.height;
+        if (!(w > 0) || !(h > 0)) {
+          return { ok: false, reason: "SVG image has no width/height properties" };
+        }
+        return decodeViaNativeWebGLWithFallback(source, w, h);
       }
       return decodeViaNativeWebGLWithFallback(source, v2.naturalWidth, v2.naturalHeight);
     }
@@ -7462,6 +7626,7 @@
     if (!spec) return;
     const isCube = img.target === C.TEXTURE_CUBE_MAP;
     const isArray = img.target === C.TEXTURE_2D_ARRAY;
+    const useSRGB = spec.isSRGB;
     const maxDim = Math.max(img.width, img.height, !isCube && !isArray ? img.depth : 1);
     const levels = Math.floor(Math.log2(maxDim)) + 1;
     const out = new Float32Array(4);
@@ -7489,6 +7654,11 @@
                   const sy = Math.min(h - 1, y * 2 + dy);
                   const srcOff = (sy * w + sx) * spec.bytesPerPixel;
                   spec.unpack(srcView, srcOff, out);
+                  if (useSRGB) {
+                    out[0] = srgbToLinear(out[0]);
+                    out[1] = srgbToLinear(out[1]);
+                    out[2] = srgbToLinear(out[2]);
+                  }
                   accR += out[0];
                   accG += out[1];
                   accB += out[2];
@@ -7497,7 +7667,11 @@
                 }
               }
               const dstOff = (y * nw + x) * spec.bytesPerPixel;
-              spec.pack(dstView, dstOff, accR / n, accG / n, accB / n, accA / n);
+              if (useSRGB) {
+                spec.pack(dstView, dstOff, linearToSrgb(accR / n), linearToSrgb(accG / n), linearToSrgb(accB / n), accA / n);
+              } else {
+                spec.pack(dstView, dstOff, accR / n, accG / n, accB / n, accA / n);
+              }
             }
           }
         }
@@ -8755,6 +8929,28 @@
   var KNOWN_UNAVAILABLE_GLSL_EXTENSIONS = /* @__PURE__ */ new Set([
     "GL_NV_shader_noperspective_interpolation"
   ]);
+  var WEBGL_TO_GLSL_EXTENSION_ALIASES = {
+    GL_EXT_blend_func_extended: ["WEBGL_blend_func_extended"]
+  };
+  function extensionAvailable(st, name) {
+    const exts = st.opts.extensions;
+    if (!exts) return false;
+    if (exts.has(name)) return true;
+    const aliases = WEBGL_TO_GLSL_EXTENSION_ALIASES[name];
+    if (aliases !== void 0) {
+      for (const a of aliases) {
+        if (exts.has(a)) return true;
+      }
+    }
+    return false;
+  }
+  function glslMacroNameFor(name) {
+    if (name.startsWith("GL_")) return name;
+    for (const [glslName, webglNames] of Object.entries(WEBGL_TO_GLSL_EXTENSION_ALIASES)) {
+      if (webglNames.includes(name)) return glslName;
+    }
+    return null;
+  }
   function handleExtension(args, line, st) {
     if (args.length !== 3 || args[1].text !== ":") {
       st.errors.push({ line: remap(st, line), message: "invalid #extension directive" });
@@ -8785,14 +8981,14 @@
       return;
     }
     if (behavior === "require") {
-      if (!st.opts.extensions || !st.opts.extensions.has(name)) {
+      if (!extensionAvailable(st, name)) {
         st.errors.push({ line: remap(st, line), message: `extension '${name}' is not supported` });
       } else {
         st.macros.set(name, simpleMacro(name, "1"));
         st.extState.set(name, behavior);
       }
     } else if (behavior === "enable") {
-      if (st.opts.extensions && st.opts.extensions.has(name)) {
+      if (extensionAvailable(st, name)) {
         st.macros.set(name, simpleMacro(name, "1"));
         st.extState.set(name, behavior);
       } else if (KNOWN_UNAVAILABLE_GLSL_EXTENSIONS.has(name)) {
@@ -8983,6 +9179,14 @@
         }
         const body = tokenize(charsOf(value)).filter((t) => t.text !== "\n");
         st.macros.set(name, { name, params: null, body, paramIndex: /* @__PURE__ */ new Map(), rawArgs: [], kind: "normal" });
+      }
+    }
+    if (opts.extensions) {
+      for (const name of opts.extensions) {
+        const macroName = glslMacroNameFor(name);
+        if (macroName !== null && !st.macros.has(macroName)) {
+          st.macros.set(macroName, simpleMacro(macroName, "1"));
+        }
       }
     }
     const tokens = tokenize(stripComments(splice(source), errors), errors);
@@ -10419,6 +10623,7 @@
           const v2 = parseAssignmentExpr(p);
           if (idT.name === "location") layout.location = intValueOf(v2);
           else if (idT.name === "binding") layout.binding = intValueOf(v2);
+          else if (idT.name === "index") layout.index = intValueOf(v2);
         } else if (idT.name === "row_major") {
           layout.rowMajor = true;
         } else if (idT.name === "column_major") {
@@ -10917,6 +11122,13 @@
       stage: "FRAGMENT",
       writable: true,
       extension: "GL_EXT_frag_depth"
+    },
+    {
+      name: "gl_SecondaryFragColorEXT",
+      type: V4,
+      stage: "FRAGMENT",
+      writable: true,
+      extension: "GL_EXT_blend_func_extended"
     },
     {
       name: "gl_FragData",
@@ -13989,13 +14201,25 @@
     }
   }
   function analyzeGlobalDecl(d, ctx, info) {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c, _d, _e, _f, _g, _h;
     const q = d.type.qualifiers;
     const base = d.type.resolved;
     if (base === void 0) return;
     const loc = (_a = q.layout) == null ? void 0 : _a.location;
     if (loc !== void 0 && (!Number.isInteger(loc) || loc < 0)) {
       ctx.error(d.loc.line, "'layout(location=)' : location must be a non-negative integer");
+    }
+    const idx = (_b = q.layout) == null ? void 0 : _b.index;
+    if (idx !== void 0) {
+      if (!ctx.enabledExtensions.has("GL_EXT_blend_func_extended")) {
+        ctx.error(d.loc.line, "'layout(index=)' : requires extension 'GL_EXT_blend_func_extended' to be enabled");
+      } else if (ctx.stage !== "FRAGMENT" || q.storage !== "out") {
+        ctx.error(d.loc.line, "'layout(index=)' : only valid on fragment shader outputs");
+      } else if (loc === void 0) {
+        ctx.error(d.loc.line, "'layout(index=)' : index requires an explicit location");
+      } else if (idx !== 0 && idx !== 1) {
+        ctx.error(d.loc.line, "'layout(index=)' : index must be 0 or 1");
+      }
     }
     if (q.precision !== void 0 && isBool2(base)) {
       ctx.error(d.loc.line, `'${q.precision}' : precision qualifiers are not allowed on bool types`);
@@ -14075,12 +14299,13 @@
             if (!isValidOutputElement(element)) {
               ctx.error(line, `'${name}' : fragment shader outputs must be float, int or uint scalars, vectors, or arrays of these`);
             }
-            const explicitLoc = (_c = (_b = q.layout) == null ? void 0 : _b.location) != null ? _c : null;
-            info.outputs.push({ name, index: null, location: explicitLoc, type: element, arraySize });
+            const explicitLoc = (_d = (_c = q.layout) == null ? void 0 : _c.location) != null ? _d : null;
+            const outIndex = (_f = (_e = q.layout) == null ? void 0 : _e.index) != null ? _f : 0;
+            info.outputs.push({ name, index: outIndex, location: explicitLoc, type: element, arraySize });
             if (arraySize > 1) {
               const base2 = explicitLoc != null ? explicitLoc : 0;
               for (let k = 0; k < arraySize; k++) {
-                info.outputs.push({ name: `${name}[${k}]`, index: null, location: base2 + k, type: element, arraySize: 1 });
+                info.outputs.push({ name: `${name}[${k}]`, index: outIndex, location: base2 + k, type: element, arraySize: 1 });
               }
             }
           }
@@ -14090,7 +14315,7 @@
             name,
             type: fullType(base, decl.arrayDims),
             precision: precisionOf(q, element, ctx),
-            binding: (_e = (_d = q.layout) == null ? void 0 : _d.binding) != null ? _e : null
+            binding: (_h = (_g = q.layout) == null ? void 0 : _g.binding) != null ? _h : null
           });
           break;
         default:
@@ -14235,7 +14460,8 @@
       fragColorWritten: false,
       fragDataWritten: false,
       fragDataIndices: [],
-      fragDataLine: 1
+      fragDataLine: 1,
+      secondaryFragColorWritten: false
     };
     const written = /* @__PURE__ */ new Set();
     const blockInstances = /* @__PURE__ */ new Map();
@@ -14261,6 +14487,8 @@
       } else if (ctx.version === 100 && ctx.stage === "FRAGMENT") {
         if (name === "gl_FragColor") {
           fragOut.fragColorWritten = true;
+        } else if (name === "gl_SecondaryFragColorEXT") {
+          fragOut.secondaryFragColorWritten = true;
         } else if (name === "gl_FragData") {
           fragOut.fragDataWritten = true;
           fragOut.fragDataLine = root.loc.line;
@@ -14507,6 +14735,9 @@
       }
       if (fragOut.fragColorWritten) {
         info.outputs.push({ name: "gl_FragColor", index: null, location: null, type: VEC4_FLOAT, arraySize: 1 });
+      }
+      if (fragOut.secondaryFragColorWritten) {
+        info.outputs.push({ name: "gl_SecondaryFragColorEXT", index: null, location: null, type: VEC4_FLOAT, arraySize: 1 });
       }
     }
     if (ctx.version === 300 && ctx.stage === "VERTEX") {
@@ -15234,6 +15465,9 @@
   function isUintType(t) {
     return (t.kind === "scalar" || t.kind === "vector") && t.base === "uint";
   }
+  function isIntType(t) {
+    return (t.kind === "scalar" || t.kind === "vector") && t.base === "int";
+  }
   function isBoolType(t) {
     return (t.kind === "scalar" || t.kind === "vector") && t.base === "bool";
   }
@@ -15414,7 +15648,8 @@
     return isUintType(type) ? wrapUint(s) : s;
   }
   function blockRead(type, blockIndex, offset, matrixStride, isIntStore, dyn, c, rowMajor) {
-    const base = dyn ? `${offset} / 4 + (${dyn.temp}) * ${dyn.stride / 4}` : `${offset} / 4`;
+    const store = dyn && dyn.blockElements ? `${blockIndex} + (${dyn.temp}) * 1` : String(blockIndex);
+    const base = dyn ? dyn.blockElements ? `${offset} / 4` : `${offset} / 4 + (${dyn.temp}) * ${dyn.stride / 4}` : `${offset} / 4`;
     let idx;
     if (type.kind === "matrix") {
       const col = Math.floor(c / type.rows);
@@ -15423,16 +15658,31 @@
     } else {
       idx = `${base} + ${c}`;
     }
-    const s = `${isIntStore ? "ctx.blockIntStores" : "ctx.blockStores"}[${blockIndex}][${idx}]`;
+    const s = `${isIntStore ? "ctx.blockIntStores" : "ctx.blockStores"}[${store}][${idx}]`;
     return isUintType(type) ? wrapUint(s) : s;
   }
   function varyingVertexAccess(type, offset, dyn, c) {
     const base = dyn ? `${offset} + (${dyn.temp}) * ${dyn.stride}` : String(offset);
     return `ctx.out.varyings[${base} + ${c}]`;
   }
-  function varyingFragmentRead(env, index, elemComponents, dyn, c) {
+  function unpackVaryingCell(cell, signed) {
+    return signed ? `R.f2i(${cell})` : `R.f2u(${cell})`;
+  }
+  function packVaryingWrite(cell, rv, signed) {
+    return `(${cell} = R.u2f(${rv}), ${unpackVaryingCell(cell, signed)})`;
+  }
+  function packVaryingCompound(op, cell, rv, signed) {
+    const un = unpackVaryingCell(cell, signed);
+    const inner = op === "*" ? `Math.imul(${un}, ${rv})` : `((${un}) ${op} (${rv}))`;
+    const wrap = signed ? "| 0" : ">>> 0";
+    return `(${cell} = R.u2f((${inner}) ${wrap}), ${un})`;
+  }
+  function varyingFragmentRead(env, type, index, elemComponents, dyn, c) {
     const comp2 = dyn ? `(${dyn.temp}) * ${dyn.stride} + ${c}` : String(c);
-    return env.varyingRead(index, comp2);
+    const s = env.varyingRead(index, comp2);
+    if (isUintType(type)) return unpackVaryingCell(s, false);
+    if (isIntType(type)) return unpackVaryingCell(s, true);
+    return s;
   }
   function attribDeclComps(type) {
     return type.kind === "vector" ? type.size : type.kind === "matrix" ? type.rows : 1;
@@ -15448,9 +15698,9 @@
     const s = `(typeof ctx.attribs[${L}] === 'number' ? (${comp2} === 0 ? ctx.attribs[${L}] : ${comp2} === 3 ? 1 : 0) : ctx.attribs[${L}][ctx.attribIndices[${L}] * ${declComps} + ${comp2}])`;
     return isUintType(type) ? wrapUint(s) : s;
   }
-  function outputAccess(type, location, dyn, c) {
+  function outputAccess(type, location, index, dyn, c) {
     const L = dyn ? `${location} + (${dyn.temp}) * ${dyn.stride}` : String(location);
-    return `ctx.out.color[${L}][${c}]`;
+    return index === 1 ? `ctx.out.secondary[${L}][${c}]` : `ctx.out.color[${L}][${c}]`;
   }
   function uniformPathRead(env, key, type, dyn, c) {
     if (type.kind === "struct") return structPathRead(env, "uniform", key, type, dyn, c);
@@ -15470,7 +15720,7 @@
     if (type.kind === "struct") return structPathRead(env, "varying", key, type, dyn, c);
     const vl = env.lookupVarying(key);
     if (!vl) throw new Error(`codegen: missing varying layout for '${key}'`);
-    return env.stage === "VERTEX" ? varyingVertexAccess(type, vl.offset, dyn, c) : varyingFragmentRead(env, vl.index, vl.elemComponents, dyn, c);
+    return env.stage === "VERTEX" ? varyingVertexAccess(type, vl.offset, dyn, c) : varyingFragmentRead(env, type, vl.index, vl.elemComponents, dyn, c);
   }
   function structPathRead(env, kind, key, type, dyn, c, blockIndex) {
     if (type.kind !== "struct") throw new Error("codegen: structPathRead on non-struct");
@@ -15498,7 +15748,13 @@
           case "varying": {
             const vl = env.lookupVarying(subKey);
             if (!vl) throw new Error(`codegen: missing varying layout for '${subKey}'`);
-            return env.stage === "VERTEX" ? varyingVertexAccess(m.type, vl.offset, dyn, c - off) : varyingFragmentRead(env, vl.index, vl.elemComponents, dyn, c - off);
+            if (env.stage === "VERTEX") {
+              const s = varyingVertexAccess(m.type, vl.offset, dyn, c - off);
+              if (isUintType(m.type)) return unpackVaryingCell(s, false);
+              if (isIntType(m.type)) return unpackVaryingCell(s, true);
+              return s;
+            }
+            return varyingFragmentRead(env, m.type, vl.index, vl.elemComponents, dyn, c - off);
           }
         }
       }
@@ -15818,7 +16074,7 @@
      *  leaves ('u.m', 'u[0].m'), so a bare struct/array name ('u') that is not
      *  itself keyed resolves when any key starts with 'name.' or 'name['. */
     globalInfo(name) {
-      var _a, _b;
+      var _a, _b, _c, _d;
       const layout = this.layout;
       const us = layout.uniformSlots.get(name);
       if (us) return { kind: "uniform", key: name };
@@ -15845,11 +16101,11 @@
         }
       }
       const ol = layout.outputLocations.get(name);
-      if (ol !== void 0) return { kind: "output", location: ol };
+      if (ol !== void 0) return { kind: "output", location: ol, index: (_b = (_a = layout.outputIndices) == null ? void 0 : _a.get(name)) != null ? _b : 0 };
       const version = layout.version;
-      const bt = (_a = builtinVariables(version).find((b) => b.name === name)) != null ? _a : extensionVariables.find((b) => b.name === name);
+      const bt = (_c = builtinVariables(version).find((b) => b.name === name)) != null ? _c : extensionVariables.find((b) => b.name === name);
       if (bt) return { kind: "builtin", builtin: bt };
-      const bc = (_b = builtinConstants(version).find((b) => b.name === name)) != null ? _b : extensionConstants.find((b) => b.name === name);
+      const bc = (_d = builtinConstants(version).find((b) => b.name === name)) != null ? _d : extensionConstants.find((b) => b.name === name);
       if (bc) return { kind: "const", value: bc.value };
       return null;
     }
@@ -16050,7 +16306,12 @@
           return mkPath(
             type,
             true,
-            (c) => varyingPathRead(env, info.key, type, null, c),
+            (c) => {
+              const s = varyingPathRead(env, info.key, type, null, c);
+              if (isUintType(type)) return unpackVaryingCell(s, false);
+              if (isIntType(type)) return unpackVaryingCell(s, true);
+              return s;
+            },
             (c) => varyingPathRead(env, info.key, type, null, c)
           );
         }
@@ -16064,8 +16325,8 @@
         );
       }
       case "output": {
-        const read = (c) => outputAccess(type, info.location, null, c);
-        const write = (c) => outputAccess(type, info.location, null, c);
+        const read = (c) => outputAccess(type, info.location, info.index, null, c);
+        const write = (c) => outputAccess(type, info.location, info.index, null, c);
         return mkPath(type, true, read, write);
       }
       case "builtin":
@@ -17940,12 +18201,20 @@
           return uniformPathRead(env, st.key, p.type, p.dyn, flatC);
         case "block":
           return blockPathRead(env, st.blockIndex, st.key, p.type, p.dyn, flatC);
-        case "varying":
-          return varyingPathRead(env, st.key, p.type, p.dyn, flatC);
+        case "varying": {
+          const s = varyingPathRead(env, st.key, p.type, p.dyn, flatC);
+          if (env.stage === "VERTEX" && isUintType(p.type)) return unpackVaryingCell(s, false);
+          if (env.stage === "VERTEX" && isIntType(p.type)) return unpackVaryingCell(s, true);
+          return s;
+        }
         case "attrib":
           return attribRead(p.type, st.location, st.declComps, p.dyn, flatC);
-        case "output":
-          return outputAccess(p.type, st.location, p.dyn, flatC);
+        case "output": {
+          const s = outputAccess(p.type, st.location, st.index, p.dyn, flatC);
+          if (isUintType(p.type)) return unpackVaryingCell(s, false);
+          if (isIntType(p.type)) return unpackVaryingCell(s, true);
+          return s;
+        }
       }
     }
     if (p.builtin) {
@@ -18064,7 +18333,7 @@
         case "attrib":
           throw new Error("codegen: attributes are read-only");
         case "output":
-          return outputAccess(p.type, st.location, p.dyn, flatC);
+          return outputAccess(p.type, st.location, st.index, p.dyn, flatC);
       }
     }
     if (p.builtin) {
@@ -18241,9 +18510,13 @@
     } else if (q.storage) {
       switch (q.storage.kind) {
         case "uniform":
-        case "block":
           q.storage = { ...q.storage, key: q.storage.key + `[${k}]` };
           break;
+        case "block": {
+          const st = q.storage;
+          q.storage = st.key === st.baseKey ? { ...st, key: st.key + `[${k}]`, blockIndex: st.blockIndex + k } : { ...st, key: st.key + `[${k}]` };
+          break;
+        }
         case "varying": {
           const vl = env.lookupVarying(q.storage.key);
           q.flatOff += k * (vl ? vl.elemComponents : flatComponents(etype));
@@ -18304,12 +18577,12 @@
             p.lvalue = env.stage === "VERTEX";
             return p;
           case "output":
-            p.storage = { kind: "output", location: info.location };
+            p.storage = { kind: "output", location: info.location, index: info.index };
             p.lvalue = true;
             return p;
           case "builtin": {
             if (e.name === "gl_FragData") {
-              p.storage = { kind: "output", location: (_a = env.layout.outputLocations.get("gl_FragData")) != null ? _a : 0 };
+              p.storage = { kind: "output", location: (_a = env.layout.outputLocations.get("gl_FragData")) != null ? _a : 0, index: 0 };
               p.lvalue = true;
               return p;
             }
@@ -18386,7 +18659,7 @@
                     `codegen: block path '${key}' has no stride for dynamic indexing (linker must set arrayStride/blockStride)`
                   );
                 }
-                p.dyn = { temp: t, stride, elemSlots: 0 };
+                p.dyn = atInstance ? { temp: t, stride, blockElements: true, elemSlots: 0 } : { temp: t, stride, elemSlots: 0 };
                 break;
               }
               case "varying": {
@@ -18450,7 +18723,8 @@
           if (p.storage && p.storage.kind === "block") {
             const entry = env.lookupBlockMember(p.storage.blockIndex, p.storage.key);
             if (entry !== null && entry.rowMajor) {
-              const base = `${entry.offset} / 4${p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.stride / 4}` : ""}`;
+              const store = p.dyn && p.dyn.blockElements ? `${p.storage.blockIndex} + (${p.dyn.temp}) * 1` : String(p.storage.blockIndex);
+              const base = `${entry.offset} / 4${p.dyn ? p.dyn.blockElements ? "" : ` + (${p.dyn.temp}) * ${p.dyn.stride / 4}` : ""}`;
               let colTerm;
               if (isConst) {
                 colTerm = String(cv);
@@ -18463,7 +18737,7 @@
               const dxNames = [];
               const dyNames = [];
               for (let r = 0; r < rows; r++) {
-                compNames.push(`ctx.blockStores[${p.storage.blockIndex}][${base} + ${colTerm} + ${r} * 4]`);
+                compNames.push(`ctx.blockStores[${store}][${base} + ${colTerm} + ${r} * 4]`);
                 dxNames.push("0");
                 dyNames.push("0");
               }
@@ -18629,6 +18903,31 @@
     for (let i = swz.length - 2; i >= 0; i--) s = `(${t} === ${i} ? ${swz[i]} : ${s})`;
     return s;
   }
+  function writeBitKinds(p, env) {
+    var _a, _b, _c;
+    const t = p.type;
+    if (t.kind === "struct") {
+      const out2 = [];
+      let off = 0;
+      for (const m of t.members) {
+        out2.push(...writeBitKinds(subP(p, m.name, m.type, off, env), env));
+        off += flatComponents(m.type);
+      }
+      return out2;
+    }
+    if (t.kind === "array") {
+      const out2 = [];
+      const n2 = (_a = t.size) != null ? _a : 0;
+      for (let k = 0; k < n2; k++) out2.push(...writeBitKinds(subPIdx(p, k, t.element, env), env));
+      return out2;
+    }
+    const packedLeaf = env.stage === "VERTEX" && ((_b = p.storage) == null ? void 0 : _b.kind) === "varying" || env.stage === "FRAGMENT" && ((_c = p.storage) == null ? void 0 : _c.kind) === "output";
+    const packed = packedLeaf ? isUintType(t) ? "uint" : isIntType(t) ? "int" : false : false;
+    const n = flatComponents(t);
+    const out = new Array(n);
+    out.fill(packed);
+    return out;
+  }
   function emitExpr(e, env) {
     const t = e.resolvedType;
     if (!t) throw new Error("codegen: expression lacks resolvedType (semantics must run first)");
@@ -18668,9 +18967,11 @@
     const p = walk(e, env);
     if (!p.lvalue) throw new Error("codegen: expression is not an lvalue");
     const targets = writes(p, env);
+    const bits = writeBitKinds(p, env);
     return {
       type: p.type,
       targets,
+      bits: bits.some((b) => b) ? bits : void 0,
       dualTargets: env.dual ? dualWrites(p, env) : void 0,
       prelude: p.pre.length ? p.pre.join("; ") + ";" : void 0,
       copyBack: p.post.length ? p.post.join("; ") + ";" : void 0
@@ -18737,6 +19038,19 @@
     }
     return out;
   }
+  function materializeOperands(vals, env, pre) {
+    const seen = /* @__PURE__ */ new Set();
+    return vals.map((v2) => {
+      const t = env.allocTemp();
+      if (v2.pre && v2.pre.length > 0 && !seen.has(v2.pre)) {
+        seen.add(v2.pre);
+        pre.push(`${t} = ${foldPre(v2.pre, v2.v)}`);
+      } else {
+        pre.push(`${t} = ${v2.v}`);
+      }
+      return t;
+    });
+  }
   function astHasSideEffects(e) {
     switch (e.kind) {
       case "assign":
@@ -18788,13 +19102,22 @@
       for (let c = 0; c < n; c++) {
         const target = lv.targets[c];
         if (base === null || base === "bool") throw new Error("codegen: cannot increment a bool");
-        const wrap = (rhs) => base === "float" ? `${target} = ${rhs}` : base === "int" ? `${target} = ((${rhs}) | 0)` : `${target} = ((${rhs}) >>> 0)`;
+        const bitKind = lv.bits !== void 0 ? lv.bits[c] : false;
+        const read = bitKind ? unpackVaryingCell(target, bitKind === "int") : target;
+        const write = (rhs) => base === "float" ? `${target} = ${rhs}` : base === "int" ? bitKind ? `${target} = R.u2f(((${rhs}) | 0))` : `${target} = ((${rhs}) | 0)` : bitKind ? `${target} = R.u2f(((${rhs}) >>> 0))` : `${target} = ((${rhs}) >>> 0)`;
         let s;
-        if (e.postfix) {
+        if (bitKind) {
+          if (e.postfix) {
+            const t2 = env.allocTemp();
+            s = `(${t2} = ${read}, ${write(`${t2} + ${delta}`)}, ${t2})`;
+          } else {
+            s = `(${write(`${read} + ${delta}`)}, ${read})`;
+          }
+        } else if (e.postfix) {
           const t2 = env.allocTemp();
-          s = `(${t2} = ${target}, ${wrap(`${t2} + ${delta}`)}, ${t2})`;
+          s = `(${t2} = ${target}, ${write(`${t2} + ${delta}`)}, ${t2})`;
         } else {
-          s = `(${wrap(`${target} + ${delta}`)})`;
+          s = `(${write(`${target} + ${delta}`)})`;
         }
         let v2 = s;
         if (post) {
@@ -19101,6 +19424,9 @@
         const av2 = emitExpr(e.left, env);
         const bv2 = emitExpr(e.right, env);
         const out2 = [];
+        const matPre = [];
+        const aT = !dual ? materializeOperands(av2, env, matPre) : null;
+        const bT = !dual ? materializeOperands(bv2, env, matPre) : null;
         for (let c = 0; c < rt.cols; c++) {
           for (let r = 0; r < aRows; r++) {
             if (dual) {
@@ -19112,13 +19438,11 @@
             } else {
               const parts = [];
               for (let s = 0; s < aCols; s++) {
-                const a = av2[s * aRows + r];
-                const b = bv2[c * bRows + s];
-                const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
-                const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-                parts.push(`(${ax} * (${bx}))`);
+                parts.push(`(${aT[s * aRows + r]} * (${bT[c * bRows + s]}))`);
               }
-              out2.push({ v: `(${parts.join(" + ")})` });
+              const res = { v: `(${parts.join(" + ")})` };
+              if (out2.length === 0) res.pre = matPre;
+              out2.push(res);
             }
           }
         }
@@ -19130,6 +19454,9 @@
         const av2 = emitExpr(e.left, env);
         const bv2 = emitExpr(e.right, env);
         const out2 = [];
+        const matPre = [];
+        const aT = !dual ? materializeOperands(av2, env, matPre) : null;
+        const bT = !dual ? materializeOperands(bv2, env, matPre) : null;
         for (let r = 0; r < R2; r++) {
           if (dual) {
             const terms = [];
@@ -19140,13 +19467,11 @@
           } else {
             const parts = [];
             for (let c = 0; c < C3; c++) {
-              const a = av2[c * R2 + r];
-              const b = bv2[c];
-              const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
-              const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-              parts.push(`(${ax} * (${bx}))`);
+              parts.push(`(${aT[c * R2 + r]} * (${bT[c]}))`);
             }
-            out2.push({ v: `(${parts.join(" + ")})` });
+            const res = { v: `(${parts.join(" + ")})` };
+            if (out2.length === 0) res.pre = matPre;
+            out2.push(res);
           }
         }
         return out2;
@@ -19157,6 +19482,9 @@
         const av2 = emitExpr(e.left, env);
         const bv2 = emitExpr(e.right, env);
         const out2 = [];
+        const matPre = [];
+        const aT = !dual ? materializeOperands(av2, env, matPre) : null;
+        const bT = !dual ? materializeOperands(bv2, env, matPre) : null;
         for (let c = 0; c < C3; c++) {
           if (dual) {
             const terms = [];
@@ -19167,13 +19495,11 @@
           } else {
             const parts = [];
             for (let r = 0; r < R2; r++) {
-              const a = av2[r];
-              const b = bv2[c * R2 + r];
-              const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
-              const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-              parts.push(`(${ax} * (${bx}))`);
+              parts.push(`(${aT[r]} * (${bT[c * R2 + r]}))`);
             }
-            out2.push({ v: `(${parts.join(" + ")})` });
+            const res = { v: `(${parts.join(" + ")})` };
+            if (out2.length === 0) res.pre = matPre;
+            out2.push(res);
           }
         }
         return out2;
@@ -19365,11 +19691,21 @@
         for (let c = 0; c < n; c++) {
           const cp = conv2[c].pre;
           const rv = cp && cp.length ? foldPre(cp, conv2[c].v) : conv2[c].v;
-          pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv2[c], v: rv }));
+          const bitKind = lv.bits !== void 0 ? lv.bits[c] : false;
+          if (bitKind) {
+            pre.push(packVaryingWrite(lv.targets[c], rv, bitKind === "int"));
+          } else {
+            pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv2[c], v: rv }));
+          }
         }
         if (post) pre.push(...post.split(", "));
         for (let c = 0; c < n; c++) {
-          out.push({ v: lv.targets[c], dx: (_a = conv2[c].dx) != null ? _a : "0", dy: (_b = conv2[c].dy) != null ? _b : "0", pre });
+          const bitKind = lv.bits !== void 0 ? lv.bits[c] : false;
+          if (bitKind) {
+            out.push({ v: unpackVaryingCell(lv.targets[c], bitKind === "int"), dx: "0", dy: "0", pre });
+          } else {
+            out.push({ v: lv.targets[c], dx: (_a = conv2[c].dx) != null ? _a : "0", dy: (_b = conv2[c].dy) != null ? _b : "0", pre });
+          }
         }
         return out;
       }
@@ -19377,7 +19713,8 @@
       for (let c = 0; c < n; c++) {
         const cp = conv2[c].pre;
         const rv = cp && cp.length ? foldPre(cp, conv2[c].v) : conv2[c].v;
-        let v2 = env.dual && lv.dualTargets ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv2[c], v: rv }) : `(${lv.targets[c]} = ${rv})`;
+        const bitKind = lv.bits !== void 0 ? lv.bits[c] : false;
+        let v2 = bitKind ? packVaryingWrite(lv.targets[c], rv, bitKind === "int") : env.dual && lv.dualTargets ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv2[c], v: rv }) : `(${lv.targets[c]} = ${rv})`;
         if (post) {
           const t2 = env.allocTemp();
           v2 = `(${t2} = ${v2}, ${post}, ${t2})`;
@@ -19446,8 +19783,11 @@
     for (let c = 0; c < n; c++) {
       const cp = conv[c].pre;
       const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
+      const bitKind = lv.bits !== void 0 ? lv.bits[c] : false;
       let v2;
-      if (env.dual && lv.dualTargets && base === "float" && lv.dualTargets[c]) {
+      if (bitKind) {
+        v2 = packVaryingCompound(cop, lv.targets[c], rv, bitKind === "int");
+      } else if (env.dual && lv.dualTargets && base === "float" && lv.dualTargets[c]) {
         v2 = env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }, cop);
       } else {
         v2 = compoundOp(cop, lv.targets[c], rv, base);
@@ -19905,10 +20245,17 @@
       const delta = e.op === "++" ? "1" : "-1";
       const base = scalarBaseOf(lv.type);
       if (base === null || base === "bool") throw new Error("codegen: cannot increment a bool");
-      for (const tgt of lv.targets) {
-        out.push(
-          base === "float" ? `${tgt} = ${tgt} + ${delta};` : base === "int" ? `${tgt} = ((${tgt} + ${delta}) | 0);` : `${tgt} = ((${tgt} + ${delta}) >>> 0);`
-        );
+      for (let c = 0; c < lv.targets.length; c++) {
+        const tgt = lv.targets[c];
+        const bitKind = lv.bits !== void 0 ? lv.bits[c] : false;
+        if (bitKind) {
+          const wrap = bitKind === "int" ? "| 0" : ">>> 0";
+          out.push(`${tgt} = R.u2f(((${unpackVaryingCell(tgt, bitKind === "int")} + ${delta}) ${wrap}));`);
+        } else {
+          out.push(
+            base === "float" ? `${tgt} = ${tgt} + ${delta};` : base === "int" ? `${tgt} = ((${tgt} + ${delta}) | 0);` : `${tgt} = ((${tgt} + ${delta}) >>> 0);`
+          );
+        }
       }
       if (lv.copyBack) out.push(lv.copyBack);
       return;
@@ -19932,7 +20279,9 @@
       if (lv.prelude) out.push(lv.prelude);
       if (op === "=") {
         for (let c = 0; c < lv.targets.length; c++) {
-          if (env.dual && lv.dualTargets && lv.dualTargets[c]) {
+          if (lv.bits && lv.bits[c]) {
+            out.push(`${lv.targets[c]} = R.u2f(${conv[c].v});`);
+          } else if (env.dual && lv.dualTargets && lv.dualTargets[c]) {
             out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c])};`);
           } else {
             out.push(`${lv.targets[c]} = ${conv[c].v};`);
@@ -19945,7 +20294,10 @@
         }
         const cop = op.replace("=", "");
         for (let c = 0; c < lv.targets.length; c++) {
-          if (env.dual && lv.dualTargets && base === "float" && lv.dualTargets[c]) {
+          const bitKind = lv.bits !== void 0 ? lv.bits[c] : false;
+          if (bitKind) {
+            out.push(`${packVaryingCompound(cop, lv.targets[c], conv[c].v, bitKind === "int")};`);
+          } else if (env.dual && lv.dualTargets && base === "float" && lv.dualTargets[c]) {
             out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c], cop)};`);
           } else {
             out.push(`${compoundOpExpr(cop, lv.targets[c], conv[c].v, base)};`);
@@ -21887,17 +22239,9 @@ ${inner.map((l) => "  " + l).join("\n")}
     const blockIndices = /* @__PURE__ */ new Map();
     const infos = [];
     const uniformInfos = [];
-    for (let idx = 0; idx < order.length; idx++) {
-      const lay = byName.get(order[idx]);
-      blocks.set(idx, lay.members);
-      if (lay.instanceName !== null) {
-        blockIndices.set(lay.instanceName, idx);
-      } else {
-        for (const m of lay.members.keys()) {
-          const root = m.split(".")[0].split("[")[0];
-          blockIndices.set(root, idx);
-        }
-      }
+    let nextIndex = 0;
+    for (const name of order) {
+      const lay = byName.get(name);
       const memberInfo = (l) => ({
         name: l.path,
         offset: l.offset,
@@ -21907,13 +22251,34 @@ ${inner.map((l) => "  " + l).join("\n")}
         matrixStride: l.matrixStride,
         rowMajor: l.rowMajor
       });
-      const leafInfos = (group) => group.map(memberInfo);
       if (lay.instanceArray) {
+        const base = nextIndex;
+        nextIndex += lay.arraySize;
+        blockIndices.set(lay.instanceName, base);
         for (let k = 0; k < lay.arraySize; k++) {
-          infos.push({ name: `${lay.instanceName}[${k}]`, index: idx, size: lay.size, activeUniforms: leafInfos(lay.leafGroups[k]) });
-        }
-        for (const group of lay.leafGroups) {
-          for (const l of group) {
+          const idx = base + k;
+          const eoff = k * lay.size;
+          const members = /* @__PURE__ */ new Map();
+          members.set(`${lay.instanceName}[${k}]`, {
+            offset: 0,
+            arrayStride: 0,
+            matrixStride: 0,
+            rowMajor: false,
+            blockStride: lay.size
+          });
+          const prefix = `${lay.instanceName}[${k}].`;
+          for (const [key, entry] of lay.members) {
+            if (!key.startsWith(prefix)) continue;
+            members.set(key, { ...entry, offset: entry.offset - eoff, blockStride: lay.size });
+          }
+          blocks.set(idx, members);
+          infos.push({
+            name: `${lay.instanceName}[${k}]`,
+            index: idx,
+            size: lay.size,
+            activeUniforms: lay.leafGroups[k].map((l) => ({ ...memberInfo(l), offset: l.offset - eoff }))
+          });
+          for (const l of lay.leafGroups[k]) {
             uniformInfos.push({
               name: l.path,
               location: -1,
@@ -21927,7 +22292,17 @@ ${inner.map((l) => "  " + l).join("\n")}
           }
         }
       } else {
-        infos.push({ name: lay.blockName, index: idx, size: lay.size, activeUniforms: leafInfos(lay.leafGroups[0]) });
+        const idx = nextIndex++;
+        blocks.set(idx, lay.members);
+        if (lay.instanceName !== null) {
+          blockIndices.set(lay.instanceName, idx);
+        } else {
+          for (const m of lay.members.keys()) {
+            const root = m.split(".")[0].split("[")[0];
+            blockIndices.set(root, idx);
+          }
+        }
+        infos.push({ name: lay.blockName, index: idx, size: lay.size, activeUniforms: lay.leafGroups[0].map(memberInfo) });
         for (const l of lay.leafGroups[0]) {
           uniformInfos.push({
             name: l.path,
@@ -22221,21 +22596,26 @@ ${inner.map((l) => "  " + l).join("\n")}
     return { map, infos };
   }
   function layoutOutputs(fs, limits) {
-    var _a;
+    var _a, _b, _c, _d, _e, _f;
     const map = /* @__PURE__ */ new Map();
+    const indices = /* @__PURE__ */ new Map();
     const outputs = [];
     if (fs.version === 100) {
       for (const o of fs.info.outputs) {
         if (o.name === "gl_FragColor") {
           map.set("gl_FragColor", 0);
-          outputs.push({ location: 0, type: toGLenum(o.type) });
+          outputs.push({ location: 0, index: 0, type: toGLenum(o.type) });
+        } else if (o.name === "gl_SecondaryFragColorEXT") {
+          map.set("gl_SecondaryFragColorEXT", 0);
+          indices.set("gl_SecondaryFragColorEXT", 1);
+          outputs.push({ location: 0, index: 1, type: toGLenum(o.type) });
         } else if (o.name.startsWith("gl_FragData")) {
           const idx = (_a = o.index) != null ? _a : 0;
           if (idx >= limits.maxDrawBuffers) {
             return { error: `linker: gl_FragData[${idx}] exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
           }
           map.set("gl_FragData", 0);
-          outputs.push({ location: idx, type: toGLenum(o.type) });
+          outputs.push({ location: idx, index: 0, type: toGLenum(o.type) });
         }
       }
     } else {
@@ -22253,13 +22633,15 @@ ${inner.map((l) => "  " + l).join("\n")}
           if (loc >= limits.maxDrawBuffers) {
             return { error: `linker: output '${o.name}' location ${loc} exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
           }
-          const owner = occupied.get(loc);
+          const key = `${loc}:${(_b = o.index) != null ? _b : 0}`;
+          const owner = occupied.get(key);
           if (owner !== void 0 && owner !== el.base) {
             return { error: `linker: output '${o.name}' location ${loc} conflicts with another output` };
           }
-          occupied.set(loc, el.base);
+          occupied.set(key, el.base);
           map.set(o.name, loc);
-          outputs.push({ location: loc, type: toGLenum(o.type) });
+          indices.set(o.name, (_c = o.index) != null ? _c : 0);
+          outputs.push({ location: loc, index: (_d = o.index) != null ? _d : 0, type: toGLenum(o.type) });
           continue;
         }
         let base;
@@ -22275,29 +22657,33 @@ ${inner.map((l) => "  " + l).join("\n")}
           return { error: `linker: output '${o.name}' location ${base} exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
         }
         map.set(o.name, base);
+        indices.set(o.name, (_e = o.index) != null ? _e : 0);
+        const outIndex = (_f = o.index) != null ? _f : 0;
         if (o.arraySize === 1) {
-          const owner = occupied.get(base);
+          const key = `${base}:${outIndex}`;
+          const owner = occupied.get(key);
           if (owner !== void 0) {
             return { error: `linker: output '${o.name}' location ${base} conflicts with another output` };
           }
-          occupied.set(base, o.name);
-          outputs.push({ location: base, type: toGLenum(o.type) });
+          occupied.set(key, o.name);
+          outputs.push({ location: base, index: outIndex, type: toGLenum(o.type) });
         } else {
           for (let k = 0; k < o.arraySize; k++) {
             const loc = base + k;
             if (loc >= limits.maxDrawBuffers) {
               return { error: `linker: output '${o.name}' location ${loc} exceeds maxDrawBuffers (${limits.maxDrawBuffers})` };
             }
-            const owner = occupied.get(loc);
+            const key = `${loc}:${outIndex}`;
+            const owner = occupied.get(key);
             if (owner !== void 0 && owner !== o.name) {
               return { error: `linker: output '${o.name}' location ${loc} conflicts with another output` };
             }
-            occupied.set(loc, o.name);
+            occupied.set(key, o.name);
           }
         }
       }
     }
-    return { map, outputs };
+    return { map, indices, outputs };
   }
   function parseOutputElement(name) {
     const m = /^(.*)\[(\d+)\]$/.exec(name);
@@ -22442,6 +22828,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       varyings: vl.map,
       attribLocations: al.map,
       outputLocations: ol.map,
+      outputIndices: ol.indices,
       uses,
       structNames
     };
@@ -24543,6 +24930,11 @@ ${inner.map((l) => "  " + l).join("\n")}
   }
 
   // src/gl/draw.ts
+  function toU64(v2) {
+    const n = Number(v2);
+    if (!Number.isFinite(n)) return 0;
+    return n < 0 ? n + 2 ** 64 : n;
+  }
   var scratchMap = /* @__PURE__ */ new WeakMap();
   function getScratch(ctx) {
     let sc = scratchMap.get(ctx);
@@ -24636,6 +25028,30 @@ ${inner.map((l) => "  " + l).join("\n")}
       return getAttachmentSurface(s.readFramebuffer, attachment);
     } catch {
       return null;
+    }
+  }
+  function readAttachmentHasImage(ctx, attachment) {
+    const s = ctx._state;
+    const fbo = s.readFramebuffer;
+    if (fbo === null) {
+      const dfb = ctx._defaultFB;
+      if (!dfb) return false;
+      return attachment === C1.DEPTH_ATTACHMENT ? !!dfb.depth : !!dfb.stencil;
+    }
+    const entry = fbo._attachments.get(attachment);
+    if (!entry) return false;
+    try {
+      if (entry.type === "renderbuffer") return !!entry.renderbuffer._surface;
+      const tex2 = entry.texture;
+      const img = tex2._image;
+      if (!img || entry.level < 0) return false;
+      const lvl = img.levels[entry.level];
+      if (!lvl) return false;
+      const isCube = entry.face !== void 0 && entry.face >= 34069 && entry.face <= 34074;
+      const idx = isCube ? entry.face - 34069 : entry.layer;
+      return !!lvl.data[idx];
+    } catch {
+      return false;
     }
   }
   function presentIfDefault(ctx) {
@@ -25041,7 +25457,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     return null;
   }
   function buildAttribs(ctx, pm, req, indices) {
-    var _a, _b, _c, _d, _e, _f;
+    var _a, _b, _c, _d, _e;
     const s = ctx._state;
     const vao = s.vao;
     const maxAttribs = s.limits.MAX_VERTEX_ATTRIBS;
@@ -25063,7 +25479,8 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (!a.enabled || !a.buffer || !a.buffer._data) {
           plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: true, constant: true };
           if (pa.integral) {
-            attribs[l] = (_b = a.constantI) != null ? _b : sc.emptyInt;
+            const unsigned2 = pa.type === C1.UNSIGNED_INT || pa.type === C2.UNSIGNED_INT_VEC2 || pa.type === C2.UNSIGNED_INT_VEC3 || pa.type === C2.UNSIGNED_INT_VEC4;
+            attribs[l] = unsigned2 ? a.constantUI : a.constantI;
           } else {
             attribs[l] = a.constantF;
           }
@@ -25130,7 +25547,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (unsigned) uintBase += need;
         else intBase += need;
         for (let e = 0; e < elemCount; e++) {
-          const element = divisor > 0 ? ((_c = req.baseInstance) != null ? _c : 0) + e : indices ? ((_d = req.baseVertex) != null ? _d : 0) + indices[e] : req.firstOrOffset + e;
+          const element = divisor > 0 ? ((_b = req.baseInstance) != null ? _b : 0) + e : indices ? ((_c = req.baseVertex) != null ? _c : 0) + indices[e] : req.firstOrOffset + e;
           const byteOff = aOffset + element * stride;
           for (let c = 0; c < comps; c++) {
             let v2 = 0;
@@ -25145,7 +25562,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         const dst = new Float32Array(sc.floatPool.buffer, floatBase * 4, need);
         floatBase += need;
         for (let e = 0; e < elemCount; e++) {
-          const element = divisor > 0 ? ((_e = req.baseInstance) != null ? _e : 0) + e : indices ? ((_f = req.baseVertex) != null ? _f : 0) + indices[e] : req.firstOrOffset + e;
+          const element = divisor > 0 ? ((_d = req.baseInstance) != null ? _d : 0) + e : indices ? ((_e = req.baseVertex) != null ? _e : 0) + indices[e] : req.firstOrOffset + e;
           const byteOff = aOffset + element * stride;
           for (let c = 0; c < comps; c++) {
             let v2 = 0;
@@ -25598,6 +26015,12 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
     return -1;
   }
+  function isIntegralVaryingType(glType) {
+    return glType === 5124 || glType === 5125 || glType >= 35667 && glType <= 35669 || glType >= 36294 && glType <= 36296 || glType >= 35670 && glType <= 35673;
+  }
+  function isUnsignedVaryingType(glType) {
+    return glType === 5125 || glType >= 36294 && glType <= 36296;
+  }
   function resolveTfVaryings(pm) {
     var _a;
     const tfVarys = pm.transformFeedbackVaryings;
@@ -25608,6 +26031,8 @@ ${inner.map((l) => "  " + l).join("\n")}
     for (const tv of tfVarys) {
       let recOff = -1;
       let comps = 0;
+      let integral = false;
+      let unsigned = false;
       if (tv.name === "gl_Position") {
         recOff = 0;
         comps = 4;
@@ -25620,10 +26045,12 @@ ${inner.map((l) => "  " + l).join("\n")}
           recOff = RECORD_HEADER_FLOATS;
           for (let i = 0; i < vi; i++) recOff += varyings[i].components;
           comps = varyings[vi].components;
+          integral = isIntegralVaryingType(varyings[vi].type);
+          unsigned = isUnsignedVaryingType(varyings[vi].type);
         }
       }
       if (comps === 0) continue;
-      out.push({ name: tv.name, recOff, comps });
+      out.push({ name: tv.name, recOff, comps, integral, unsigned });
       totalComps += comps;
     }
     return out.length === 0 ? null : { varyings: out, totalComps };
@@ -25706,8 +26133,14 @@ ${inner.map((l) => "  " + l).join("\n")}
               overflow = true;
               break outer;
             }
-            const src = records.subarray(recBase + tfVarys[k].recOff, recBase + tfVarys[k].recOff + c);
-            new Float32Array(buf._data, dstByte, c).set(src);
+            const recOff = recBase + tfVarys[k].recOff;
+            if (tfVarys[k].integral) {
+              const dst = tfVarys[k].unsigned ? new Uint32Array(buf._data, dstByte, c) : new Int32Array(buf._data, dstByte, c);
+              const recU32 = new Uint32Array(records.buffer, records.byteOffset + recOff * 4, c);
+              for (let j = 0; j < c; j++) dst[j] = recU32[j];
+            } else {
+              new Float32Array(buf._data, dstByte, c).set(records.subarray(recOff, recOff + c));
+            }
           }
           capturedVerts++;
         }
@@ -25731,8 +26164,24 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (!att) return false;
     return (att.type === "renderbuffer" ? att.renderbuffer._internalformat : (_a = att.texture._image) == null ? void 0 : _a.internalFormat) === fmt;
   }
+  function outputTypeFamily(type) {
+    switch (type) {
+      case 5124:
+      case 35667:
+      case 35668:
+      case 35669:
+        return 1;
+      case 5125:
+      case 35676:
+      case 35677:
+      case 35678:
+        return 2;
+      default:
+        return 0;
+    }
+  }
   function executeDraw(ctx, req) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w;
     const s = ctx._state;
     const prog = s.currentProgram;
     if (prog !== null) ensureProgramLinked(ctx, prog);
@@ -25813,10 +26262,33 @@ ${inner.map((l) => "  " + l).join("\n")}
       for (let i = 0; i < s.drawBuffers.length; i++) {
         if (s.drawBuffers[i] === C1.NONE) continue;
         if (declared.has(i)) continue;
+        if (s.caps.RASTERIZER_DISCARD) break;
+        const db = s.drawBuffers[i];
+        const dbIdx = db - C1.COLOR_ATTACHMENT0;
+        if (dbIdx < 0 || dbIdx >= fb.color.length || !fb.color[dbIdx]) continue;
         const m = (_b = s.colorMaskPerDrawBuffer.get(i)) != null ? _b : s.colorMask;
         if (m[0] || m[1] || m[2] || m[3]) {
           pushError(ctx, C1.INVALID_OPERATION);
           return;
+        }
+      }
+    }
+    if (s.version === 2) {
+      const outs = (_c = pm.fragment) == null ? void 0 : _c.outputs;
+      if (outs && outs.length > 0) {
+        for (const o of outs) {
+          const l = o.location;
+          if (l < 0 || l >= s.drawBuffers.length) continue;
+          const db = s.drawBuffers[l];
+          if (db === C1.NONE) continue;
+          const dbIdx = db - C1.COLOR_ATTACHMENT0;
+          if (dbIdx < 0 || dbIdx >= fb.color.length || !fb.color[dbIdx]) continue;
+          const info = fb.color[dbIdx].info;
+          const surfFam = info && info.isInteger ? info.isSigned ? 1 : 2 : 0;
+          if (outputTypeFamily(o.type) !== surfFam) {
+            pushError(ctx, C1.INVALID_OPERATION);
+            return;
+          }
         }
       }
     }
@@ -25826,7 +26298,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         if (db === C1.NONE) continue;
         const dbIdx = db - C1.COLOR_ATTACHMENT0;
         if (!drawBufferAttachmentIs(ctx, dbIdx, C2.RGB9_E5)) continue;
-        const m = (_c = s.colorMaskPerDrawBuffer.get(dbIdx)) != null ? _c : s.colorMask;
+        const m = (_d = s.colorMaskPerDrawBuffer.get(dbIdx)) != null ? _d : s.colorMask;
         if ((m[0] || m[1] || m[2] || m[3]) && !(m[0] && m[1] && m[2] && m[3])) {
           pushError(ctx, C1.INVALID_OPERATION);
           return;
@@ -25842,7 +26314,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         for (let i = 0; i < s.drawBuffers.length; i++) {
           if (s.drawBuffers[i] === C1.NONE) continue;
           const be = s.blendPerDrawBuffer.get(i);
-          if (SRC1_BLEND_FACTORS.includes((_d = be == null ? void 0 : be.srcRGB) != null ? _d : s.blend.srcRGB) || SRC1_BLEND_FACTORS.includes((_e = be == null ? void 0 : be.dstRGB) != null ? _e : s.blend.dstRGB) || SRC1_BLEND_FACTORS.includes((_f = be == null ? void 0 : be.srcAlpha) != null ? _f : s.blend.srcAlpha) || SRC1_BLEND_FACTORS.includes((_g = be == null ? void 0 : be.dstAlpha) != null ? _g : s.blend.dstAlpha)) {
+          if (SRC1_BLEND_FACTORS.includes((_e = be == null ? void 0 : be.srcRGB) != null ? _e : s.blend.srcRGB) || SRC1_BLEND_FACTORS.includes((_f = be == null ? void 0 : be.dstRGB) != null ? _f : s.blend.dstRGB) || SRC1_BLEND_FACTORS.includes((_g = be == null ? void 0 : be.srcAlpha) != null ? _g : s.blend.srcAlpha) || SRC1_BLEND_FACTORS.includes((_h = be == null ? void 0 : be.dstAlpha) != null ? _h : s.blend.dstAlpha)) {
             pushError(ctx, C1.INVALID_OPERATION);
             return;
           }
@@ -25850,7 +26322,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
       let hasPrimary = false;
       let hasSecondary = false;
-      const outs = (_h = pm.fragment) == null ? void 0 : _h.outputs;
+      const outs = (_i = pm.fragment) == null ? void 0 : _i.outputs;
       if (outs) {
         for (const o of outs) {
           if (o.location !== 0) continue;
@@ -25862,12 +26334,12 @@ ${inner.map((l) => "  " + l).join("\n")}
       for (let i = 0; i < s.drawBuffers.length; i++) {
         if (s.drawBuffers[i] === C1.NONE) continue;
         const be = s.blendPerDrawBuffer.get(i);
-        if (!SRC1_BLEND_FACTORS.includes((_i = be == null ? void 0 : be.srcRGB) != null ? _i : s.blend.srcRGB) && !SRC1_BLEND_FACTORS.includes((_j = be == null ? void 0 : be.dstRGB) != null ? _j : s.blend.dstRGB) && !SRC1_BLEND_FACTORS.includes((_k = be == null ? void 0 : be.srcAlpha) != null ? _k : s.blend.srcAlpha) && !SRC1_BLEND_FACTORS.includes((_l = be == null ? void 0 : be.dstAlpha) != null ? _l : s.blend.dstAlpha)) {
+        if (!SRC1_BLEND_FACTORS.includes((_j = be == null ? void 0 : be.srcRGB) != null ? _j : s.blend.srcRGB) && !SRC1_BLEND_FACTORS.includes((_k = be == null ? void 0 : be.dstRGB) != null ? _k : s.blend.dstRGB) && !SRC1_BLEND_FACTORS.includes((_l = be == null ? void 0 : be.srcAlpha) != null ? _l : s.blend.srcAlpha) && !SRC1_BLEND_FACTORS.includes((_m = be == null ? void 0 : be.dstAlpha) != null ? _m : s.blend.dstAlpha)) {
           continue;
         }
-        const m = (_m = s.colorMaskPerDrawBuffer.get(i)) != null ? _m : s.colorMask;
+        const m = (_n = s.colorMaskPerDrawBuffer.get(i)) != null ? _n : s.colorMask;
         if (!(m[0] || m[1] || m[2] || m[3])) continue;
-        const blendEnabled = i === 0 ? s.caps.BLEND : (_n = blendEnables == null ? void 0 : blendEnables.get(i)) != null ? _n : s.caps.BLEND;
+        const blendEnabled = i === 0 ? s.caps.BLEND : (_o = blendEnables == null ? void 0 : blendEnables.get(i)) != null ? _o : s.caps.BLEND;
         if (!hasPrimary || blendEnabled && !hasSecondary) {
           pushError(ctx, C1.INVALID_OPERATION);
           return;
@@ -25889,7 +26361,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       sc.attribIndices = new Int32Array(maxAttribs);
     }
     const ai = sc.attribIndices;
-    const stride = computeVertexStride((_o = pm.varyings) != null ? _o : []);
+    const stride = computeVertexStride((_p = pm.varyings) != null ? _p : []);
     const totalVary = stride - RECORD_HEADER_FLOATS;
     const totalVerts = req.count * req.instanceCount;
     const needRecords = totalVerts * stride;
@@ -25903,11 +26375,11 @@ ${inner.map((l) => "  " + l).join("\n")}
       sc.outVaryings.fill(0);
       sc.outPosition.fill(0);
     }
-    const scratchSize = (_p = pm.scratchSize) != null ? _p : 0;
-    const intScratchSize = (_q = pm.intScratchSize) != null ? _q : 0;
+    const scratchSize = (_q = pm.scratchSize) != null ? _q : 0;
+    const intScratchSize = (_r = pm.intScratchSize) != null ? _r : 0;
     if (sc.scratch.length < scratchSize) sc.scratch = new Float32Array(Math.max(scratchSize, 64));
     if (sc.intScratch.length < intScratchSize) sc.intScratch = new Int32Array(Math.max(intScratchSize, 64));
-    const blocks = (_r = pm.uniformBlocks) != null ? _r : [];
+    const blocks = (_s = pm.uniformBlocks) != null ? _s : [];
     const blockStores = new Array(blocks.length);
     const blockIntStores = new Array(blocks.length);
     const gl2 = ctx;
@@ -25926,14 +26398,14 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
     }
     const env = buildTextureEnv(ctx, pm);
-    const floatStore = (_s = pm.floatStore) != null ? _s : sc.emptyFloat;
-    const intStore = (_t = pm.intStore) != null ? _t : sc.emptyInt;
+    const floatStore = (_t = pm.floatStore) != null ? _t : sc.emptyFloat;
+    const intStore = (_u = pm.intStore) != null ? _u : sc.emptyInt;
     const vctx = {
       attribs,
       attribIndices: ai,
       vertexId: 0,
       instanceId: 0,
-      drawId: (_u = req.drawId) != null ? _u : 0,
+      drawId: (_v = req.drawId) != null ? _v : 0,
       // gl_DrawID: subdraw index; 0 for single draws
       uniforms: floatStore,
       intUniforms: intStore,
@@ -25974,7 +26446,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         ai[instancedLocs[k].loc] = i / instancedLocs[k].divisor | 0;
       }
       for (let j = 0; j < req.count; j++, r++) {
-        vctx.vertexId = req.indexed ? ((_v = req.baseVertex) != null ? _v : 0) + indices[j] : first + j;
+        vctx.vertexId = req.indexed ? ((_w = req.baseVertex) != null ? _w : 0) + indices[j] : first + j;
         vctx.instanceId = i;
         for (let k = 0; k < vertexLocs.length; k++) ai[vertexLocs[k]] = j;
         run(vctx);
@@ -26040,7 +26512,12 @@ ${inner.map((l) => "  " + l).join("\n")}
           return;
         }
         if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) continue;
-        const [r, g2, b, a] = s.clearColor;
+        let [r, g2, b, a] = s.clearColor;
+        if (surf.info.isSRGB) {
+          r = linearToSRGB(r);
+          g2 = linearToSRGB(g2);
+          b = linearToSRGB(b);
+        }
         try {
           clearColorSurface(surf, r, g2, b, a, scissor, cm);
         } catch {
@@ -26234,7 +26711,7 @@ ${inner.map((l) => "  " + l).join("\n")}
         return null;
     }
   }
-  function executeReadPixels(ctx, x, y, width, height, format, type, pixels) {
+  function executeReadPixels(ctx, x, y, width, height, format, type, pixels, dstOffset = 0) {
     var _a;
     const s = ctx._state;
     if (width === 0 || height === 0) return;
@@ -26279,7 +26756,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       dstBase = pixels + pack.skipRows * rowStride + pack.skipPixels * bpp;
     } else {
       dstView = pixels;
-      dstBase = pixels.byteOffset + pack.skipRows * rowStride + pack.skipPixels * bpp;
+      dstBase = pixels.byteOffset + dstOffset * pixels.BYTES_PER_ELEMENT + pack.skipRows * rowStride + pack.skipPixels * bpp;
     }
     for (let row = 0; row < height; row++) {
       const srcRow = y + row;
@@ -26314,7 +26791,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
   }
   function executeBlitFramebuffer(ctx, srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter) {
-    var _a, _b;
+    var _a, _b, _c;
     const s = ctx._state;
     const srcW = srcX1 - srcX0;
     const srcH = srcY1 - srcY0;
@@ -26324,8 +26801,16 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (mask & C1.COLOR_BUFFER_BIT) {
       const src = resolveReadColor(ctx);
       const fb = resolveDrawTarget(ctx);
-      if (src && fb) {
+      if (!src && fb) {
         const db0 = (_a = s.drawBuffers[0]) != null ? _a : C1.COLOR_ATTACHMENT0;
+        const dst0 = db0 === C1.NONE ? null : fb.color[db0 - C1.COLOR_ATTACHMENT0];
+        if (dst0) {
+          pushError(ctx, C1.INVALID_OPERATION);
+          return;
+        }
+      }
+      if (src && fb) {
+        const db0 = (_b = s.drawBuffers[0]) != null ? _b : C1.COLOR_ATTACHMENT0;
         const dst = db0 === C1.NONE ? null : fb.color[db0 - C1.COLOR_ATTACHMENT0];
         if (dst) {
           try {
@@ -26353,7 +26838,15 @@ ${inner.map((l) => "  " + l).join("\n")}
       const srcStencil = resolveReadDepthStencil(ctx, C1.STENCIL_ATTACHMENT);
       const fb = resolveDrawTarget(ctx);
       const dstDepth = fb ? fb.depth : null;
-      const dstStencil = fb ? (_b = fb.stencil) != null ? _b : fb.depth && fb.depth.stencilData ? fb.depth : null : null;
+      const dstStencil = fb ? (_c = fb.stencil) != null ? _c : fb.depth && fb.depth.stencilData ? fb.depth : null : null;
+      if ((mask & C1.DEPTH_BUFFER_BIT) !== 0 && readAttachmentHasImage(ctx, C1.DEPTH_ATTACHMENT) !== !!dstDepth) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+      if ((mask & C1.STENCIL_BUFFER_BIT) !== 0 && readAttachmentHasImage(ctx, C1.STENCIL_ATTACHMENT) !== !!dstStencil) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
       if (srcDepth && dstDepth) {
         try {
           blitDepthStencilSurface(srcDepth, dstDepth, srcX0, srcY0, srcW, srcH, dstX0, dstY0, dstW, dstH);
@@ -26418,8 +26911,8 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
     }
   }
-  function executeClearBuffer(ctx, buffer, drawbuffer, values, depth, stencil) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o;
+  function executeClearBuffer(ctx, buffer, drawbuffer, values, srcOffset = 0, depth, stencil) {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k;
     const s = ctx._state;
     ensureCanvasSize(ctx);
     const fb = resolveDrawTarget(ctx);
@@ -26445,13 +26938,20 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
       if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) return;
       if (values instanceof Int32Array || values instanceof Uint32Array) {
-        clearColorIntLocal(surf, values, cm, scissor);
+        clearColorIntLocal(surf, values.subarray(srcOffset), cm, scissor);
       } else {
         const v2 = values;
+        let r = (_c = v2[srcOffset]) != null ? _c : 0, g2 = (_d = v2[srcOffset + 1]) != null ? _d : 0;
+        let b = (_e = v2[srcOffset + 2]) != null ? _e : 0, a = (_f = v2[srcOffset + 3]) != null ? _f : 1;
+        if (surf.info.isSRGB) {
+          r = linearToSRGB(r);
+          g2 = linearToSRGB(g2);
+          b = linearToSRGB(b);
+        }
         try {
-          clearColorSurface(surf, (_c = v2[0]) != null ? _c : 0, (_d = v2[1]) != null ? _d : 0, (_e = v2[2]) != null ? _e : 0, (_f = v2[3]) != null ? _f : 1, scissor, cm);
+          clearColorSurface(surf, r, g2, b, a, scissor, cm);
         } catch {
-          clearColorLocal(surf, (_g = v2[0]) != null ? _g : 0, (_h = v2[1]) != null ? _h : 0, (_i = v2[2]) != null ? _i : 0, (_j = v2[3]) != null ? _j : 1, scissor, cm);
+          clearColorLocal(surf, r, g2, b, a, scissor, cm);
         }
       }
     } else if (buffer === C2.DEPTH) {
@@ -26461,12 +26961,12 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
       if (!s.depth.mask || !values) return;
       try {
-        clearDepthSurface(fb.depth, (_k = values[0]) != null ? _k : 0, scissor, true);
+        clearDepthSurface(fb.depth, (_g = values[srcOffset]) != null ? _g : 0, scissor, true);
       } catch {
-        clearDepthLocal(fb.depth, (_l = values[0]) != null ? _l : 0, scissor);
+        clearDepthLocal(fb.depth, (_h = values[srcOffset]) != null ? _h : 0, scissor);
       }
     } else if (buffer === C2.STENCIL) {
-      const stencilSurf = (_m = fb.stencil) != null ? _m : fb.depth && fb.depth.stencilData ? fb.depth : null;
+      const stencilSurf = (_i = fb.stencil) != null ? _i : fb.depth && fb.depth.stencilData ? fb.depth : null;
       if (!stencilSurf) {
         pushError(ctx, C1.INVALID_OPERATION);
         return;
@@ -26475,9 +26975,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       const writeMask = s.stencil.front.writeMask & s.stencil.back.writeMask & 255;
       if (writeMask === 0) return;
       try {
-        clearStencilSurface(stencilSurf, (_n = values[0]) != null ? _n : 0, scissor, writeMask);
+        clearStencilSurface(stencilSurf, (_j = values[srcOffset]) != null ? _j : 0, scissor, writeMask);
       } catch {
-        clearStencilLocal(stencilSurf, (_o = values[0]) != null ? _o : 0, scissor, writeMask);
+        clearStencilLocal(stencilSurf, (_k = values[srcOffset]) != null ? _k : 0, scissor, writeMask);
       }
     } else {
       if (!fb.depth || !fb.depth.stencilData) {
@@ -26515,6 +27015,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     return type === C1.UNSIGNED_BYTE ? 1 : type === C1.UNSIGNED_SHORT ? 2 : 4;
   }
   function validateCommonDraw(ctx, mode, indexed = false) {
+    var _a, _b, _c;
     const s = ctx._state;
     const prog = s.currentProgram;
     if (prog !== null) ensureProgramLinked(ctx, prog);
@@ -26560,6 +27061,59 @@ ${inner.map((l) => "  " + l).join("\n")}
       if (a.enabled && !a.buffer) {
         pushError(ctx, C1.INVALID_OPERATION);
         return false;
+      }
+    }
+    {
+      const pm = prog._program;
+      if (pm) {
+        const attrs = (_a = pm.attributes) != null ? _a : [];
+        for (const pa of attrs) {
+          const loc = pa.location;
+          if (loc < 0 || loc >= maxAttribs) continue;
+          const a = vao.attribs[loc];
+          const shaderInt = !!pa.integral;
+          const shaderUnsigned = pa.type === C1.UNSIGNED_INT || pa.type === C2.UNSIGNED_INT_VEC2 || pa.type === C2.UNSIGNED_INT_VEC3 || pa.type === C2.UNSIGNED_INT_VEC4;
+          const kind = (_b = a.genericKind) != null ? _b : "f";
+          let bad = false;
+          if (a.enabled) {
+            if (shaderInt !== a.integer) {
+              bad = true;
+            } else if (shaderInt) {
+              const arrUnsigned = a.type === C1.UNSIGNED_BYTE || a.type === C1.UNSIGNED_SHORT || a.type === C1.UNSIGNED_INT;
+              if (shaderUnsigned !== arrUnsigned) bad = true;
+            }
+          } else if (shaderInt) {
+            if (kind === "f") {
+              bad = true;
+            } else if (shaderUnsigned ? kind !== "ui" : kind !== "i") {
+              bad = true;
+            }
+          } else if (kind !== "f") {
+            bad = true;
+          }
+          if (bad) {
+            pushError(ctx, C1.INVALID_OPERATION);
+            return false;
+          }
+        }
+      }
+    }
+    {
+      const pm2 = prog._program;
+      if (pm2) {
+        const blocks = (_c = pm2.uniformBlocks) != null ? _c : [];
+        if (blocks.length > 0) {
+          const gl2 = ctx;
+          for (let bi = 0; bi < blocks.length; bi++) {
+            const binding = gl2.getActiveUniformBlockParameter !== void 0 ? gl2.getActiveUniformBlockParameter(prog, blocks[bi].index, C2.UNIFORM_BLOCK_BINDING) || 0 : 0;
+            const buf = binding < s.uniformBuffers.length ? s.uniformBuffers[binding] : null;
+            const range = binding < s.uniformBufferRanges.length ? s.uniformBufferRanges[binding] : null;
+            if (!buf || !buf._data || !range || range.size < blocks[bi].size) {
+              pushError(ctx, C1.INVALID_OPERATION);
+              return false;
+            }
+          }
+        }
       }
     }
     const fb = resolveDrawTarget(ctx);
@@ -27473,8 +28027,840 @@ ${inner.map((l) => "  " + l).join("\n")}
     });
   }
 
-  // src/gl/api/draw.ts
+  // src/gl/api/buffers.ts
+  var GL_STREAM_READ = 35041;
+  var GL_STREAM_COPY = 35042;
+  var GL_STATIC_READ = 35045;
+  var GL_STATIC_COPY = 35046;
+  var GL_DYNAMIC_READ = 35049;
+  var GL_DYNAMIC_COPY = 35050;
+  var everBoundBuffers = /* @__PURE__ */ new WeakSet();
   function isLost4(ctx) {
+    return ctx._isLost;
+  }
+  var genericBindings = /* @__PURE__ */ new WeakMap();
+  function genericBindingState(ctx) {
+    let g2 = genericBindings.get(ctx);
+    if (g2 === void 0) {
+      g2 = { uniformBuffer: null, transformFeedbackBuffer: null, baseUniformIndices: /* @__PURE__ */ new Set() };
+      genericBindings.set(ctx, g2);
+    }
+    return g2;
+  }
+  function getGenericBufferBinding(ctx, target) {
+    const g2 = genericBindings.get(ctx);
+    if (!g2) return null;
+    if (target === C2.UNIFORM_BUFFER) return g2.uniformBuffer;
+    if (target === C2.TRANSFORM_FEEDBACK_BUFFER) return g2.transformFeedbackBuffer;
+    return null;
+  }
+  function transformFeedbackActive(ctx) {
+    const s = ctx._state;
+    if (s.transformFeedback && s.transformFeedback._active) return true;
+    for (const o of ctx._resources.all) {
+      if (o instanceof WebGLTransformFeedback && o._active) return true;
+    }
+    return false;
+  }
+  function bufferBoundToOtherBindingPoint(ctx, buf) {
+    const s = ctx._state;
+    if (s.arrayBuffer === buf) return true;
+    if (s.vao.elementArrayBuffer === buf) return true;
+    for (const a of s.vao.attribs) {
+      if (a.buffer === buf) return true;
+    }
+    if (ctx._version === 2) {
+      const g2 = genericBindings.get(ctx);
+      if (g2 && g2.uniformBuffer === buf) return true;
+      for (const b of s.uniformBuffers) {
+        if (b === buf) return true;
+      }
+      if (s.pixelPackBuffer === buf || s.pixelUnpackBuffer === buf) return true;
+      if (s.copyReadBuffer === buf || s.copyWriteBuffer === buf) return true;
+    }
+    return false;
+  }
+  function bufferTfUseError(ctx, buf, target) {
+    const s = ctx._state;
+    const boundTf = s.transformFeedback;
+    if (boundTf && boundTf._buffers.includes(buf)) {
+      if (target !== C2.TRANSFORM_FEEDBACK_BUFFER) return true;
+      if (bufferBoundToOtherBindingPoint(ctx, buf)) return true;
+    }
+    for (const o of ctx._resources.all) {
+      if (o instanceof WebGLTransformFeedback && o._active && o._buffers.includes(buf)) return true;
+    }
+    return false;
+  }
+  var BufferCtor = WebGLBuffer;
+  var BufferCtorAny = BufferCtor;
+  function validateBuffer(ctx, buffer) {
+    return validateObject(ctx, buffer, BufferCtorAny);
+  }
+  function isValidBufferTarget(ctx, target) {
+    if (target === C1.ARRAY_BUFFER || target === C1.ELEMENT_ARRAY_BUFFER) return true;
+    if (ctx._version !== 2) return false;
+    return target === C2.COPY_READ_BUFFER || target === C2.COPY_WRITE_BUFFER || target === C2.PIXEL_PACK_BUFFER || target === C2.PIXEL_UNPACK_BUFFER || target === C2.TRANSFORM_FEEDBACK_BUFFER || target === C2.UNIFORM_BUFFER;
+  }
+  function isValidUsage(ctx, usage) {
+    if (usage === C1.STREAM_DRAW || usage === C1.STATIC_DRAW || usage === C1.DYNAMIC_DRAW) return true;
+    if (ctx._version !== 2) return false;
+    return usage === GL_STREAM_READ || usage === GL_STREAM_COPY || usage === GL_STATIC_READ || usage === GL_STATIC_COPY || usage === GL_DYNAMIC_READ || usage === GL_DYNAMIC_COPY;
+  }
+  function isSharedArrayBuffer(v2) {
+    return typeof SharedArrayBuffer !== "undefined" && v2 instanceof SharedArrayBuffer;
+  }
+  function clearTfBinding(ctx, index) {
+    for (const obj of ctx._resources.all) {
+      if (obj instanceof WebGLBuffer) {
+        const i = obj._tfRangeBindings.findIndex((e) => e.index === index);
+        if (i >= 0) obj._tfRangeBindings.splice(i, 1);
+      }
+    }
+  }
+  function setTfBinding(ctx, index, buffer, offset, size, base) {
+    clearTfBinding(ctx, index);
+    buffer._tfRangeBindings.push({ index, offset, size, base });
+  }
+  function boundBufferForTarget(ctx, target) {
+    const s = ctx._state;
+    switch (target) {
+      case C1.ARRAY_BUFFER:
+        return s.arrayBuffer;
+      case C1.ELEMENT_ARRAY_BUFFER:
+        return s.vao.elementArrayBuffer;
+      case C2.UNIFORM_BUFFER:
+        return genericBindingState(ctx).uniformBuffer;
+      case C2.TRANSFORM_FEEDBACK_BUFFER:
+        return genericBindingState(ctx).transformFeedbackBuffer;
+      case C2.COPY_READ_BUFFER:
+        return s.copyReadBuffer;
+      case C2.COPY_WRITE_BUFFER:
+        return s.copyWriteBuffer;
+      case C2.PIXEL_PACK_BUFFER:
+        return s.pixelPackBuffer;
+      case C2.PIXEL_UNPACK_BUFFER:
+        return s.pixelUnpackBuffer;
+      default:
+        return null;
+    }
+  }
+  function tfMirrorBindingAtIndex(ctx, index) {
+    for (const obj of ctx._resources.all) {
+      if (obj instanceof WebGLBuffer) {
+        for (const e of obj._tfRangeBindings) {
+          if (e.index === index) return { buffer: obj, offset: e.offset, size: e.size, base: e.base };
+        }
+      }
+    }
+    return null;
+  }
+  function unbindBufferEverywhere(ctx, buffer, skipTfBindings = false) {
+    let found = false;
+    const nullIf = (b) => {
+      if (b === buffer) {
+        found = true;
+        return null;
+      }
+      return b;
+    };
+    const s = ctx._state;
+    s.arrayBuffer = nullIf(s.arrayBuffer);
+    s.vao.elementArrayBuffer = nullIf(s.vao.elementArrayBuffer);
+    for (const a of s.vao.attribs) a.buffer = nullIf(a.buffer);
+    if (ctx._defaultVAO) {
+      ctx._defaultVAO.elementArrayBuffer = nullIf(ctx._defaultVAO.elementArrayBuffer);
+      for (const a of ctx._defaultVAO.attribs) a.buffer = nullIf(a.buffer);
+    }
+    if (ctx._version === 2) {
+      const g2 = genericBindings.get(ctx);
+      for (let i = 0; i < s.uniformBuffers.length; i++) {
+        if (s.uniformBuffers[i] === buffer) {
+          s.uniformBuffers[i] = null;
+          s.uniformBufferRanges[i] = { offset: 0, size: 0 };
+          if (g2) g2.baseUniformIndices.delete(i);
+          found = true;
+        }
+      }
+      if (g2) {
+        g2.uniformBuffer = nullIf(g2.uniformBuffer);
+        g2.transformFeedbackBuffer = nullIf(g2.transformFeedbackBuffer);
+      }
+      s.pixelPackBuffer = nullIf(s.pixelPackBuffer);
+      s.pixelUnpackBuffer = nullIf(s.pixelUnpackBuffer);
+      s.copyReadBuffer = nullIf(s.copyReadBuffer);
+      s.copyWriteBuffer = nullIf(s.copyWriteBuffer);
+    }
+    if (s.transformFeedback && !skipTfBindings) {
+      for (let i = 0; i < s.transformFeedback._buffers.length; i++) {
+        if (s.transformFeedback._buffers[i] === buffer) {
+          s.transformFeedback._buffers[i] = null;
+          found = true;
+        }
+      }
+    }
+    if (!skipTfBindings) {
+      for (const obj of ctx._resources.all) {
+        if (obj instanceof WebGLVertexArrayObject && obj._vao) {
+          obj._vao.elementArrayBuffer = nullIf(obj._vao.elementArrayBuffer);
+          for (const a of obj._vao.attribs) a.buffer = nullIf(a.buffer);
+        } else if (obj instanceof WebGLTransformFeedback) {
+          for (let i = 0; i < obj._buffers.length; i++) {
+            if (obj._buffers[i] === buffer) {
+              obj._buffers[i] = null;
+              found = true;
+            }
+          }
+        }
+      }
+      if (buffer._tfRangeBindings.length > 0) {
+        found = true;
+        buffer._tfRangeBindings.length = 0;
+      }
+    }
+    return found;
+  }
+  function bindBufferBaseImpl(ctx, target, index, buffer) {
+    const s = ctx._state;
+    if (target === C2.TRANSFORM_FEEDBACK_BUFFER && transformFeedbackActive(ctx)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    const max = target === C2.UNIFORM_BUFFER ? s.limits.MAX_UNIFORM_BUFFER_BINDINGS : s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
+    if (index < 0 || index >= max) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
+    if (buffer === null || buffer === void 0) {
+      if (target === C2.UNIFORM_BUFFER) {
+        s.uniformBuffers[index] = null;
+        s.uniformBufferRanges[index] = { offset: 0, size: 0 };
+        genericBindingState(ctx).baseUniformIndices.delete(index);
+        genericBindingState(ctx).uniformBuffer = null;
+      } else {
+        const boundTf = s.transformFeedback;
+        if (boundTf) {
+          boundTf._buffers[index] = null;
+          boundTf._bufferRanges[index] = { offset: 0, size: 0, base: false };
+        } else {
+          clearTfBinding(ctx, index);
+        }
+        genericBindingState(ctx).transformFeedbackBuffer = null;
+      }
+      return;
+    }
+    if (buffer instanceof WebGLBuffer && buffer._deletePending) {
+      unbindBufferEverywhere(ctx, buffer);
+      buffer._deletePending = false;
+    }
+    const buf = validateBuffer(ctx, buffer);
+    if (buf === null) return;
+    if (buf._target === 0) buf._target = target;
+    else if (buf._target === C1.ELEMENT_ARRAY_BUFFER) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    everBoundBuffers.add(buf);
+    if (target === C2.UNIFORM_BUFFER) {
+      genericBindingState(ctx).baseUniformIndices.add(index);
+      s.uniformBuffers[index] = buf;
+      s.uniformBufferRanges[index] = { offset: 0, size: buf._size };
+      genericBindingState(ctx).uniformBuffer = buf;
+    } else {
+      const boundTf = s.transformFeedback;
+      if (boundTf) {
+        boundTf._buffers[index] = buf;
+        boundTf._bufferRanges[index] = { offset: 0, size: buf._size, base: true };
+      } else {
+        setTfBinding(ctx, index, buf, 0, buf._size, true);
+      }
+      genericBindingState(ctx).transformFeedbackBuffer = buf;
+    }
+  }
+  function sliceSourceData(ctx, data, bytes, srcOffset, srcLength) {
+    var _a, _b;
+    const view = data;
+    const elemSize = (_a = view.BYTES_PER_ELEMENT) != null ? _a : 1;
+    const elemCount = (_b = view.length) != null ? _b : data.byteLength;
+    const off = Math.trunc(Number(srcOffset));
+    const len = srcLength === void 0 || srcLength === 0 ? elemCount - off : Math.trunc(Number(srcLength));
+    if (off < 0 || len < 0 || off > elemCount || off + len > elemCount) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return { bytes, ok: false };
+    }
+    return { bytes: new Uint8Array(bytes.buffer, bytes.byteOffset + off * elemSize, len * elemSize), ok: true };
+  }
+  function installBuffersApi(proto) {
+    proto.createBuffer = function() {
+      const ctx = this;
+      return createObject(ctx, BufferCtor);
+    };
+    proto.deleteBuffer = function(buffer) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      if (buffer === null || buffer === void 0) return;
+      if (!(buffer instanceof WebGLBuffer)) {
+        throw new TypeError(`Argument is not of type 'WebGLBuffer'`);
+      }
+      if (buffer._context !== ctx) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (buffer._deleted) return;
+      const s = ctx._state;
+      const boundTf = s.transformFeedback;
+      const boundTfRefs = !!boundTf && boundTf._buffers.includes(buffer);
+      const tfRefs = buffer._tfRangeBindings.length > 0 || [...ctx._resources.all].some(
+        (o) => o instanceof WebGLTransformFeedback && o._buffers.includes(buffer)
+      );
+      const wasBound = unbindBufferEverywhere(
+        ctx,
+        buffer,
+        true
+        /* skipTfBindings */
+      );
+      if (boundTfRefs) {
+        for (let i = 0; i < boundTf._buffers.length; i++) {
+          if (boundTf._buffers[i] === buffer) {
+            boundTf._buffers[i] = null;
+            boundTf._bufferRanges[i] = { offset: 0, size: 0, base: false };
+          }
+        }
+        buffer._tfRangeBindings.length = 0;
+      }
+      buffer._deleted = true;
+      buffer._deletePending = wasBound || tfRefs || boundTfRefs;
+      if (!tfRefs || boundTfRefs) ctx._resources.untrack(buffer);
+    };
+    proto.isBuffer = function(buffer) {
+      const ctx = this;
+      if (isLost4(ctx)) return false;
+      if (buffer === null || buffer === void 0) return false;
+      if (!(buffer instanceof WebGLBuffer)) {
+        throw new TypeError(`Argument is not of type 'WebGLBuffer'`);
+      }
+      if (buffer._context !== ctx) return false;
+      if (buffer._deleted) return false;
+      return everBoundBuffers.has(buffer);
+    };
+    proto.bindBuffer = function(target, buffer) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      if (!isValidBufferTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (ctx._version === 2 && (target === C2.TRANSFORM_FEEDBACK_BUFFER || target === C2.UNIFORM_BUFFER)) {
+        if (buffer === null || buffer === void 0) {
+          if (target === C2.UNIFORM_BUFFER) genericBindingState(ctx).uniformBuffer = null;
+          else genericBindingState(ctx).transformFeedbackBuffer = null;
+          return;
+        }
+        if (buffer instanceof WebGLBuffer && buffer._deletePending) {
+          unbindBufferEverywhere(ctx, buffer);
+          buffer._deletePending = false;
+        }
+        const buf2 = validateBuffer(ctx, buffer);
+        if (buf2 === null) return;
+        if (buf2._target === 0) buf2._target = target;
+        else if (buf2._target === C1.ELEMENT_ARRAY_BUFFER) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        everBoundBuffers.add(buf2);
+        if (target === C2.UNIFORM_BUFFER) genericBindingState(ctx).uniformBuffer = buf2;
+        else genericBindingState(ctx).transformFeedbackBuffer = buf2;
+        return;
+      }
+      if (buffer === null || buffer === void 0) {
+        const s2 = ctx._state;
+        if (target === C1.ARRAY_BUFFER) s2.arrayBuffer = null;
+        else if (target === C1.ELEMENT_ARRAY_BUFFER) s2.vao.elementArrayBuffer = null;
+        else if (ctx._version === 2) {
+          switch (target) {
+            case C2.COPY_READ_BUFFER:
+              s2.copyReadBuffer = null;
+              break;
+            case C2.COPY_WRITE_BUFFER:
+              s2.copyWriteBuffer = null;
+              break;
+            case C2.PIXEL_PACK_BUFFER:
+              s2.pixelPackBuffer = null;
+              break;
+            case C2.PIXEL_UNPACK_BUFFER:
+              s2.pixelUnpackBuffer = null;
+              break;
+          }
+        }
+        return;
+      }
+      if (buffer instanceof WebGLBuffer && buffer._deletePending) {
+        unbindBufferEverywhere(ctx, buffer);
+        buffer._deletePending = false;
+      }
+      const buf = validateBuffer(ctx, buffer);
+      if (buf === null) return;
+      if (ctx._version === 2) {
+        const isElementType = buf._target === C1.ELEMENT_ARRAY_BUFFER;
+        const isCopyTarget = target === C2.COPY_READ_BUFFER || target === C2.COPY_WRITE_BUFFER;
+        if (buf._target === 0) {
+          buf._target = target;
+        } else if (isElementType) {
+          if (target !== C1.ELEMENT_ARRAY_BUFFER && !isCopyTarget) {
+            ctx._errors.push(C1.INVALID_OPERATION);
+            return;
+          }
+        } else if (target === C1.ELEMENT_ARRAY_BUFFER) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+      } else {
+        if (buf._target === 0) buf._target = target;
+        else if (buf._target !== target) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+      }
+      everBoundBuffers.add(buf);
+      const s = ctx._state;
+      if (target === C1.ARRAY_BUFFER) s.arrayBuffer = buf;
+      else if (target === C1.ELEMENT_ARRAY_BUFFER) s.vao.elementArrayBuffer = buf;
+      else if (ctx._version === 2) {
+        switch (target) {
+          case C2.COPY_READ_BUFFER:
+            s.copyReadBuffer = buf;
+            break;
+          case C2.COPY_WRITE_BUFFER:
+            s.copyWriteBuffer = buf;
+            break;
+          case C2.PIXEL_PACK_BUFFER:
+            s.pixelPackBuffer = buf;
+            break;
+          case C2.PIXEL_UNPACK_BUFFER:
+            s.pixelUnpackBuffer = buf;
+            break;
+        }
+      }
+    };
+    proto.bufferData = function(target, size, usage) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      if (!isValidBufferTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      if (!isValidUsage(ctx, usage)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const buf = boundBufferForTarget(ctx, target);
+      if (buf === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (ctx._version === 2 && bufferTfUseError(ctx, buf, target)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (size === null || size === void 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (size instanceof ArrayBuffer || ArrayBuffer.isView(size) || isSharedArrayBuffer(size)) {
+        const data = requireBufferData(size, "size");
+        const bytes = isSharedArrayBuffer(data) ? new Uint8Array(data) : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        let slice = bytes;
+        if (ctx._version === 2 && arguments.length > 3) {
+          const r = sliceSourceData(ctx, data, bytes, arguments[3], arguments[4]);
+          if (!r.ok) return;
+          slice = r.bytes;
+        }
+        let copy;
+        try {
+          copy = new ArrayBuffer(slice.byteLength);
+        } catch {
+          ctx._errors.push(C1.OUT_OF_MEMORY);
+          return;
+        }
+        new Uint8Array(copy).set(slice);
+        buf._data = copy;
+        buf._size = slice.byteLength;
+      } else {
+        const raw = Number(size);
+        const n = Number.isFinite(raw) ? Math.trunc(raw) : 0;
+        if (n < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        let data;
+        try {
+          data = new ArrayBuffer(n);
+        } catch {
+          ctx._errors.push(C1.OUT_OF_MEMORY);
+          return;
+        }
+        buf._data = data;
+        buf._size = n;
+      }
+      if (ctx._version === 2) {
+        const g2 = genericBindings.get(ctx);
+        if (g2 && g2.baseUniformIndices.size > 0) {
+          const s = ctx._state;
+          for (const i of g2.baseUniformIndices) {
+            if (s.uniformBuffers[i] === buf) s.uniformBufferRanges[i] = { offset: 0, size: buf._size };
+          }
+        }
+      }
+      buf._usage = usage;
+    };
+    proto.bufferSubData = function(target, offset, data) {
+      const ctx = this;
+      if (isLost4(ctx)) return;
+      if (!isValidBufferTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return;
+      }
+      const buf = boundBufferForTarget(ctx, target);
+      if (buf === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (ctx._version === 2 && bufferTfUseError(ctx, buf, target)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (offset < 0) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      const src = requireBufferData(data, "data");
+      const bytes = src instanceof ArrayBuffer ? new Uint8Array(src) : new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
+      let slice = bytes;
+      if (ctx._version === 2 && arguments.length > 3) {
+        const r = sliceSourceData(ctx, src, bytes, arguments[3], arguments[4]);
+        if (!r.ok) return;
+        slice = r.bytes;
+      }
+      if (offset + slice.byteLength > buf._size) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (slice.byteLength > 0 && buf._data !== null) {
+        new Uint8Array(buf._data).set(slice, offset);
+      }
+    };
+    proto.getBufferParameter = function(target, pname) {
+      const ctx = this;
+      if (isLost4(ctx)) return null;
+      if (!isValidBufferTarget(ctx, target)) {
+        ctx._errors.push(C1.INVALID_ENUM);
+        return null;
+      }
+      const buf = boundBufferForTarget(ctx, target);
+      if (buf === null) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return null;
+      }
+      switch (pname) {
+        case C1.BUFFER_SIZE:
+          return buf._size;
+        case C1.BUFFER_USAGE:
+          return buf._usage;
+        default:
+          ctx._errors.push(C1.INVALID_ENUM);
+          return null;
+      }
+    };
+    if ("bindBufferBase" in proto) {
+      const p2 = proto;
+      p2.bindBufferBase = function(target, index, buffer) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        if (target !== C2.UNIFORM_BUFFER && target !== C2.TRANSFORM_FEEDBACK_BUFFER) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        bindBufferBaseImpl(ctx, target, index, buffer);
+      };
+      p2.bindBufferRange = function(target, index, buffer, offset, size) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        if (target !== C2.UNIFORM_BUFFER && target !== C2.TRANSFORM_FEEDBACK_BUFFER) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        if (target === C2.TRANSFORM_FEEDBACK_BUFFER && transformFeedbackActive(ctx)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const s = ctx._state;
+        const max = target === C2.UNIFORM_BUFFER ? s.limits.MAX_UNIFORM_BUFFER_BINDINGS : s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
+        if (index < 0 || index >= max) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (buffer === null || buffer === void 0) {
+          if (target === C2.UNIFORM_BUFFER) {
+            s.uniformBuffers[index] = null;
+            s.uniformBufferRanges[index] = { offset: 0, size: 0 };
+            genericBindingState(ctx).baseUniformIndices.delete(index);
+            genericBindingState(ctx).uniformBuffer = null;
+          } else {
+            const boundTf = s.transformFeedback;
+            if (boundTf) {
+              boundTf._buffers[index] = null;
+              boundTf._bufferRanges[index] = { offset: 0, size: 0, base: false };
+            } else {
+              clearTfBinding(ctx, index);
+            }
+            genericBindingState(ctx).transformFeedbackBuffer = null;
+          }
+          return;
+        }
+        if (buffer instanceof WebGLBuffer && buffer._deletePending) {
+          unbindBufferEverywhere(ctx, buffer);
+          buffer._deletePending = false;
+        }
+        const buf = validateBuffer(ctx, buffer);
+        if (buf === null) return;
+        if (offset < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (size < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (target === C2.UNIFORM_BUFFER) {
+          if (offset % s.limits.UNIFORM_BUFFER_OFFSET_ALIGNMENT !== 0) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+          if (size > s.limits.MAX_UNIFORM_BLOCK_SIZE) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+        } else {
+          if (offset % 4 !== 0) {
+            ctx._errors.push(C1.INVALID_VALUE);
+            return;
+          }
+        }
+        let rangeSize = size === 0 ? Math.max(0, buf._size - offset) : size;
+        if (buf._target === 0) buf._target = target;
+        else if (buf._target === C1.ELEMENT_ARRAY_BUFFER) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        everBoundBuffers.add(buf);
+        if (target === C2.UNIFORM_BUFFER) {
+          genericBindingState(ctx).baseUniformIndices.delete(index);
+          s.uniformBuffers[index] = buf;
+          s.uniformBufferRanges[index] = { offset, size: rangeSize };
+          genericBindingState(ctx).uniformBuffer = buf;
+        } else {
+          const boundTf = s.transformFeedback;
+          if (boundTf) {
+            boundTf._buffers[index] = buf;
+            boundTf._bufferRanges[index] = { offset, size: rangeSize, base: size === 0 };
+          } else {
+            setTfBinding(ctx, index, buf, offset, rangeSize, size === 0);
+          }
+          genericBindingState(ctx).transformFeedbackBuffer = buf;
+        }
+      };
+      p2.getIndexedParameter = function(target, index) {
+        var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n;
+        const ctx = this;
+        if (isLost4(ctx)) return null;
+        const s = ctx._state;
+        let max;
+        let blendPname = false;
+        switch (target) {
+          case C2.UNIFORM_BUFFER_BINDING:
+          case C2.UNIFORM_BUFFER_START:
+          case C2.UNIFORM_BUFFER_SIZE:
+            max = s.limits.MAX_UNIFORM_BUFFER_BINDINGS;
+            break;
+          case C2.TRANSFORM_FEEDBACK_BUFFER_BINDING:
+          case C2.TRANSFORM_FEEDBACK_BUFFER_START:
+          case C2.TRANSFORM_FEEDBACK_BUFFER_SIZE:
+            max = s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
+            break;
+          case C1.BLEND_EQUATION_RGB:
+          case C1.BLEND_EQUATION_ALPHA:
+          case C1.BLEND_SRC_RGB:
+          case C1.BLEND_SRC_ALPHA:
+          case C1.BLEND_DST_RGB:
+          case C1.BLEND_DST_ALPHA:
+          case C1.COLOR_WRITEMASK:
+            if (!ctx._extensions.has("OES_draw_buffers_indexed")) {
+              ctx._errors.push(C1.INVALID_ENUM);
+              return null;
+            }
+            max = s.limits.MAX_DRAW_BUFFERS;
+            blendPname = true;
+            break;
+          default:
+            ctx._errors.push(C1.INVALID_ENUM);
+            return null;
+        }
+        if (index < 0 || index >= max) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return null;
+        }
+        if (blendPname) {
+          const be = s.blendPerDrawBuffer.get(index);
+          switch (target) {
+            case C1.BLEND_EQUATION_RGB:
+              return (_a = be == null ? void 0 : be.eqRGB) != null ? _a : s.blend.eqRGB;
+            case C1.BLEND_EQUATION_ALPHA:
+              return (_b = be == null ? void 0 : be.eqAlpha) != null ? _b : s.blend.eqAlpha;
+            case C1.BLEND_SRC_RGB:
+              return (_c = be == null ? void 0 : be.srcRGB) != null ? _c : s.blend.srcRGB;
+            case C1.BLEND_SRC_ALPHA:
+              return (_d = be == null ? void 0 : be.srcAlpha) != null ? _d : s.blend.srcAlpha;
+            case C1.BLEND_DST_RGB:
+              return (_e = be == null ? void 0 : be.dstRGB) != null ? _e : s.blend.dstRGB;
+            case C1.BLEND_DST_ALPHA:
+              return (_f = be == null ? void 0 : be.dstAlpha) != null ? _f : s.blend.dstAlpha;
+            default: {
+              const m = (_g = s.colorMaskPerDrawBuffer.get(index)) != null ? _g : s.colorMask;
+              return [m[0], m[1], m[2], m[3]];
+            }
+          }
+        }
+        switch (target) {
+          case C2.UNIFORM_BUFFER_BINDING:
+            return s.uniformBuffers[index];
+          case C2.UNIFORM_BUFFER_START:
+            return s.uniformBufferRanges[index].offset;
+          case C2.UNIFORM_BUFFER_SIZE:
+            if (genericBindingState(ctx).baseUniformIndices.has(index)) return 0;
+            return s.uniformBufferRanges[index].size;
+          case C2.TRANSFORM_FEEDBACK_BUFFER_BINDING: {
+            const tf = s.transformFeedback;
+            if (tf) return (_h = tf._buffers[index]) != null ? _h : null;
+            return (_j = (_i = tfMirrorBindingAtIndex(ctx, index)) == null ? void 0 : _i.buffer) != null ? _j : null;
+          }
+          case C2.TRANSFORM_FEEDBACK_BUFFER_START: {
+            const tf = s.transformFeedback;
+            if (tf) return (_l = (_k = tf._bufferRanges[index]) == null ? void 0 : _k.offset) != null ? _l : 0;
+            return (_n = (_m = tfMirrorBindingAtIndex(ctx, index)) == null ? void 0 : _m.offset) != null ? _n : 0;
+          }
+          default: {
+            const tf = s.transformFeedback;
+            if (tf) {
+              const r = tf._bufferRanges[index];
+              return r ? r.base ? 0 : r.size : 0;
+            }
+            const m = tfMirrorBindingAtIndex(ctx, index);
+            return m ? m.base ? 0 : m.size : 0;
+          }
+        }
+      };
+      p2.getBufferSubData = function(target, srcByteOffset, dstBuffer, dstOffset, length) {
+        var _a, _b;
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        if (!isValidBufferTarget(ctx, target)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const buf = boundBufferForTarget(ctx, target);
+        if (buf === null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (bufferTfUseError(ctx, buf, target)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (srcByteOffset < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (!ArrayBuffer.isView(dstBuffer)) {
+          throw new TypeError("dstBuffer is not an ArrayBufferView");
+        }
+        if (dstOffset !== void 0 && dstOffset < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (length !== void 0 && length < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        const view = dstBuffer;
+        const elemSize = (_a = view.BYTES_PER_ELEMENT) != null ? _a : 1;
+        const elemCount = (_b = view.length) != null ? _b : view.byteLength;
+        const dstOff = dstOffset === void 0 ? 0 : dstOffset;
+        const len = length === void 0 ? elemCount - dstOff : length;
+        if (len < 0 || dstOff + len > elemCount) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        const byteLen = len * elemSize;
+        if (srcByteOffset + byteLen > buf._size) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (byteLen > 0 && buf._data !== null) {
+          new Uint8Array(view.buffer, view.byteOffset + dstOff * elemSize, byteLen).set(
+            new Uint8Array(buf._data, srcByteOffset, byteLen)
+          );
+        }
+      };
+      p2.copyBufferSubData = function(readTarget, writeTarget, readOffset, writeOffset, size) {
+        const ctx = this;
+        if (isLost4(ctx)) return;
+        if (!isValidBufferTarget(ctx, readTarget) || !isValidBufferTarget(ctx, writeTarget)) {
+          ctx._errors.push(C1.INVALID_ENUM);
+          return;
+        }
+        const readBuffer = boundBufferForTarget(ctx, readTarget);
+        const writeBuffer = boundBufferForTarget(ctx, writeTarget);
+        if (readBuffer === null || writeBuffer === null) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (bufferTfUseError(ctx, readBuffer, readTarget) || bufferTfUseError(ctx, writeBuffer, writeTarget)) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        const readIsElement = readBuffer._target === C1.ELEMENT_ARRAY_BUFFER;
+        const writeIsElement = writeBuffer._target === C1.ELEMENT_ARRAY_BUFFER;
+        if (readIsElement !== writeIsElement) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (readOffset < 0 || writeOffset < 0 || size < 0) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (readOffset + size > readBuffer._size) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (writeOffset + size > writeBuffer._size) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (readBuffer === writeBuffer && readOffset < writeOffset + size && writeOffset < readOffset + size) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return;
+        }
+        if (size > 0 && readBuffer._data !== null && writeBuffer._data !== null) {
+          new Uint8Array(writeBuffer._data, writeOffset, size).set(
+            new Uint8Array(readBuffer._data, readOffset, size)
+          );
+        }
+      };
+    }
+  }
+
+  // src/gl/api/draw.ts
+  function isLost5(ctx) {
     return ctx._isLost;
   }
   var CLEAR_BUFFERS = /* @__PURE__ */ new Set([
@@ -27823,6 +29209,10 @@ ${inner.map((l) => "  " + l).join("\n")}
     const s = ctx._state;
     const fbo = s.readFramebuffer;
     if (fbo === null) {
+      const dfbFormat = ctx._drawingBufferFormat;
+      if (dfbFormat === C2.RGBA16F) {
+        return format === C1.RGBA && (type === C1.UNSIGNED_BYTE || type === C1.FLOAT || type === 5131);
+      }
       return format === C1.RGBA && type === C1.UNSIGNED_BYTE;
     }
     const rb = s.version === 2 ? s.readBuffer : C1.COLOR_ATTACHMENT0;
@@ -27847,7 +29237,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   function installDrawApi(proto) {
     proto.drawArrays = function(mode, first, count) {
       const ctx = this;
-      if (isLost4(ctx)) return;
+      if (isLost5(ctx)) return;
       const req = validateDrawArrays(ctx, mode, first | 0, count | 0, 1);
       if (!req) return;
       try {
@@ -27858,7 +29248,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.drawElements = function(mode, count, type, offset) {
       const ctx = this;
-      if (isLost4(ctx)) return;
+      if (isLost5(ctx)) return;
       const req = validateDrawElements(ctx, mode, count | 0, type, offset);
       if (!req) return;
       try {
@@ -27869,7 +29259,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     };
     proto.clear = function(mask) {
       const ctx = this;
-      if (isLost4(ctx)) return;
+      if (isLost5(ctx)) return;
       if ((mask & ~(C1.COLOR_BUFFER_BIT | C1.DEPTH_BUFFER_BIT | C1.STENCIL_BUFFER_BIT)) !== 0) {
         ctx._errors.push(C1.INVALID_VALUE);
         return;
@@ -27881,14 +29271,14 @@ ${inner.map((l) => "  " + l).join("\n")}
       }
     };
     proto.flush = function() {
-      if (isLost4(this)) return;
+      if (isLost5(this)) return;
     };
     proto.finish = function() {
-      if (isLost4(this)) return;
+      if (isLost5(this)) return;
     };
     proto.readPixels = function(x, y, width, height, format, type, pixels) {
       const ctx = this;
-      if (isLost4(ctx)) return;
+      if (isLost5(ctx)) return;
       if (pixels === null || pixels === void 0) {
         ctx._errors.push(C1.INVALID_VALUE);
         return;
@@ -27896,6 +29286,10 @@ ${inner.map((l) => "  " + l).join("\n")}
       const s = ctx._state;
       if (width < 0 || height < 0) {
         ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
+      if (s.readFramebuffer !== null && checkFramebufferStatus(ctx, s.readFramebuffer) !== C1.FRAMEBUFFER_COMPLETE) {
+        ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
         return;
       }
       if (typeof pixels === "number") {
@@ -27909,6 +29303,10 @@ ${inner.map((l) => "  " + l).join("\n")}
         }
         const packBuf = s.pixelPackBuffer;
         if (!packBuf._data) {
+          ctx._errors.push(C1.INVALID_OPERATION);
+          return;
+        }
+        if (bufferTfUseError(ctx, packBuf, C2.PIXEL_PACK_BUFFER)) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
@@ -27969,14 +29367,21 @@ ${inner.map((l) => "  " + l).join("\n")}
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
+      const dstOffset = toU64(arguments[7]);
+      const dstBytes = dstOffset * pixels.BYTES_PER_ELEMENT;
+      const avail = pixels.byteLength - pixels.byteOffset;
+      if (dstBytes > avail) {
+        ctx._errors.push(C1.INVALID_VALUE);
+        return;
+      }
       const needed = readPixelsNeeded(ctx, format, type, width, height);
       if (needed < 0) return;
-      if (pixels.byteLength - pixels.byteOffset < needed) {
+      if (avail - dstBytes < needed) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
       try {
-        executeReadPixels(ctx, x, y, width, height, format, type, pixels);
+        executeReadPixels(ctx, x, y, width, height, format, type, pixels, dstOffset);
       } catch {
         ctx._errors.push(C1.INVALID_OPERATION);
       }
@@ -27988,7 +29393,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("drawArraysInstanced" in p2) {
       p2.drawArraysInstanced = function(mode, first, count, instanceCount) {
         const ctx = this;
-        if (isLost4(ctx)) return;
+        if (isLost5(ctx)) return;
         const req = validateDrawArrays(ctx, mode, first | 0, count | 0, instanceCount | 0);
         if (!req) return;
         try {
@@ -28001,7 +29406,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("drawElementsInstanced" in p2) {
       p2.drawElementsInstanced = function(mode, count, type, offset, instanceCount) {
         const ctx = this;
-        if (isLost4(ctx)) return;
+        if (isLost5(ctx)) return;
         const req = validateDrawElements(ctx, mode, count | 0, type, offset, { instanceCount: instanceCount | 0 });
         if (!req) return;
         try {
@@ -28014,7 +29419,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("drawRangeElements" in p2) {
       p2.drawRangeElements = function(mode, start, end, count, type, offset) {
         const ctx = this;
-        if (isLost4(ctx)) return;
+        if (isLost5(ctx)) return;
         const req = validateDrawElements(ctx, mode, count | 0, type, offset, { range: [start >>> 0, end >>> 0] });
         if (!req) return;
         try {
@@ -28027,15 +29432,16 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("clearBufferfv" in p2) {
       p2.clearBufferfv = function(buffer, drawbuffer, values) {
         const ctx = this;
-        if (isLost4(ctx)) return;
+        if (isLost5(ctx)) return;
         const v2 = toList(values, Float32Array, "Float32List");
         if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
         if (!CLEAR_FV.has(buffer)) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
+        const srcOffset = toU64(arguments[3]);
         const need = buffer === C2.COLOR ? 4 : 1;
-        if (v2.length < need) {
+        if (srcOffset + need > v2.length) {
           ctx._errors.push(C1.INVALID_VALUE);
           return;
         }
@@ -28048,7 +29454,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           }
         }
         try {
-          executeClearBuffer(ctx, buffer, drawbuffer, v2);
+          executeClearBuffer(ctx, buffer, drawbuffer, v2, srcOffset);
         } catch {
           ctx._errors.push(C1.INVALID_OPERATION);
         }
@@ -28057,15 +29463,16 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("clearBufferiv" in p2) {
       p2.clearBufferiv = function(buffer, drawbuffer, values) {
         const ctx = this;
-        if (isLost4(ctx)) return;
+        if (isLost5(ctx)) return;
         const v2 = toList(values, Int32Array, "Int32List");
         if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
         if (!CLEAR_IV.has(buffer)) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
+        const srcOffset = toU64(arguments[3]);
         const need = buffer === C2.COLOR ? 4 : 1;
-        if (v2.length < need) {
+        if (srcOffset + need > v2.length) {
           ctx._errors.push(C1.INVALID_VALUE);
           return;
         }
@@ -28078,12 +29485,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           }
         }
         try {
-          executeClearBuffer(ctx, buffer, drawbuffer, v2);
-        } catch {
-          ctx._errors.push(C1.INVALID_OPERATION);
-        }
-        try {
-          executeClearBuffer(ctx, buffer, drawbuffer, v2);
+          executeClearBuffer(ctx, buffer, drawbuffer, v2, srcOffset);
         } catch {
           ctx._errors.push(C1.INVALID_OPERATION);
         }
@@ -28092,14 +29494,15 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("clearBufferuiv" in p2) {
       p2.clearBufferuiv = function(buffer, drawbuffer, values) {
         const ctx = this;
-        if (isLost4(ctx)) return;
+        if (isLost5(ctx)) return;
         const v2 = toList(values, Uint32Array, "Uint32List");
         if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
         if (!CLEAR_UIV.has(buffer)) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
-        if (v2.length < 4) {
+        const srcOffset = toU64(arguments[3]);
+        if (srcOffset + 4 > v2.length) {
           ctx._errors.push(C1.INVALID_VALUE);
           return;
         }
@@ -28112,7 +29515,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           }
         }
         try {
-          executeClearBuffer(ctx, buffer, drawbuffer, v2);
+          executeClearBuffer(ctx, buffer, drawbuffer, v2, srcOffset);
         } catch {
           ctx._errors.push(C1.INVALID_OPERATION);
         }
@@ -28121,7 +29524,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     if ("clearBufferfi" in p2) {
       p2.clearBufferfi = function(buffer, drawbuffer, depth, stencil) {
         const ctx = this;
-        if (isLost4(ctx)) return;
+        if (isLost5(ctx)) return;
         if (!CLEAR_BUFFERS.has(buffer)) {
           ctx._errors.push(C1.INVALID_ENUM);
           return;
@@ -28135,7 +29538,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           return;
         }
         try {
-          executeClearBuffer(ctx, buffer, drawbuffer, null, depth, stencil);
+          executeClearBuffer(ctx, buffer, drawbuffer, null, 0, depth, stencil);
         } catch {
           ctx._errors.push(C1.INVALID_OPERATION);
         }
@@ -28147,7 +29550,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
     installExtensionMethod(mdProto, "multiDrawArraysWEBGL", function(mode, firsts, firstsOffset, counts, countsOffset, drawcount) {
       const ctx = this;
-      if (isLost4(ctx)) return;
+      if (isLost5(ctx)) return;
       const firstsArr = toList(firsts, Int32Array, "Int32List");
       const countsArr = toList(counts, Int32Array, "Int32List");
       const dc = drawcount | 0;
@@ -28170,7 +29573,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     });
     installExtensionMethod(mdProto, "multiDrawElementsWEBGL", function(mode, counts, countsOffset, type, offsets, offsetsOffset, drawcount) {
       const ctx = this;
-      if (isLost4(ctx)) return;
+      if (isLost5(ctx)) return;
       const countsArr = toList(counts, Int32Array, "Int32List");
       const offsetsArr = toList(offsets, Int32Array, "Int32List");
       const dc = drawcount | 0;
@@ -28193,7 +29596,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     });
     installExtensionMethod(mdProto, "multiDrawArraysInstancedWEBGL", function(mode, firsts, firstsOffset, counts, countsOffset, instanceCounts, instanceCountsOffset, drawcount) {
       const ctx = this;
-      if (isLost4(ctx)) return;
+      if (isLost5(ctx)) return;
       const firstsArr = toList(firsts, Int32Array, "Int32List");
       const countsArr = toList(counts, Int32Array, "Int32List");
       const instArr = toList(instanceCounts, Int32Array, "Int32List");
@@ -28218,7 +29621,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     });
     installExtensionMethod(mdProto, "multiDrawElementsInstancedWEBGL", function(mode, counts, countsOffset, type, offsets, offsetsOffset, instanceCounts, instanceCountsOffset, drawcount) {
       const ctx = this;
-      if (isLost4(ctx)) return;
+      if (isLost5(ctx)) return;
       const countsArr = toList(counts, Int32Array, "Int32List");
       const offsetsArr = toList(offsets, Int32Array, "Int32List");
       const instArr = toList(instanceCounts, Int32Array, "Int32List");
@@ -28525,838 +29928,6 @@ ${inner.map((l) => "  " + l).join("\n")}
     const factory = FACTORIES[spec.name];
     if (factory) return factory(ctx);
     return buildExtension({});
-  }
-
-  // src/gl/api/buffers.ts
-  var GL_STREAM_READ = 35041;
-  var GL_STREAM_COPY = 35042;
-  var GL_STATIC_READ = 35045;
-  var GL_STATIC_COPY = 35046;
-  var GL_DYNAMIC_READ = 35049;
-  var GL_DYNAMIC_COPY = 35050;
-  var everBoundBuffers = /* @__PURE__ */ new WeakSet();
-  function isLost5(ctx) {
-    return ctx._isLost;
-  }
-  var genericBindings = /* @__PURE__ */ new WeakMap();
-  function genericBindingState(ctx) {
-    let g2 = genericBindings.get(ctx);
-    if (g2 === void 0) {
-      g2 = { uniformBuffer: null, transformFeedbackBuffer: null, baseUniformIndices: /* @__PURE__ */ new Set() };
-      genericBindings.set(ctx, g2);
-    }
-    return g2;
-  }
-  function getGenericBufferBinding(ctx, target) {
-    const g2 = genericBindings.get(ctx);
-    if (!g2) return null;
-    if (target === C2.UNIFORM_BUFFER) return g2.uniformBuffer;
-    if (target === C2.TRANSFORM_FEEDBACK_BUFFER) return g2.transformFeedbackBuffer;
-    return null;
-  }
-  function transformFeedbackActive(ctx) {
-    const s = ctx._state;
-    if (s.transformFeedback && s.transformFeedback._active) return true;
-    for (const o of ctx._resources.all) {
-      if (o instanceof WebGLTransformFeedback && o._active) return true;
-    }
-    return false;
-  }
-  function bufferBoundToOtherBindingPoint(ctx, buf) {
-    const s = ctx._state;
-    if (s.arrayBuffer === buf) return true;
-    if (s.vao.elementArrayBuffer === buf) return true;
-    for (const a of s.vao.attribs) {
-      if (a.buffer === buf) return true;
-    }
-    if (ctx._version === 2) {
-      const g2 = genericBindings.get(ctx);
-      if (g2 && g2.uniformBuffer === buf) return true;
-      for (const b of s.uniformBuffers) {
-        if (b === buf) return true;
-      }
-      if (s.pixelPackBuffer === buf || s.pixelUnpackBuffer === buf) return true;
-      if (s.copyReadBuffer === buf || s.copyWriteBuffer === buf) return true;
-    }
-    return false;
-  }
-  function bufferTfUseError(ctx, buf, target) {
-    const s = ctx._state;
-    const boundTf = s.transformFeedback;
-    if (boundTf && boundTf._buffers.includes(buf)) {
-      if (target !== C2.TRANSFORM_FEEDBACK_BUFFER) return true;
-      if (bufferBoundToOtherBindingPoint(ctx, buf)) return true;
-    }
-    for (const o of ctx._resources.all) {
-      if (o instanceof WebGLTransformFeedback && o._active && o._buffers.includes(buf)) return true;
-    }
-    return false;
-  }
-  var BufferCtor = WebGLBuffer;
-  var BufferCtorAny = BufferCtor;
-  function validateBuffer(ctx, buffer) {
-    return validateObject(ctx, buffer, BufferCtorAny);
-  }
-  function isValidBufferTarget(ctx, target) {
-    if (target === C1.ARRAY_BUFFER || target === C1.ELEMENT_ARRAY_BUFFER) return true;
-    if (ctx._version !== 2) return false;
-    return target === C2.COPY_READ_BUFFER || target === C2.COPY_WRITE_BUFFER || target === C2.PIXEL_PACK_BUFFER || target === C2.PIXEL_UNPACK_BUFFER || target === C2.TRANSFORM_FEEDBACK_BUFFER || target === C2.UNIFORM_BUFFER;
-  }
-  function isValidUsage(ctx, usage) {
-    if (usage === C1.STREAM_DRAW || usage === C1.STATIC_DRAW || usage === C1.DYNAMIC_DRAW) return true;
-    if (ctx._version !== 2) return false;
-    return usage === GL_STREAM_READ || usage === GL_STREAM_COPY || usage === GL_STATIC_READ || usage === GL_STATIC_COPY || usage === GL_DYNAMIC_READ || usage === GL_DYNAMIC_COPY;
-  }
-  function isSharedArrayBuffer(v2) {
-    return typeof SharedArrayBuffer !== "undefined" && v2 instanceof SharedArrayBuffer;
-  }
-  function clearTfBinding(ctx, index) {
-    for (const obj of ctx._resources.all) {
-      if (obj instanceof WebGLBuffer) {
-        const i = obj._tfRangeBindings.findIndex((e) => e.index === index);
-        if (i >= 0) obj._tfRangeBindings.splice(i, 1);
-      }
-    }
-  }
-  function setTfBinding(ctx, index, buffer, offset, size, base) {
-    clearTfBinding(ctx, index);
-    buffer._tfRangeBindings.push({ index, offset, size, base });
-  }
-  function boundBufferForTarget(ctx, target) {
-    const s = ctx._state;
-    switch (target) {
-      case C1.ARRAY_BUFFER:
-        return s.arrayBuffer;
-      case C1.ELEMENT_ARRAY_BUFFER:
-        return s.vao.elementArrayBuffer;
-      case C2.UNIFORM_BUFFER:
-        return genericBindingState(ctx).uniformBuffer;
-      case C2.TRANSFORM_FEEDBACK_BUFFER:
-        return genericBindingState(ctx).transformFeedbackBuffer;
-      case C2.COPY_READ_BUFFER:
-        return s.copyReadBuffer;
-      case C2.COPY_WRITE_BUFFER:
-        return s.copyWriteBuffer;
-      case C2.PIXEL_PACK_BUFFER:
-        return s.pixelPackBuffer;
-      case C2.PIXEL_UNPACK_BUFFER:
-        return s.pixelUnpackBuffer;
-      default:
-        return null;
-    }
-  }
-  function tfMirrorBindingAtIndex(ctx, index) {
-    for (const obj of ctx._resources.all) {
-      if (obj instanceof WebGLBuffer) {
-        for (const e of obj._tfRangeBindings) {
-          if (e.index === index) return { buffer: obj, offset: e.offset, size: e.size, base: e.base };
-        }
-      }
-    }
-    return null;
-  }
-  function unbindBufferEverywhere(ctx, buffer, skipTfBindings = false) {
-    let found = false;
-    const nullIf = (b) => {
-      if (b === buffer) {
-        found = true;
-        return null;
-      }
-      return b;
-    };
-    const s = ctx._state;
-    s.arrayBuffer = nullIf(s.arrayBuffer);
-    s.vao.elementArrayBuffer = nullIf(s.vao.elementArrayBuffer);
-    for (const a of s.vao.attribs) a.buffer = nullIf(a.buffer);
-    if (ctx._defaultVAO) {
-      ctx._defaultVAO.elementArrayBuffer = nullIf(ctx._defaultVAO.elementArrayBuffer);
-      for (const a of ctx._defaultVAO.attribs) a.buffer = nullIf(a.buffer);
-    }
-    if (ctx._version === 2) {
-      const g2 = genericBindings.get(ctx);
-      for (let i = 0; i < s.uniformBuffers.length; i++) {
-        if (s.uniformBuffers[i] === buffer) {
-          s.uniformBuffers[i] = null;
-          s.uniformBufferRanges[i] = { offset: 0, size: 0 };
-          if (g2) g2.baseUniformIndices.delete(i);
-          found = true;
-        }
-      }
-      if (g2) {
-        g2.uniformBuffer = nullIf(g2.uniformBuffer);
-        g2.transformFeedbackBuffer = nullIf(g2.transformFeedbackBuffer);
-      }
-      s.pixelPackBuffer = nullIf(s.pixelPackBuffer);
-      s.pixelUnpackBuffer = nullIf(s.pixelUnpackBuffer);
-      s.copyReadBuffer = nullIf(s.copyReadBuffer);
-      s.copyWriteBuffer = nullIf(s.copyWriteBuffer);
-    }
-    if (s.transformFeedback && !skipTfBindings) {
-      for (let i = 0; i < s.transformFeedback._buffers.length; i++) {
-        if (s.transformFeedback._buffers[i] === buffer) {
-          s.transformFeedback._buffers[i] = null;
-          found = true;
-        }
-      }
-    }
-    if (!skipTfBindings) {
-      for (const obj of ctx._resources.all) {
-        if (obj instanceof WebGLVertexArrayObject && obj._vao) {
-          obj._vao.elementArrayBuffer = nullIf(obj._vao.elementArrayBuffer);
-          for (const a of obj._vao.attribs) a.buffer = nullIf(a.buffer);
-        } else if (obj instanceof WebGLTransformFeedback) {
-          for (let i = 0; i < obj._buffers.length; i++) {
-            if (obj._buffers[i] === buffer) {
-              obj._buffers[i] = null;
-              found = true;
-            }
-          }
-        }
-      }
-      if (buffer._tfRangeBindings.length > 0) {
-        found = true;
-        buffer._tfRangeBindings.length = 0;
-      }
-    }
-    return found;
-  }
-  function bindBufferBaseImpl(ctx, target, index, buffer) {
-    const s = ctx._state;
-    if (target === C2.TRANSFORM_FEEDBACK_BUFFER && transformFeedbackActive(ctx)) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return;
-    }
-    const max = target === C2.UNIFORM_BUFFER ? s.limits.MAX_UNIFORM_BUFFER_BINDINGS : s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
-    if (index < 0 || index >= max) {
-      ctx._errors.push(C1.INVALID_VALUE);
-      return;
-    }
-    if (buffer === null || buffer === void 0) {
-      if (target === C2.UNIFORM_BUFFER) {
-        s.uniformBuffers[index] = null;
-        s.uniformBufferRanges[index] = { offset: 0, size: 0 };
-        genericBindingState(ctx).baseUniformIndices.delete(index);
-        genericBindingState(ctx).uniformBuffer = null;
-      } else {
-        const boundTf = s.transformFeedback;
-        if (boundTf) {
-          boundTf._buffers[index] = null;
-          boundTf._bufferRanges[index] = { offset: 0, size: 0, base: false };
-        } else {
-          clearTfBinding(ctx, index);
-        }
-        genericBindingState(ctx).transformFeedbackBuffer = null;
-      }
-      return;
-    }
-    if (buffer instanceof WebGLBuffer && buffer._deletePending) {
-      unbindBufferEverywhere(ctx, buffer);
-      buffer._deletePending = false;
-    }
-    const buf = validateBuffer(ctx, buffer);
-    if (buf === null) return;
-    if (buf._target === 0) buf._target = target;
-    else if (buf._target === C1.ELEMENT_ARRAY_BUFFER) {
-      ctx._errors.push(C1.INVALID_OPERATION);
-      return;
-    }
-    everBoundBuffers.add(buf);
-    if (target === C2.UNIFORM_BUFFER) {
-      genericBindingState(ctx).baseUniformIndices.add(index);
-      s.uniformBuffers[index] = buf;
-      s.uniformBufferRanges[index] = { offset: 0, size: buf._size };
-      genericBindingState(ctx).uniformBuffer = buf;
-    } else {
-      const boundTf = s.transformFeedback;
-      if (boundTf) {
-        boundTf._buffers[index] = buf;
-        boundTf._bufferRanges[index] = { offset: 0, size: buf._size, base: true };
-      } else {
-        setTfBinding(ctx, index, buf, 0, buf._size, true);
-      }
-      genericBindingState(ctx).transformFeedbackBuffer = buf;
-    }
-  }
-  function sliceSourceData(ctx, data, bytes, srcOffset, srcLength) {
-    var _a, _b;
-    const view = data;
-    const elemSize = (_a = view.BYTES_PER_ELEMENT) != null ? _a : 1;
-    const elemCount = (_b = view.length) != null ? _b : data.byteLength;
-    const off = Math.trunc(Number(srcOffset));
-    const len = srcLength === void 0 || srcLength === 0 ? elemCount - off : Math.trunc(Number(srcLength));
-    if (off < 0 || len < 0 || off > elemCount || off + len > elemCount) {
-      ctx._errors.push(C1.INVALID_VALUE);
-      return { bytes, ok: false };
-    }
-    return { bytes: new Uint8Array(bytes.buffer, bytes.byteOffset + off * elemSize, len * elemSize), ok: true };
-  }
-  function installBuffersApi(proto) {
-    proto.createBuffer = function() {
-      const ctx = this;
-      return createObject(ctx, BufferCtor);
-    };
-    proto.deleteBuffer = function(buffer) {
-      const ctx = this;
-      if (isLost5(ctx)) return;
-      if (buffer === null || buffer === void 0) return;
-      if (!(buffer instanceof WebGLBuffer)) {
-        throw new TypeError(`Argument is not of type 'WebGLBuffer'`);
-      }
-      if (buffer._context !== ctx) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      if (buffer._deleted) return;
-      const s = ctx._state;
-      const boundTf = s.transformFeedback;
-      const boundTfRefs = !!boundTf && boundTf._buffers.includes(buffer);
-      const tfRefs = buffer._tfRangeBindings.length > 0 || [...ctx._resources.all].some(
-        (o) => o instanceof WebGLTransformFeedback && o._buffers.includes(buffer)
-      );
-      const wasBound = unbindBufferEverywhere(
-        ctx,
-        buffer,
-        true
-        /* skipTfBindings */
-      );
-      if (boundTfRefs) {
-        for (let i = 0; i < boundTf._buffers.length; i++) {
-          if (boundTf._buffers[i] === buffer) {
-            boundTf._buffers[i] = null;
-            boundTf._bufferRanges[i] = { offset: 0, size: 0, base: false };
-          }
-        }
-        buffer._tfRangeBindings.length = 0;
-      }
-      buffer._deleted = true;
-      buffer._deletePending = wasBound || tfRefs || boundTfRefs;
-      if (!tfRefs || boundTfRefs) ctx._resources.untrack(buffer);
-    };
-    proto.isBuffer = function(buffer) {
-      const ctx = this;
-      if (isLost5(ctx)) return false;
-      if (buffer === null || buffer === void 0) return false;
-      if (!(buffer instanceof WebGLBuffer)) {
-        throw new TypeError(`Argument is not of type 'WebGLBuffer'`);
-      }
-      if (buffer._context !== ctx) return false;
-      if (buffer._deleted) return false;
-      return everBoundBuffers.has(buffer);
-    };
-    proto.bindBuffer = function(target, buffer) {
-      const ctx = this;
-      if (isLost5(ctx)) return;
-      if (!isValidBufferTarget(ctx, target)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      if (ctx._version === 2 && (target === C2.TRANSFORM_FEEDBACK_BUFFER || target === C2.UNIFORM_BUFFER)) {
-        if (buffer === null || buffer === void 0) {
-          if (target === C2.UNIFORM_BUFFER) genericBindingState(ctx).uniformBuffer = null;
-          else genericBindingState(ctx).transformFeedbackBuffer = null;
-          return;
-        }
-        if (buffer instanceof WebGLBuffer && buffer._deletePending) {
-          unbindBufferEverywhere(ctx, buffer);
-          buffer._deletePending = false;
-        }
-        const buf2 = validateBuffer(ctx, buffer);
-        if (buf2 === null) return;
-        if (buf2._target === 0) buf2._target = target;
-        else if (buf2._target === C1.ELEMENT_ARRAY_BUFFER) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        everBoundBuffers.add(buf2);
-        if (target === C2.UNIFORM_BUFFER) genericBindingState(ctx).uniformBuffer = buf2;
-        else genericBindingState(ctx).transformFeedbackBuffer = buf2;
-        return;
-      }
-      if (buffer === null || buffer === void 0) {
-        const s2 = ctx._state;
-        if (target === C1.ARRAY_BUFFER) s2.arrayBuffer = null;
-        else if (target === C1.ELEMENT_ARRAY_BUFFER) s2.vao.elementArrayBuffer = null;
-        else if (ctx._version === 2) {
-          switch (target) {
-            case C2.COPY_READ_BUFFER:
-              s2.copyReadBuffer = null;
-              break;
-            case C2.COPY_WRITE_BUFFER:
-              s2.copyWriteBuffer = null;
-              break;
-            case C2.PIXEL_PACK_BUFFER:
-              s2.pixelPackBuffer = null;
-              break;
-            case C2.PIXEL_UNPACK_BUFFER:
-              s2.pixelUnpackBuffer = null;
-              break;
-          }
-        }
-        return;
-      }
-      if (buffer instanceof WebGLBuffer && buffer._deletePending) {
-        unbindBufferEverywhere(ctx, buffer);
-        buffer._deletePending = false;
-      }
-      const buf = validateBuffer(ctx, buffer);
-      if (buf === null) return;
-      if (ctx._version === 2) {
-        const isElementType = buf._target === C1.ELEMENT_ARRAY_BUFFER;
-        const isCopyTarget = target === C2.COPY_READ_BUFFER || target === C2.COPY_WRITE_BUFFER;
-        if (buf._target === 0) {
-          buf._target = target;
-        } else if (isElementType) {
-          if (target !== C1.ELEMENT_ARRAY_BUFFER && !isCopyTarget) {
-            ctx._errors.push(C1.INVALID_OPERATION);
-            return;
-          }
-        } else if (target === C1.ELEMENT_ARRAY_BUFFER) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-      } else {
-        if (buf._target === 0) buf._target = target;
-        else if (buf._target !== target) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-      }
-      everBoundBuffers.add(buf);
-      const s = ctx._state;
-      if (target === C1.ARRAY_BUFFER) s.arrayBuffer = buf;
-      else if (target === C1.ELEMENT_ARRAY_BUFFER) s.vao.elementArrayBuffer = buf;
-      else if (ctx._version === 2) {
-        switch (target) {
-          case C2.COPY_READ_BUFFER:
-            s.copyReadBuffer = buf;
-            break;
-          case C2.COPY_WRITE_BUFFER:
-            s.copyWriteBuffer = buf;
-            break;
-          case C2.PIXEL_PACK_BUFFER:
-            s.pixelPackBuffer = buf;
-            break;
-          case C2.PIXEL_UNPACK_BUFFER:
-            s.pixelUnpackBuffer = buf;
-            break;
-        }
-      }
-    };
-    proto.bufferData = function(target, size, usage) {
-      const ctx = this;
-      if (isLost5(ctx)) return;
-      if (!isValidBufferTarget(ctx, target)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      if (!isValidUsage(ctx, usage)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      const buf = boundBufferForTarget(ctx, target);
-      if (buf === null) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      if (ctx._version === 2 && bufferTfUseError(ctx, buf, target)) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      if (size === null || size === void 0) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      if (size instanceof ArrayBuffer || ArrayBuffer.isView(size) || isSharedArrayBuffer(size)) {
-        const data = requireBufferData(size, "size");
-        const bytes = isSharedArrayBuffer(data) ? new Uint8Array(data) : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-        let slice = bytes;
-        if (ctx._version === 2 && arguments.length > 3) {
-          const r = sliceSourceData(ctx, data, bytes, arguments[3], arguments[4]);
-          if (!r.ok) return;
-          slice = r.bytes;
-        }
-        let copy;
-        try {
-          copy = new ArrayBuffer(slice.byteLength);
-        } catch {
-          ctx._errors.push(C1.OUT_OF_MEMORY);
-          return;
-        }
-        new Uint8Array(copy).set(slice);
-        buf._data = copy;
-        buf._size = slice.byteLength;
-      } else {
-        const raw = Number(size);
-        const n = Number.isFinite(raw) ? Math.trunc(raw) : 0;
-        if (n < 0) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        let data;
-        try {
-          data = new ArrayBuffer(n);
-        } catch {
-          ctx._errors.push(C1.OUT_OF_MEMORY);
-          return;
-        }
-        buf._data = data;
-        buf._size = n;
-      }
-      if (ctx._version === 2) {
-        const g2 = genericBindings.get(ctx);
-        if (g2 && g2.baseUniformIndices.size > 0) {
-          const s = ctx._state;
-          for (const i of g2.baseUniformIndices) {
-            if (s.uniformBuffers[i] === buf) s.uniformBufferRanges[i] = { offset: 0, size: buf._size };
-          }
-        }
-      }
-      buf._usage = usage;
-    };
-    proto.bufferSubData = function(target, offset, data) {
-      const ctx = this;
-      if (isLost5(ctx)) return;
-      if (!isValidBufferTarget(ctx, target)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return;
-      }
-      const buf = boundBufferForTarget(ctx, target);
-      if (buf === null) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      if (ctx._version === 2 && bufferTfUseError(ctx, buf, target)) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return;
-      }
-      if (offset < 0) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      const src = requireBufferData(data, "data");
-      const bytes = src instanceof ArrayBuffer ? new Uint8Array(src) : new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
-      let slice = bytes;
-      if (ctx._version === 2 && arguments.length > 3) {
-        const r = sliceSourceData(ctx, src, bytes, arguments[3], arguments[4]);
-        if (!r.ok) return;
-        slice = r.bytes;
-      }
-      if (offset + slice.byteLength > buf._size) {
-        ctx._errors.push(C1.INVALID_VALUE);
-        return;
-      }
-      if (slice.byteLength > 0 && buf._data !== null) {
-        new Uint8Array(buf._data).set(slice, offset);
-      }
-    };
-    proto.getBufferParameter = function(target, pname) {
-      const ctx = this;
-      if (isLost5(ctx)) return null;
-      if (!isValidBufferTarget(ctx, target)) {
-        ctx._errors.push(C1.INVALID_ENUM);
-        return null;
-      }
-      const buf = boundBufferForTarget(ctx, target);
-      if (buf === null) {
-        ctx._errors.push(C1.INVALID_OPERATION);
-        return null;
-      }
-      switch (pname) {
-        case C1.BUFFER_SIZE:
-          return buf._size;
-        case C1.BUFFER_USAGE:
-          return buf._usage;
-        default:
-          ctx._errors.push(C1.INVALID_ENUM);
-          return null;
-      }
-    };
-    if ("bindBufferBase" in proto) {
-      const p2 = proto;
-      p2.bindBufferBase = function(target, index, buffer) {
-        const ctx = this;
-        if (isLost5(ctx)) return;
-        if (target !== C2.UNIFORM_BUFFER && target !== C2.TRANSFORM_FEEDBACK_BUFFER) {
-          ctx._errors.push(C1.INVALID_ENUM);
-          return;
-        }
-        bindBufferBaseImpl(ctx, target, index, buffer);
-      };
-      p2.bindBufferRange = function(target, index, buffer, offset, size) {
-        const ctx = this;
-        if (isLost5(ctx)) return;
-        if (target !== C2.UNIFORM_BUFFER && target !== C2.TRANSFORM_FEEDBACK_BUFFER) {
-          ctx._errors.push(C1.INVALID_ENUM);
-          return;
-        }
-        if (target === C2.TRANSFORM_FEEDBACK_BUFFER && transformFeedbackActive(ctx)) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        const s = ctx._state;
-        const max = target === C2.UNIFORM_BUFFER ? s.limits.MAX_UNIFORM_BUFFER_BINDINGS : s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
-        if (index < 0 || index >= max) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (buffer === null || buffer === void 0) {
-          if (target === C2.UNIFORM_BUFFER) {
-            s.uniformBuffers[index] = null;
-            s.uniformBufferRanges[index] = { offset: 0, size: 0 };
-            genericBindingState(ctx).baseUniformIndices.delete(index);
-            genericBindingState(ctx).uniformBuffer = null;
-          } else {
-            const boundTf = s.transformFeedback;
-            if (boundTf) {
-              boundTf._buffers[index] = null;
-              boundTf._bufferRanges[index] = { offset: 0, size: 0, base: false };
-            } else {
-              clearTfBinding(ctx, index);
-            }
-            genericBindingState(ctx).transformFeedbackBuffer = null;
-          }
-          return;
-        }
-        if (buffer instanceof WebGLBuffer && buffer._deletePending) {
-          unbindBufferEverywhere(ctx, buffer);
-          buffer._deletePending = false;
-        }
-        const buf = validateBuffer(ctx, buffer);
-        if (buf === null) return;
-        if (offset < 0) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (size < 0) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (target === C2.UNIFORM_BUFFER) {
-          if (offset % s.limits.UNIFORM_BUFFER_OFFSET_ALIGNMENT !== 0) {
-            ctx._errors.push(C1.INVALID_VALUE);
-            return;
-          }
-          if (size > s.limits.MAX_UNIFORM_BLOCK_SIZE) {
-            ctx._errors.push(C1.INVALID_VALUE);
-            return;
-          }
-        } else {
-          if (offset % 4 !== 0) {
-            ctx._errors.push(C1.INVALID_VALUE);
-            return;
-          }
-        }
-        let rangeSize = size === 0 ? Math.max(0, buf._size - offset) : size;
-        if (buf._target === 0) buf._target = target;
-        else if (buf._target === C1.ELEMENT_ARRAY_BUFFER) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        everBoundBuffers.add(buf);
-        if (target === C2.UNIFORM_BUFFER) {
-          genericBindingState(ctx).baseUniformIndices.delete(index);
-          s.uniformBuffers[index] = buf;
-          s.uniformBufferRanges[index] = { offset, size: rangeSize };
-          genericBindingState(ctx).uniformBuffer = buf;
-        } else {
-          const boundTf = s.transformFeedback;
-          if (boundTf) {
-            boundTf._buffers[index] = buf;
-            boundTf._bufferRanges[index] = { offset, size: rangeSize, base: size === 0 };
-          } else {
-            setTfBinding(ctx, index, buf, offset, rangeSize, size === 0);
-          }
-          genericBindingState(ctx).transformFeedbackBuffer = buf;
-        }
-      };
-      p2.getIndexedParameter = function(target, index) {
-        var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n;
-        const ctx = this;
-        if (isLost5(ctx)) return null;
-        const s = ctx._state;
-        let max;
-        let blendPname = false;
-        switch (target) {
-          case C2.UNIFORM_BUFFER_BINDING:
-          case C2.UNIFORM_BUFFER_START:
-          case C2.UNIFORM_BUFFER_SIZE:
-            max = s.limits.MAX_UNIFORM_BUFFER_BINDINGS;
-            break;
-          case C2.TRANSFORM_FEEDBACK_BUFFER_BINDING:
-          case C2.TRANSFORM_FEEDBACK_BUFFER_START:
-          case C2.TRANSFORM_FEEDBACK_BUFFER_SIZE:
-            max = s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
-            break;
-          case C1.BLEND_EQUATION_RGB:
-          case C1.BLEND_EQUATION_ALPHA:
-          case C1.BLEND_SRC_RGB:
-          case C1.BLEND_SRC_ALPHA:
-          case C1.BLEND_DST_RGB:
-          case C1.BLEND_DST_ALPHA:
-          case C1.COLOR_WRITEMASK:
-            if (!ctx._extensions.has("OES_draw_buffers_indexed")) {
-              ctx._errors.push(C1.INVALID_ENUM);
-              return null;
-            }
-            max = s.limits.MAX_DRAW_BUFFERS;
-            blendPname = true;
-            break;
-          default:
-            ctx._errors.push(C1.INVALID_ENUM);
-            return null;
-        }
-        if (index < 0 || index >= max) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return null;
-        }
-        if (blendPname) {
-          const be = s.blendPerDrawBuffer.get(index);
-          switch (target) {
-            case C1.BLEND_EQUATION_RGB:
-              return (_a = be == null ? void 0 : be.eqRGB) != null ? _a : s.blend.eqRGB;
-            case C1.BLEND_EQUATION_ALPHA:
-              return (_b = be == null ? void 0 : be.eqAlpha) != null ? _b : s.blend.eqAlpha;
-            case C1.BLEND_SRC_RGB:
-              return (_c = be == null ? void 0 : be.srcRGB) != null ? _c : s.blend.srcRGB;
-            case C1.BLEND_SRC_ALPHA:
-              return (_d = be == null ? void 0 : be.srcAlpha) != null ? _d : s.blend.srcAlpha;
-            case C1.BLEND_DST_RGB:
-              return (_e = be == null ? void 0 : be.dstRGB) != null ? _e : s.blend.dstRGB;
-            case C1.BLEND_DST_ALPHA:
-              return (_f = be == null ? void 0 : be.dstAlpha) != null ? _f : s.blend.dstAlpha;
-            default: {
-              const m = (_g = s.colorMaskPerDrawBuffer.get(index)) != null ? _g : s.colorMask;
-              return [m[0], m[1], m[2], m[3]];
-            }
-          }
-        }
-        switch (target) {
-          case C2.UNIFORM_BUFFER_BINDING:
-            return s.uniformBuffers[index];
-          case C2.UNIFORM_BUFFER_START:
-            return s.uniformBufferRanges[index].offset;
-          case C2.UNIFORM_BUFFER_SIZE:
-            if (genericBindingState(ctx).baseUniformIndices.has(index)) return 0;
-            return s.uniformBufferRanges[index].size;
-          case C2.TRANSFORM_FEEDBACK_BUFFER_BINDING: {
-            const tf = s.transformFeedback;
-            if (tf) return (_h = tf._buffers[index]) != null ? _h : null;
-            return (_j = (_i = tfMirrorBindingAtIndex(ctx, index)) == null ? void 0 : _i.buffer) != null ? _j : null;
-          }
-          case C2.TRANSFORM_FEEDBACK_BUFFER_START: {
-            const tf = s.transformFeedback;
-            if (tf) return (_l = (_k = tf._bufferRanges[index]) == null ? void 0 : _k.offset) != null ? _l : 0;
-            return (_n = (_m = tfMirrorBindingAtIndex(ctx, index)) == null ? void 0 : _m.offset) != null ? _n : 0;
-          }
-          default: {
-            const tf = s.transformFeedback;
-            if (tf) {
-              const r = tf._bufferRanges[index];
-              return r ? r.base ? 0 : r.size : 0;
-            }
-            const m = tfMirrorBindingAtIndex(ctx, index);
-            return m ? m.base ? 0 : m.size : 0;
-          }
-        }
-      };
-      p2.getBufferSubData = function(target, srcByteOffset, dstBuffer, dstOffset, length) {
-        var _a, _b;
-        const ctx = this;
-        if (isLost5(ctx)) return;
-        if (!isValidBufferTarget(ctx, target)) {
-          ctx._errors.push(C1.INVALID_ENUM);
-          return;
-        }
-        const buf = boundBufferForTarget(ctx, target);
-        if (buf === null) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        if (bufferTfUseError(ctx, buf, target)) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        if (srcByteOffset < 0) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (!ArrayBuffer.isView(dstBuffer)) {
-          throw new TypeError("dstBuffer is not an ArrayBufferView");
-        }
-        if (dstOffset !== void 0 && dstOffset < 0) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (length !== void 0 && length < 0) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        const view = dstBuffer;
-        const elemSize = (_a = view.BYTES_PER_ELEMENT) != null ? _a : 1;
-        const elemCount = (_b = view.length) != null ? _b : view.byteLength;
-        const dstOff = dstOffset === void 0 ? 0 : dstOffset;
-        const len = length === void 0 ? elemCount - dstOff : length;
-        if (len < 0 || dstOff + len > elemCount) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        const byteLen = len * elemSize;
-        if (srcByteOffset + byteLen > buf._size) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (byteLen > 0 && buf._data !== null) {
-          new Uint8Array(view.buffer, view.byteOffset + dstOff * elemSize, byteLen).set(
-            new Uint8Array(buf._data, srcByteOffset, byteLen)
-          );
-        }
-      };
-      p2.copyBufferSubData = function(readTarget, writeTarget, readOffset, writeOffset, size) {
-        const ctx = this;
-        if (isLost5(ctx)) return;
-        if (!isValidBufferTarget(ctx, readTarget) || !isValidBufferTarget(ctx, writeTarget)) {
-          ctx._errors.push(C1.INVALID_ENUM);
-          return;
-        }
-        const readBuffer = boundBufferForTarget(ctx, readTarget);
-        const writeBuffer = boundBufferForTarget(ctx, writeTarget);
-        if (readBuffer === null || writeBuffer === null) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        if (bufferTfUseError(ctx, readBuffer, readTarget) || bufferTfUseError(ctx, writeBuffer, writeTarget)) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        const readIsElement = readBuffer._target === C1.ELEMENT_ARRAY_BUFFER;
-        const writeIsElement = writeBuffer._target === C1.ELEMENT_ARRAY_BUFFER;
-        if (readIsElement !== writeIsElement) {
-          ctx._errors.push(C1.INVALID_OPERATION);
-          return;
-        }
-        if (readOffset < 0 || writeOffset < 0 || size < 0) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (readOffset + size > readBuffer._size) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (writeOffset + size > writeBuffer._size) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (readBuffer === writeBuffer && readOffset < writeOffset + size && writeOffset < readOffset + size) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
-        if (size > 0 && readBuffer._data !== null && writeBuffer._data !== null) {
-          new Uint8Array(writeBuffer._data, writeOffset, size).set(
-            new Uint8Array(readBuffer._data, readOffset, size)
-          );
-        }
-      };
-    }
   }
 
   // src/gl/getters.ts
@@ -30143,7 +30714,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     throw new TypeError("Argument is not a Uint32List");
   }
   function setCurrentKind(a, k) {
-    a._currentKind = k;
+    a.genericKind = k;
   }
   var globalCurrentAttribs = /* @__PURE__ */ new WeakMap();
   function globalStore(ctx) {
@@ -32275,11 +32846,22 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
       return;
     }
-    if (copyFeedbackLoop(ctx, tex2, level, target, null)) {
+    if (ctx._version === 2 && ctx._state.readBuffer === C1.NONE) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
     const readFbo = ctx._state.readFramebuffer;
+    if (readFbo !== null) {
+      const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
+      if (!readFbo._attachments.get(readPoint)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+    }
+    if (copyFeedbackLoop(ctx, tex2, level, target, null)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     let srcFmt = 0;
     if (readFbo !== null) {
       const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
@@ -32347,6 +32929,22 @@ ${inner.map((l) => "  " + l).join("\n")}
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
+    if (checkFramebufferStatus(ctx, ctx._state.readFramebuffer) !== C1.FRAMEBUFFER_COMPLETE) {
+      ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
+      return;
+    }
+    if (ctx._version === 2 && ctx._state.readBuffer === C1.NONE) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    const readFbo = ctx._state.readFramebuffer;
+    if (readFbo !== null) {
+      const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
+      if (!readFbo._attachments.get(readPoint)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+    }
     if (copyFeedbackLoop(ctx, tex2, level, target, null)) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
@@ -32392,6 +32990,22 @@ ${inner.map((l) => "  " + l).join("\n")}
     if (xoffset + width > levelData.width || yoffset + height > levelData.height || zoffset >= levelData.depth) {
       ctx._errors.push(C1.INVALID_VALUE);
       return;
+    }
+    if (checkFramebufferStatus(ctx, ctx._state.readFramebuffer) !== C1.FRAMEBUFFER_COMPLETE) {
+      ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
+      return;
+    }
+    if (ctx._state.readBuffer === C1.NONE) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    const readFbo = ctx._state.readFramebuffer;
+    if (readFbo !== null) {
+      const readPoint = ctx._state.readBuffer;
+      if (!readFbo._attachments.get(readPoint)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
     }
     if (copyFeedbackLoop(ctx, tex2, level, target, zoffset)) {
       ctx._errors.push(C1.INVALID_OPERATION);
@@ -35630,7 +36244,8 @@ ${inner.map((l) => "  " + l).join("\n")}
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
-        if (v2.length < (buffer === C2.COLOR ? 4 : 1)) {
+        const srcOffset = toU64(arguments[3]);
+        if (srcOffset + (buffer === C2.COLOR ? 4 : 1) > v2.length) {
           ctx._errors.push(C1.INVALID_VALUE);
           return;
         }
@@ -35644,7 +36259,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           }
         }
         try {
-          executeClearBuffer(ctx, buffer, drawbuffer, v2);
+          executeClearBuffer(ctx, buffer, drawbuffer, v2, srcOffset);
         } catch {
           ctx._errors.push(C1.INVALID_OPERATION);
         }
@@ -35665,7 +36280,8 @@ ${inner.map((l) => "  " + l).join("\n")}
           ctx._errors.push(C1.INVALID_VALUE);
           return;
         }
-        if (v2.length < 4) {
+        const srcOffset = toU64(arguments[3]);
+        if (srcOffset + 4 > v2.length) {
           ctx._errors.push(C1.INVALID_VALUE);
           return;
         }
@@ -35677,7 +36293,7 @@ ${inner.map((l) => "  " + l).join("\n")}
           return;
         }
         try {
-          executeClearBuffer(ctx, C2.COLOR, drawbuffer, v2);
+          executeClearBuffer(ctx, C2.COLOR, drawbuffer, v2, srcOffset);
         } catch {
           ctx._errors.push(C1.INVALID_OPERATION);
         }
