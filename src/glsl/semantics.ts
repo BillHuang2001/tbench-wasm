@@ -824,15 +824,27 @@ function registerInterfaceBlock(d: InterfaceBlockDecl, scope: Scope, ctx: SemCon
   }
   const blockType: GLSLType = { kind: 'struct', name: d.blockName, members };
   scope.declare({ kind: 'struct', name: d.blockName, type: blockType }, ctx, d.loc.line);
+  // The block instance (and bare members of instance-less blocks) carries the
+  // block's OWN storage qualifier (GLSL ES 3.00 §4.3.9): uniform blocks →
+  // 'uniform'; `out` (vertex) / `in` (fragment) varying blocks → 'out'/'in'.
+  // varIsWritable then allows writes to vertex `out` block members and
+  // rejects writes to fragment `in` (global input) and uniform block
+  // members. Absent storage is treated as uniform (matches
+  // analyzeInterfaceBlock's UBO path). Block members carry no storage of
+  // their own (parser rejects member storage qualifiers); member-access
+  // writability inherits from this instance symbol via analyzeMember.
+  const storage = d.qualifiers.storage === undefined ? 'uniform' : d.qualifiers.storage;
   if (d.instanceName !== null && d.instanceName !== '') {
     const t = wrapArrayDims(blockType, d.arrayDims, scope, ctx, false, d.loc.line);
-    scope.declare({ kind: 'var', name: d.instanceName, type: t, storage: 'uniform' }, ctx, d.loc.line);
+    scope.declare({ kind: 'var', name: d.instanceName, type: t, storage }, ctx, d.loc.line);
   } else {
     // Instance-less block: members are accessed by BARE name (GLSL ES 3.00
-    // §4.3.7) — register them as global read-only uniforms so expression
-    // analysis resolves them. The linker keeps them OUT of the default block.
+    // §4.3.7) — register them as global variables carrying the block's own
+    // storage qualifier ('uniform' read-only for uniform blocks; 'out'/'in'
+    // for instance-less varying blocks, which the linker supports). The
+    // linker keeps UBO members OUT of the default block.
     for (const m of members) {
-      scope.declare({ kind: 'var', name: m.name, type: m.type, storage: 'uniform' }, ctx, d.loc.line);
+      scope.declare({ kind: 'var', name: m.name, type: m.type, storage }, ctx, d.loc.line);
     }
   }
 }

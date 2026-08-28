@@ -212,7 +212,11 @@ let uboDual: Program | null = null;
   );
   const fs = compile(
     `#version 300 es
-     precision mediump float;
+     // PIN: highp must match the vertex stage's default (the VS declares no
+     // precision statement, so its default is highp). A mediump default here
+     // makes the shared struct uniform 'u' mismatch (highp vs mediump) — a
+     // link error per CTS shader-with-global-variable-precision-mismatch.html.
+     precision highp float;
      struct S { vec2 a; float b[2]; };
      in VS_OUT { vec4 c; float d; } fs;
      in float vPlain;
