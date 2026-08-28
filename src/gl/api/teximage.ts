@@ -2440,6 +2440,10 @@ const W2_UNSIZED: number[] = [
 /** texStorage requires a SIZED internalformat (norm16 gated on the extension). */
 function isW2SizedInternalFormat(ctx: WebGLRenderingContext, fmt: GLenum): boolean {
   if (isNorm16Format(fmt)) return ctx._extensions.has('EXT_texture_norm16');
+  // ETC2/EAC (GLES3 Table 3.19) are core sized COMPRESSED formats in WebGL2 —
+  // texStorage2D/3D accept them (WEBGL_compressed_texture_etc only exposes the
+  // constants; its 'implement' status is irrelevant to format validity).
+  if (ETC2_BYTES_PER_BLOCK[fmt] !== undefined) return true;
   return fmt in W2_COMBOS && !W2_UNSIZED.includes(fmt);
 }
 
@@ -2522,6 +2526,13 @@ function texStorage3DImpl(
   const lim = dimLimit(ctx, target);
   if (width > lim.maxW || height > lim.maxH || depth > lim.maxD) {
     ctx._errors.push(C1.INVALID_VALUE);
+    return;
+  }
+  // GLES 3.0.4 p147: ETC2/EAC compressed formats are 2D/2D_ARRAY-only —
+  // texStorage3D with target TEXTURE_3D → INVALID_OPERATION (not INVALID_ENUM;
+  // the format itself is legal for 2D_ARRAY).
+  if (target === C2.TEXTURE_3D && ETC2_BYTES_PER_BLOCK[internalformat] !== undefined) {
+    ctx._errors.push(C1.INVALID_OPERATION);
     return;
   }
   if (!isW2SizedInternalFormat(ctx, internalformat)) {

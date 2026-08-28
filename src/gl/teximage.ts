@@ -1500,6 +1500,19 @@ export function uploadTexSubImage(
   updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
 }
 
+/** Allocate one ETC2/EAC immutable level record (GLES3 Table 3.19): views
+ *  sized to the compressed block grid — ceil(w/4) × ceil(h/4) blocks of `bpb`
+ *  bytes each — per face (cube, all 6) or per layer (3D/2D_ARRAY, data[z]).
+ *  Storage is OPAQUE (nothing samples it; the raster has no compressed
+ *  decoder) — the views exist so completeness + draw paths stay well-formed. */
+function allocCompressedLevel(w: number, h: number, d: number, isCube: boolean, bpb: number): TextureLevel {
+  const bytes = Math.ceil(w / 4) * Math.ceil(h / 4) * bpb;
+  const views: ArrayBufferView[] = [];
+  const n = isCube ? 6 : d;
+  for (let i = 0; i < n; i++) views.push(new Uint8Array(bytes));
+  return { width: w, height: h, depth: isCube ? 6 : d, data: views };
+}
+
 /** texStorage2D/3D: allocate immutable mip chain. */
 export function allocateImmutableStorage(
   ctx: WebGLRenderingContext,
@@ -1513,8 +1526,10 @@ export function allocateImmutableStorage(
 ): void {
   void ctx;
   if (texture._immutable) return;
-  const spec = resolveStorageSpec(internalformat);
-  if (!spec) return;
+  const bpb = ETC2_BYTES_PER_BLOCK[internalformat];
+  const isCompressed = bpb !== undefined;
+  const spec = isCompressed ? null : resolveStorageSpec(internalformat);
+  if (!isCompressed && !spec) return;
   const img = ensureImage(texture, target);
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
   img.levels = [];
@@ -1522,7 +1537,9 @@ export function allocateImmutableStorage(
   let h = height;
   let d = depth;
   for (let l = 0; l < levels; l++) {
-    img.levels[l] = allocLevel(spec, w, h, d, isCube);
+    img.levels[l] = isCompressed
+      ? allocCompressedLevel(w, h, d, isCube, bpb as number)
+      : allocLevel(spec as FormatSpec, w, h, d, isCube);
     w = Math.max(1, w >> 1);
     h = Math.max(1, h >> 1);
     // The mip pyramid halves depth only for TEXTURE_3D; TEXTURE_2D_ARRAY
@@ -1531,10 +1548,10 @@ export function allocateImmutableStorage(
   }
   texture._immutable = true;
   texture._internalFormat = internalformat;
-  texture._compressed = false;
+  texture._compressed = isCompressed;
   img.immutable = true;
   img.internalFormat = internalformat;
-  img.info = toPixelFormatInfo(spec);
+  img.info = isCompressed ? PLACEHOLDER_INFO : toPixelFormatInfo(spec as FormatSpec);
   img.target = canonTarget(target);
   img.width = width;
   img.height = height;
