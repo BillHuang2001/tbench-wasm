@@ -21,8 +21,11 @@
  *    WebGL2: bindBuffer(UNIFORM_BUFFER/TRANSFORM_FEEDBACK_BUFFER, b) binds the
  *    GENERIC binding point only — the indexed binding points are untouched
  *    (CTS uniform-buffers-state-restoration.html, simultaneous_binding.html).
- *    bindBufferBase/bindBufferRange with index 0 additionally update the
- *    generic point (GLES 3.0 §2.10.1; same two pages).
+ *    bindBufferBase/bindBufferRange at ANY index additionally update the
+ *    generic point (GLES 3.0 §2.10.1 — the generic binding follows any indexed
+ *    bind, so the following bufferData(TRANSFORM_FEEDBACK_BUFFER, ...) hits
+ *    the just-bound buffer; CTS too-small-buffers.html binds index 1 and
+ *    bufferData's it).
  *    Per WebGL2 §BUFFER_OBJECT_BINDING the buffer-type split is element-array vs
  *    other-data: a TF bind only rejects element-array buffers and does NOT fix
  *    the buffer's target (a TF-bound buffer can later bind ARRAY_BUFFER —
@@ -73,9 +76,13 @@
  *    is ACTIVE, bindBufferBase/Range with TRANSFORM_FEEDBACK_BUFFER →
  *    INVALID_OPERATION before any other validation (GLES 3.0 §2.13; CTS
  *    transform_feedback.html runUnchangedBufferBindingsTest,
- *    switching-objects.html). TF indexed bindings are recorded on the buffer
- *    object (_tfRangeBindings — last bind at an index wins) and mirrored into
- *    the bound TF object's _buffers/_bufferRanges.
+ *    switching-objects.html). Indexed TF bindings are transform-feedback-
+ *    OBJECT state (GLES 3.0 §6.24): bindBufferBase/Range while a TF object is
+ *    bound writes that object's _buffers/_bufferRanges only (persisting across
+ *    bindTransformFeedback switches — CTS switching-objects.html); with NO TF
+ *    object bound the binding belongs to the DEFAULT TF object (name 0),
+ *    recorded in the buffers' _tfRangeBindings mirror (last bind at an index
+ *    wins) and copied into the default object at beginTransformFeedback.
  *  - bufferData/bufferSubData/getBufferSubData/copyBufferSubData fail with
  *    INVALID_OPERATION when the buffer is caught by the transform-feedback
  *    binding rules (spec "Preventing undefined behavior with Transform
@@ -140,10 +147,10 @@ function isLost(ctx: WebGLRenderingContext): boolean {
  * Generic (non-indexed) UNIFORM_BUFFER / TRANSFORM_FEEDBACK_BUFFER bindings.
  * Per GLES 3.0 §2.10.1 the generic point is DISTINCT from the indexed binding
  * points: bindBuffer(UNIFORM_BUFFER/TRANSFORM_FEEDBACK_BUFFER, b) touches only
- * the generic point, while bindBufferBase/bindBufferRange with index 0 touch
+ * the generic point, while bindBufferBase/bindBufferRange at ANY index touch
  * both. bufferData/getBufferSubData/getBufferParameter on those targets operate
  * on the generic binding (CTS uniform-buffers-state-restoration.html,
- * large-uniform-buffers.html, switching-objects.html).
+ * large-uniform-buffers.html, switching-objects.html, too-small-buffers.html).
  * baseUniformIndices tracks UBO indices bound via bindBufferBase — their
  * whole-buffer range follows later bufferData resizes (CTS
  * uniform-buffers-state-restoration.html binds an unallocated buffer with
@@ -172,7 +179,7 @@ function genericBindingState(ctx: WebGLRenderingContext): GenericBindings {
  * getParameter(UNIFORM_BUFFER_BINDING / TRANSFORM_FEEDBACK_BUFFER_BINDING)
  * must report (GLES 3.0 §2.10.1: "the generic buffer binding point" is
  * distinct from the indexed points; bindBuffer touches only it, while
- * bindBufferBase/bindBufferRange with index 0 update both). getters.ts reads
+ * bindBufferBase/bindBufferRange at ANY index update both). getters.ts reads
  * this instead of the indexed/old-model state (CTS switching-objects.html,
  * uniform-buffers.html).
  */
@@ -470,17 +477,24 @@ function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: G
       s.uniformBuffers[index] = null;
       s.uniformBufferRanges[index] = { offset: 0, size: 0 };
       genericBindingState(ctx).baseUniformIndices.delete(index);
-      if (index === 0) genericBindingState(ctx).uniformBuffer = null;
+      // GLES 3.0 §2.10.1: bindBufferBase at ANY index (also) updates the
+      // generic binding point — unbinding at any index clears it too.
+      genericBindingState(ctx).uniformBuffer = null;
     } else {
-      clearTfBinding(ctx, index);
-      // Unbinding while a TF object is bound clears that object's indexed
-      // binding too (indexed TF bindings are per-object state).
       const boundTf = s.transformFeedback;
       if (boundTf) {
+        // Unbinding while a TF object is bound clears THAT object's indexed
+        // binding only (indexed TF bindings are per-object state, GLES 3.0
+        // §6.24; the default object's bindings — the global mirror — are
+        // untouched).
         boundTf._buffers[index] = null;
         boundTf._bufferRanges[index] = { offset: 0, size: 0 };
+      } else {
+        clearTfBinding(ctx, index); // default-TF binding (global mirror)
       }
-      if (index === 0) genericBindingState(ctx).transformFeedbackBuffer = null;
+      // GLES 3.0 §2.10.1: any-index bindBufferBase(null) clears the generic
+      // TRANSFORM_FEEDBACK_BUFFER binding point too.
+      genericBindingState(ctx).transformFeedbackBuffer = null;
     }
     return;
   }
@@ -514,19 +528,28 @@ function bindBufferBaseImpl(ctx: WebGLRenderingContext, target: GLenum, index: G
     genericBindingState(ctx).baseUniformIndices.add(index);
     s.uniformBuffers[index] = buf;
     s.uniformBufferRanges[index] = { offset: 0, size: buf._size };
-    if (index === 0) genericBindingState(ctx).uniformBuffer = buf;
+    // GLES 3.0 §2.10.1: bindBufferBase at ANY index also updates the generic
+    // binding point (native behavior; bufferData/bufferSubData/
+    // getBufferSubData on UNIFORM_BUFFER operate on the generic point).
+    genericBindingState(ctx).uniformBuffer = buf;
   } else {
-    // Indexed TF bindings are transform-feedback-OBJECT state (GLES 3.0 §6.24):
-    // record on the bound object (getIndexedParameter reads it) and mirror into
-    // the global _tfRangeBindings (source for the webgl2 agent's bind/begin
-    // sync, begin's buffer-count validation, and the default-TF path).
+    // Indexed TF bindings are transform-feedback-OBJECT state (GLES 3.0
+    // §6.24): record on the BOUND object (getIndexedParameter / draw capture
+    // read it). With no TF object bound the binding belongs to the DEFAULT TF
+    // object (name 0) — recorded in the global _tfRangeBindings mirror, which
+    // the webgl2 agent copies into the default object at beginTransformFeedback.
     const boundTf = s.transformFeedback;
     if (boundTf) {
       boundTf._buffers[index] = buf;
       boundTf._bufferRanges[index] = { offset: 0, size: buf._size };
+    } else {
+      setTfBinding(ctx, index, buf, 0, buf._size); // whole buffer (default TF)
     }
-    setTfBinding(ctx, index, buf, 0, buf._size); // whole buffer
-    if (index === 0) genericBindingState(ctx).transformFeedbackBuffer = buf;
+    // GLES 3.0 §2.10.1: bindBufferBase at ANY index also updates the generic
+    // TRANSFORM_FEEDBACK_BUFFER binding point (native behavior; CTS
+    // too-small-buffers.html binds index 1 and expects the subsequent
+    // bufferData(TRANSFORM_FEEDBACK_BUFFER, ...) to allocate buffer1's store).
+    genericBindingState(ctx).transformFeedbackBuffer = buf;
   }
 }
 
@@ -936,17 +959,23 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
           s.uniformBuffers[index] = null;
           s.uniformBufferRanges[index] = { offset: 0, size: 0 };
           genericBindingState(ctx).baseUniformIndices.delete(index);
-          if (index === 0) genericBindingState(ctx).uniformBuffer = null;
+          // GLES 3.0 §2.10.1: any-index bindBufferRange(null) clears the
+          // generic binding point too.
+          genericBindingState(ctx).uniformBuffer = null;
         } else {
-          clearTfBinding(ctx, index);
-          // Unbinding while a TF object is bound clears that object's indexed
-          // binding too (indexed TF bindings are per-object state).
           const boundTf = s.transformFeedback;
           if (boundTf) {
+            // Unbinding while a TF object is bound clears THAT object's
+            // indexed binding only (per-object state; the default object's
+            // bindings — the global mirror — are untouched).
             boundTf._buffers[index] = null;
             boundTf._bufferRanges[index] = { offset: 0, size: 0 };
+          } else {
+            clearTfBinding(ctx, index); // default-TF binding (global mirror)
           }
-          if (index === 0) genericBindingState(ctx).transformFeedbackBuffer = null;
+          // GLES 3.0 §2.10.1: any-index bindBufferRange(null) clears the
+          // generic TRANSFORM_FEEDBACK_BUFFER binding point too.
+          genericBindingState(ctx).transformFeedbackBuffer = null;
         }
         return;
       }
@@ -1000,15 +1029,23 @@ export function installBuffersApi(proto: WebGLRenderingContext): void {
         genericBindingState(ctx).baseUniformIndices.delete(index);
         s.uniformBuffers[index] = buf;
         s.uniformBufferRanges[index] = { offset, size: rangeSize };
-        if (index === 0) genericBindingState(ctx).uniformBuffer = buf;
+        // GLES 3.0 §2.10.1: any-index bindBufferRange also updates the
+        // generic UNIFORM_BUFFER binding point.
+        genericBindingState(ctx).uniformBuffer = buf;
       } else {
+        // Indexed TF bindings are transform-feedback-OBJECT state (GLES 3.0
+        // §6.24): record on the BOUND object; with no TF object bound the
+        // binding belongs to the DEFAULT TF object (global mirror).
         const boundTf = s.transformFeedback;
         if (boundTf) {
           boundTf._buffers[index] = buf;
           boundTf._bufferRanges[index] = { offset, size: rangeSize };
+        } else {
+          setTfBinding(ctx, index, buf, offset, rangeSize);
         }
-        setTfBinding(ctx, index, buf, offset, rangeSize);
-        if (index === 0) genericBindingState(ctx).transformFeedbackBuffer = buf;
+        // GLES 3.0 §2.10.1: any-index bindBufferRange also updates the
+        // generic TRANSFORM_FEEDBACK_BUFFER binding point.
+        genericBindingState(ctx).transformFeedbackBuffer = buf;
       }
     };
 

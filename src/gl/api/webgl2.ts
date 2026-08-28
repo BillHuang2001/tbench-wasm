@@ -62,13 +62,19 @@
  *    (switching-objects.html allows beginning a DIFFERENT TF while another is
  *    active-paused), no linked program in use, program has no TF varyings
  *    (runNoOutputsTest), or fewer TF buffers bound than needed (INTERLEAVED ≥1;
- *    SEPARATE one per varying — checked against the global indexed bindings).
+ *    SEPARATE one per varying — counted against the BEGUN object's own indexed
+ *    bindings).
  *    bindTransformFeedback rejected only while BOUND TF active AND unpaused.
- *    TF indexed bindings are GLOBAL state per the updated Khronos spec
- *    (switching-objects.html); the bound TF's _buffers/_bufferRanges are
- *    re-synced from the buffers agent's _tfRangeBindings at bind/begin time
- *    (getters.ts TRANSFORM_FEEDBACK_BUFFER_BINDING and the draw engine read
- *    _buffers). Delete of an active TF → INVALID_OPERATION (CTS).
+ *    Indexed TF bindings are PER-TF-OBJECT state (GLES 3.0 §6.24): while a TF
+ *    object is bound, bindBufferBase/Range writes its _buffers/_bufferRanges
+ *    and they persist across bindTransformFeedback switches
+ *    (switching-objects.html); bindTransformFeedback only initializes a
+ *    NEVER-bound object once from the buffers agent's global mirror. With no
+ *    TF object bound the indexed bindings belong to the DEFAULT TF object
+ *    (name 0) — the mirror — copied into the default object at begin. The
+ *    generic TRANSFORM_FEEDBACK_BUFFER binding point is context-global
+ *    (getters.ts reads it) and bindTransformFeedback never touches it. Delete
+ *    of an active TF → INVALID_OPERATION (CTS).
  *  - getInternalformatParameter: RENDERBUFFER + SAMPLES only; internalformat
  *    must be an ES3 renderable format (local list — raster/formats.ts
  *    isValidRenderbufferFormat is a throwing stub); returns Int32Array([4]),
@@ -302,6 +308,17 @@ function defaultVAO(ctx: WebGLRenderingContext): VAOState {
 const everBoundTFs = new WeakSet<WebGLTransformFeedback>();
 
 /**
+ * Named TF objects whose indexed TRANSFORM_FEEDBACK_BUFFER bindings have been
+ * initialized (from the global mirror) at least once. After that, the object's
+ * OWN bindings win: bindBufferBase/Range writes them directly while the object
+ * is bound, and bindTransformFeedback must never clobber them (GLES 3.0 §2.15/
+ * §6.24 — CTS switching-objects.html persists per-object bindings across
+ * object switches). A fresh named object inherits the mirror once so bindings
+ * made while no TF object was bound are visible on its first bind/begin.
+ */
+const tfInitialized = new WeakSet<WebGLTransformFeedback>();
+
+/**
  * The default transform feedback object (the active TF when no TF object is
  * bound; name 0 per GLES 3.0 §2.15). Usually kept OUT of state.transformFeedback
  * so getParameter(TRANSFORM_FEEDBACK_BINDING) stays null (CTS
@@ -321,9 +338,11 @@ function getDefaultTF(ctx: WebGLRenderingContext): WebGLTransformFeedback {
 }
 
 /**
- * Indexed TRANSFORM_FEEDBACK_BUFFER binding at `index` (last bind wins).
- * MIRROR of buffers.ts's private helper — the source of truth is the buffer
- * objects' _tfRangeBindings entries (global per the updated Khronos spec).
+ * Indexed TRANSFORM_FEEDBACK_BUFFER binding at `index` from the GLOBAL mirror
+ * (last bind wins). The mirror is the DEFAULT TF object's (name 0) indexed
+ * bindings — the bindings made via bindBufferBase/Range while NO TF object was
+ * bound (api/buffers.ts records them in the buffers' _tfRangeBindings). Used
+ * to initialize the default object and never-bound named objects.
  */
 function tfBindingAtIndex(
   ctx: WebGLRenderingContext,
@@ -340,10 +359,16 @@ function tfBindingAtIndex(
 }
 
 /**
- * Mirror the global indexed TF buffer bindings into the TF object's
- * _buffers/_bufferRanges (getters.ts TRANSFORM_FEEDBACK_BUFFER_BINDING reads
- * `_buffers[0]`; the draw engine captures via _buffers). Called at bind and
- * begin so late bindBufferBase calls are picked up.
+ * Initialize `tf`'s indexed TRANSFORM_FEEDBACK_BUFFER bindings. Called at
+ * bindTransformFeedback and beginTransformFeedback — it must NOT clobber
+ * existing per-object bindings (switching-objects.html rebinds tf1 after tf2
+ * and expects tf1's own buffer):
+ * - DEFAULT TF object (name 0): always rebuilt from the global mirror (the
+ *   mirror IS the default object's state; bindBufferBase while no TF object is
+ *   bound writes there — default_transform_feedback.html, too-small-buffers.html).
+ * - Named object on FIRST bind/begin: initialized once from the mirror;
+ *   afterwards the object's own bindings win (bindBufferBase/Range writes them
+ *   directly while the object is bound).
  */
 function syncTfBuffers(ctx: WebGLRenderingContext, tf: WebGLTransformFeedback): void {
   const n = ctx._state.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS;
@@ -351,10 +376,22 @@ function syncTfBuffers(ctx: WebGLRenderingContext, tf: WebGLTransformFeedback): 
     tf._buffers = new Array<WebGLBuffer | null>(n).fill(null);
     tf._bufferRanges = Array.from({ length: n }, () => ({ offset: 0, size: 0 }));
   }
-  for (let i = 0; i < n; i++) {
-    const b = tfBindingAtIndex(ctx, i);
-    tf._buffers[i] = b.buffer;
-    tf._bufferRanges[i] = { offset: b.offset, size: b.size };
+  const isDefault = tf === defaultTFs.get(ctx);
+  if (isDefault) {
+    for (let i = 0; i < n; i++) {
+      const b = tfBindingAtIndex(ctx, i);
+      tf._buffers[i] = b.buffer;
+      tf._bufferRanges[i] = { offset: b.offset, size: b.size };
+    }
+  } else if (!tfInitialized.has(tf)) {
+    tfInitialized.add(tf);
+    for (let i = 0; i < n; i++) {
+      const b = tfBindingAtIndex(ctx, i);
+      if (b.buffer !== null) {
+        tf._buffers[i] = b.buffer;
+        tf._bufferRanges[i] = { offset: b.offset, size: b.size };
+      }
+    }
   }
 }
 
@@ -971,6 +1008,9 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
       if (tf === null) return; // cross-context/deleted → INVALID_OPERATION pushed
       s.transformFeedback = tf;
       everBoundTFs.add(tf);
+      // Initialize only a NEVER-bound object's indexed bindings from the
+      // global mirror (once); a previously-bound object keeps its own
+      // per-object bindings (GLES 3.0 §2.15 / §6.24 — CTS switching-objects.html).
       syncTfBuffers(ctx, tf);
     };
   }
@@ -1002,18 +1042,22 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         ctx._errors.push(C1.INVALID_OPERATION); // CTS runNoOutputsTest
         return;
       }
-      // Buffer-bound check against the global indexed TF bindings (the source
-      // of truth for bindBufferBase; also what the default TF captures from).
+      const tf = bound !== null ? bound : getDefaultTF(ctx);
+      // Initialize the begun object's indexed bindings (first bind of a named
+      // object from the mirror; the default object always from the mirror),
+      // then count what THIS object has bound (GLES 3.0 §2.15: the buffers of
+      // the transform feedback object being begun — per-object state, not the
+      // global mirror; the default object's bindings ARE the mirror).
+      syncTfBuffers(ctx, tf);
       const needed = program._tfBufferMode === C2.SEPARATE_ATTRIBS ? varyings.length : 1;
       let boundCount = 0;
       for (let i = 0; i < s.limits.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS; i++) {
-        if (tfBindingAtIndex(ctx, i).buffer !== null) boundCount++;
+        if (tf._buffers[i] !== null) boundCount++;
       }
       if (boundCount < needed) {
         ctx._errors.push(C1.INVALID_OPERATION); // insufficient TF buffers bound
         return;
       }
-      const tf = bound !== null ? bound : getDefaultTF(ctx);
       if (bound === null) {
         // Default-TF session: expose the default object through
         // state.transformFeedback so the draw engine's tfActive check
@@ -1025,7 +1069,6 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         // endTransformFeedback restores null below).
         s.transformFeedback = tf;
       }
-      syncTfBuffers(ctx, tf);
       tf._program = program;
       tf._active = true;
       tf._paused = false;
