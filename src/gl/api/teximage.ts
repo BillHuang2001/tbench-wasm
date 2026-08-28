@@ -590,7 +590,12 @@ function w2ValidateFormatType(
   pixels: unknown,
 ): boolean {
   if (!w2InternalformatValid(ctx, internalformat)) {
-    ctx._errors.push(C1.INVALID_ENUM);
+    // norm16 formats (R16_EXT etc.) are valid GLES3 Table 3.2 formats gated
+    // on EXT_texture_norm16 — without the extension they are rejected with
+    // INVALID_OPERATION, NOT INVALID_ENUM (CTS tex-image-with-bad-args.html
+    // accepts only INVALID_VALUE/INVALID_OPERATION for 0x822A).
+    if (isNorm16Format(internalformat)) ctx._errors.push(C1.INVALID_OPERATION);
+    else ctx._errors.push(C1.INVALID_ENUM);
     return false;
   }
   if (!W2_FORMATS.includes(format)) {
