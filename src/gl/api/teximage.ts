@@ -1437,6 +1437,12 @@ function texSubImage2DBuffer(
       if (!w2ValidatePbo(ctx, pixels)) return;
       if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
     } else if (ArrayBuffer.isView(pixels)) {
+      // WebGL2: the view's element type must match `type` (texImage2D already
+      // enforces this via w2ValidateFormatType; texSubImage2D must too).
+      if (!w2TypeMatchesView(type, pixels)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
       if (!validatePixelsSize(ctx, pixels, width, height, 1, format, type, false)) return;
     } else {
       ctx._errors.push(C1.INVALID_OPERATION);
@@ -1569,6 +1575,12 @@ function texSubImage3DBuffer(
     // (the PBO path is already rejected in w2ValidatePbo).
     const unpack = ctx._state.pixelStore.unpack;
     if (unpack.flipY || unpack.premultiplyAlpha) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+    // WebGL2: the view's element type must match `type` (texImage3D already
+    // enforces this via w2ValidateFormatType; texSubImage3D must too).
+    if (!w2TypeMatchesView(type, pixels)) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
