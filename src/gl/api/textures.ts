@@ -455,17 +455,29 @@ export function installTexturesApi(proto: WebGLRenderingContext): void {
     }
     if (img.info.isFloat) {
       if (ctx._version === 2) {
-        // RGB9_E5 is never mipmap-generatable; the 16F formats are
-        // mipmap-generatable with either float extension (EXT_color_buffer_half_float
-        // makes them color-renderable → their mip chain must be buildable), all
-        // other float formats need EXT_color_buffer_float.
+        // GLES 3.0 §3.8.14 + Table 3.13: the base level's internal format must
+        // be BOTH color-renderable AND texture-filterable. 16F formats are
+        // texture-filterable in core; 32F formats become filterable only with
+        // OES_texture_float_linear (WebGL2); RGB9_E5, RGB32F and
+        // R11F_G11F_B10F are never color-renderable. (CTS
+        // tex-mipmap-levels.html: RGBA32F generateMipmap fails with only
+        // EXT_color_buffer_float enabled and succeeds once
+        // OES_texture_float_linear is also enabled.)
+        const fmt = img.internalFormat;
         const is16F =
-          img.internalFormat === 0x822d /* R16F */ ||
-          img.internalFormat === 0x822f /* RG16F */ ||
-          img.internalFormat === 0x881a /* RGBA16F */;
-        const floatExtOK = ctx._extensions.has('EXT_color_buffer_float') ||
-          (is16F && ctx._extensions.has('EXT_color_buffer_half_float'));
-        if (img.internalFormat === RGB9_E5 || !floatExtOK) {
+          fmt === 0x822d /* R16F */ ||
+          fmt === 0x822f /* RG16F */ ||
+          fmt === 0x881a /* RGBA16F */;
+        const is32F =
+          fmt === 0x822e /* R32F */ ||
+          fmt === 0x8230 /* RG32F */ ||
+          fmt === 0x8814 /* RGBA32F */;
+        const renderable =
+          (is16F && (ctx._extensions.has('EXT_color_buffer_float') ||
+            ctx._extensions.has('EXT_color_buffer_half_float'))) ||
+          (is32F && ctx._extensions.has('EXT_color_buffer_float'));
+        const filterable = !is32F || ctx._extensions.has('OES_texture_float_linear');
+        if (fmt === RGB9_E5 || !renderable || !filterable) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
