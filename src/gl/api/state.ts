@@ -14,7 +14,7 @@
  *    NO_ERROR after every void call while lost).
  *    WebIDL conversion failures (wrong argument types) still throw TypeError.
  *  - pixelStorei: UNPACK/PACK_ALIGNMENT ∈ {1,2,4,8} (INVALID_VALUE otherwise);
- *    UNPACK_FLIP_Y/PREMULTIPLY_ALPHA ∈ {0,1} (INVALID_VALUE otherwise);
+ *    UNPACK_FLIP_Y/PREMULTIPLY_ALPHA: any nonzero value = true (WebIDL GLboolean, no error);
  *    UNPACK_COLORSPACE_CONVERSION ∈ {BROWSER_DEFAULT_WEBGL, NONE}; WebGL2
  *    ROW_LENGTH, SKIP_ROWS, SKIP_PIXELS, IMAGE_HEIGHT, SKIP_IMAGES pnames
  *    accept any value ≥ 0 and are INVALID_ENUM on WebGL1. Integer pnames are
@@ -541,18 +541,12 @@ export function installStateApi(proto: WebGLRenderingContext): void {
         return;
       }
       case C1.UNPACK_FLIP_Y_WEBGL: {
-        if (v !== 0 && v !== 1) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
+        // WebIDL GLboolean: ANY nonzero value is true — no error.
         s.pixelStore.unpack.flipY = v !== 0;
         return;
       }
       case C1.UNPACK_PREMULTIPLY_ALPHA_WEBGL: {
-        if (v !== 0 && v !== 1) {
-          ctx._errors.push(C1.INVALID_VALUE);
-          return;
-        }
+        // WebIDL GLboolean: ANY nonzero value is true — no error.
         s.pixelStore.unpack.premultiplyAlpha = v !== 0;
         return;
       }
