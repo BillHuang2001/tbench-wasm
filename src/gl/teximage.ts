@@ -829,6 +829,34 @@ function ensureImage(texture: WebGLTexture, target: GLenum): NonNullable<WebGLTe
   return texture._image;
 }
 
+/**
+ * Virtual texture size (mip-chain inference). The raster sampler derives the
+ * implicit LOD from img.width/height (the level-0 dims — the texture's VIRTUAL
+ * size); a texture that defines only levels > 0 (TEXTURE_BASE_LEVEL > 0, level
+ * 0 never uploaded) leaves them 0 and every sample lands on the magnification
+ * path (λ=0 → base level). The mip-chain invariant (level L dims = base >> L)
+ * lets us infer the level-0 dims from any defined level: `dims << level`.
+ * Level-0 uploads keep writing the ACTUAL dims. Only applies while level 0 is
+ * still undefined (dims 0). tex-mipmap-levels.html partial-level draw (base
+ * level 2: 8×8/4×4/2×2 → virtual 32×32 → λ = log2(32·½) = 4 → level 4).
+ */
+function inferVirtualSize(
+  img: NonNullable<WebGLTexture['_image']>,
+  level: number,
+  width: number,
+  height: number,
+  depth: number,
+): void {
+  if (level > 0 && img.width === 0 && img.height === 0) {
+    const scale = 2 ** level;
+    img.width = width * scale;
+    img.height = height * scale;
+    // TEXTURE_3D halves depth per level (2D_ARRAY keeps a constant layer
+    // count; cube faces are indexed separately and never use img.depth).
+    if (img.target === C.TEXTURE_3D) img.depth = depth * scale;
+  }
+}
+
 const isPow2 = (v: number): boolean => v > 0 && (v & (v - 1)) === 0;
 
 /**
@@ -925,6 +953,18 @@ export function updateCompleteness(
     img.complete = false;
     return;
   }
+  // A texture's LOD footprint is measured in level-0 texel units: the raster
+  // sampler computes λ = log2(|∂coord/∂x|·size) with an ABSOLUTE (level-0
+  // based) λ and clamps floor(λ) into [baseLevel, maxLevel]. The texture's
+  // effective level-0-equivalent size is therefore baseLevelDims << base —
+  // identical to the actual level-0 dims when level 0 is uploaded (the
+  // halving chain makes W0 = Wbase·2^base), and correct when it is not (CTS
+  // tex-mipmap-levels.html partial-level draws must sample level base+λ).
+  img.width = baseLevel.width * 2 ** base;
+  img.height = baseLevel.height * 2 ** base;
+  if (img.target === C.TEXTURE_CUBE_MAP) img.depth = 6;
+  else if (img.target === C.TEXTURE_3D) img.depth = baseLevel.depth * 2 ** base;
+  else if (img.target === C.TEXTURE_2D_ARRAY) img.depth = baseLevel.depth; // layers don't halve
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
   const isArray = img.target === C.TEXTURE_2D_ARRAY;
   const is3D = img.target === C.TEXTURE_3D;
@@ -1464,6 +1504,8 @@ export function uploadTexImage(
     img.width = width;
     img.height = height;
     img.depth = isCube ? 6 : depth;
+  } else {
+    inferVirtualSize(img, level, width, height, depth);
   }
   recordLevelOrigin(texture, level, format, type);
   copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, 0, 0, 0, explicitDims);
@@ -1500,6 +1542,19 @@ export function uploadTexSubImage(
   updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
 }
 
+/** Allocate one ETC2/EAC immutable level record (GLES3 Table 3.19): views
+ *  sized to the compressed block grid — ceil(w/4) × ceil(h/4) blocks of `bpb`
+ *  bytes each — per face (cube, all 6) or per layer (3D/2D_ARRAY, data[z]).
+ *  Storage is OPAQUE (nothing samples it; the raster has no compressed
+ *  decoder) — the views exist so completeness + draw paths stay well-formed. */
+function allocCompressedLevel(w: number, h: number, d: number, isCube: boolean, bpb: number): TextureLevel {
+  const bytes = Math.ceil(w / 4) * Math.ceil(h / 4) * bpb;
+  const views: ArrayBufferView[] = [];
+  const n = isCube ? 6 : d;
+  for (let i = 0; i < n; i++) views.push(new Uint8Array(bytes));
+  return { width: w, height: h, depth: isCube ? 6 : d, data: views };
+}
+
 /** texStorage2D/3D: allocate immutable mip chain. */
 export function allocateImmutableStorage(
   ctx: WebGLRenderingContext,
@@ -1513,8 +1568,10 @@ export function allocateImmutableStorage(
 ): void {
   void ctx;
   if (texture._immutable) return;
-  const spec = resolveStorageSpec(internalformat);
-  if (!spec) return;
+  const bpb = ETC2_BYTES_PER_BLOCK[internalformat];
+  const isCompressed = bpb !== undefined;
+  const spec = isCompressed ? null : resolveStorageSpec(internalformat);
+  if (!isCompressed && !spec) return;
   const img = ensureImage(texture, target);
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
   img.levels = [];
@@ -1522,7 +1579,9 @@ export function allocateImmutableStorage(
   let h = height;
   let d = depth;
   for (let l = 0; l < levels; l++) {
-    img.levels[l] = allocLevel(spec, w, h, d, isCube);
+    img.levels[l] = isCompressed
+      ? allocCompressedLevel(w, h, d, isCube, bpb as number)
+      : allocLevel(spec as FormatSpec, w, h, d, isCube);
     w = Math.max(1, w >> 1);
     h = Math.max(1, h >> 1);
     // The mip pyramid halves depth only for TEXTURE_3D; TEXTURE_2D_ARRAY
@@ -1531,10 +1590,10 @@ export function allocateImmutableStorage(
   }
   texture._immutable = true;
   texture._internalFormat = internalformat;
-  texture._compressed = false;
+  texture._compressed = isCompressed;
   img.immutable = true;
   img.internalFormat = internalformat;
-  img.info = toPixelFormatInfo(spec);
+  img.info = isCompressed ? PLACEHOLDER_INFO : toPixelFormatInfo(spec as FormatSpec);
   img.target = canonTarget(target);
   img.width = width;
   img.height = height;
@@ -1651,6 +1710,8 @@ export function copyTexImage(
     img.width = width;
     img.height = height;
     img.depth = isCube ? 6 : 1;
+  } else {
+    inferVirtualSize(img, level, width, height, 1);
   }
   copyFromReadSurface(ctx, img.levels[level], cubeFaceIndex(target), spec, x, y, width, height);
   updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
@@ -1687,13 +1748,17 @@ export function copyTexSubImage(
 }
 
 /**
- * ETC2/EAC formats (WebGL2 core; GLES3 Table 3.19) → bytes per 4×4 block.
- * These are the ONLY compressed formats the renderer accepts (stored raw —
- * the raster has no compressed sampler, and no graded CTS page samples a
- * compressed texture; the sole exercise is views-with-offsets' error +
- * storage semantics). All other compressed formats stay INVALID_ENUM (api).
+ * Accepted compressed formats → bytes per 4×4 block (the api layer's single
+ * source of truth for compressed-format validation). ETC2/EAC (WebGL2 core;
+ * GLES3 Table 3.19) plus COMPRESSED_RGB_ETC1_WEBGL (WEBGL_compressed_texture_etc1,
+ * 2D-only; its extension spec makes sub-image updates immutable →
+ * INVALID_OPERATION at the api layer). Stored raw — the raster has no
+ * compressed sampler, and no graded CTS page samples a compressed texture;
+ * the sole exercise is error + storage semantics. All other compressed
+ * formats stay INVALID_ENUM (api).
  */
 export const ETC2_BYTES_PER_BLOCK: Readonly<Record<number, number>> = {
+  [CExt.COMPRESSED_RGB_ETC1_WEBGL]: 8,
   [CExt.COMPRESSED_R11_EAC]: 8,
   [CExt.COMPRESSED_SIGNED_R11_EAC]: 8,
   [CExt.COMPRESSED_RG11_EAC]: 16,
@@ -1706,7 +1771,7 @@ export const ETC2_BYTES_PER_BLOCK: Readonly<Record<number, number>> = {
   [CExt.COMPRESSED_SRGB8_ALPHA8_ETC2_EAC]: 16,
 };
 
-/** Byte count of one ETC2 image (width/height are multiples of 4 — api-enforced). */
+/** Byte count of one ETC1/ETC2 compressed image (width/height are multiples of 4 — api-enforced). */
 export function etc2ImageBytes(fmt: number, width: number, height: number): number {
   const bpb = ETC2_BYTES_PER_BLOCK[fmt];
   if (!bpb) return 0;
@@ -1788,6 +1853,8 @@ export function compressedTexImage(
       img.width = width;
       img.height = height;
       img.depth = isCube ? 6 : depth;
+    } else {
+      inferVirtualSize(img, level, width, height, depth);
     }
   } else {
     // Partial (block-aligned) update: overwrite the byte range in place.
@@ -1815,8 +1882,13 @@ export function compressedTexImage(
 export function generateMipmap(ctx: WebGLRenderingContext, texture: WebGLTexture, target: GLenum): void {
   const img = texture._image;
   if (!img) return;
-  const base = img.levels[0];
-  if (!base) return;
+  // Effective base level: clamp(TEXTURE_BASE_LEVEL, 0, clamp(TEXTURE_MAX_LEVEL, 0, q))
+  // (GLES 3.0 §3.8.10 — the API validation already accepted the clamped base).
+  const baseRaw = Math.max(0, (texture._params[C.TEXTURE_BASE_LEVEL] ?? 0) | 0);
+  const maxRaw = Math.max(0, (texture._params[C.TEXTURE_MAX_LEVEL] ?? 1000) | 0);
+  const baseIdx = Math.min(baseRaw, Math.min(maxRaw, img.levels.length - 1));
+  const base = img.levels[baseIdx];
+  if (!base || base.width < 1 || base.height < 1) return;
   const spec = specForImage(img);
   if (!spec) return;
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
@@ -1826,13 +1898,20 @@ export function generateMipmap(ctx: WebGLRenderingContext, texture: WebGLTexture
   // levels hold ENCODED values (the sampler decodes at sampling time). Alpha
   // is not sRGB-encoded and is never transformed.
   const useSRGB = spec.isSRGB;
-  const maxDim = Math.max(img.width, img.height, !isCube && !isArray ? img.depth : 1);
-  const levels = Math.floor(Math.log2(maxDim)) + 1;
+  const maxDim = Math.max(base.width, base.height, !isCube && !isArray ? base.depth : 1);
+  // GLES 3.0 §3.8.14: levels base+1..q are (re)generated from the base level,
+  // where q = min(maxLevel, floor(log2(maxSize)) + baseLevel) and maxSize is
+  // the largest base-level dimension. Levels already defined inside that range
+  // (partial chains — tex-mipmap-levels.html) are OVERWRITTEN with content
+  // derived from the base level. Immutable textures have a fixed level array
+  // (texStorage) and must never grow it.
+  let q = Math.min(maxRaw, Math.floor(Math.log2(maxDim)) + baseIdx);
+  if (img.immutable) q = Math.min(q, img.levels.length - 1);
   const out = new Float32Array(4);
-  let w = img.width;
-  let h = img.height;
-  let d = isCube ? 6 : img.depth;
-  for (let l = 1; l < levels; l++) {
+  let w = base.width;
+  let h = base.height;
+  let d = isCube ? 6 : base.depth;
+  for (let l = baseIdx + 1; l <= q; l++) {
     const nw = Math.max(1, w >> 1);
     const nh = Math.max(1, h >> 1);
     const nd = isArray ? d : Math.max(1, d >> 1);

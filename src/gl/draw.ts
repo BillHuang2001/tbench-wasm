@@ -14,7 +14,10 @@
  *  3. Vertex evaluation: for each instance × vertex, set ctx.vertexId
  *     (gl_VertexID: first+j or the element value) + ctx.instanceId, run
  *     program.vertex.run(ctx), pack the output record
- *     [x,y,z,w, pointSize, varyings...] at record index i*count + j
+ *     [x,y,z,w, pointSize, clipDistance[8], cullDistance[8], varyings...]
+ *     (header = 21 floats: 0-3 position, 4 pointSize, 5-12 clipDistance,
+ *     13-20 cullDistance, varyings from 21 — see RECORD_TOTAL_HEADER_FLOATS)
+ *     at record index i*count + j
  *     (raster DrawCall instanced addressing: instance i, vertex j at
  *     first + i*count + j; we pack with first = 0).
  *  4. Transform feedback capture (when active && !paused): write the captured
@@ -67,8 +70,6 @@ import { handleCanvasResize } from './lost';
 import { getClipControl } from './extensions/clip-state';
 import { updateCompleteness, floatLinearExtensionState } from './teximage';
 import {
-  computeVertexStride,
-  RECORD_HEADER_FLOATS,
   draw as rasterDraw,
   clearColorSurface,
   clearDepthSurface,
@@ -92,6 +93,16 @@ import type { ProgramModel } from './objects';
 import type { WebGLBuffer, WebGLQuery, WebGLTexture, WebGLTransformFeedback } from './objects';
 import { ensureProgramLinked } from './api/programs';
 import { SRC1_BLEND_FACTORS } from './api/state';
+
+/** Clip/cull distance record-slot contract (CROSS-AGENT, see src/gl/CONTEXT.md):
+ *  header = [x,y,z,w (0-3), pointSize (4), clipDistance[8] (5-12),
+ *  cullDistance[8] (13-20)] → varyings start at 21.
+ *  The raster side (src/raster/types.ts RECORD_HEADER_FLOATS/VARYINGS_OFFSET)
+ *  is updated to 21 in parallel against this contract. Do NOT size the header
+ *  from the imported RECORD_HEADER_FLOATS (5 at HEAD). */
+const RECORD_OFFSET_CLIP_DISTANCE = 5;
+const RECORD_OFFSET_CULL_DISTANCE = 13;
+const RECORD_TOTAL_HEADER_FLOATS = 21; // 4 pos + 1 pointSize + 8 clip + 8 cull
 
 /**
  * WebIDL `unsigned long long` conversion (readPixels dstOffset, clearBuffer*
@@ -157,6 +168,9 @@ interface DrawScratch {
   /** Vertex exec ctx reusable buffers. */
   outPosition: Float32Array;
   outVaryings: Float32Array;
+  /** gl_ClipDistance / gl_CullDistance outputs (8 floats each, zeroed per draw). */
+  outClipDistance: Float32Array;
+  outCullDistance: Float32Array;
   scratch: Float32Array;   // codegen float scratch (program.scratchSize)
   intScratch: Int32Array;  // codegen int scratch
   zeroStore: Float32Array; // fallback uniform-block store (zero-filled)
@@ -185,6 +199,8 @@ function getScratch(ctx: WebGLRenderingContext): DrawScratch {
       attribIndices: new Int32Array(0),
       outPosition: new Float32Array(4),
       outVaryings: new Float32Array(0),
+      outClipDistance: new Float32Array(8),
+      outCullDistance: new Float32Array(8),
       scratch: new Float32Array(64),
       intScratch: new Int32Array(64),
       zeroStore: new Float32Array(16384), // MAX_UNIFORM_BLOCK_SIZE / 4
@@ -1204,7 +1220,13 @@ function samplerFeedbackAtLevel(tex: WebGLTexture, img: TextureImage, dstLevel: 
   if (levelBase > levelMax) return false;
   // Deepest level a full mip chain reaches: floor(log2(maxSize)) + level_base
   // (maxSize excludes 2D_ARRAY layers and cube faces — GLES 3.0 p150).
-  const maxSize = Math.max(img.width, img.height, img.target === C2.TEXTURE_3D ? img.depth : 1);
+  // image.width is the level-0-EQUIVALENT size (baseDims·2^base), so use the
+  // actual base level's dimensions for the spec q formula.
+  const baseLv = img.levels[levelBase];
+  const maxSize = Math.max(
+    baseLv ? baseLv.width : img.width,
+    baseLv ? baseLv.height : img.height,
+    img.target === C2.TEXTURE_3D ? (baseLv ? baseLv.depth : img.depth) : 1);
   const q = Math.min(Math.floor(Math.log2(maxSize)) + levelBase, levelMax);
   const minFilter = st.minFilter;
   const useMips = minFilter !== C1.NEAREST && minFilter !== C1.LINEAR;
@@ -1373,7 +1395,7 @@ function buildDrawCall(
     instanceCount: req.instanceCount,
     vertices: records,
     vertexStride: stride,
-    varyingsOffset: RECORD_HEADER_FLOATS,
+    varyingsOffset: RECORD_TOTAL_HEADER_FLOATS,
     program: pm as never,
     fb,
     viewport: { x: s.viewport.x, y: s.viewport.y, w: s.viewport.w, h: s.viewport.h },
@@ -1520,7 +1542,7 @@ function resolveTfVaryings(pm: ProgramModel): ResolvedTfState | null {
     } else {
       const vi = findVarying(varyings, tv.name);
       if (vi >= 0) {
-        recOff = RECORD_HEADER_FLOATS;
+        recOff = RECORD_TOTAL_HEADER_FLOATS;
         for (let i = 0; i < vi; i++) recOff += varyings[i].components;
         comps = varyings[vi].components;
         integral = isIntegralVaryingType(varyings[vi].type);
@@ -2066,8 +2088,11 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
   const ai = sc.attribIndices;
 
   // 4. Vertex evaluation loop.
-  const stride = computeVertexStride(pm.varyings ?? []);
-  const totalVary = stride - RECORD_HEADER_FLOATS;
+  // Record stride sized from the LOCAL header contract (21 floats) — the
+  // imported computeVertexStride/RECORD_HEADER_FLOATS still carry raster's
+  // stale 5 until the parallel raster flip lands (see RECORD_TOTAL_HEADER_FLOATS).
+  const totalVary = (pm.varyings ?? []).reduce((n, v) => n + v.components, 0);
+  const stride = RECORD_TOTAL_HEADER_FLOATS + totalVary;
   const totalVerts = req.count * req.instanceCount;
   const needRecords = totalVerts * stride;
   if (sc.records.length < needRecords) {
@@ -2076,6 +2101,13 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
   if (sc.outVaryings.length !== totalVary) {
     sc.outVaryings = new Float32Array(totalVary);
   }
+  // Zero the clip/cull distance outputs per draw — clip distance 0 = inside,
+  // the correct default when the program doesn't write them. UNCONDITIONAL:
+  // the record slots must never carry stale values from a previous draw (the
+  // current glsl emits scratch-based writes, so they stay zero until the
+  // glsl leafWrite flip — that is expected).
+  sc.outClipDistance.fill(0);
+  sc.outCullDistance.fill(0);
   if (tfActive) {
     // Unwritten varyings capture as 0, not as stale values from a previous draw
     // (the outVaryings/outPosition scratch is reused across draws; CTS
@@ -2123,7 +2155,7 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
   const floatStore = (pm as unknown as { floatStore?: Float32Array | null }).floatStore ?? sc.emptyFloat;
   const intStore = (pm as unknown as { intStore?: Int32Array | null }).intStore ?? sc.emptyInt;
 
-  const vctx: VertexExecCtx & { tex: TextureEnv } = {
+  const vctx: VertexExecCtx & { tex: TextureEnv; out: VertexExecCtx['out'] & { clipDistance: Float32Array; cullDistance: Float32Array } } = {
     attribs,
     attribIndices: ai,
     vertexId: 0,
@@ -2145,7 +2177,13 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
     // gl_DepthRange builtin uniform: [near, far, far - near] (state already
     // clamped to 0..1 by depthRange(); GLES2 §2.11.1).
     depthRange: new Float32Array([s.depth.range[0], s.depth.range[1], s.depth.range[1] - s.depth.range[0]]),
-    out: { position: sc.outPosition, pointSize: 0, varyings: sc.outVaryings },
+    out: {
+      position: sc.outPosition,
+      pointSize: 0,
+      varyings: sc.outVaryings,
+      clipDistance: sc.outClipDistance,
+      cullDistance: sc.outCullDistance,
+    } as VertexExecCtx['out'] & { clipDistance: Float32Array; cullDistance: Float32Array },
   };
 
   // Precompute per-loc loops for the inner hot path. Constant (disabled)
@@ -2188,8 +2226,14 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
       records[base + 2] = pos[2];
       records[base + 3] = pos[3];
       records[base + 4] = vctx.out.pointSize;
+      // Clip/cull distance slots (optional-safe — the fields may be absent
+      // from the VertexExecCtx out type until the glsl flip; absent = zeroed).
+      const cd = vctx.out.clipDistance;
+      if (cd) { for (let c = 0; c < 8; c++) records[base + RECORD_OFFSET_CLIP_DISTANCE + c] = cd[c]; }
+      const cd2 = vctx.out.cullDistance;
+      if (cd2) { for (let c = 0; c < 8; c++) records[base + RECORD_OFFSET_CULL_DISTANCE + c] = cd2[c]; }
       if (totalVary > 0) {
-        const vb = base + RECORD_HEADER_FLOATS;
+        const vb = base + RECORD_TOTAL_HEADER_FLOATS;
         for (let v = 0; v < totalVary; v++) records[vb + v] = sc.outVaryings[v];
       }
     }
@@ -2260,6 +2304,14 @@ export function executeClear(ctx: WebGLRenderingContext, mask: GLuint): void {
       const idx = db - C1.COLOR_ATTACHMENT0;
       const surf = fb.color[idx];
       if (!surf) continue;
+      // GLES 3.0 §4.2.1 (CTS clear-func-buffer-type-match.html): a float clear
+      // color against an INTEGER color attachment is INVALID_OPERATION — the
+      // base type of the clear value must match the buffer family (same
+      // surfFam rule as draw-time output matching above).
+      if (surf.info.isInteger) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
       const cm = s.colorMaskPerDrawBuffer.get(d) ?? s.colorMask;
       // WEBGL_render_shared_exponent: Clear is INVALID_OPERATION when an
       // enabled RGB9_E5 draw buffer's effective mask is neither all-true nor

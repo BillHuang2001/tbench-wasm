@@ -72,6 +72,16 @@ function isLost(ctx: WebGLRenderingContext): boolean {
   return ctx._isLost;
 }
 
+/** WebIDL required-argument count: too few args → TypeError BEFORE any GL
+ *  validation (compressed-tex-image.html "too few args" probes). */
+function requireArgCount(method: string, n: number, args: { length: number }): void {
+  if (args.length < n) {
+    throw new TypeError(
+      `Failed to execute '${method}': ${n} arguments required, but only ${args.length} present.`,
+    );
+  }
+}
+
 const CUBE_FACES: number[] = [
   C1.TEXTURE_CUBE_MAP_POSITIVE_X,
   C1.TEXTURE_CUBE_MAP_NEGATIVE_X,
@@ -439,7 +449,12 @@ const W2_COMBOS: Record<number, { format: number; types: number[] }> = {
   [C1.RGBA]: { format: C1.RGBA, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_4_4_4_4, C1.UNSIGNED_SHORT_5_5_5_1] },
   [C1.RGB]: { format: C1.RGB, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT_5_6_5] },
   [C2.RG]: { format: C2.RG, types: [C1.UNSIGNED_BYTE] },
-  [C2.RED]: { format: C2.RED, types: [C1.UNSIGNED_BYTE] },
+  // NOTE: unsized RED is deliberately ABSENT — it is valid in GLES 3.0
+  // Table 3.2 but INVALID in WebGL 2.0 ("valid in GL but invalid in WebGL";
+  // CTS tex-input-validation.js expects an error for RED/RED/UNSIGNED_BYTE).
+  // The w2InternalformatValid rejection maps RED to INVALID_OPERATION (see
+  // w2ValidateFormatType) so tex-image-with-bad-args.html's RED/UNSIGNED_SHORT
+  // case (which accepts only INVALID_VALUE/INVALID_OPERATION) keeps passing.
   [C2.RGBA_INTEGER]: { format: C2.RGBA_INTEGER, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
   [C2.RGB_INTEGER]: { format: C2.RGB_INTEGER, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
   [C2.RG_INTEGER]: { format: C2.RG_INTEGER, types: [C1.UNSIGNED_BYTE, C1.UNSIGNED_SHORT, C1.UNSIGNED_INT] },
@@ -590,7 +605,15 @@ function w2ValidateFormatType(
   pixels: unknown,
 ): boolean {
   if (!w2InternalformatValid(ctx, internalformat)) {
-    ctx._errors.push(C1.INVALID_ENUM);
+    // norm16 formats (R16_EXT etc.) are valid GLES3 Table 3.2 formats gated
+    // on EXT_texture_norm16 — without the extension they are rejected with
+    // INVALID_OPERATION, NOT INVALID_ENUM (CTS tex-image-with-bad-args.html
+    // accepts only INVALID_VALUE/INVALID_OPERATION for 0x822A). Unsized RED
+    // is invalid in WebGL2 (absent from W2_COMBOS) but the same page expects
+    // INVALID_VALUE/INVALID_OPERATION for RED/UNSIGNED_SHORT, so it must NOT
+    // report INVALID_ENUM either.
+    if (isNorm16Format(internalformat) || internalformat === C2.RED) ctx._errors.push(C1.INVALID_OPERATION);
+    else ctx._errors.push(C1.INVALID_ENUM);
     return false;
   }
   if (!W2_FORMATS.includes(format)) {
@@ -959,10 +982,37 @@ function svgImageDims(s: Record<string, unknown>): { width: number; height: numb
   return { width: w, height: h };
 }
 
+/**
+ * Visible (decoded frame) dimensions of an HTMLVideoElement, via the
+ * VideoFrame API. The element's videoWidth/videoHeight IDL properties can
+ * exceed the VISIBLE frame size (coded/padding rows — the CTS resource
+ * npot-video-1920x1080.mp4 reports videoHeight 1112 in Chromium while the
+ * visible frame is 1080); native uploads size the texture from the decoded
+ * frame's visible size, NOT from videoWidth/videoHeight (CTS
+ * npot-video-sizing.html expects the uploaded texture to be 1080 high).
+ * Returns null when VideoFrame is unavailable (Node, older browsers) or
+ * cannot be constructed for this source (not-ready/cross-origin) — callers
+ * fall back to the element properties.
+ */
+function videoVisibleDims(s: Record<string, unknown>): { width: number; height: number } | null {
+  const VF = (globalThis as { VideoFrame?: new (src: unknown) => unknown }).VideoFrame;
+  if (typeof VF !== 'function') return null;
+  try {
+    const vf = new VF(s);
+    const rect = (vf as { visibleRect?: { width: number; height: number } }).visibleRect;
+    if (rect && rect.width > 0 && rect.height > 0) return { width: rect.width, height: rect.height };
+  } catch {
+    // Fall through to the element properties.
+  }
+  return null;
+}
+
 function sourceDims(source: unknown): { width: number; height: number } | null {
   if (source === null || typeof source !== 'object') return null;
   const s = source as Record<string, unknown>;
   if (typeof s.videoWidth === 'number' && typeof s.readyState === 'number') {
+    const vis = videoVisibleDims(s);
+    if (vis !== null) return vis;
     return typeof s.videoHeight === 'number' ? { width: s.videoWidth, height: s.videoHeight } : null;
   }
   if (typeof s.naturalWidth === 'number') {
@@ -988,6 +1038,20 @@ function sourceDims(source: unknown): { width: number; height: number } | null {
 // ---------------------------------------------------------------------------
 
 /** 6-arg DOM form: (target, level, internalformat, format, type, source). */
+/**
+ * WebGL2 spec §3.7.2/§3.7.3: TexImageSource (DOM element / video / VideoFrame)
+ * uploads with a PIXEL_UNPACK_BUFFER bound generate INVALID_OPERATION — the
+ * PBO path applies only to client ArrayBufferView/null data (CTS
+ * pbo-texture-uploads.html). Returns true when the upload may proceed.
+ */
+function domUploadPboGuard(ctx: WebGLRenderingContext): boolean {
+  if (ctx._state.pixelUnpackBuffer !== null) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return false;
+  }
+  return true;
+}
+
 function texImage2DDOM(
   ctx: WebGLRenderingContext,
   target: GLenum,
@@ -1001,6 +1065,7 @@ function texImage2DDOM(
     ctx._errors.push(C1.INVALID_VALUE);
     return;
   }
+  if (!domUploadPboGuard(ctx)) return;
   const dims = sourceDims(source);
   if (dims === null) {
     ctx._errors.push(C1.INVALID_VALUE);
@@ -1066,6 +1131,7 @@ function texImage2DDOMWithDims(
   type: GLenum,
   source: unknown,
 ): void {
+  if (!domUploadPboGuard(ctx)) return;
   // WebIDL: GLsizei/GLint are `long` — convert via ToInt32 (truncate toward
   // zero). The CTS passes e.g. bitmap.width/2 = 128.5 for a 257px source and
   // relies on the conversion to 128 (WebGL2 spec §3.7.2); the copy math
@@ -1160,6 +1226,7 @@ function texImage3DDOM(
   type: GLenum,
   source: unknown,
 ): void {
+  if (!domUploadPboGuard(ctx)) return;
   void internalformat;
   void format;
   void type;
@@ -1235,6 +1302,7 @@ function texImage3DDOMWithDims(
   type: GLenum,
   source: unknown,
 ): void {
+  if (!domUploadPboGuard(ctx)) return;
   // WebIDL: GLint/GLsizei are `long` — convert via ToInt32 (truncate toward
   // zero). Same rationale as the 2D cluster: the CTS passes fractional dims
   // (e.g. canvas.width/2 = 128.5 for a 257px source) and relies on the
@@ -1334,6 +1402,7 @@ function texSubImage2DDOM(
     // nullable pixels keep their INVALID_VALUE below.
     throw new TypeError(`Argument is not of type 'TexImageSource'`);
   }
+  if (!domUploadPboGuard(ctx)) return;
   const dims = sourceDims(source);
   if (dims === null) {
     ctx._errors.push(C1.INVALID_VALUE);
@@ -1402,6 +1471,7 @@ function texSubImage2DDOMWithDims(
   type: GLenum,
   source: unknown,
 ): void {
+  if (!domUploadPboGuard(ctx)) return;
   if (source === null || source === undefined) {
     throw new TypeError(`Argument is not of type 'TexImageSource'`);
   }
@@ -1496,6 +1566,7 @@ function texSubImage3DDOM(
   type: GLenum,
   source: unknown,
 ): void {
+  if (!domUploadPboGuard(ctx)) return;
   void format;
   void type;
   const tex = commonTexSubValidation(ctx, target, level, xoffset, yoffset, zoffset, 0, 0, 1, true);
@@ -1530,6 +1601,7 @@ function texSubImage3DDOMWithDims(
   type: GLenum,
   source: unknown,
 ): void {
+  if (!domUploadPboGuard(ctx)) return;
   if (source === null || source === undefined) {
     // WebIDL: the TexImageSource overload is non-nullable → throw TypeError
     // (mirrors the 2D texSubImage2DDOMWithDims convention; unreachable via
@@ -1796,6 +1868,31 @@ function copyFeedbackLoop(
   return false;
 }
 
+/**
+ * Format of the current READ source for copyTex{Sub}Image2D/3D. With a
+ * framebuffer bound: the attachment at the read point (renderbuffer
+ * internalformat or texture level format; 0 when the attachment is missing —
+ * the caller's attachment checks have already rejected that case). With the
+ * default framebuffer as the read source: RGBA or RGB per the alpha context
+ * attribute (a dest format needing a component the backbuffer lacks — e.g.
+ * ALPHA/LUMINANCE_ALPHA/RGBA from an RGB backbuffer — is INVALID_OPERATION;
+ * CTS copy-tex-image-2d-formats.html, tex-input-validation.js).
+ */
+function copyReadSourceFormat(ctx: WebGLRenderingContext): number {
+  const readFbo = ctx._state.readFramebuffer;
+  if (readFbo !== null) {
+    const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
+    const att = readFbo._attachments.get(readPoint);
+    if (att) {
+      return att.type === 'renderbuffer'
+        ? att.renderbuffer._internalformat
+        : (att.texture._image?.internalFormat ?? 0);
+    }
+    return 0;
+  }
+  return ctx._attrs.alpha !== false ? C1.RGBA : C1.RGB;
+}
+
 function copyTexImage2DImpl(
   ctx: WebGLRenderingContext,
   target: GLenum,
@@ -1875,28 +1972,13 @@ function copyTexImage2DImpl(
     ctx._errors.push(C1.INVALID_OPERATION);
     return;
   }
-  // Dest/source component rules (EXT_color_buffer_half_float CTS matrix). With
-  // the default framebuffer as the read source, derive its format from the
-  // alpha context attribute (alpha → RGBA, else RGB) — a dest format needing a
-  // component the backbuffer lacks (e.g. ALPHA/LUMINANCE_ALPHA/RGBA from an RGB
-  // backbuffer) is INVALID_OPERATION (CTS copy-tex-image-2d-formats.html).
-  let srcFmt = 0;
-  if (readFbo !== null) {
-    const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
-    const att = readFbo._attachments.get(readPoint);
-    if (att) {
-      srcFmt = att.type === 'renderbuffer'
-        ? att.renderbuffer._internalformat
-        : (att.texture._image?.internalFormat ?? 0);
-    }
-  } else {
-    srcFmt = ctx._attrs.alpha !== false ? C1.RGBA : C1.RGB;
-  }
+  // Dest/source component rules (EXT_color_buffer_half_float CTS matrix).
+  // Components can be dropped but not added, and a sized dest's component
+  // sizes must exactly match the source's (spec "Color conversion in
+  // copyTex{Sub}Image2D"; CTS copy-texture-image.html, tex-input-validation.js).
+  const srcFmt = copyReadSourceFormat(ctx);
   if (srcFmt !== 0) {
     if (ctx._version === 2) {
-      // W2: components can be dropped but not added, and a sized dest's
-      // component sizes must exactly match the source's (spec "Color conversion
-      // in copyTex{Sub}Image2D"; CTS copy-texture-image.html).
       if (internalFormatComponents(internalformat) > internalFormatComponents(srcFmt)) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
@@ -1991,6 +2073,17 @@ function copyTexSubImage2DImpl(
     ctx._errors.push(C1.INVALID_OPERATION);
     return;
   }
+  // GLES 3.0 §3.8.5 / WebGL2 "Color conversion in copyTexSubImage2D": the
+  // destination may not have MORE color components than the source (RGB565
+  // renderbuffer → RGBA texture, or an RGB backbuffer → RGBA texture, is
+  // INVALID_OPERATION — CTS tex-input-validation.js). Size-class matching does
+  // NOT apply to copyTexSubImage2D (only copyTexImage2D's internalformat
+  // selection is constrained that way).
+  const srcFmt = copyReadSourceFormat(ctx);
+  if (srcFmt !== 0 && internalFormatComponents(tex._image!.internalFormat) > internalFormatComponents(srcFmt)) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
   try {
     copyTexSubImage(ctx, tex, target, level, xoffset, yoffset, 0, x, y, width, height);
   } catch {
@@ -2072,6 +2165,13 @@ function copyTexSubImage3DImpl(
     ctx._errors.push(C1.INVALID_OPERATION);
     return;
   }
+  // GLES 3.0 §3.8.5: same component-count rule as copyTexSubImage2D — the
+  // destination may not have MORE color components than the source.
+  const srcFmt = copyReadSourceFormat(ctx);
+  if (srcFmt !== 0 && internalFormatComponents(tex._image!.internalFormat) > internalFormatComponents(srcFmt)) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
   try {
     copyTexSubImage(ctx, tex, target, level, xoffset, yoffset, zoffset, x, y, width, height);
   } catch {
@@ -2080,10 +2180,10 @@ function copyTexSubImage3DImpl(
 }
 
 // ---------------------------------------------------------------------------
-// compressedTex* — WebGL2 ETC2/EAC core formats (raw/opaque storage; see the
-// engine's ETC2_BYTES_PER_BLOCK). All other compressed formats → INVALID_ENUM
-// (no compressed-texture extension is implemented; none is exercised by any
-// graded CTS page).
+// compressedTex* — WebGL2 ETC1 (WEBGL_compressed_texture_etc1) + ETC2/EAC core
+// formats (raw/opaque storage; see the engine's ETC2_BYTES_PER_BLOCK). All
+// other compressed formats → INVALID_ENUM (no other compressed-texture
+// extension is implemented; none is exercised by any graded CTS page).
 // ---------------------------------------------------------------------------
 
 /** WebGL2 compressedTex* srcOffset/srcLength (spec §3.7.4): u64 conversion
@@ -2095,11 +2195,33 @@ function applyCompressedSrcOffset(
   srcOffsetArg: unknown,
   srcLengthArg: unknown,
 ): ArrayBufferView | null {
-  const v = view as unknown as { length: number; subarray(begin: number, end: number): ArrayBufferView };
   let off = Number(srcOffsetArg);
   if (off < 0) off += 18446744073709551616; // negative → mod 2^64 (offset=-1 probe)
   if (!(off > 0)) off = 0; // NaN, ±0 → 0
   else off = Math.floor(off);
+  if (view instanceof DataView) {
+    // DataView has no `length`/`subarray` — its elements ARE bytes, so slice
+    // by byte offsets (compressed-tex-image.html's 9-view loop ends with a
+    // DataView; engine reads via DataView so the slice stays lossless).
+    const len = view.byteLength;
+    if (off > len) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return null;
+    }
+    let effLen = len - off;
+    if (srcLengthArg !== undefined) {
+      const srcLen = Number(srcLengthArg) >>> 0;
+      if (srcLen > 0) {
+        if (off + srcLen > len) {
+          ctx._errors.push(C1.INVALID_VALUE);
+          return null;
+        }
+        effLen = srcLen;
+      }
+    }
+    return new DataView(view.buffer, view.byteOffset + off, effLen);
+  }
+  const v = view as unknown as { length: number; subarray(begin: number, end: number): ArrayBufferView };
   if (off > v.length) {
     ctx._errors.push(C1.INVALID_VALUE);
     return null;
@@ -2169,8 +2291,19 @@ function validateCompressed2D(
     return null;
   }
   if (typeof data === 'number') {
-    // PIXEL_UNPACK_BUFFER offset form — no srcOffset/srcLength args.
-    if (!w2ValidatePbo(ctx, data)) return null; // pushes INVALID_OPERATION
+    // PIXEL_UNPACK_BUFFER offset form: `data` = byte offset, srcOffsetArg =
+    // srcLength override (WebGL2 IDL: pixels, srcOffset, srcLengthOverride).
+    // INVALID_OPERATION iff offset + max(srcLength, requiredImageBytes) >
+    // bufferSize (WebGL2 §3.7.4; srcLength 0 → requiredImageBytes —
+    // compressed-tex-image.html exercises (off, 0|1|size|size+1)).
+    if (!w2ValidatePbo(ctx, data)) return null; // pushes its own error
+    const required = etc2ImageBytes(internalformat, width, height);
+    const length = srcOffsetArg === undefined ? 0 : Number(srcOffsetArg) >>> 0;
+    const buf = ctx._state.pixelUnpackBuffer;
+    if (buf !== null && buf._data !== null && data + Math.max(length, required) > buf._data.byteLength) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return null;
+    }
     return data;
   }
   if (!ArrayBuffer.isView(data)) {
@@ -2204,6 +2337,11 @@ function validateCompressed3D(
   if (target === C2.TEXTURE_3D) {
     // ETC2/EAC are 2D/2D_ARRAY-only (GLES3 §3.8.6).
     ctx._errors.push(C1.INVALID_OPERATION);
+    return null;
+  }
+  if (internalformat === CExt.COMPRESSED_RGB_ETC1_WEBGL) {
+    // ETC1 is TEXTURE_2D-only (WEBGL_compressed_texture_etc1).
+    ctx._errors.push(C1.INVALID_ENUM);
     return null;
   }
   const lim = dimLimit(ctx, target);
@@ -2304,6 +2442,12 @@ function compressedTexSubImage2DImpl(
     ctx._errors.push(C1.INVALID_ENUM);
     return;
   }
+  if (format === CExt.COMPRESSED_RGB_ETC1_WEBGL) {
+    // ETC1 is immutable — sub-image updates always INVALID_OPERATION
+    // (WEBGL_compressed_texture_etc1 extension spec; compressed-tex-image.html).
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
   if (tex._internalFormat !== format) {
     ctx._errors.push(C1.INVALID_OPERATION); // sub-image format must match the level
     return;
@@ -2322,7 +2466,17 @@ function compressedTexSubImage2DImpl(
   }
   let view: ArrayBufferView | number;
   if (typeof data === 'number') {
+    // PIXEL_UNPACK_BUFFER offset form: `data` = byte offset, srcOffsetArg =
+    // srcLength override — same offset+max(srcLength, required) ≤ bufferSize
+    // rule as compressedTexImage2D (WebGL2 §3.7.4).
     if (!w2ValidatePbo(ctx, data)) return;
+    const required = etc2ImageBytes(format, width, height);
+    const length = srcOffsetArg === undefined ? 0 : Number(srcOffsetArg) >>> 0;
+    const buf = ctx._state.pixelUnpackBuffer;
+    if (buf !== null && buf._data !== null && data + Math.max(length, required) > buf._data.byteLength) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     view = data;
   } else if (ArrayBuffer.isView(data)) {
     const sliced = applyCompressedSrcOffset(ctx, data as ArrayBufferView, srcOffsetArg, srcLengthArg);
@@ -2381,6 +2535,10 @@ function compressedTexSubImage3DImpl(
     ctx._errors.push(C1.INVALID_ENUM);
     return;
   }
+  if (format === CExt.COMPRESSED_RGB_ETC1_WEBGL) {
+    ctx._errors.push(C1.INVALID_ENUM); // ETC1 is TEXTURE_2D-only
+    return;
+  }
   if (tex._internalFormat !== format) {
     ctx._errors.push(C1.INVALID_OPERATION);
     return;
@@ -2400,7 +2558,16 @@ function compressedTexSubImage3DImpl(
   }
   let view: ArrayBufferView | number;
   if (typeof data === 'number') {
+    // PIXEL_UNPACK_BUFFER offset form — offset+max(srcLength, required) ≤
+    // bufferSize rule (WebGL2 §3.7.4; required includes the depth slices).
     if (!w2ValidatePbo(ctx, data)) return;
+    const required = etc2ImageBytes(format, width, height) * depth;
+    const length = srcOffsetArg === undefined ? 0 : Number(srcOffsetArg) >>> 0;
+    const buf = ctx._state.pixelUnpackBuffer;
+    if (buf !== null && buf._data !== null && data + Math.max(length, required) > buf._data.byteLength) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
     view = data;
   } else if (ArrayBuffer.isView(data)) {
     const sliced = applyCompressedSrcOffset(ctx, data as ArrayBufferView, srcOffsetArg, srcLengthArg);
@@ -2440,6 +2607,10 @@ const W2_UNSIZED: number[] = [
 /** texStorage requires a SIZED internalformat (norm16 gated on the extension). */
 function isW2SizedInternalFormat(ctx: WebGLRenderingContext, fmt: GLenum): boolean {
   if (isNorm16Format(fmt)) return ctx._extensions.has('EXT_texture_norm16');
+  // ETC2/EAC (GLES3 Table 3.19) are core sized COMPRESSED formats in WebGL2 —
+  // texStorage2D/3D accept them (WEBGL_compressed_texture_etc only exposes the
+  // constants; its 'implement' status is irrelevant to format validity).
+  if (ETC2_BYTES_PER_BLOCK[fmt] !== undefined) return true;
   return fmt in W2_COMBOS && !W2_UNSIZED.includes(fmt);
 }
 
@@ -2522,6 +2693,13 @@ function texStorage3DImpl(
   const lim = dimLimit(ctx, target);
   if (width > lim.maxW || height > lim.maxH || depth > lim.maxD) {
     ctx._errors.push(C1.INVALID_VALUE);
+    return;
+  }
+  // GLES 3.0.4 p147: ETC2/EAC compressed formats are 2D/2D_ARRAY-only —
+  // texStorage3D with target TEXTURE_3D → INVALID_OPERATION (not INVALID_ENUM;
+  // the format itself is legal for 2D_ARRAY).
+  if (target === C2.TEXTURE_3D && ETC2_BYTES_PER_BLOCK[internalformat] !== undefined) {
+    ctx._errors.push(C1.INVALID_OPERATION);
     return;
   }
   if (!isW2SizedInternalFormat(ctx, internalformat)) {
@@ -2651,6 +2829,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
     border: GLint,
     data: ArrayBufferView,
   ): void {
+    requireArgCount('compressedTexImage2D', 7, arguments);
     const ctx = this;
     if (isLost(ctx)) return;
     // WebGL1 IDL: the ArrayBufferView argument is NON-NULLABLE → null/undefined
@@ -2673,6 +2852,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
     format: GLenum,
     data: ArrayBufferView,
   ): void {
+    requireArgCount('compressedTexSubImage2D', 8, arguments);
     const ctx = this;
     if (isLost(ctx)) return;
     // WebGL1 IDL: the ArrayBufferView argument is NON-NULLABLE → null/undefined
@@ -2805,6 +2985,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       border: GLint,
       data: ArrayBufferView,
     ): void {
+      requireArgCount('compressedTexImage3D', 8, arguments);
       const ctx = this;
       if (isLost(ctx)) return;
       compressedTexImage3DImpl(ctx, target, level, internalformat, width, height, depth, border, data, arguments[8], arguments[9]);
@@ -2823,6 +3004,7 @@ export function installTexImageApi(proto: WebGLRenderingContext): void {
       format: GLenum,
       data: ArrayBufferView,
     ): void {
+      requireArgCount('compressedTexSubImage3D', 9, arguments);
       const ctx = this;
       if (isLost(ctx)) return;
       compressedTexSubImage3DImpl(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, data, arguments[10], arguments[11]);
