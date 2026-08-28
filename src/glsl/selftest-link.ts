@@ -2156,7 +2156,9 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
     }
   }
 
-  // Scalar INT output (vertex-id): type GL_INT, run writes the int value.
+  // Scalar INT output (vertex-id): type GL_INT; run writes the int value's
+  // BIT PATTERN into the output cell (R.u2f — the raster bit-reinterprets
+  // for integer attachments, e.g. R32I).
   {
     const vsI = compile(
       `#version 300 es
@@ -2185,7 +2187,16 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
       p.vertex.run(vctx);
       const fctx = fragmentCtx(p, [vctx.out.varyings]);
       p.fragment.run(fctx);
-      check(fctx.out.color[0][0] === 12345, `int output run writes 12345 (got ${fctx.out.color[0][0]})`);
+      // Direct element store + alias read (NOT `new Float32Array([x])` — the
+      // array-literal conversion sometimes canonicalizes NaN payloads in V8).
+      const bitBuf = new ArrayBuffer(4);
+      const bitF32 = new Float32Array(bitBuf);
+      const bitI32 = new Int32Array(bitBuf);
+      const f2i = (x: number): number => {
+        bitF32[0] = x;
+        return bitI32[0];
+      };
+      check(f2i(fctx.out.color[0][0]) === 12345, `int output run writes 12345 as BIT PATTERN (got f2i=${f2i(fctx.out.color[0][0])})`);
     }
   }
 

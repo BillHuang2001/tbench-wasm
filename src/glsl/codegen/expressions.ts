@@ -160,8 +160,17 @@ function leafRead(p: P, env: CodegenEnv, c: number): string {
         // BUG 5: fetch stride = DECLARED comps (st.declComps), not p.type's
         // (swizzles retype p.type to the swizzle width).
         return attribRead(p.type, st.location, st.declComps, p.dyn, flatC);
-      case 'output':
-        return outputAccess(p.type, st.location, st.index, p.dyn, flatC);
+      case 'output': {
+        const s = outputAccess(p.type, st.location, st.index, p.dyn, flatC);
+        // Packed int/uint fragment-output cell (see packVaryingWrite): the
+        // cell holds the value's bit pattern — unpack to the int32/uint32
+        // value (a read-after-write of an integral output, e.g. an
+        // assignment-expression using the write's value). Float outputs read
+        // plain.
+        if (isUintType(p.type)) return unpackVaryingCell(s, false);
+        if (isIntType(p.type)) return unpackVaryingCell(s, true);
+        return s;
+      }
     }
   }
   if (p.builtin) {
@@ -1038,8 +1047,9 @@ export interface LValue {
 
 /** Per-flat-component packed-ness of an lvalue path (parallel to writes():
  *  struct/array recursion; a leaf is packed when it is a VERTEX-stage
- *  int/uint varying — the only shapes that store bit patterns in the
- *  record). The kind distinguishes the int32 vs uint32 unpack. */
+ *  int/uint varying or a FRAGMENT-stage int/uint output — the shapes that
+ *  store bit patterns in the record / output cells). The kind
+ *  distinguishes the int32 vs uint32 unpack. */
 function writeBitKinds(p: P, env: CodegenEnv): ('uint' | 'int' | false)[] {
   const t = p.type;
   if (t.kind === 'struct') {
@@ -1057,8 +1067,11 @@ function writeBitKinds(p: P, env: CodegenEnv): ('uint' | 'int' | false)[] {
     for (let k = 0; k < n; k++) out.push(...writeBitKinds(subPIdx(p, k, t.element, env), env));
     return out;
   }
+  const packedLeaf =
+    (env.stage === 'VERTEX' && p.storage?.kind === 'varying') ||
+    (env.stage === 'FRAGMENT' && p.storage?.kind === 'output');
   const packed: 'uint' | 'int' | false =
-    env.stage === 'VERTEX' && p.storage?.kind === 'varying'
+    packedLeaf
       ? isUintType(t)
         ? 'uint'
         : isIntType(t)
