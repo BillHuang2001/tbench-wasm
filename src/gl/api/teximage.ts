@@ -1422,8 +1422,20 @@ function texSubImage3DBuffer(
 // copyTexImage2D / copyTexSubImage2D / copyTexSubImage3D
 // ---------------------------------------------------------------------------
 
-/** WebGL2 copyTexImage2D internalformats (sized color-renderable; 32F gated). */
+/**
+ * WebGL2 copyTexImage2D internalformats — the full GLES 3.0 / WebGL2 list:
+ * the unsized WebGL1-compat formats plus all sized color formats (incl. the
+ * 32F floats, RGB32F and RGB10_A2UI). Renderability of the SOURCE attachment
+ * is a separate FBO-completeness concern (the source FBO is incomplete without
+ * EXT_color_buffer_float, which surfaces as the accepted
+ * INVALID_FRAMEBUFFER_OPERATION — CTS ext-color-buffer-float.html).
+ */
 const W2_COPY_INTERNALFORMATS: number[] = [
+  C1.RGBA,
+  C1.RGB,
+  C1.ALPHA,
+  C1.LUMINANCE,
+  C1.LUMINANCE_ALPHA,
   C2.R8,
   C2.RG8,
   C2.RGB8,
@@ -1432,11 +1444,17 @@ const W2_COPY_INTERNALFORMATS: number[] = [
   C1.RGB5_A1,
   C1.RGB565,
   C2.RGB10_A2,
+  C2.RGB10_A2UI,
+  C2.SRGB8,
   C2.SRGB8_ALPHA8,
   C2.R16F,
   C2.RG16F,
   C2.RGB16F,
   C2.RGBA16F,
+  C2.R32F,
+  C2.RG32F,
+  C2.RGB32F,
+  C2.RGBA32F,
   C2.R11F_G11F_B10F,
   C2.R8I, C2.R8UI, C2.R16I, C2.R16UI, C2.R32I, C2.R32UI,
   C2.RG8I, C2.RG8UI, C2.RG16I, C2.RG16UI, C2.RG32I, C2.RG32UI,
@@ -1445,11 +1463,8 @@ const W2_COPY_INTERNALFORMATS: number[] = [
 ];
 
 function isW2CopyInternalFormatValid(ctx: WebGLRenderingContext, fmt: GLenum): boolean {
-  if (W2_COPY_INTERNALFORMATS.includes(fmt)) return true;
-  if (fmt === C2.R32F || fmt === C2.RG32F || fmt === C2.RGBA32F) {
-    return ctx._extensions.has('EXT_color_buffer_float');
-  }
-  return false;
+  void ctx;
+  return W2_COPY_INTERNALFORMATS.includes(fmt);
 }
 
 /** Component count of an internal format (copyTexImage2D src/dest rules). */
@@ -1508,6 +1523,63 @@ function w1CopyDestAllowed(srcFmt: GLenum, destFmt: GLenum): boolean {
     case C1.ALPHA: return kind === 'alpha' || kind === 'rgba';
     default: return true; // sized dests (extension formats) are unconstrained in W1
   }
+}
+
+/**
+ * Per-component size class of a format, for the WebGL2 copyTexImage2D rule
+ * (spec "Color conversion in copyTex{Sub}Image2D"; CTS copy-texture-image.html):
+ * a SIZED dest's component sizes must exactly match the source's. Classes match
+ * the CTS expectations — 8-bit normalized (incl. sRGB), 4/5/565/10-10-10-2
+ * normalized, float16, float32, R11F, 32-bit int, 8/16-bit int, 32-bit uint,
+ * 8/16-bit uint (incl. RGB10_A2UI). Unsized formats map to their effective
+ * 8-bit storage (RGBA→RGBA8 etc. — WebGL2 converts unsized texImage2D
+ * internalformats to sized); as a DEST they are exempt from the rule (handled
+ * by w2CopyDestSizeClassMatch). Returns null for unknown formats.
+ */
+function copySizeClass(fmt: GLenum): string | null {
+  switch (fmt) {
+    case C2.R8: case C2.RG8: case C2.RGB8: case C2.RGBA8:
+    case C2.SRGB8: case C2.SRGB8_ALPHA8:
+    case C1.RGBA: case C1.RGB: case C1.LUMINANCE: case C1.LUMINANCE_ALPHA: case C1.ALPHA:
+      return 'unorm8';
+    case C1.RGBA4: case C1.RGB5_A1: case C1.RGB565: case C2.RGB10_A2:
+      return 'unorm-small';
+    case C2.R16F: case C2.RG16F: case C2.RGB16F: case C2.RGBA16F:
+      return 'float16';
+    case C2.R32F: case C2.RG32F: case C2.RGB32F: case C2.RGBA32F:
+      return 'float32';
+    case C2.R11F_G11F_B10F:
+      return 'r11';
+    case C2.R32I: case C2.RG32I: case C2.RGB32I: case C2.RGBA32I:
+      return 'int32';
+    case C2.R8I: case C2.R16I: case C2.RG8I: case C2.RG16I:
+    case C2.RGB8I: case C2.RGB16I: case C2.RGBA8I: case C2.RGBA16I:
+      return 'int8or16';
+    case C2.R32UI: case C2.RG32UI: case C2.RGB32UI: case C2.RGBA32UI:
+      return 'uint32';
+    case C2.R8UI: case C2.R16UI: case C2.RG8UI: case C2.RG16UI:
+    case C2.RGB10_A2UI: case C2.RGB8UI: case C2.RGB16UI:
+    case C2.RGBA8UI: case C2.RGBA16UI:
+      return 'uint8or16';
+    default:
+      return null;
+  }
+}
+
+/** WebGL2 copyTexImage2D dest/source size-class rule (see copySizeClass). */
+function w2CopyDestSizeClassMatch(srcFmt: GLenum, destFmt: GLenum): boolean {
+  // Unsized dest formats are exempt: the size-matching requirement applies only
+  // "if internalformat is sized" (WebGL2 spec).
+  switch (destFmt) {
+    case C1.RGBA: case C1.RGB: case C1.LUMINANCE: case C1.LUMINANCE_ALPHA: case C1.ALPHA:
+      return true;
+  }
+  const srcClass = copySizeClass(srcFmt);
+  const destClass = copySizeClass(destFmt);
+  // Unknown formats: don't block here (the source FBO completeness check and
+  // the component-count rule above govern).
+  if (srcClass === null || destClass === null) return true;
+  return srcClass === destClass;
 }
 
 /**
@@ -1622,8 +1694,14 @@ function copyTexImage2DImpl(
   }
   if (srcFmt !== 0) {
     if (ctx._version === 2) {
-      // W2: the destination may not have more components than the source.
+      // W2: components can be dropped but not added, and a sized dest's
+      // component sizes must exactly match the source's (spec "Color conversion
+      // in copyTex{Sub}Image2D"; CTS copy-texture-image.html).
       if (internalFormatComponents(internalformat) > internalFormatComponents(srcFmt)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
+        return;
+      }
+      if (!w2CopyDestSizeClassMatch(srcFmt, internalformat)) {
         ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
