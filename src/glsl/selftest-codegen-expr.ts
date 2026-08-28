@@ -345,7 +345,7 @@ function evalParams(v: Value, e: CodegenEnv, params: string[], args: number[]): 
 {
   const e = env('VERTEX', 100);
   const v = emitExpr(bin('+', lit(4294967295, uT()), lit(1, uT()), uT()), e)[0];
-  check(v.v === '((4294967295) + (1)) >>> 0', `uint add wraps (got '${v.v}')`);
+  check(v.v === '(((4294967295) + (1)) >>> 0)', `uint add wraps (got '${v.v}')`);
   check(evalV(v, e) === 0, `(0xFFFFFFFF + 1) >>> 0 === 0`);
 }
 
@@ -354,7 +354,7 @@ function evalParams(v: Value, e: CodegenEnv, params: string[], args: number[]): 
   e.declareLocal('a', iT());
   e.declareLocal('b', iT());
   const v = emitExpr(bin('/', ident('a', iT()), ident('b', iT()), iT()), e)[0];
-  check(v.v === '((a) / (b)) | 0', `int div → '((a) / (b)) | 0' (got '${v.v}')`);
+  check(v.v === '(((a) / (b)) | 0)', `int div → '(((a) / (b)) | 0)' (got '${v.v}')`);
   check(evalParams(v, e, ['a', 'b'], [-7, 2]) === -3, `int (-7)/2 === -3`);
 }
 
@@ -363,7 +363,7 @@ function evalParams(v: Value, e: CodegenEnv, params: string[], args: number[]): 
   e.declareLocal('a', uT());
   e.declareLocal('b', uT());
   const v = emitExpr(bin('*', ident('a', uT()), ident('b', uT()), uT()), e)[0];
-  check(v.v === '(Math.imul(a, b)) >>> 0', `uint mul → '(Math.imul(a, b)) >>> 0' (got '${v.v}')`);
+  check(v.v === '((Math.imul(a, b)) >>> 0)', `uint mul → '((Math.imul(a, b)) >>> 0)' (got '${v.v}')`);
 }
 
 {
