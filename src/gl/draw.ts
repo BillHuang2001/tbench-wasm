@@ -79,6 +79,7 @@ import {
   getPackConverter,
   getFormat,
   floatToHalf,
+  linearToSRGB,
 } from '../raster';
 import type {
   DrawCall, FramebufferTarget, SamplerState, Surface, TextureImage, TextureUnitBinding, TextureEnv,
@@ -91,6 +92,19 @@ import type { ProgramModel } from './objects';
 import type { WebGLBuffer, WebGLQuery, WebGLTexture, WebGLTransformFeedback } from './objects';
 import { ensureProgramLinked } from './api/programs';
 import { SRC1_BLEND_FACTORS } from './api/state';
+
+/**
+ * WebIDL `unsigned long long` conversion (readPixels dstOffset, clearBuffer*
+ * srcOffset — the wasm readpixels CTS pages pass offsets > 2^32, so NO
+ * `>>> 0`). NaN/Infinity → 0; negatives wrap modulo 2^64 (a huge value that
+ * fails every bounds check, per WebIDL semantics). Shared by api/draw.ts and
+ * api/webgl2.ts.
+ */
+export function toU64(v: unknown): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return n < 0 ? n + 2 ** 64 : n;
+}
 
 /** A fully validated, assembled draw request (before rasterizer call). */
 export interface DrawRequest {
@@ -277,6 +291,41 @@ function resolveReadDepthStencil(ctx: WebGLRenderingContext, attachment: GLenum)
     return getAttachmentSurface(s.readFramebuffer, attachment);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Does the READ framebuffer's attachment point hold an image? (GLES 3.0 §4.3.2
+ * blit missing-image validation.) Uses the RAW attachment record, NOT
+ * getAttachmentSurface's plane-scoped views: a depth-stencil image attached at
+ * DEPTH_ATTACHMENT resolves to null via getAttachmentSurface(DEPTH_ATTACHMENT)
+ * (deliberate — stencil-only blits must not copy depth) even though the point
+ * HAS an image (blitframebuffer-test.html binds the same DEPTH24_STENCIL8
+ * renderbuffer at DEPTH_ATTACHMENT on both sides and expects a DEPTH blit to
+ * succeed).
+ */
+function readAttachmentHasImage(ctx: WebGLRenderingContext, attachment: GLenum): boolean {
+  const s = ctx._state;
+  const fbo = s.readFramebuffer;
+  if (fbo === null) {
+    const dfb = ctx._defaultFB;
+    if (!dfb) return false;
+    return attachment === C1.DEPTH_ATTACHMENT ? !!dfb.depth : !!dfb.stencil;
+  }
+  const entry = fbo._attachments.get(attachment);
+  if (!entry) return false;
+  try {
+    if (entry.type === 'renderbuffer') return !!entry.renderbuffer._surface;
+    const tex = entry.texture;
+    const img = tex._image;
+    if (!img || entry.level < 0) return false;
+    const lvl = img.levels[entry.level];
+    if (!lvl) return false;
+    const isCube = entry.face !== undefined && entry.face >= 0x8515 && entry.face <= 0x851a;
+    const idx = isCube ? entry.face - 0x8515 : entry.layer;
+    return !!lvl.data[idx];
+  } catch {
+    return false;
   }
 }
 
@@ -791,7 +840,16 @@ function buildAttribs(
         // constant attribute
         plans[l] = { source: 0, divisor: a.divisor, instanced: a.divisor > 0, present: true, constant: true };
         if (pa.integral) {
-          attribs[l] = (a.constantI ?? sc.emptyInt) as Int32Array;
+          // Signedness matters: the uint mirror (constantUI) holds the values
+          // written by vertexAttribI4ui — constantI is never touched by those
+          // setters (attrib-type-match.html "Correct setup" draw reads the
+          // uvec2 constant through constantUI; constantI would be stale zeros).
+          const unsigned = pa.type === C1.UNSIGNED_INT ||
+            pa.type === C2.UNSIGNED_INT_VEC2 || pa.type === C2.UNSIGNED_INT_VEC3 ||
+            pa.type === C2.UNSIGNED_INT_VEC4;
+          attribs[l] = unsigned
+            ? (a.constantUI as Uint32Array)
+            : (a.constantI as Int32Array);
         } else {
           attribs[l] = a.constantF as Float32Array;
         }
@@ -1398,6 +1456,22 @@ function findVarying(varyings: readonly { name: string }[], name: string): numbe
   return -1;
 }
 
+/** True for GLenum varying types that carry integral values (int/uint/bool families). */
+function isIntegralVaryingType(glType: number): boolean {
+  return (
+    glType === 0x1404 /* INT */ ||
+    glType === 0x1405 /* UNSIGNED_INT */ ||
+    (glType >= 0x8b53 && glType <= 0x8b55) /* INT_VEC2..4 */ ||
+    (glType >= 0x8dc6 && glType <= 0x8dc8) /* UNSIGNED_INT_VEC2..4 */ ||
+    (glType >= 0x8b56 && glType <= 0x8b59) /* BOOL..BOOL_VEC4 */
+  );
+}
+
+/** True for unsigned GLenum varying types (uint/uvec families). */
+function isUnsignedVaryingType(glType: number): boolean {
+  return glType === 0x1405 || (glType >= 0x8dc6 && glType <= 0x8dc8);
+}
+
 /** One resolved capture: where the value lives in the vertex record + its component count. */
 interface ResolvedTfVarying {
   name: string;
@@ -1405,6 +1479,10 @@ interface ResolvedTfVarying {
   recOff: number;
   /** Floats captured per vertex. */
   comps: number;
+  /** Integral varying: the record holds float32 VALUES — the TF buffer must get the exact integer, not float bits. */
+  integral: boolean;
+  /** Unsigned integral varying: captured as uint32. */
+  unsigned: boolean;
 }
 
 interface ResolvedTfState {
@@ -1431,6 +1509,8 @@ function resolveTfVaryings(pm: ProgramModel): ResolvedTfState | null {
   for (const tv of tfVarys) {
     let recOff = -1;
     let comps = 0;
+    let integral = false;
+    let unsigned = false;
     if (tv.name === 'gl_Position') {
       recOff = 0;
       comps = 4;
@@ -1443,10 +1523,12 @@ function resolveTfVaryings(pm: ProgramModel): ResolvedTfState | null {
         recOff = RECORD_HEADER_FLOATS;
         for (let i = 0; i < vi; i++) recOff += varyings[i].components;
         comps = varyings[vi].components;
+        integral = isIntegralVaryingType(varyings[vi].type);
+        unsigned = isUnsignedVaryingType(varyings[vi].type);
       }
     }
     if (comps === 0) continue; // not active in the record — skipped (linker normally rejects)
-    out.push({ name: tv.name, recOff, comps });
+    out.push({ name: tv.name, recOff, comps, integral, unsigned });
     totalComps += comps;
   }
   return out.length === 0 ? null : { varyings: out, totalComps };
@@ -1608,8 +1690,24 @@ function captureTransformFeedback(
             overflow = true;
             break outer;
           }
-          const src = records.subarray(recBase + tfVarys[k].recOff, recBase + tfVarys[k].recOff + c);
-          new Float32Array(buf._data, dstByte, c).set(src);
+          const recOff = recBase + tfVarys[k].recOff;
+          if (tfVarys[k].integral) {
+            // Integral varyings ride the float32 record as float VALUES; the TF
+            // buffer must hold the exact integer (GLES 3.0 §2.15.2), not the
+            // float bit pattern (vertex-id.html "Via transform feedback",
+            // get-buffer-sub-data-validity.html). Values within float32 exact
+            // range convert losslessly; larger magnitudes need the glsl
+            // bit-exact side channel (src/glsl CONTEXT.md).
+            const dst = tfVarys[k].unsigned
+              ? new Uint32Array(buf._data, dstByte, c)
+              : new Int32Array(buf._data, dstByte, c);
+            for (let j = 0; j < c; j++) {
+              const v = records[recOff + j];
+              dst[j] = tfVarys[k].unsigned ? v >>> 0 : v | 0;
+            }
+          } else {
+            new Float32Array(buf._data, dstByte, c).set(records.subarray(recOff, recOff + c));
+          }
         }
         capturedVerts++;
       }
@@ -1641,6 +1739,26 @@ function drawBufferAttachmentIs(ctx: WebGLRenderingContext, index: number, fmt: 
   const att = fbo._attachments.get(C1.COLOR_ATTACHMENT0 + index);
   if (!att) return false;
   return (att.type === 'renderbuffer' ? att.renderbuffer._internalformat : att.texture._image?.internalFormat) === fmt;
+}
+
+/**
+ * Base type family of a fragment output GLenum (ProgramModel.fragment.outputs
+ * [].type): 0 = float/normalized, 1 = signed integer, 2 = unsigned integer.
+ * GLES 3.0 §4.2.1 — an output may only target a color buffer of the SAME
+ * family (int → signed-integer attachment, uint → unsigned, float → any
+ * float/normalized buffer).
+ */
+function outputTypeFamily(type: number): number {
+  switch (type) {
+    case 0x1404 /* GL_INT */: case 0x8b53 /* GL_INT_VEC2 */:
+    case 0x8b54 /* GL_INT_VEC3 */: case 0x8b55 /* GL_INT_VEC4 */:
+      return 1;
+    case 0x1405 /* GL_UNSIGNED_INT */: case 0x8b5c /* GL_UNSIGNED_INT_VEC2 */:
+    case 0x8b5d /* GL_UNSIGNED_INT_VEC3 */: case 0x8b5e /* GL_UNSIGNED_INT_VEC4 */:
+      return 2;
+    default:
+      return 0;
+  }
 }
 
 /**
@@ -1777,10 +1895,52 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
     for (let i = 0; i < s.drawBuffers.length; i++) {
       if (s.drawBuffers[i] === C1.NONE) continue;
       if (declared.has(i)) continue;
+      // RASTERIZER_DISCARD discards every fragment before any output write —
+      // the undefined-output rule is moot (CTS draw-buffers.html asserts
+      // NO_ERROR for an undefined-output draw with discard enabled).
+      if (s.caps.RASTERIZER_DISCARD) break;
+      // The rule applies ONLY to draw buffers with an attached image: a
+      // non-NONE draw buffer whose attachment point has no image is simply
+      // skipped by the rasterizer — no error (CTS
+      // read-draw-when-missing-image.html draws with
+      // drawBuffers=[NONE, COLOR_ATTACHMENT1] and [COLOR_ATTACHMENT0,
+      // COLOR_ATTACHMENT1] where CA1 is unattached → NO_ERROR).
+      const db = s.drawBuffers[i];
+      const dbIdx = db - C1.COLOR_ATTACHMENT0;
+      if (dbIdx < 0 || dbIdx >= fb.color.length || !fb.color[dbIdx]) continue;
       const m = s.colorMaskPerDrawBuffer.get(i) ?? s.colorMask;
       if (m[0] || m[1] || m[2] || m[3]) {
         pushError(ctx, C1.INVALID_OPERATION);
         return;
+      }
+    }
+  }
+  // GLES 3.0 §4.2.1 (CTS conformance2/rendering/fs-color-type-mismatch-color-
+  // buffer-type.html): a draw is INVALID_OPERATION when the base type of a
+  // DECLARED fragment shader output does not match the type of the color
+  // buffer it writes — float/normalized outputs to integer attachments or
+  // integer outputs to float/normalized attachments, including signed-vs-
+  // unsigned (an int output to an unsigned attachment mismatches and vice
+  // versa). Attachments with no image are skipped (nothing is written); NONE
+  // draw buffers are skipped; WebGL1 has no integer color buffers. Placed
+  // with the other pre-vertex checks (runs after the count>0 gate above).
+  if (s.version === 2) {
+    const outs = pm.fragment?.outputs;
+    if (outs && outs.length > 0) {
+      for (const o of outs) {
+        const l = o.location;
+        if (l < 0 || l >= s.drawBuffers.length) continue;
+        const db = s.drawBuffers[l];
+        if (db === C1.NONE) continue;
+        const dbIdx = db - C1.COLOR_ATTACHMENT0;
+        if (dbIdx < 0 || dbIdx >= fb.color.length || !fb.color[dbIdx]) continue;
+        const info = fb.color[dbIdx]!.info;
+        // Attachment family: 0 = float/normalized, 1 = signed int, 2 = uint.
+        const surfFam = info && info.isInteger ? (info.isSigned ? 1 : 2) : 0;
+        if (outputTypeFamily(o.type) !== surfFam) {
+          pushError(ctx, C1.INVALID_OPERATION);
+          return;
+        }
       }
     }
   }
@@ -2108,7 +2268,14 @@ export function executeClear(ctx: WebGLRenderingContext, mask: GLuint): void {
         return;
       }
       if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) continue;
-      const [r, g, b, a] = s.clearColor;
+      let [r, g, b, a] = s.clearColor;
+      // The clear color is LINEAR; sRGB color buffers store the ENCODED value
+      // (RGB only — GLES 3.0 §4.1.8; CTS clear-srgb-color-buffer.html and
+      // read-pixels-from-fbo-test.html assert the encoded bytes). Raster's
+      // clearColorSurface stores linear as-is, so encode here.
+      if (surf.info.isSRGB) {
+        r = linearToSRGB(r); g = linearToSRGB(g); b = linearToSRGB(b);
+      }
       try {
         clearColorSurface(surf, r, g, b, a, scissor, cm);
       } catch {
@@ -2323,6 +2490,7 @@ export function executeReadPixels(
   ctx: WebGLRenderingContext,
   x: GLint, y: GLint, width: GLsizei, height: GLsizei,
   format: GLenum, type: GLenum, pixels: ArrayBufferView,
+  dstOffset = 0,
 ): void {
   const s = ctx._state;
   if (width === 0 || height === 0) return;
@@ -2376,6 +2544,8 @@ export function executeReadPixels(
   const sbpp = surfaceBytesPerPixel(surf);
 
   // Destination: client ArrayBufferView, or PIXEL_PACK_BUFFER when bound.
+  // `dstOffset` (WebGL2 readPixels 8th arg, element offset into the view) is
+  // validated api-side; here it just shifts the write base.
   let dstBase: number;
   let dstView: ArrayBufferView;
   const packBuf = s.pixelPackBuffer;
@@ -2384,7 +2554,9 @@ export function executeReadPixels(
     dstBase = (pixels as unknown as number) + pack.skipRows * rowStride + pack.skipPixels * bpp;
   } else {
     dstView = pixels;
-    dstBase = pixels.byteOffset + pack.skipRows * rowStride + pack.skipPixels * bpp;
+    dstBase = pixels.byteOffset +
+      dstOffset * (pixels as unknown as { BYTES_PER_ELEMENT: number }).BYTES_PER_ELEMENT +
+      pack.skipRows * rowStride + pack.skipPixels * bpp;
   }
 
   for (let row = 0; row < height; row++) {
@@ -2451,6 +2623,18 @@ export function executeBlitFramebuffer(
   if (mask & C1.COLOR_BUFFER_BIT) {
     const src = resolveReadColor(ctx);
     const fb = resolveDrawTarget(ctx);
+    // GLES 3.0 §4.3.2 + CTS read-draw-when-missing-image.html: when the read
+    // buffer has NO image, a color blit is INVALID_OPERATION only if the
+    // blit's destination — the first enabled draw buffer — HAS an image;
+    // source- and destination-both-missing → NO_ERROR no-op.
+    if (!src && fb) {
+      const db0 = s.drawBuffers[0] ?? C1.COLOR_ATTACHMENT0;
+      const dst0 = db0 === C1.NONE ? null : fb.color[db0 - C1.COLOR_ATTACHMENT0];
+      if (dst0) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+    }
     if (src && fb) {
       const db0 = s.drawBuffers[0] ?? C1.COLOR_ATTACHMENT0;
       const dst = db0 === C1.NONE ? null : fb.color[db0 - C1.COLOR_ATTACHMENT0];
@@ -2470,6 +2654,20 @@ export function executeBlitFramebuffer(
     const fb = resolveDrawTarget(ctx);
     const dstDepth = fb ? fb.depth : null;
     const dstStencil = fb ? fb.stencil ?? (fb.depth && fb.depth.stencilData ? fb.depth : null) : null;
+    // GLES 3.0 §4.3.2 + CTS read-draw-when-missing-image.html: a depth/stencil
+    // blit is INVALID_OPERATION when exactly one side (source or destination)
+    // has the buffer; both-present or both-missing → proceed/no-op. The source
+    // side is judged by raw attachment presence (readAttachmentHasImage) —
+    // plane-scoped resolution would misreport DS images attached at
+    // DEPTH_ATTACHMENT as "missing".
+    if ((mask & C1.DEPTH_BUFFER_BIT) !== 0 && readAttachmentHasImage(ctx, C1.DEPTH_ATTACHMENT) !== !!dstDepth) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return;
+    }
+    if ((mask & C1.STENCIL_BUFFER_BIT) !== 0 && readAttachmentHasImage(ctx, C1.STENCIL_ATTACHMENT) !== !!dstStencil) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return;
+    }
     if (srcDepth && dstDepth) {
       try {
         blitDepthStencilSurface(srcDepth, dstDepth, srcX0, srcY0, srcW, srcH, dstX0, dstY0, dstW, dstH);
@@ -2551,6 +2749,7 @@ function clearColorIntLocal(
 export function executeClearBuffer(
   ctx: WebGLRenderingContext,
   buffer: GLenum, drawbuffer: GLint, values: Float32Array | Int32Array | Uint32Array | null,
+  srcOffset = 0,
   depth?: number, stencil?: number,
 ): void {
   const s = ctx._state;
@@ -2584,13 +2783,22 @@ export function executeClearBuffer(
     }
     if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) return;
     if (values instanceof Int32Array || values instanceof Uint32Array) {
-      clearColorIntLocal(surf, values, cm, scissor);
+      clearColorIntLocal(surf, values.subarray(srcOffset), cm, scissor);
     } else {
       const v = values as Float32Array;
+      // The clear color is LINEAR; sRGB color buffers store the ENCODED value
+      // (GLES 3.0 §4.1.8 — RGB only, alpha untouched; CTS clear-srgb-color-
+      // buffer.html + read-pixels-from-fbo-test.html). Raster's
+      // clearColorSurface stores linear as-is, so encode here.
+      let r = v[srcOffset] ?? 0, g = v[srcOffset + 1] ?? 0;
+      let b = v[srcOffset + 2] ?? 0, a = v[srcOffset + 3] ?? 1;
+      if (surf.info.isSRGB) {
+        r = linearToSRGB(r); g = linearToSRGB(g); b = linearToSRGB(b);
+      }
       try {
-        clearColorSurface(surf, v[0] ?? 0, v[1] ?? 0, v[2] ?? 0, v[3] ?? 1, scissor, cm);
+        clearColorSurface(surf, r, g, b, a, scissor, cm);
       } catch {
-        clearColorLocal(surf, v[0] ?? 0, v[1] ?? 0, v[2] ?? 0, v[3] ?? 1, scissor, cm);
+        clearColorLocal(surf, r, g, b, a, scissor, cm);
       }
     }
   } else if (buffer === C2.DEPTH) {
@@ -2600,9 +2808,9 @@ export function executeClearBuffer(
     }
     if (!s.depth.mask || !values) return;
     try {
-      clearDepthSurface(fb.depth, values[0] ?? 0, scissor, true);
+      clearDepthSurface(fb.depth, values[srcOffset] ?? 0, scissor, true);
     } catch {
-      clearDepthLocal(fb.depth, values[0] ?? 0, scissor);
+      clearDepthLocal(fb.depth, values[srcOffset] ?? 0, scissor);
     }
   } else if (buffer === C2.STENCIL) {
     const stencilSurf = fb.stencil ?? (fb.depth && fb.depth.stencilData ? fb.depth : null);
@@ -2614,9 +2822,9 @@ export function executeClearBuffer(
     const writeMask = (s.stencil.front.writeMask & s.stencil.back.writeMask) & 0xff;
     if (writeMask === 0) return;
     try {
-      clearStencilSurface(stencilSurf, values[0] ?? 0, scissor, writeMask);
+      clearStencilSurface(stencilSurf, values[srcOffset] ?? 0, scissor, writeMask);
     } catch {
-      clearStencilLocal(stencilSurf, values[0] ?? 0, scissor, writeMask);
+      clearStencilLocal(stencilSurf, values[srcOffset] ?? 0, scissor, writeMask);
     }
   } else { // DEPTH_STENCIL (clearBufferfi only)
     if (!fb.depth || !fb.depth.stencilData) {
@@ -2735,6 +2943,86 @@ function validateCommonDraw(ctx: WebGLRenderingContext, mode: GLenum, indexed: b
     if (a.enabled && !a.buffer) {
       pushError(ctx, C1.INVALID_OPERATION);
       return false;
+    }
+  }
+  // GLES 3.0 §2.11.6 (CTS conformance2/rendering/attrib-type-match.html): at
+  // draw time, the base type of every ACTIVE vertex shader input must match the
+  // type of its backing data. ENABLED arrays: vertexAttribPointer (float) vs
+  // vertexAttribIPointer (integer) must match the shader input's float vs
+  // int/uint declaration, INCLUDING int-vs-uint signedness (an INT array on a
+  // uvec input is a mismatch, and vice versa). DISABLED arrays: the current
+  // generic value's type (most recent setter — vertexAttrib* → float,
+  // vertexAttribI* → int, vertexAttribIu* → uint; default float) must match
+  // likewise. Inactive attributes are exempt (they are not in pm.attributes).
+  {
+    const pm = prog._program;
+    if (pm) {
+      const attrs = pm.attributes ?? [];
+      for (const pa of attrs) {
+        const loc = pa.location;
+        if (loc < 0 || loc >= maxAttribs) continue;
+        const a = vao.attribs[loc];
+        const shaderInt = !!pa.integral;
+        const shaderUnsigned =
+          pa.type === C1.UNSIGNED_INT || pa.type === C2.UNSIGNED_INT_VEC2 ||
+          pa.type === C2.UNSIGNED_INT_VEC3 || pa.type === C2.UNSIGNED_INT_VEC4;
+        const kind = a.genericKind ?? 'f';
+        let bad = false;
+        if (a.enabled) {
+          if (shaderInt !== a.integer) {
+            bad = true;
+          } else if (shaderInt) {
+            const arrUnsigned = a.type === C1.UNSIGNED_BYTE ||
+              a.type === C1.UNSIGNED_SHORT || a.type === C1.UNSIGNED_INT;
+            if (shaderUnsigned !== arrUnsigned) bad = true;
+          }
+        } else if (shaderInt) {
+          if (kind === 'f') {
+            bad = true;
+          } else if (shaderUnsigned ? kind !== 'ui' : kind !== 'i') {
+            bad = true;
+          }
+        } else if (kind !== 'f') {
+          bad = true;
+        }
+        if (bad) {
+          pushError(ctx, C1.INVALID_OPERATION);
+          return false;
+        }
+      }
+    }
+  }
+  // GLES 3.0 §2.11.6/§2.11.7 (CTS conformance2/rendering/
+  // uniform-block-buffer-size.html): a draw is INVALID_OPERATION when any
+  // ACTIVE uniform block of the current program is not backed by a buffer
+  // range large enough to contain the block. Covers: nothing bound at the
+  // block's binding point, a buffer with no data store (never bufferData'd),
+  // a store smaller than the block, and a bindBufferRange whose size is
+  // smaller than the block. The per-program blockIndex → binding-point map
+  // lives in api/programs.ts's private WeakMap — read it back through the
+  // public query (same pattern as the engine's block-store build in
+  // executeDraw; safe on a linked program, pushes no errors).
+  {
+    const pm2 = prog._program;
+    if (pm2) {
+      const blocks = pm2.uniformBlocks ?? [];
+      if (blocks.length > 0) {
+        const gl2 = ctx as unknown as {
+          getActiveUniformBlockParameter?: (program: WebGLProgram, uniformBlockIndex: GLuint, pname: GLenum) => unknown;
+        };
+        for (let bi = 0; bi < blocks.length; bi++) {
+          const binding =
+            gl2.getActiveUniformBlockParameter !== undefined
+              ? ((gl2.getActiveUniformBlockParameter(prog, blocks[bi].index, C2.UNIFORM_BLOCK_BINDING) as number) || 0)
+              : 0;
+          const buf = binding < s.uniformBuffers.length ? s.uniformBuffers[binding] : null;
+          const range = binding < s.uniformBufferRanges.length ? s.uniformBufferRanges[binding] : null;
+          if (!buf || !buf._data || !range || range.size < blocks[bi].size) {
+            pushError(ctx, C1.INVALID_OPERATION);
+            return false;
+          }
+        }
+      }
     }
   }
   const fb = resolveDrawTarget(ctx);

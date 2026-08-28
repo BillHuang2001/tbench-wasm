@@ -22,8 +22,10 @@
  *    applied only in the fragment color-write path (RGB channels only — alpha
  *    is never sRGB-encoded per GLES 3.0 §4.1.8). Clear and blit pass values
  *    through unconverted (glClearColor is written as-is per spec).
- *  - Blending applies to output location 0 only (GLES 3.0 §4.1.7: with
- *    multiple color outputs, blending is applied to the first one).
+ *  - Blending applies per output location. Core GLES 3.0: the global BLEND cap
+ *    governs every draw buffer. With OES_draw_buffers_indexed active, gl/
+ *    attaches DrawCall.blendPerDrawBuffer (entry per draw buffer; buffer 0
+ *    mirrors the global cap) and each output blends with its own entry.
  *  - Dither: the DITHER state is accepted (gl.enable/getParameter) but the
  *    dithering algorithm is a NO-OP. The GL/WebGL specs leave the algorithm
  *    implementation-defined, and every shipping WebGL implementation (ANGLE,
@@ -46,7 +48,7 @@
  */
 
 import type {
-  ColorMask, DrawCall, FragmentExecCtx, FragmentOps, RasterState,
+  BlendPerDrawBufferEntry, ColorMask, DrawCall, FragmentExecCtx, FragmentOps, RasterState,
   ScissorState, StencilFaceState, Surface,
 } from './types';
 import { getDepthData, getStencilData } from './surface';
@@ -235,6 +237,8 @@ export class FragmentOpsImpl implements FragmentOps {
   private readonly depthTestEnabled: boolean;
   private readonly depthMask: boolean;
   private readonly blend: DrawCall['blend'];
+  /** Optional per-draw-buffer blend state (OES_draw_buffers_indexed). */
+  private readonly blendPerDrawBuffer: readonly BlendPerDrawBufferEntry[] | undefined;
   private readonly colorMask: readonly ColorMask[];
   private readonly drawBuffers: readonly number[];
   private readonly fbColors: readonly (Surface | null)[];
@@ -258,6 +262,7 @@ export class FragmentOpsImpl implements FragmentOps {
     this.depthTestEnabled = dc.depthTest.enabled;
     this.depthMask = dc.depthMask;
     this.blend = dc.blend;
+    this.blendPerDrawBuffer = dc.blendPerDrawBuffer;
     this.colorMask = dc.colorMask;
     this.drawBuffers = dc.drawBuffers;
     this.fbColors = dc.fb.color;
@@ -353,8 +358,9 @@ export class FragmentOpsImpl implements FragmentOps {
 
   /**
    * Writes one fragment color output (location L) through the full pipeline:
-   * blend (location 0 only, linear space for sRGB targets) → sRGB encode
-   * (RGB only) → colorMask → surface write. (DITHER is a no-op — see header.)
+   * blend (per-draw-buffer state when the DrawCall carries it, else the global
+   * BLEND state — always in linear space for sRGB targets) → sRGB encode (RGB
+   * only) → colorMask → surface write. (DITHER is a no-op — see header.)
    */
   private writeColor(L: number, x: number, y: number, colors: readonly Float32Array[]): void {
     const db = this.drawBuffers[L];
@@ -377,7 +383,13 @@ export class FragmentOpsImpl implements FragmentOps {
     const off = (y * tgt.width + x) * info.bytesPerPixel;
     let r = src[0], g = src[1], b = src[2], a = src[3];
     const isSRGB = info.isSRGB;
-    const blendHere = this.blend.enabled && L === 0;
+    // Per-draw-buffer blend (OES_draw_buffers_indexed): when the DrawCall
+    // carries per-draw-buffer entries, output L blends with entry L (buffer 0's
+    // entry always mirrors the global BLEND cap); otherwise the global blend
+    // state applies to every output (core GLES 3.0: BLEND applies to all draw
+    // buffers).
+    const bEntry = this.blendPerDrawBuffer ? this.blendPerDrawBuffer[L] : undefined;
+    const blendHere = bEntry ? bEntry.enabled : this.blend.enabled;
     if (blendHere) {
       // Decode the destination (as-stored values; dstScratch keeps them for
       // the colorMask read-modify-write below), linearize for sRGB targets,
@@ -391,8 +403,13 @@ export class FragmentOpsImpl implements FragmentOps {
       this.linearDst[0] = dr; this.linearDst[1] = dg; this.linearDst[2] = db; this.linearDst[3] = da;
       blendColor(
         src, this.linearDst, this.blendOut,
-        this.blend.srcRGB, this.blend.dstRGB, this.blend.srcAlpha, this.blend.dstAlpha,
-        this.blend.eqRGB, this.blend.eqAlpha, this.blend.color,
+        bEntry ? bEntry.srcRGB : this.blend.srcRGB,
+        bEntry ? bEntry.dstRGB : this.blend.dstRGB,
+        bEntry ? bEntry.srcAlpha : this.blend.srcAlpha,
+        bEntry ? bEntry.dstAlpha : this.blend.dstAlpha,
+        bEntry ? bEntry.eqRGB : this.blend.eqRGB,
+        bEntry ? bEntry.eqAlpha : this.blend.eqAlpha,
+        bEntry ? bEntry.color : this.blend.color,
       );
       r = this.blendOut[0]; g = this.blendOut[1]; b = this.blendOut[2]; a = this.blendOut[3];
     }
@@ -652,26 +669,49 @@ export function blitColorSurface(
   dstX: number, dstY: number, dstW: number, dstH: number,
   filter: 'nearest' | 'linear',
 ): void {
-  if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return;
+  // Negative srcW/srcH/dstW/dstH are legal (GLES 3.0 §4.3.2: the rect spans
+  // X0..X0+W, mirroring the image); only zero-size rects are degenerate.
+  if (srcW === 0 || srcH === 0 || dstW === 0 || dstH === 0) return;
   const sw = src.width, sh = src.height;
   const dw = dst.width, dh = dst.height;
-  // Iterate the destination rect clipped to dst bounds (rows map directly:
-  // both surfaces have row 0 = BOTTOM).
-  const x0 = Math.max(0, dstX);
-  const y0 = Math.max(0, dstY);
-  const x1 = Math.min(dw, dstX + dstW);
-  const y1 = Math.min(dh, dstY + dstH);
+  // Iterate the destination rect (sign-aware: [min(X,X+W), max(X,X+W))) clipped
+  // to dst bounds. Rows map directly: both surfaces have row 0 = BOTTOM.
+  const x0 = Math.max(0, Math.min(dstX, dstX + dstW));
+  const y0 = Math.max(0, Math.min(dstY, dstY + dstH));
+  const x1 = Math.min(dw, Math.max(dstX, dstX + dstW));
+  const y1 = Math.min(dh, Math.max(dstY, dstY + dstH));
   if (x0 >= x1 || y0 >= y1) return;
   const sInfo = src.info;
   const dInfo = dst.info;
   const sbpp = sInfo.bytesPerPixel;
   const dbpp = dInfo.bytesPerPixel;
-  if (filter === 'linear' && !sInfo.isInteger) {
+  // sRGB format conversion is part of the copy (GLES 3.0 §4.3.2): sRGB sources
+  // decode to linear, sRGB destinations re-encode the linear result. Alpha is
+  // never sRGB-encoded (GLES 3.0 §4.1.8). Same-format sRGB→sRGB round-trips
+  // through the identity.
+  const decodeSRGB = sInfo.isSRGB;
+  const encodeSRGB = dInfo.isSRGB;
+  // GLES 3.0 §4.3.2: same-size rects blit WITHOUT filtering (as NEAREST) even
+  // when LINEAR was requested — bilinear weights are exactly 0/1 there and the
+  // sRGB decode→filter→encode round trip would corrupt bytes that a plain copy
+  // keeps byte-exact. Integer formats never filter (gl/ validates; linear on
+  // integer = nearest). The per-pixel sRGB conversion above still applies to
+  // same-size copies.
+  const doLinear = filter === 'linear' && !sInfo.isInteger &&
+    (srcW !== dstW || srcH !== dstH);
+  if (doLinear) {
     // Bilinear with CLAMP_TO_EDGE: continuous source coord
     //   u = (d − dstOrigin + 0.5)·srcSize/dstSize − 0.5
     // texels = srcOrigin + floor(u), weight = frac(u). Integer formats fall
     // through to nearest (gl/ validates; linear on integer = nearest).
+    // A destination pixel is copied ONLY when its mapped CENTER lies inside
+    // the source surface (the rect condition is implied: the affine map of the
+    // iterated dst-rect pixels always falls inside the source rect). Pixels
+    // whose center lands outside retain their previous value (GLES 3.0 §4.3.2;
+    // CTS blitframebuffer-outside-readbuffer / -filter-outofbounds).
     for (let dy = y0; dy < y1; dy++) {
+      const vc = srcY + (dy - dstY + 0.5) * srcH / dstH;
+      if (vc < 0 || vc >= sh) continue;
       const fy = (dy - dstY + 0.5) * srcH / dstH - 0.5;
       const sy0f = Math.floor(fy);
       const wy = fy - sy0f;
@@ -681,6 +721,8 @@ export function blitColorSurface(
       sy1 = Math.max(0, Math.min(sh - 1, sy1));
       let doff = (dy * dw + x0) * dbpp;
       for (let dx = x0; dx < x1; dx++) {
+        const uc = srcX + (dx - dstX + 0.5) * srcW / dstW;
+        if (uc < 0 || uc >= sw) { doff += dbpp; continue; }
         const fx = (dx - dstX + 0.5) * srcW / dstW - 0.5;
         const sx0f = Math.floor(fx);
         const wx = fx - sx0f;
@@ -692,6 +734,14 @@ export function blitColorSurface(
         sInfo.decode(src.data, (sy0 * sw + sx1) * sbpp, _blitT1);
         sInfo.decode(src.data, (sy1 * sw + sx0) * sbpp, _blitT2);
         sInfo.decode(src.data, (sy1 * sw + sx1) * sbpp, _blitT3);
+        if (decodeSRGB) {
+          // sRGB sources filter in LINEAR space (RGB only — alpha is never
+          // sRGB-encoded per GLES 3.0 §4.1.8).
+          _blitT0[0] = sRGBToLinear(_blitT0[0]); _blitT0[1] = sRGBToLinear(_blitT0[1]); _blitT0[2] = sRGBToLinear(_blitT0[2]);
+          _blitT1[0] = sRGBToLinear(_blitT1[0]); _blitT1[1] = sRGBToLinear(_blitT1[1]); _blitT1[2] = sRGBToLinear(_blitT1[2]);
+          _blitT2[0] = sRGBToLinear(_blitT2[0]); _blitT2[1] = sRGBToLinear(_blitT2[1]); _blitT2[2] = sRGBToLinear(_blitT2[2]);
+          _blitT3[0] = sRGBToLinear(_blitT3[0]); _blitT3[1] = sRGBToLinear(_blitT3[1]); _blitT3[2] = sRGBToLinear(_blitT3[2]);
+        }
         const w00 = (1 - wx) * (1 - wy);
         const w10 = wx * (1 - wy);
         const w01 = (1 - wx) * wy;
@@ -700,19 +750,35 @@ export function blitColorSurface(
         _blitOut[1] = _blitT0[1] * w00 + _blitT1[1] * w10 + _blitT2[1] * w01 + _blitT3[1] * w11;
         _blitOut[2] = _blitT0[2] * w00 + _blitT1[2] * w10 + _blitT2[2] * w01 + _blitT3[2] * w11;
         _blitOut[3] = _blitT0[3] * w00 + _blitT1[3] * w10 + _blitT2[3] * w01 + _blitT3[3] * w11;
+        if (encodeSRGB) {
+          _blitOut[0] = linearToSRGB(_blitOut[0]); _blitOut[1] = linearToSRGB(_blitOut[1]); _blitOut[2] = linearToSRGB(_blitOut[2]);
+        }
         dInfo.encode(dst.data, doff, _blitOut[0], _blitOut[1], _blitOut[2], _blitOut[3]);
         doff += dbpp;
       }
     }
   } else {
-    // NEAREST (also the fallback for integer formats with 'linear').
+    // NEAREST (also the fallback for integer formats with 'linear'). Same
+    // center-outside semantics as the LINEAR path: pixels whose mapped center
+    // lies outside the source surface are never written.
     for (let dy = y0; dy < y1; dy++) {
+      const vc = srcY + (dy - dstY + 0.5) * srcH / dstH;
+      if (vc < 0 || vc >= sh) continue;
       const sy = Math.max(0, Math.min(sh - 1, srcY + Math.floor((dy - dstY + 0.5) * srcH / dstH)));
       let doff = (dy * dw + x0) * dbpp;
       for (let dx = x0; dx < x1; dx++) {
-        const sx = Math.max(0, Math.min(sw - 1, srcX + Math.floor((dx - dstX + 0.5) * srcW / dstW)));
-        sInfo.decode(src.data, (sy * sw + sx) * sbpp, _blitOut);
-        dInfo.encode(dst.data, doff, _blitOut[0], _blitOut[1], _blitOut[2], _blitOut[3]);
+        const uc = srcX + (dx - dstX + 0.5) * srcW / dstW;
+        if (uc >= 0 && uc < sw) {
+          const sx = Math.max(0, Math.min(sw - 1, srcX + Math.floor((dx - dstX + 0.5) * srcW / dstW)));
+          sInfo.decode(src.data, (sy * sw + sx) * sbpp, _blitOut);
+          if (decodeSRGB) {
+            _blitOut[0] = sRGBToLinear(_blitOut[0]); _blitOut[1] = sRGBToLinear(_blitOut[1]); _blitOut[2] = sRGBToLinear(_blitOut[2]);
+          }
+          if (encodeSRGB) {
+            _blitOut[0] = linearToSRGB(_blitOut[0]); _blitOut[1] = linearToSRGB(_blitOut[1]); _blitOut[2] = linearToSRGB(_blitOut[2]);
+          }
+          dInfo.encode(dst.data, doff, _blitOut[0], _blitOut[1], _blitOut[2], _blitOut[3]);
+        }
         doff += dbpp;
       }
     }

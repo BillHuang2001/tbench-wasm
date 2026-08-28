@@ -100,7 +100,7 @@ import { ensureProgramLinked } from './programs';
 import { syncCurrentAttribs } from './vertex-attrib';
 import { defaultVAOState } from '../state';
 import type { VAOState } from '../state';
-import { executeClearBuffer } from '../draw';
+import { executeClearBuffer, toU64 } from '../draw';
 import { refreshUnitSamplerBindings } from '../teximage';
 import { createSurface, getFormat, linearToSRGB } from '../../raster';
 import type { Surface } from '../../raster';
@@ -1408,7 +1408,9 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         ctx._errors.push(C1.INVALID_OPERATION); // depth/stencil only clear drawbuffer 0
         return;
       }
-      if (v.length < (buffer === C2.COLOR ? 4 : 1)) {
+      // Optional 4th arg srcOffset (u64; see api/draw.ts clearBufferfv).
+      const srcOffset = toU64(arguments[3]);
+      if (srcOffset + (buffer === C2.COLOR ? 4 : 1) > v.length) {
         ctx._errors.push(C1.INVALID_VALUE);
         return;
       }
@@ -1422,7 +1424,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         }
       }
       try {
-        executeClearBuffer(ctx, buffer, drawbuffer, v);
+        executeClearBuffer(ctx, buffer, drawbuffer, v, srcOffset);
       } catch {
         ctx._errors.push(C1.INVALID_OPERATION);
       }
@@ -1443,7 +1445,9 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         ctx._errors.push(C1.INVALID_VALUE);
         return;
       }
-      if (v.length < 4) {
+      // Optional 4th arg srcOffset (u64; see api/draw.ts clearBufferfv).
+      const srcOffset = toU64(arguments[3]);
+      if (srcOffset + 4 > v.length) {
         ctx._errors.push(C1.INVALID_VALUE);
         return;
       }
@@ -1455,7 +1459,7 @@ export function installWebGL2Api(proto: WebGL2RenderingContext): void {
         return;
       }
       try {
-        executeClearBuffer(ctx, C2.COLOR, drawbuffer, v);
+        executeClearBuffer(ctx, C2.COLOR, drawbuffer, v, srcOffset);
       } catch {
         ctx._errors.push(C1.INVALID_OPERATION);
       }

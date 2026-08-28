@@ -1852,6 +1852,23 @@ function copyTexImage2DImpl(
     ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
     return;
   }
+  // GLES 3.0 §3.8.5 / WebGL2 §3.7.2: with a COMPLETE read framebuffer, a
+  // READ_BUFFER of NONE — or a read-buffer point with no attached image —
+  // makes copyTexImage2D/copyTexSubImage2D generate INVALID_OPERATION
+  // (CTS framebuffer-object-attachment.html "missing color attachment" case;
+  // the srcFmt === 0 gate below would otherwise swallow it silently).
+  if (ctx._version === 2 && ctx._state.readBuffer === C1.NONE) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
+  const readFbo = ctx._state.readFramebuffer;
+  if (readFbo !== null) {
+    const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
+    if (!readFbo._attachments.get(readPoint)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+  }
   // Feedback loop: dest texture+level(+face) attached to the read framebuffer
   // (CTS texture-copying-feedback-loops.html).
   if (copyFeedbackLoop(ctx, tex, level, target, null)) {
@@ -1863,7 +1880,6 @@ function copyTexImage2DImpl(
   // alpha context attribute (alpha → RGBA, else RGB) — a dest format needing a
   // component the backbuffer lacks (e.g. ALPHA/LUMINANCE_ALPHA/RGBA from an RGB
   // backbuffer) is INVALID_OPERATION (CTS copy-tex-image-2d-formats.html).
-  const readFbo = ctx._state.readFramebuffer;
   let srcFmt = 0;
   if (readFbo !== null) {
     const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
@@ -1950,6 +1966,26 @@ function copyTexSubImage2DImpl(
     ctx._errors.push(C1.INVALID_VALUE);
     return;
   }
+  // Spec: copyTexSubImage2D reads from the READ framebuffer — an incomplete
+  // framebuffer → INVALID_FRAMEBUFFER_OPERATION; a complete one whose
+  // READ_BUFFER is NONE or has no attached image → INVALID_OPERATION
+  // (GLES 3.0 §3.8.5; CTS framebuffer-object-attachment.html).
+  if (checkFramebufferStatus(ctx, ctx._state.readFramebuffer as WebGLFramebuffer) !== C1.FRAMEBUFFER_COMPLETE) {
+    ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
+    return;
+  }
+  if (ctx._version === 2 && ctx._state.readBuffer === C1.NONE) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
+  const readFbo = ctx._state.readFramebuffer;
+  if (readFbo !== null) {
+    const readPoint = ctx._version === 2 ? ctx._state.readBuffer : C1.COLOR_ATTACHMENT0;
+    if (!readFbo._attachments.get(readPoint)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
+  }
   // Feedback loop: dest texture+level(+face) attached to the read framebuffer.
   if (copyFeedbackLoop(ctx, tex, level, target, null)) {
     ctx._errors.push(C1.INVALID_OPERATION);
@@ -2008,6 +2044,26 @@ function copyTexSubImage3DImpl(
   if (xoffset + width > levelData.width || yoffset + height > levelData.height || zoffset >= levelData.depth) {
     ctx._errors.push(C1.INVALID_VALUE);
     return;
+  }
+  // Spec: copyTexSubImage3D reads from the READ framebuffer — an incomplete
+  // framebuffer → INVALID_FRAMEBUFFER_OPERATION; a complete one whose
+  // READ_BUFFER is NONE or has no attached image → INVALID_OPERATION
+  // (GLES 3.0 §3.8.5).
+  if (checkFramebufferStatus(ctx, ctx._state.readFramebuffer as WebGLFramebuffer) !== C1.FRAMEBUFFER_COMPLETE) {
+    ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
+    return;
+  }
+  if (ctx._state.readBuffer === C1.NONE) {
+    ctx._errors.push(C1.INVALID_OPERATION);
+    return;
+  }
+  const readFbo = ctx._state.readFramebuffer;
+  if (readFbo !== null) {
+    const readPoint = ctx._state.readBuffer;
+    if (!readFbo._attachments.get(readPoint)) {
+      ctx._errors.push(C1.INVALID_OPERATION);
+      return;
+    }
   }
   // Feedback loop: dest texture+level+layer attached to the read framebuffer
   // (framebufferTextureLayer; CTS copy-texture-image-webgl-specific.html —

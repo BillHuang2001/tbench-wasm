@@ -12,6 +12,8 @@
  * - GL_EXT_shader_texture_lod: Lod/Grad texture functions in the FRAGMENT
  *   stage (core 1.00 only has the Lod forms in vertex shaders).
  * - GL_EXT_frag_depth: gl_FragDepthEXT builtin variable.
+ * - GL_EXT_blend_func_extended: gl_SecondaryFragColorEXT builtin variable
+ *   (1.00 dual-source secondary color; 3.00 uses layout(index=1) instead).
  * - GL_EXT_draw_buffers: gl_FragData resized to gl_MaxDrawBuffers = 4.
  *
  * NOTE on shadow functions: WebGL 1.0 has no sampler2DShadow/samplerCubeShadow
@@ -90,6 +92,13 @@ export const extensionVariables: BuiltinVariable[] = [
     stage: 'FRAGMENT',
     writable: true,
     extension: 'GL_EXT_frag_depth',
+  },
+  {
+    name: 'gl_SecondaryFragColorEXT',
+    type: V4,
+    stage: 'FRAGMENT',
+    writable: true,
+    extension: 'GL_EXT_blend_func_extended',
   },
   {
     name: 'gl_FragData',

@@ -149,6 +149,15 @@ export interface VertexAttribState {
   constantF: Float32Array; // length 4
   constantI: Int32Array; // length 4 (vertexAttribI4i)
   constantUI: Uint32Array; // length 4 (vertexAttribI4ui)
+  /**
+   * Base type of the CURRENT generic (constant) value — follows the most
+   * recent setter: vertexAttrib{1..4}f(v) → 'f', vertexAttribI4{i,iv} → 'i',
+   * vertexAttribI4{ui,uiv} → 'ui'. Default 'f' (spec generic attribute
+   * default). Consumed by the draw-time attribute type-mismatch check
+   * (GLES 3.0 §2.11.6, CTS attrib-type-match.html): a disabled array's generic
+   * value type must match the active shader input's float/int/uint base type.
+   */
+  genericKind: 'f' | 'i' | 'ui';
 }
 
 export function defaultVertexAttrib(): VertexAttribState {
@@ -165,6 +174,7 @@ export function defaultVertexAttrib(): VertexAttribState {
     constantF: new Float32Array([0, 0, 0, 1]), // spec default (0,0,0,1)
     constantI: new Int32Array([0, 0, 0, 1]),
     constantUI: new Uint32Array([0, 0, 0, 1]),
+    genericKind: 'f',
   };
 }
 

@@ -57,6 +57,9 @@ import {
   attribRead,
   attribDeclComps,
   outputAccess,
+  unpackVaryingCell,
+  packVaryingWrite,
+  packVaryingCompound,
 } from './env.js';
 import type { Value } from './index.js';
 import { emitConstructorCall } from './expr-ctor.js';
@@ -85,7 +88,9 @@ type StorageKind =
  *  outermost array dimension only. `dyn.stride` = storage stride per element
  *  (uniform: floats; block: bytes; varying: components; attrib: locations;
  *  output: 1); `dyn.elemSlots` = flat components per element for LOCAL
- *  scratch storage. */
+ *  scratch storage; `dyn.blockElements` = the dynamic index selects among the
+ *  per-element STORES of an ARRAYED uniform block (store array index strides
+ *  by 1, offsets element-local — see env.ts DynTerm). */
 interface P {
   type: GLSLType;      // type OF THE VALUE AT THE PATH END
   lvalue: boolean;
@@ -94,7 +99,7 @@ interface P {
   storage: StorageKind | null;
   builtin: string | null; // gl_Position / gl_FragCoord / ... (gl_FragData converts to output)
   swz: number[] | null;   // swizzle remap: leafRead(c) = baseRead(swz[c])
-  dyn: { temp: string; stride: number; elemSlots: number } | null;
+  dyn: { temp: string; stride: number; elemSlots: number; blockElements?: boolean } | null;
   pre: string[];
   post: string[];
 }
@@ -142,8 +147,12 @@ function leafRead(p: P, env: CodegenEnv, c: number): string {
         return uniformPathRead(env, st.key, p.type, p.dyn, flatC);
       case 'block':
         return blockPathRead(env, st.blockIndex, st.key, p.type, p.dyn, flatC);
-      case 'varying':
-        return varyingPathRead(env, st.key, p.type, p.dyn, flatC);
+      case 'varying': {
+        const s = varyingPathRead(env, st.key, p.type, p.dyn, flatC);
+        // Packed uint varying read-back (VERTEX stage — see packVaryingWrite):
+        // the cell holds the value's bit pattern — unpack to the uint value.
+        return env.stage === 'VERTEX' && isUintType(p.type) ? unpackVaryingCell(s) : s;
+      }
       case 'attrib':
         // BUG 5: fetch stride = DECLARED comps (st.declComps), not p.type's
         // (swizzles retype p.type to the swizzle width).
@@ -502,9 +511,18 @@ function subPIdx(p: P, k: number, etype: GLSLType, env: CodegenEnv): P {
   } else if (q.storage) {
     switch (q.storage.kind) {
       case 'uniform':
-      case 'block':
         q.storage = { ...q.storage, key: q.storage.key + `[${k}]` };
         break;
+      case 'block': {
+        // A const index on the INSTANCE identifier itself (key === baseKey —
+        // an ARRAYED block) selects element k, which has its OWN unique block
+        // index (per-element stores). Any other const index descends a MEMBER
+        // array → same block, key only.
+        const st = q.storage;
+        q.storage =
+          st.key === st.baseKey ? { ...st, key: st.key + `[${k}]`, blockIndex: st.blockIndex + k } : { ...st, key: st.key + `[${k}]` };
+        break;
+      }
       case 'varying': {
         const vl = env.lookupVarying(q.storage.key);
         q.flatOff += k * (vl ? vl.elemComponents : flatComponents(etype));
@@ -657,8 +675,11 @@ function walk(e: Expr, env: CodegenEnv): P {
                 );
               }
               // Instance-element index (pre-update key still equals the
-              // instance name) strides by blockStride; a member-array index
-              // (key ≠ baseKey) strides by the member's arrayStride
+              // instance name) selects among the per-element BLOCK STORES —
+              // each element has its OWN unique block index (linker), so the
+              // store array index strides by 1 and member offsets are
+              // element-local (blockElements). A member-array index (key ≠
+              // baseKey) strides by the member's arrayStride within one store
               // (blockStride is absent on non-arrayed-instance member entries).
               const atInstance = p.storage.key === p.storage.baseKey;
               p.storage = { ...p.storage, key };
@@ -668,7 +689,9 @@ function walk(e: Expr, env: CodegenEnv): P {
                   `codegen: block path '${key}' has no stride for dynamic indexing (linker must set arrayStride/blockStride)`,
                 );
               }
-              p.dyn = { temp: t, stride, elemSlots: 0 };
+              p.dyn = atInstance
+                ? { temp: t, stride, blockElements: true, elemSlots: 0 }
+                : { temp: t, stride, elemSlots: 0 };
               break;
             }
             case 'varying': {
@@ -752,7 +775,10 @@ function walk(e: Expr, env: CodegenEnv): P {
         if (p.storage && p.storage.kind === 'block') {
           const entry = env.lookupBlockMember(p.storage.blockIndex, p.storage.key);
           if (entry !== null && entry.rowMajor) {
-            const base = `${entry.offset} / 4${p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.stride / 4}` : ''}`;
+            // Arrayed-block dynamic instance index (blockElements): the store
+            // array index strides by 1, offsets element-local.
+            const store = p.dyn && p.dyn.blockElements ? `${p.storage.blockIndex} + (${p.dyn.temp}) * 1` : String(p.storage.blockIndex);
+            const base = `${entry.offset} / 4${p.dyn ? (p.dyn.blockElements ? '' : ` + (${p.dyn.temp}) * ${p.dyn.stride / 4}`) : ''}`;
             let colTerm: string;
             if (isConst) {
               colTerm = String(cv);
@@ -765,7 +791,7 @@ function walk(e: Expr, env: CodegenEnv): P {
             const dxNames: (string | null)[] = [];
             const dyNames: (string | null)[] = [];
             for (let r = 0; r < rows; r++) {
-              compNames.push(`ctx.blockStores[${p.storage.blockIndex}][${base} + ${colTerm} + ${r} * 4]`);
+              compNames.push(`ctx.blockStores[${store}][${base} + ${colTerm} + ${r} * 4]`);
               dxNames.push('0');
               dyNames.push('0');
             }
@@ -995,10 +1021,42 @@ export interface LValue {
   /** Dual-mode write slots per component: [dx, dy] lvalues (null = no dual
    *  planes — int/bool components, outputs). Absent in non-dual mode. */
   dualTargets?: ([string, string] | null)[];
+  /** Per-component true when the target cell is a PACKED uint varying
+   *  (VERTEX stage — see packVaryingWrite): the cell stores the value's BIT
+   *  PATTERN as float32, so writes must pack (`R.u2f`) and the cell read back
+   *  unpack (`R.f2u`). Absent when no component is packed. */
+  bits?: boolean[];
   /** Statements that must run BEFORE the writes (dynamic-index temps, spill copy-in). */
   prelude?: string;
   /** Statements that must run AFTER the writes (spill copy-out). */
   copyBack?: string;
+}
+
+/** Per-flat-component packed-ness of an lvalue path (parallel to writes():
+ *  struct/array recursion; a leaf is packed when it is a VERTEX-stage uint
+ *  varying — the only shapes that store bit patterns in the record). */
+function writeBitKinds(p: P, env: CodegenEnv): boolean[] {
+  const t = p.type;
+  if (t.kind === 'struct') {
+    const out: boolean[] = [];
+    let off = 0;
+    for (const m of t.members) {
+      out.push(...writeBitKinds(subP(p, m.name, m.type, off, env), env));
+      off += flatComponents(m.type);
+    }
+    return out;
+  }
+  if (t.kind === 'array') {
+    const out: boolean[] = [];
+    const n = t.size ?? 0;
+    for (let k = 0; k < n; k++) out.push(...writeBitKinds(subPIdx(p, k, t.element, env), env));
+    return out;
+  }
+  const packed = env.stage === 'VERTEX' && p.storage?.kind === 'varying' && isUintType(t);
+  const n = flatComponents(t);
+  const out: boolean[] = new Array(n);
+  out.fill(packed);
+  return out;
 }
 
 /** Emit one JS expression per flat component (column-major; scalar → 1). */
@@ -1052,9 +1110,11 @@ export function emitLValue(e: Expr, env: CodegenEnv): LValue {
   const p = walk(e, env);
   if (!p.lvalue) throw new Error('codegen: expression is not an lvalue');
   const targets = writes(p, env);
+  const bits = writeBitKinds(p, env);
   return {
     type: p.type,
     targets,
+    bits: bits.some((b) => b) ? bits : undefined,
     dualTargets: env.dual ? dualWrites(p, env) : undefined,
     prelude: p.pre.length ? p.pre.join('; ') + ';' : undefined,
     copyBack: p.post.length ? p.post.join('; ') + ';' : undefined,
@@ -1168,6 +1228,31 @@ export function materializeSharedPre(vals: Value[], env: CodegenEnv): Value[] {
 }
 
 /**
+ * Materialize every operand component into a FRESH temp, appending the
+ * assignments to `pre` (one shared buffer — the caller attaches it to
+ * component 0 only, the established comp0-hoist convention). Pres carried by
+ * the values are folded per component BEFORE its temp assignment, deduped by
+ * array identity (a multi-component result shares ONE pre array, so its side
+ * effects run exactly once, at the first component). All returned reads
+ * reference the temps, so sequential target writes (`v = m * v`,
+ * `m = m1 * m2`) never observe partially-updated operands (matrixCompoundMul's
+ * RHS-materialization idiom).
+ */
+function materializeOperands(vals: Value[], env: CodegenEnv, pre: string[]): string[] {
+  const seen = new Set<string[]>();
+  return vals.map((v) => {
+    const t = env.allocTemp();
+    if (v.pre && v.pre.length > 0 && !seen.has(v.pre)) {
+      seen.add(v.pre);
+      pre.push(`${t} = ${foldPre(v.pre, v.v)}`);
+    } else {
+      pre.push(`${t} = ${v.v}`);
+    }
+    return t;
+  });
+}
+
+/**
  * Does the expression subtree fold GLSL side effects (assignments, ++/--)
  * into its codegen v strings? User-function calls put their whole inline in
  * Value.pre instead (detected separately there) — but when a call is nested
@@ -1247,21 +1332,39 @@ function emitUnary(e: Extract<Expr, { kind: 'unary' }>, env: CodegenEnv): Value[
     for (let c = 0; c < n; c++) {
       const target = lv.targets[c];
       if (base === null || base === 'bool') throw new Error('codegen: cannot increment a bool');
-      const wrap = (rhs: string): string =>
+      // Packed uint varying cell (see packVaryingWrite): the old value is the
+      // UNPACKED cell read; the write re-packs the incremented value; the
+      // expression's value is the unpacked post-write cell (new value for
+      // prefix, old for postfix).
+      const packed = lv.bits !== undefined && lv.bits[c];
+      const read = packed ? unpackVaryingCell(target) : target;
+      const write = (rhs: string): string =>
         base === 'float'
           ? `${target} = ${rhs}`
           : base === 'int'
             ? `${target} = ((${rhs}) | 0)`
-            : `${target} = ((${rhs}) >>> 0)`;
+            : packed
+              ? `${target} = R.u2f(((${rhs}) >>> 0))`
+              : `${target} = ((${rhs}) >>> 0)`;
       let s: string;
-      if (e.postfix) {
+      if (packed) {
+        // Packed cell: the write re-packs; the expression's value is the
+        // unpacked post-write cell read (new value for prefix, old for postfix
+        // via the snapshot temp).
+        if (e.postfix) {
+          const t = env.allocTemp();
+          s = `(${t} = ${read}, ${write(`${t} + ${delta}`)}, ${t})`;
+        } else {
+          s = `(${write(`${read} + ${delta}`)}, ${read})`;
+        }
+      } else if (e.postfix) {
         // Postfix result = OLD value: snapshot the target BEFORE the write,
         // then write old ± 1, then yield the snapshot:
         // (t = target, target = t ± 1, t).
         const t = env.allocTemp();
-        s = `(${t} = ${target}, ${wrap(`${t} + ${delta}`)}, ${t})`;
+        s = `(${t} = ${target}, ${write(`${t} + ${delta}`)}, ${t})`;
       } else {
-        s = `(${wrap(`${target} + ${delta}`)})`;
+        s = `(${write(`${target} + ${delta}`)})`;
       }
       // Prelude (dyn-index temps / spill copy-in) runs BEFORE the write, the
       // spill copy-back AFTER it — and the expression's VALUE must be the
@@ -1664,6 +1767,17 @@ function emitArith(
       const av = emitExpr(e.left, env);
       const bv = emitExpr(e.right, env);
       const out: Value[] = [];
+      // ALIASING FIX (sequential-assignment aliasing): the non-dual result
+      // strings below reference the OPERAND components directly — a sequential
+      // target write (`v = m * v`, `m = m1 * m2`) would observe partially-
+      // updated operands (GLSL requires every RHS read to see pre-assignment
+      // values). Materialize BOTH operands into fresh temps (ONE shared pre on
+      // component 0 — the comp0-hoist convention, matrixCompoundMul idiom) so
+      // all reads are captured before any target write. The dual branch
+      // materializes per term inside arithDual.
+      const matPre: string[] = [];
+      const aT = !dual ? materializeOperands(av, env, matPre) : null;
+      const bT = !dual ? materializeOperands(bv, env, matPre) : null;
       for (let c = 0; c < rt.cols; c++) {
         for (let r = 0; r < aRows; r++) {
           if (dual) {
@@ -1675,13 +1789,11 @@ function emitArith(
           } else {
             const parts: string[] = [];
             for (let s = 0; s < aCols; s++) {
-              const a = av[s * aRows + r];
-              const b = bv[c * bRows + s];
-              const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
-              const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-              parts.push(`(${ax} * (${bx}))`);
+              parts.push(`(${aT![s * aRows + r]} * (${bT![c * bRows + s]}))`);
             }
-            out.push({ v: `(${parts.join(' + ')})` });
+            const res: Value = { v: `(${parts.join(' + ')})` };
+            if (out.length === 0) res.pre = matPre;
+            out.push(res);
           }
         }
       }
@@ -1694,6 +1806,13 @@ function emitArith(
       const av = emitExpr(e.left, env);
       const bv = emitExpr(e.right, env);
       const out: Value[] = [];
+      // ALIASING FIX — same as the matrix×matrix branch: materialize both
+      // operands into temps (shared pre on component 0) so in-place targets
+      // (`v = m * v` — result[r] reads ALL of v) never observe partially-
+      // updated operands during sequential writes.
+      const matPre: string[] = [];
+      const aT = !dual ? materializeOperands(av, env, matPre) : null;
+      const bT = !dual ? materializeOperands(bv, env, matPre) : null;
       for (let r = 0; r < R; r++) {
         if (dual) {
           const terms: Value[] = [];
@@ -1704,13 +1823,11 @@ function emitArith(
         } else {
           const parts: string[] = [];
           for (let c = 0; c < C; c++) {
-            const a = av[c * R + r];
-            const b = bv[c];
-            const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
-            const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-            parts.push(`(${ax} * (${bx}))`);
+            parts.push(`(${aT![c * R + r]} * (${bT![c]}))`);
           }
-          out.push({ v: `(${parts.join(' + ')})` });
+          const res: Value = { v: `(${parts.join(' + ')})` };
+          if (out.length === 0) res.pre = matPre;
+          out.push(res);
         }
       }
       return out;
@@ -1722,6 +1839,13 @@ function emitArith(
       const av = emitExpr(e.left, env);
       const bv = emitExpr(e.right, env);
       const out: Value[] = [];
+      // ALIASING FIX — same as the matrix×matrix branch: materialize both
+      // operands into temps (shared pre on component 0) so in-place targets
+      // (`v = v * M` — result[c] reads ALL of v) never observe partially-
+      // updated operands during sequential writes.
+      const matPre: string[] = [];
+      const aT = !dual ? materializeOperands(av, env, matPre) : null;
+      const bT = !dual ? materializeOperands(bv, env, matPre) : null;
       for (let c = 0; c < C; c++) {
         if (dual) {
           const terms: Value[] = [];
@@ -1732,13 +1856,11 @@ function emitArith(
         } else {
           const parts: string[] = [];
           for (let r = 0; r < R; r++) {
-            const a = av[r];
-            const b = bv[c * R + r];
-            const ax = a.pre && a.pre.length ? foldPre(a.pre, a.v) : a.v;
-            const bx = b.pre && b.pre.length ? foldPre(b.pre, b.v) : b.v;
-            parts.push(`(${ax} * (${bx}))`);
+            parts.push(`(${aT![r]} * (${bT![c * R + r]}))`);
           }
-          out.push({ v: `(${parts.join(' + ')})` });
+          const res: Value = { v: `(${parts.join(' + ')})` };
+          if (out.length === 0) res.pre = matPre;
+          out.push(res);
         }
       }
       return out;
@@ -2007,11 +2129,22 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
       for (let c = 0; c < n; c++) {
         const cp = conv[c].pre;
         const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
-        pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }));
+        if (lv.bits && lv.bits[c]) {
+          // Packed uint varying cell (VERTEX): store the value's BIT PATTERN;
+          // the write composite ends with the unpacked read (the assignment's
+          // value is the assigned uint).
+          pre.push(packVaryingWrite(lv.targets[c], rv));
+        } else {
+          pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }));
+        }
       }
       if (post) pre.push(...post.split(', '));
       for (let c = 0; c < n; c++) {
-        out.push({ v: lv.targets[c], dx: conv[c].dx ?? '0', dy: conv[c].dy ?? '0', pre });
+        if (lv.bits && lv.bits[c]) {
+          out.push({ v: unpackVaryingCell(lv.targets[c]), dx: '0', dy: '0', pre });
+        } else {
+          out.push({ v: lv.targets[c], dx: conv[c].dx ?? '0', dy: conv[c].dy ?? '0', pre });
+        }
       }
       return out;
     }
@@ -2034,9 +2167,11 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
       // assigned value. Semicolons are invalid inside parens, so fold copyBack
       // as comma terms via a temp: (t = (target = rv), cb, t).
       let v =
-        env.dual && lv.dualTargets
-          ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv })
-          : `(${lv.targets[c]} = ${rv})`;
+        lv.bits && lv.bits[c]
+          ? packVaryingWrite(lv.targets[c], rv)
+          : env.dual && lv.dualTargets
+            ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv })
+            : `(${lv.targets[c]} = ${rv})`;
       if (post) {
         const t = env.allocTemp();
         v = `(${t} = ${v}, ${post}, ${t})`;
@@ -2137,7 +2272,11 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
     // Dual mode, float target: linear ops (+=, -=) update all three planes
     // via dualWrite; non-linear compounds throw (C5a2 templates).
     let v: string;
-    if (env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]) {
+    if (lv.bits && lv.bits[c]) {
+      // Packed uint varying cell (VERTEX): unpack the old value, apply the op
+      // with the uint wrap, repack (packVaryingCompound mirrors compoundOp).
+      v = packVaryingCompound(cop, lv.targets[c], rv);
+    } else if (env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]) {
       v = env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }, cop);
     } else {
       v = compoundOp(cop, lv.targets[c], rv, base);

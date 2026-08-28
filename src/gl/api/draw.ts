@@ -48,6 +48,8 @@
 import type { WebGLRenderingContext } from '../webgl1';
 import type { WebGL2RenderingContext } from '../webgl2';
 import { C1, C2, CExt } from '../constants';
+import { checkFramebufferStatus } from '../framebuffer-util';
+import { bufferTfUseError } from './buffers';
 import {
   executeClear,
   executeClearBuffer,
@@ -58,6 +60,7 @@ import {
   executeMultiDrawElementsInstanced,
   executeReadPixels,
   extSupported,
+  toU64,
   transferToImageBitmapSnapshot,
   validateDrawArrays,
   validateDrawElements,
@@ -443,6 +446,16 @@ function readPixelsComboOK(ctx: WebGLRenderingContext, format: GLenum, type: GLe
   const s = ctx._state;
   const fbo = s.readFramebuffer;
   if (fbo === null) {
+    // Default framebuffer: RGBA/UNSIGNED_BYTE always (WebGL1+2). With a
+    // drawingBufferStorage-allocated RGBA16F drawing buffer the native
+    // RGBA/FLOAT (+ HALF_FLOAT) combos are also legal (CTS
+    // canvas/drawingbuffer-storage-test.html testClearColor reads back
+    // RGBA/FLOAT from the RGBA16F drawing buffer).
+    const dfbFormat = (ctx as unknown as { _drawingBufferFormat?: number })._drawingBufferFormat;
+    if (dfbFormat === C2.RGBA16F) {
+      return format === C1.RGBA &&
+        (type === C1.UNSIGNED_BYTE || type === C1.FLOAT || type === 0x140b /* HALF_FLOAT */);
+    }
     return format === C1.RGBA && type === C1.UNSIGNED_BYTE;
   }
   const rb = s.version === 2 ? s.readBuffer : C1.COLOR_ATTACHMENT0;
@@ -538,6 +551,17 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       ctx._errors.push(C1.INVALID_VALUE);
       return;
     }
+    // Reading from an INCOMPLETE framebuffer is INVALID_FRAMEBUFFER_OPERATION
+    // (GLES 3.0 §4.3.2; CTS framebuffer-object-attachment.html
+    // testUsingIncompleteFramebuffer). The default framebuffer is always
+    // complete (checkFramebufferStatus handles fbo === null). Runs before the
+    // enum/combo checks so an incomplete FBO wins with the FBO error even when
+    // the read-buffer compatibility gate would also fail.
+    if (s.readFramebuffer !== null &&
+        checkFramebufferStatus(ctx, s.readFramebuffer) !== C1.FRAMEBUFFER_COMPLETE) {
+      ctx._errors.push(C1.INVALID_FRAMEBUFFER_OPERATION);
+      return;
+    }
     // WebGL2: the 7th arg is either an ArrayBufferView (client-memory read) or
     // a GLintptr byte offset into the PIXEL_PACK_BUFFER data store.
     if (typeof pixels === 'number') {
@@ -556,6 +580,14 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       const packBuf = s.pixelPackBuffer;
       if (!packBuf._data) {
         ctx._errors.push(C1.INVALID_OPERATION); // no data store
+        return;
+      }
+      // GLES 3.0 §2.15.2 (use-time double-bind rule; CTS
+      // transform_feedback/simultaneous_binding.html "Test PIXEL_PACK_BUFFER"):
+      // reading into a PIXEL_PACK_BUFFER that is bound in the TF object's
+      // indexed bindings is INVALID_OPERATION.
+      if (bufferTfUseError(ctx, packBuf, C2.PIXEL_PACK_BUFFER)) {
+        ctx._errors.push(C1.INVALID_OPERATION);
         return;
       }
       // 1. Enum validity: WebGL2 uses the GLES3 (format,type) PAIR table.
@@ -612,16 +644,28 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       ? (pixels instanceof Uint8Array || pixels instanceof Uint8ClampedArray)
       : pixels instanceof want;
     if (!viewOK) { ctx._errors.push(C1.INVALID_OPERATION); return; }
-    // 5. Pixel-store constraints + destination size (INVALID_OPERATION).
+    // 5. Pixel-store constraints + destination size. The WebGL2 optional 8th
+    //    arg dstOffset (u64 per IDL — the wasm readpixels pages pass offsets
+    //    > 2^32, hence toU64 not `>>> 0`) is an ELEMENT offset into the view:
+    //    a dstOffset past the end of the view is INVALID_VALUE, a dstOffset
+    //    leaving fewer bytes than the read needs is INVALID_OPERATION (CTS
+    //    misc/views-with-offsets.html doReadPixels).
+    const dstOffset = toU64(arguments[7]);
+    const dstBytes = dstOffset * (pixels as unknown as { BYTES_PER_ELEMENT: number }).BYTES_PER_ELEMENT;
+    const avail = pixels.byteLength - pixels.byteOffset;
+    if (dstBytes > avail) {
+      ctx._errors.push(C1.INVALID_VALUE);
+      return;
+    }
     const needed = readPixelsNeeded(ctx, format, type, width, height);
     if (needed < 0) return;
-    if (pixels.byteLength - pixels.byteOffset < needed) {
+    if (avail - dstBytes < needed) {
       ctx._errors.push(C1.INVALID_OPERATION);
       return;
     }
     // 6. Execute.
     try {
-      executeReadPixels(ctx, x, y, width, height, format, type, pixels);
+      executeReadPixels(ctx, x, y, width, height, format, type, pixels, dstOffset);
     } catch { ctx._errors.push(C1.INVALID_OPERATION); }
   };
 
@@ -679,15 +723,20 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       const v = toList(values, Float32Array, 'Float32List');
       if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
       if (!CLEAR_FV.has(buffer)) { ctx._errors.push(C1.INVALID_OPERATION); return; }
+      // WebGL2 optional 4th arg srcOffset (u64 per IDL — read via arguments to
+      // keep function.length at 3): starting element of the source array;
+      // srcOffset + components must fit inside the array (GLES 3.0 §4.2.3,
+      // CTS clearbuffer-sub-source.html expects INVALID_VALUE).
+      const srcOffset = toU64(arguments[3]);
       const need = buffer === C2.COLOR ? 4 : 1;
-      if (v.length < need) { ctx._errors.push(C1.INVALID_VALUE); return; }
+      if (srcOffset + need > v.length) { ctx._errors.push(C1.INVALID_VALUE); return; }
       if (buffer === C2.COLOR) {
         // clearBufferfv clears float/fixed-point color attachments only.
         const cls = clearColorAttachmentClass(ctx, drawbuffer);
         if (cls === 'missing') return; // missing attachment → no-op NO_ERROR
         if (cls !== 'float') { ctx._errors.push(C1.INVALID_OPERATION); return; }
       }
-      try { executeClearBuffer(ctx, buffer, drawbuffer, v); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
+      try { executeClearBuffer(ctx, buffer, drawbuffer, v, srcOffset); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
   }
 
@@ -698,16 +747,17 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       const v = toList(values, Int32Array, 'Int32List');
       if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
       if (!CLEAR_IV.has(buffer)) { ctx._errors.push(C1.INVALID_OPERATION); return; }
+      // Optional 4th arg srcOffset (u64; see clearBufferfv).
+      const srcOffset = toU64(arguments[3]);
       const need = buffer === C2.COLOR ? 4 : 1;
-      if (v.length < need) { ctx._errors.push(C1.INVALID_VALUE); return; }
+      if (srcOffset + need > v.length) { ctx._errors.push(C1.INVALID_VALUE); return; }
       if (buffer === C2.COLOR) {
         // clearBufferiv clears signed-integer color attachments only.
         const cls = clearColorAttachmentClass(ctx, drawbuffer);
         if (cls === 'missing') return; // missing attachment → no-op NO_ERROR
         if (cls !== 'sint') { ctx._errors.push(C1.INVALID_OPERATION); return; }
       }
-      try { executeClearBuffer(ctx, buffer, drawbuffer, v); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
-      try { executeClearBuffer(ctx, buffer, drawbuffer, v); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
+      try { executeClearBuffer(ctx, buffer, drawbuffer, v, srcOffset); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
   }
 
@@ -718,14 +768,16 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       const v = toList(values, Uint32Array, 'Uint32List');
       if (!validateClearBufferArgs(ctx, buffer, drawbuffer)) return;
       if (!CLEAR_UIV.has(buffer)) { ctx._errors.push(C1.INVALID_OPERATION); return; }
-      if (v.length < 4) { ctx._errors.push(C1.INVALID_VALUE); return; }
+      // Optional 4th arg srcOffset (u64; see clearBufferfv).
+      const srcOffset = toU64(arguments[3]);
+      if (srcOffset + 4 > v.length) { ctx._errors.push(C1.INVALID_VALUE); return; }
       if (buffer === C2.COLOR) {
         // clearBufferuiv clears unsigned-integer color attachments only.
         const cls = clearColorAttachmentClass(ctx, drawbuffer);
         if (cls === 'missing') return; // missing attachment → no-op NO_ERROR
         if (cls !== 'uint') { ctx._errors.push(C1.INVALID_OPERATION); return; }
       }
-      try { executeClearBuffer(ctx, buffer, drawbuffer, v); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
+      try { executeClearBuffer(ctx, buffer, drawbuffer, v, srcOffset); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
   }
 
@@ -736,7 +788,7 @@ export function installDrawApi(proto: WebGLRenderingContext): void {
       if (!CLEAR_BUFFERS.has(buffer)) { ctx._errors.push(C1.INVALID_ENUM); return; }
       if (buffer !== C2.DEPTH_STENCIL) { ctx._errors.push(C1.INVALID_OPERATION); return; }
       if (drawbuffer !== 0) { ctx._errors.push(C1.INVALID_VALUE); return; }
-      try { executeClearBuffer(ctx, buffer, drawbuffer, null, depth, stencil); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
+      try { executeClearBuffer(ctx, buffer, drawbuffer, null, 0, depth, stencil); } catch { ctx._errors.push(C1.INVALID_OPERATION); }
     };
   }
 
