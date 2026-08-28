@@ -65,7 +65,7 @@ import { C1, C2 } from './constants';
 import { resolveFramebufferTarget, resolveReadSurface, getAttachmentSurface } from './framebuffer-util';
 import { handleCanvasResize } from './lost';
 import { getClipControl } from './extensions/clip-state';
-import { updateCompleteness } from './teximage';
+import { updateCompleteness, floatLinearExtensionState } from './teximage';
 import {
   computeVertexStride,
   RECORD_HEADER_FLOATS,
@@ -90,6 +90,7 @@ import type { WebGLProgram } from './objects';
 import type { ProgramModel } from './objects';
 import type { WebGLBuffer, WebGLQuery, WebGLTexture, WebGLTransformFeedback } from './objects';
 import { ensureProgramLinked } from './api/programs';
+import { SRC1_BLEND_FACTORS } from './api/state';
 
 /** A fully validated, assembled draw request (before rasterizer call). */
 export interface DrawRequest {
@@ -109,6 +110,19 @@ export interface DrawRequest {
    * single draws. The vertex exec ctx reads it as `gl_DrawID`.
    */
   drawId?: number;
+  /**
+   * WEBGL_draw_instanced_base_vertex_base_instance /
+   * WEBGL_multi_draw_instanced_base_vertex_base_instance:
+   *  - baseVertex (GLint, indexed draws only): added to every element index
+   *    for attribute fetch AND to gl_VertexID. Per GLES 3.2 §10.5 the vertex
+   *    ID of the ith element of an indexed draw is basevertex + elementIndex.
+   *  - baseInstance (GLuint): added to the divisor-based instance attribute
+   *    fetch index (element = baseInstance + floor(instanceId/divisor)).
+   *    gl_InstanceID is NOT offset (always starts at 0).
+   * Omitted (0) for regular draws.
+   */
+  baseVertex?: number;
+  baseInstance?: number;
 }
 
 /* ================================================================== */
@@ -722,7 +736,6 @@ interface AttribExtraction {
   dv: DataView;
   typeSize: number;
   stride: number;
-  colOffset: number;
   divisor: number;
   integer: boolean;
   unsigned: boolean;
@@ -794,7 +807,6 @@ function buildAttribs(
       const elemCount = a.divisor > 0
         ? Math.ceil(req.instanceCount / a.divisor)
         : req.count;
-      const colOffset = col * (dims ? dims.rows * typeSize : 0);
       const need = elemCount * comps;
       const integer = a.integer;
       const unsigned = integer && (a.type === C1.UNSIGNED_BYTE || a.type === C1.UNSIGNED_SHORT || a.type === C1.UNSIGNED_INT);
@@ -802,7 +814,7 @@ function buildAttribs(
       totals[pool] += need;
       extract.push({
         l, pool, need, elemCount, comps,
-        data, dv: new DataView(data), typeSize, stride, colOffset,
+        data, dv: new DataView(data), typeSize, stride,
         divisor: a.divisor, integer, unsigned, normalized: a.normalized,
         aSize: a.size, aType: a.type, aOffset: a.offset,
       });
@@ -816,7 +828,7 @@ function buildAttribs(
   // Pass 2 (fill): cumulative per-pool cursor (element units, reset per draw).
   let floatBase = 0, intBase = 0, uintBase = 0;
   for (const ex of extract) {
-    const { l, pool, need, elemCount, comps, data, dv, typeSize, stride, colOffset,
+    const { l, pool, need, elemCount, comps, data, dv, typeSize, stride,
             divisor, integer, unsigned, normalized, aSize, aType, aOffset } = ex;
     if (integer) {
       // raw integer path (vertexAttribIPointer)
@@ -826,8 +838,14 @@ function buildAttribs(
         : new Int32Array(sc.intPool.buffer, base * 4, need);
       if (unsigned) uintBase += need; else intBase += need;
       for (let e = 0; e < elemCount; e++) {
-        const element = divisor > 0 ? e : (indices ? indices[e] : req.firstOrOffset + e);
-        const byteOff = aOffset + element * stride + colOffset;
+        // baseVertex offsets the element index (indexed draws); baseInstance
+        // offsets the instance element (divisor > 0). Both may push the fetch
+        // past the end of the buffer — read*Component bounds-checks and yields
+        // 0 (ANGLE issue 3764: robust access → NO_ERROR is legal).
+        const element = divisor > 0
+          ? (req.baseInstance ?? 0) + e
+          : (indices ? (req.baseVertex ?? 0) + indices[e] : req.firstOrOffset + e);
+        const byteOff = aOffset + element * stride;
         for (let c = 0; c < comps; c++) {
           let v = 0;
           if (c < aSize && byteOff + c * typeSize + typeSize <= data.byteLength) {
@@ -842,8 +860,11 @@ function buildAttribs(
       const dst = new Float32Array(sc.floatPool.buffer, floatBase * 4, need);
       floatBase += need;
       for (let e = 0; e < elemCount; e++) {
-        const element = divisor > 0 ? e : (indices ? indices[e] : req.firstOrOffset + e);
-        const byteOff = aOffset + element * stride + colOffset;
+        // baseVertex/baseInstance offsets — see the integer path above.
+        const element = divisor > 0
+          ? (req.baseInstance ?? 0) + e
+          : (indices ? (req.baseVertex ?? 0) + indices[e] : req.firstOrOffset + e);
+        const byteOff = aOffset + element * stride;
         for (let c = 0; c < comps; c++) {
           let v = 0;
           if (c < aSize && byteOff + c * typeSize + typeSize <= data.byteLength) {
@@ -1016,7 +1037,7 @@ function buildTextureEnv(
         // MIN_FILTER was the default NEAREST_MIPMAP_LINEAR then switched to
         // LINEAR would otherwise sample as incomplete forever). Cheap
         // recompute per draw.
-        updateCompleteness(tex, ctx._version);
+        updateCompleteness(tex, ctx._version, floatLinearExtensionState(ctx));
         const img = tex._image as TextureImage;
         const st = effectiveSamplerState(tex, unitState.sampler);
         images[unit] = img;
@@ -1076,7 +1097,7 @@ function textureFeedbackLoop(ctx: WebGLRenderingContext, pm: ProgramModel): bool
         // WebGL1: any attached level of a complete texture is a loop (no
         // level-window concept — CTS feedback-loop.html). Completeness at
         // draw time (MIN_FILTER/level chain — cheap per draw).
-        updateCompleteness(tex, 1);
+        updateCompleteness(tex, 1, floatLinearExtensionState(ctx));
         if (!tex._image.complete) continue;
       }
       for (let i = 0; i < textureAtts.length; i++) {
@@ -1613,6 +1634,15 @@ function tfCaptureCursor(tf: WebGLTransformFeedback): number {
 /* executeDraw                                                         */
 /* ================================================================== */
 
+/** True when the draw framebuffer's attachment at `index` (COLOR_ATTACHMENT0+index) has internal format `fmt`. */
+function drawBufferAttachmentIs(ctx: WebGLRenderingContext, index: number, fmt: GLenum): boolean {
+  const fbo = ctx._state.drawFramebuffer;
+  if (!fbo) return false;
+  const att = fbo._attachments.get(C1.COLOR_ATTACHMENT0 + index);
+  if (!att) return false;
+  return (att.type === 'renderbuffer' ? att.renderbuffer._internalformat : att.texture._image?.internalFormat) === fmt;
+}
+
 /**
  * Execute an assembled draw request: attribute fetch → vertex evaluation →
  * record packing → TF capture → rasterizer.draw (steps above).
@@ -1749,6 +1779,98 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
       if (declared.has(i)) continue;
       const m = s.colorMaskPerDrawBuffer.get(i) ?? s.colorMask;
       if (m[0] || m[1] || m[2] || m[3]) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+    }
+  }
+  // WEBGL_render_shared_exponent: a draw is INVALID_OPERATION when any ENABLED
+  // draw buffer with an RGB9_E5 attachment has an effective color mask (per-
+  // drawbuffer colorMaskiOES entry, else the common mask) that is neither
+  // all-true nor all-false — the shared exponent couples all three channels, so
+  // individual-channel writes are impossible (CTS webgl-render-shared-exponent
+  // colorMaskTest). Placement mirrors the undefined-output check (pre-vertex).
+  if (s.version === 2) {
+    for (let i = 0; i < s.drawBuffers.length; i++) {
+      const db = s.drawBuffers[i];
+      if (db === C1.NONE) continue;
+      const dbIdx = db - C1.COLOR_ATTACHMENT0;
+      if (!drawBufferAttachmentIs(ctx, dbIdx, C2.RGB9_E5)) continue;
+      const m = s.colorMaskPerDrawBuffer.get(dbIdx) ?? s.colorMask;
+      if ((m[0] || m[1] || m[2] || m[3]) && !(m[0] && m[1] && m[2] && m[3])) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
+    }
+  }
+  // WEBGL_blend_func_extended (dual-source blending): draw-time restrictions
+  // (CTS conformance2/extensions/webgl-blend-func-extended.html + the WebGL1
+  // variant — the page matrix is authoritative). A dual-source factor is
+  // ACTIVE for a draw buffer when its effective blend state (per-drawbuffer
+  // OES_draw_buffers_indexed entry, else the base blend state) contains any
+  // SRC1_* factor. Both rules fire with blending ENABLED or DISABLED — the
+  // page asserts errors while BLEND is off (js:470-472, js:311-316).
+  if (ctx._extensions.has('WEBGL_blend_func_extended')) {
+    // (1) Draw-buffer limit: INVALID_OPERATION when the number of ACTIVE draw
+    // buffers (non-NONE drawBuffers entries) exceeds
+    // MAX_DUAL_SOURCE_DRAW_BUFFERS_WEBGL and any active draw buffer uses a
+    // dual-source factor (page js:398-485: 4 SRC1_* funcs × 4 factor slots ×
+    // blend on/off → 32 assertions; non-SRC1 funcs → NO_ERROR).
+    let activeBuffers = 0;
+    for (let i = 0; i < s.drawBuffers.length; i++) {
+      if (s.drawBuffers[i] !== C1.NONE) activeBuffers++;
+    }
+    if (activeBuffers > s.limits.MAX_DUAL_SOURCE_DRAW_BUFFERS_WEBGL) {
+      for (let i = 0; i < s.drawBuffers.length; i++) {
+        if (s.drawBuffers[i] === C1.NONE) continue;
+        const be = s.blendPerDrawBuffer.get(i);
+        if (
+          SRC1_BLEND_FACTORS.includes(be?.srcRGB ?? s.blend.srcRGB) ||
+          SRC1_BLEND_FACTORS.includes(be?.dstRGB ?? s.blend.dstRGB) ||
+          SRC1_BLEND_FACTORS.includes(be?.srcAlpha ?? s.blend.srcAlpha) ||
+          SRC1_BLEND_FACTORS.includes(be?.dstAlpha ?? s.blend.dstAlpha)
+        ) {
+          pushError(ctx, C1.INVALID_OPERATION);
+          return;
+        }
+      }
+    }
+    // (2) Missing fragment outputs: for every active draw buffer with a
+    // dual-source factor and an effective color mask that is not all false,
+    // the fragment shader must write the PRIMARY output (location 0); when
+    // blending is enabled for the buffer it must ALSO write a SECONDARY
+    // output (location 0, index 1) (page js:304-396 — "no fragment outputs",
+    // "only gl_SecondaryFragColorEXT" and "only index 1 output" error even
+    // with blending disabled; "only gl_FragColor"/"only index 0 output"
+    // error only with blending enabled; all masked-out → NO_ERROR). `index`
+    // is not yet part of the glsl output model (layout(index=1) unsupported)
+    // — treated as absent, i.e. no secondary output.
+    let hasPrimary = false;
+    let hasSecondary = false;
+    const outs = pm.fragment?.outputs;
+    if (outs) {
+      for (const o of outs) {
+        if (o.location !== 0) continue;
+        if ((o as { index?: number }).index === 1) hasSecondary = true;
+        else hasPrimary = true;
+      }
+    }
+    const blendEnables = (s as unknown as { blendEnablePerDrawBuffer?: Map<number, boolean> }).blendEnablePerDrawBuffer;
+    for (let i = 0; i < s.drawBuffers.length; i++) {
+      if (s.drawBuffers[i] === C1.NONE) continue;
+      const be = s.blendPerDrawBuffer.get(i);
+      if (
+        !SRC1_BLEND_FACTORS.includes(be?.srcRGB ?? s.blend.srcRGB) &&
+        !SRC1_BLEND_FACTORS.includes(be?.dstRGB ?? s.blend.dstRGB) &&
+        !SRC1_BLEND_FACTORS.includes(be?.srcAlpha ?? s.blend.srcAlpha) &&
+        !SRC1_BLEND_FACTORS.includes(be?.dstAlpha ?? s.blend.dstAlpha)
+      ) {
+        continue;
+      }
+      const m = s.colorMaskPerDrawBuffer.get(i) ?? s.colorMask;
+      if (!(m[0] || m[1] || m[2] || m[3])) continue;
+      const blendEnabled = i === 0 ? s.caps.BLEND : (blendEnables?.get(i) ?? s.caps.BLEND);
+      if (!hasPrimary || (blendEnabled && !hasSecondary)) {
         pushError(ctx, C1.INVALID_OPERATION);
         return;
       }
@@ -1892,7 +2014,9 @@ export function executeDraw(ctx: WebGLRenderingContext, req: DrawRequest): void 
       ai[instancedLocs[k].loc] = (i / instancedLocs[k].divisor) | 0;
     }
     for (let j = 0; j < req.count; j++, r++) {
-      vctx.vertexId = req.indexed ? indices![j] : first + j;
+      // gl_VertexID = basevertex + element index for indexed draws (GLES 3.2
+      // §10.5; the base-vertex-base-instance extensions), first + j otherwise.
+      vctx.vertexId = req.indexed ? (req.baseVertex ?? 0) + indices![j] : first + j;
       vctx.instanceId = i;
       for (let k = 0; k < vertexLocs.length; k++) ai[vertexLocs[k]] = j;
       run(vctx);
@@ -1975,6 +2099,14 @@ export function executeClear(ctx: WebGLRenderingContext, mask: GLuint): void {
       const surf = fb.color[idx];
       if (!surf) continue;
       const cm = s.colorMaskPerDrawBuffer.get(d) ?? s.colorMask;
+      // WEBGL_render_shared_exponent: Clear is INVALID_OPERATION when an
+      // enabled RGB9_E5 draw buffer's effective mask is neither all-true nor
+      // all-false (shared exponent couples all channels; CTS colorMaskTest).
+      if (drawBufferAttachmentIs(ctx, idx, C2.RGB9_E5) &&
+          (cm[0] || cm[1] || cm[2] || cm[3]) && !(cm[0] && cm[1] && cm[2] && cm[3])) {
+        pushError(ctx, C1.INVALID_OPERATION);
+        return;
+      }
       if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) continue;
       const [r, g, b, a] = s.clearColor;
       try {
@@ -2026,9 +2158,26 @@ function packBytesPerPixel(format: GLenum, type: GLenum): number {
     case C1.UNSIGNED_SHORT: case C1.SHORT: case C2.HALF_FLOAT:
       return comps * 2;
     case C2.UNSIGNED_INT_2_10_10_10_REV: return 4;
+    case C2.UNSIGNED_INT_5_9_9_9_REV: return 4; // packed 9/9/9/5 (RGB only)
     case C2.FLOAT_32_UNSIGNED_INT_24_8_REV: return 8;
     default: return comps * 4; // UNSIGNED_INT, INT, FLOAT, UNSIGNED_INT_24_8
   }
+}
+
+/**
+ * Float triple → UNSIGNED_INT_5_9_9_9_REV bits with the GL readback layout:
+ * R in bits 0-8, G 9-17, B 18-26, shared exponent E in 27-31 (GLES 3.0
+ * §3.8.21 — CTS webgl-render-shared-exponent.html decodes R from bits 0-8).
+ * Quantization matches raster's pack9E5 (E = max(0, floor(log2(maxC)) + 16),
+ * mantissa = round(c / 2^(E−24)) clamped to [0, 511]).
+ */
+function pack9E5Read(r: number, g: number, b: number): number {
+  const maxC = Math.max(r, g, b);
+  if (maxC <= 2 ** -25) return 0; // ≤ 2^-25 → all-zero (value 0)
+  const exp = Math.max(0, Math.floor(Math.log2(maxC)) + 16);
+  const scale = 2 ** (exp - 24);
+  const m = (v: number): number => Math.min(511, Math.max(0, Math.round(v / scale)));
+  return ((exp << 27) | m(r) | (m(g) << 9) | (m(b) << 18)) >>> 0;
 }
 
 /** Local pack conversion (replace with raster getPackConverter when it lands). */
@@ -2082,6 +2231,19 @@ function makeLocalPack(surf: Surface, format: GLenum, type: GLenum): ((src: Arra
           (Math.min(3, Math.max(0, Math.round(tmp[3] * 3))) << 30)
         ) >>> 0;
         (dst as Uint32Array)[d >> 2] = v;
+      };
+    case C2.UNSIGNED_INT_5_9_9_9_REV:
+      // Shared-exponent pack (RGB9_E5 storage; WEBGL_render_shared_exponent).
+      // The surface stores f32 (isFloat → the raster getPackConverter is
+      // skipped), so encode the decoded triple with the GL 9_9_9_5 layout:
+      // R in bits 0-8, G 9-17, B 18-26, shared exponent 27-31 (GLES 3.0
+      // §3.8.21; CTS webgl-render-shared-exponent.html decodes R from bits
+      // 0-8). NOTE: raster's pack9E5 uses the REVERSED layout (R at 18-26) —
+      // consistent with its own f32 storage convention but NOT the GL
+      // readback layout, so it cannot be reused here.
+      return (_src, so, dst, d) => {
+        decodeSurfaceTexel(surf, so, tmp);
+        (dst as Uint32Array)[d >> 2] = pack9E5Read(tmp[0], tmp[1], tmp[2]);
       };
     case C1.FLOAT: {
       const comps = format === C1.RGBA ? 4 : format === C1.RGB ? 3 : format === C1.LUMINANCE_ALPHA ? 2 : 1;
@@ -2412,6 +2574,14 @@ export function executeClearBuffer(
     const surf = fb.color[idx];
     if (!surf) return;
     const cm = s.colorMaskPerDrawBuffer.get(drawbuffer) ?? s.colorMask;
+    // WEBGL_render_shared_exponent: ClearBuffer* is INVALID_OPERATION when the
+    // target draw buffer holds an RGB9_E5 attachment and its effective mask is
+    // neither all-true nor all-false (CTS colorMaskTest clearBufferfv checks).
+    if (drawBufferAttachmentIs(ctx, idx, C2.RGB9_E5) &&
+        (cm[0] || cm[1] || cm[2] || cm[3]) && !(cm[0] && cm[1] && cm[2] && cm[3])) {
+      pushError(ctx, C1.INVALID_OPERATION);
+      return;
+    }
     if (!cm[0] && !cm[1] && !cm[2] && !cm[3]) return;
     if (values instanceof Int32Array || values instanceof Uint32Array) {
       clearColorIntLocal(surf, values, cm, scissor);
@@ -2607,6 +2777,10 @@ export function validateDrawArrays(
   mode: GLenum, first: GLint, count: GLsizei,
   instanceCount: GLsizei = 1,
 ): DrawRequest | null {
+  // WebIDL conversion: GLenum is `unsigned long` → ToUint32 (undefined/NaN →
+  // 0 = POINTS; -1 → 0xFFFFFFFF; valid enums unchanged). WebGL validation
+  // then rejects values outside DRAW_MODES with INVALID_ENUM.
+  mode = mode >>> 0;
   if (!DRAW_MODES.has(mode)) { pushError(ctx, C1.INVALID_ENUM); return null; }
   if (first < 0 || count < 0 || instanceCount < 0) { pushError(ctx, C1.INVALID_VALUE); return null; }
   if (!validateCommonDraw(ctx, mode)) return null;
@@ -2631,6 +2805,11 @@ export function validateDrawElements(
   opts: DrawElementsOpts = {},
 ): DrawRequest | null {
   const instanceCount = opts.instanceCount ?? 1;
+  // WebIDL conversion: GLenum is `unsigned long` → ToUint32 (undefined/NaN →
+  // 0 = POINTS; -1 → 0xFFFFFFFF; valid enums unchanged). The WebGL validation
+  // below then rejects values outside the accepted set with INVALID_ENUM.
+  mode = mode >>> 0;
+  type = type >>> 0;
   if (!DRAW_MODES.has(mode)) { pushError(ctx, C1.INVALID_ENUM); return null; }
   if (count < 0 || instanceCount < 0) { pushError(ctx, C1.INVALID_VALUE); return null; }
   const s = ctx._state;
@@ -2809,6 +2988,83 @@ export function executeMultiDrawElementsInstanced(
       { instanceCount: instanceCounts[instanceCountsOffset + i] },
     );
     if (!req) return; // error already pushed; nothing drawn
+    reqs.push(req);
+  }
+  runMultiSubdraws(ctx, reqs);
+}
+
+/**
+ * multiDrawArraysInstancedBaseInstanceWEBGL engine entry (WEBGL_multi_draw_
+ * instanced_base_vertex_base_instance; same validate-all-first contract).
+ * baseInstances is a Uint32List (GLuint per extension.xml IDL) — each value is
+ * converted with ToUint32 (`>>> 0`) and applied to the subdraw's instance
+ * attribute fetch (element = baseInstance + floor(instanceId/divisor));
+ * gl_InstanceID stays 0-based.
+ */
+export function executeMultiDrawArraysInstancedBaseInstance(
+  ctx: WebGLRenderingContext,
+  mode: GLenum,
+  firsts: Int32Array | number[],
+  firstsOffset: number,
+  counts: Int32Array | number[],
+  countsOffset: number,
+  instanceCounts: Int32Array | number[],
+  instanceCountsOffset: number,
+  baseInstances: Uint32Array | number[],
+  baseInstancesOffset: number,
+  drawcount: number,
+): void {
+  const n = drawcount | 0;
+  if (n <= 0) return; // NO_ERROR no-op
+  const reqs: DrawRequest[] = [];
+  for (let i = 0; i < n; i++) {
+    const req = validateDrawArrays(
+      ctx, mode,
+      firsts[firstsOffset + i], counts[countsOffset + i],
+      instanceCounts[instanceCountsOffset + i],
+    );
+    if (!req) return; // error already pushed; nothing drawn
+    req.baseInstance = baseInstances[baseInstancesOffset + i] >>> 0;
+    reqs.push(req);
+  }
+  runMultiSubdraws(ctx, reqs);
+}
+
+/**
+ * multiDrawElementsInstancedBaseVertexBaseInstanceWEBGL engine entry
+ * (WEBGL_multi_draw_instanced_base_vertex_base_instance; same
+ * validate-all-first contract). baseVertices is an Int32List (GLint — may be
+ * negative) and baseInstances a Uint32List (GLuint); baseVertex offsets the
+ * element indices + gl_VertexID, baseInstance the instance attribute fetch.
+ */
+export function executeMultiDrawElementsInstancedBaseVertexBaseInstance(
+  ctx: WebGLRenderingContext,
+  mode: GLenum,
+  counts: Int32Array | number[],
+  countsOffset: number,
+  type: GLenum,
+  offsets: Int32Array | number[],
+  offsetsOffset: number,
+  instanceCounts: Int32Array | number[],
+  instanceCountsOffset: number,
+  baseVertices: Int32Array | number[],
+  baseVerticesOffset: number,
+  baseInstances: Uint32Array | number[],
+  baseInstancesOffset: number,
+  drawcount: number,
+): void {
+  const n = drawcount | 0;
+  if (n <= 0) return; // NO_ERROR no-op
+  const reqs: DrawRequest[] = [];
+  for (let i = 0; i < n; i++) {
+    const req = validateDrawElements(
+      ctx, mode,
+      counts[countsOffset + i], type, offsets[offsetsOffset + i],
+      { instanceCount: instanceCounts[instanceCountsOffset + i] },
+    );
+    if (!req) return; // error already pushed; nothing drawn
+    req.baseVertex = baseVertices[baseVerticesOffset + i] | 0;
+    req.baseInstance = baseInstances[baseInstancesOffset + i] >>> 0;
     reqs.push(req);
   }
   runMultiSubdraws(ctx, reqs);

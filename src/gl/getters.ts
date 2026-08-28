@@ -84,8 +84,10 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
     }
     const i = pname - DRAW_BUFFER0;
     if (s.drawFramebuffer === null) {
+      // Storage is normalized to attachment indices ([COLOR_ATTACHMENT0] for
+      // BACK, [NONE], or [] = no color buffers) — report the spec-visible value.
       const db0 = s.drawBuffers[0];
-      return db0 === NONE ? NONE : BACK;
+      return db0 === NONE || db0 === undefined ? NONE : BACK;
     }
     return s.drawBuffers[i] ?? NONE;
   }
@@ -578,6 +580,12 @@ function implementationColorReadPair(ctx: WebGLRenderingContext): { format: numb
     return { format: fmt, type };
   }
   if (info?.isFloat) {
+    // Shared-exponent (WEBGL_render_shared_exponent): the exact native pair is
+    // RGB/UNSIGNED_INT_5_9_9_9_REV (GLES3 ReadPixels table; the CTS page reads
+    // with it when IMPLEMENTATION_COLOR_READ_FORMAT/TYPE report it).
+    if (internalFormat === C.RGB9_E5) {
+      return { format: C.RGB, type: C.UNSIGNED_INT_5_9_9_9_REV };
+    }
     if ((internalFormat === C.R16F || internalFormat === C.RG16F || internalFormat === C.RGBA16F) &&
         (ctx._extensions.has('EXT_color_buffer_float') || ctx._extensions.has('EXT_color_buffer_half_float'))) {
       return { format: C.RGBA, type: C.FLOAT };

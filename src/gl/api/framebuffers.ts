@@ -1332,12 +1332,20 @@ export function installFramebuffersApi(proto: WebGLRenderingContext): void {
       // empty list (default-FB path: no entries → no color buffers; FBO path:
       // the strictly-increasing loop over [] writes the empty per-FBO state).
       if (s.drawFramebuffer === null) {
-        // Default framebuffer: empty (no color buffers) or exactly [BACK]/[NONE].
+        // Default framebuffer: empty (no color buffers) or exactly [BACK]/[NONE]
+        // (COLOR_ATTACHMENT0 as an input stays INVALID_OPERATION below).
         if (arr.length > 1 || (arr.length === 1 && arr[0] !== BACK && arr[0] !== NONE)) {
           ctx._errors.push(C1.INVALID_OPERATION);
           return;
         }
-        s.drawBuffers = arr;
+        // Normalize BACK → COLOR_ATTACHMENT0 BEFORE storing: s.drawBuffers is
+        // consumed by draw.ts/api consumers as ATTACHMENT INDICES
+        // (db - COLOR_ATTACHMENT0 → surface index); a raw BACK (0x0405) entry
+        // computes a negative index and silently drops every color write
+        // (three.js emits drawBuffers([BACK]) on each FBO → default transition).
+        // getters.ts DRAW_BUFFERi maps any non-NONE first entry back to BACK for
+        // the default framebuffer, so normalized storage is observably identical.
+        s.drawBuffers = arr.length === 1 && arr[0] === BACK ? [COLOR_ATTACHMENT0] : arr;
         return;
       }
       const fbo = s.drawFramebuffer;

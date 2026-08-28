@@ -301,6 +301,23 @@ function isDepthStencilRenderable(ctx: WebGLRenderingContext, format: GLenum): b
 /* Attachment resolution                                               */
 /* ------------------------------------------------------------------ */
 
+/** Unsized internal format → its sized storage key (mirrors teximage.ts
+ *  unsizedStorage; used to compare effective internal formats across mip
+ *  levels — RGBA ≡ RGBA8, RGB ≡ RGB8, SRGB_EXT ≡ SRGB8, etc.). */
+function storageFormatKey(format: GLenum): GLenum {
+  switch (format) {
+    case 0x1908 /* RGBA */: return 0x8058 /* RGBA8 */;
+    case 0x1907 /* RGB */: return 0x8051 /* RGB8 */;
+    case 0x1903 /* RED */: return 0x8229 /* R8 */;
+    case 0x8227 /* RG */: return 0x822b /* RG8 */;
+    case 0x1902 /* DEPTH_COMPONENT */: return 0x81a5 /* DEPTH_COMPONENT16 */;
+    case 0x84f9 /* DEPTH_STENCIL */: return 0x88f0 /* DEPTH24_STENCIL8 */;
+    case 0x8c40 /* SRGB_EXT */: return 0x8c41 /* SRGB8 */;
+    case 0x8c42 /* SRGB_ALPHA_EXT */: return 0x8c43 /* SRGB8_ALPHA8 */;
+    default: return format;
+  }
+}
+
 /**
  * WebGL2-spec enum → raster-registry key for Surface.format. The WebGL2 spec
  * defines RGBA8I/RGB8I as the DESKTOP-GL values 0x8d8e/0x8d8f (CTS
@@ -328,15 +345,32 @@ function resolveAttachmentSurface(entry: FramebufferAttachment): Surface | null 
   if (!image || entry.level < 0) return null;
   const lvl = image.levels[entry.level];
   if (!lvl) return null;
-  const faceIndex = isCubeFace(entry.face) ? cubeFaceIndex(entry.face) : 0;
-  const data = lvl.data[faceIndex];
+  // 3D/2D_ARRAY attachments (framebufferTextureLayer) address a specific
+  // slice: lvl.data is per-layer (data[z]). Cube faces index the 6 face views.
+  const idx = isCubeFace(entry.face) ? cubeFaceIndex(entry.face) : entry.layer;
+  const data = lvl.data[idx];
   if (!data) return null;
-  const info: PixelFormatInfo | null = image.info ?? getFormat(image.internalFormat);
+  // The level's OWN format wins over the texture-global `image.info` /
+  // `image.internalFormat` (last upload/copy wins per texture): a same-texture
+  // copyTexImage2D overwrites them BEFORE another level's surface is resolved
+  // (copy-texture-image-same-texture.html reads from level 1 of a texture
+  // whose level 2 was just redefined) — the per-level key recorded at
+  // allocation (teximage.ts allocLevel) describes THIS level. Keep
+  // `image.info` when it exactly matches the level key (it is richer for
+  // float-promoted WebGL1 unsized levels, where the raster registry only has
+  // the u8 descriptors); otherwise resolve from the per-level key.
+  const lvlFmt = lvl.format ?? image.internalFormat;
+  let info: PixelFormatInfo | null = null;
+  if (image.info && image.info.format === lvlFmt) {
+    info = image.info;
+  } else {
+    info = getFormat(lvlFmt) ?? image.info ?? null;
+  }
   if (!info) return null;
   return {
     width: lvl.width,
     height: lvl.height,
-    format: surfaceFormatKey(image.internalFormat),
+    format: surfaceFormatKey(lvlFmt),
     info,
     data,
     stencilData: lvl.stencilData,
@@ -575,33 +609,55 @@ function checkAttachment(
     const tex = entry.texture;
     const image = tex._image;
     if (!image || entry.level < 0) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
-    // GLES3 §4.4.5 (pg 213): when the attached level is NOT the texture's
-    // TEXTURE_BASE_LEVEL, the level must lie in [levelbase, q] (q = highest
-    // defined level, capped by TEXTURE_MAX_LEVEL) and the texture must be
-    // mipmap complete. When the attached level IS the base level, only that
-    // level's image must be defined (checked below). CTS
-    // framebuffer-texture-level1.html: attaching level 1 with base level 0
-    // (only level 1 defined) is INCOMPLETE_ATTACHMENT until TEXTURE_BASE_LEVEL
-    // is raised to 1; mipmap-fbo.html: attaching level 1 of a texture with
-    // only level 0 defined is INCOMPLETE_ATTACHMENT.
-    {
+    // GLES 3.0 §4.4.5 (p213): the [level_base, q] range + mipmap-completeness
+    // rules apply only to textures that do not name an immutable-format
+    // texture; for immutable textures (texStorage2D/3D) the sole requirement
+    // is that the attached level's image exists (checked below). q per
+    // §3.8.10 (p150): q = min(floor(log2(maxSize)) + level_base, level_max),
+    // where maxSize is the max of the level-0 image dimensions (3D depth for
+    // TEXTURE_3D). The range check applies even when the attached level IS
+    // level_base (level_base > level_max → empty range → INCOMPLETE).
+    // CTS immutable-tex-render-feedback.html, framebuffer-texture-level1.html,
+    // mipmap-fbo.html.
+    if (!tex._immutable) {
       const baseLevel = tex._params[0x813c] ?? 0;
       const maxLevel = tex._params[0x813d] ?? 1000;
+      const maxSize = Math.max(image.width, image.height, image.target === C2.TEXTURE_3D ? image.depth : 1);
+      const q = Math.min(Math.floor(Math.log2(maxSize)) + baseLevel, maxLevel);
+      if (entry.level < baseLevel || entry.level > q) {
+        return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+      }
       if (entry.level !== baseLevel) {
-        // q = highest level with a defined image, clamped to TEXTURE_MAX_LEVEL.
-        let q = -1;
-        const n = image.levels.length;
-        for (let l = 0; l < n && l <= maxLevel; l++) {
-          if (image.levels[l]) q = l;
-        }
-        if (entry.level < baseLevel || entry.level > Math.min(q, maxLevel)) {
-          return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
-        }
-        // Mipmap complete over [baseLevel, q]: every level's image must exist.
+        // Mipmap complete over [baseLevel, q] (spec q): every level's image
+        // must exist, have the expected halved dimensions (GLES 3.0 §3.8.13:
+        // max(1, baseW >> (l - level_base)), same for height/depth) and the
+        // SAME effective internal format as the base level. A level redefined
+        // at the wrong size or format (e.g. copyTexImage2D into a higher level
+        // with different dims/format) breaks the chain — CTS
+        // copy-texture-image-same-texture.html hard-asserts INCOMPLETE.
         const isCube = isCubeFace(entry.face);
+        const is3D = image.target === C2.TEXTURE_3D;
+        const isArray = image.target === C2.TEXTURE_2D_ARRAY;
+        const baseLvl = image.levels[baseLevel];
+        const baseW = baseLvl ? baseLvl.width : image.width;
+        const baseH = baseLvl ? baseLvl.height : image.height;
+        const baseD = baseLvl ? baseLvl.depth : image.depth;
+        // Level allocation records its storage-format key (teximage.ts
+        // allocLevel); normalize unsized formats so RGBA ≡ RGBA8 etc.
+        const baseFmt = storageFormatKey(baseLvl ? baseLvl.format ?? image.internalFormat : image.internalFormat);
         for (let l = baseLevel; l <= q; l++) {
           const lvl = image.levels[l];
           if (!lvl) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+          const shift = l - baseLevel;
+          const expW = Math.max(1, baseW >> shift);
+          const expH = Math.max(1, baseH >> shift);
+          const expD = isArray ? baseD : is3D ? Math.max(1, baseD >> shift) : 1;
+          if (lvl.width !== expW || lvl.height !== expH || lvl.depth !== expD) {
+            return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+          }
+          if (storageFormatKey(lvl.format ?? image.internalFormat) !== baseFmt) {
+            return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
+          }
           if (isCube) {
             if (lvl.data.length !== 6) return C1.FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
             for (const face of lvl.data) {

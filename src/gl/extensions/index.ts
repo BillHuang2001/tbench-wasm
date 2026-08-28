@@ -73,6 +73,10 @@ import {
 } from './misc';
 import { createWEBGLMultisampledRenderToTexture } from './multisampled';
 import { createOESDrawBuffersIndexed } from './draw-buffers-indexed';
+import {
+  createWEBGLDrawInstancedBaseVertexBaseInstance,
+  createWEBGLMultiDrawInstancedBaseVertexBaseInstance,
+} from './base-vertex-base-instance';
 
 export type ExtensionContextVersion = 1 | 2;
 
@@ -126,7 +130,9 @@ export const EXTENSION_SPECS: ExtensionSpec[] = [
   { name: 'KHR_parallel_shader_compile', versions: [1, 2], status: 'implement' },
   { name: 'OES_draw_buffers_indexed', versions: [2], status: 'implement' },
   { name: 'WEBGL_clip_cull_distance', versions: [2], status: 'implement' },
+  { name: 'WEBGL_draw_instanced_base_vertex_base_instance', versions: [2], status: 'implement' },
   { name: 'WEBGL_multi_draw', versions: [1, 2], status: 'implement' },
+  { name: 'WEBGL_multi_draw_instanced_base_vertex_base_instance', versions: [2], status: 'implement' },
   { name: 'WEBGL_multisampled_render_to_texture', versions: [2], status: 'implement' },
   { name: 'WEBGL_render_shared_exponent', versions: [2], status: 'implement' },
 
@@ -206,7 +212,7 @@ export function getExtensionObject(ctx: WebGLRenderingContext | WebGL2RenderingC
   // WebGL2 ANGLE_instanced_arrays is core (registry versions [1]) — nothing to
   // enable.
   if (spec.name === 'WEBGL_multi_draw' && version === 1 && !cache.has('ANGLE_instanced_arrays')) {
-    const angleSpec = SPEC_BY_NAME.get('ANGLE_instanced_arrays');
+    const angleSpec = SPEC_BY_NAME.get('angle_instanced_arrays'); // keys are lowercased
     if (angleSpec && angleSpec.status === 'implement') {
       cache.set(angleSpec.name, createExtension(ctx, angleSpec));
     }
@@ -216,9 +222,22 @@ export function getExtensionObject(ctx: WebGLRenderingContext | WebGL2RenderingC
   // enable it" — the CTS relies on this (ext-color-buffer-half-float.html runs
   // render-target tests with only OES_texture_half_float requested).
   if (spec.name === 'OES_texture_half_float') {
-    const cb = SPEC_BY_NAME.get('EXT_color_buffer_half_float');
+    const cb = SPEC_BY_NAME.get('ext_color_buffer_half_float'); // keys are lowercased
     if (cb && cb.status === 'implement' && cb.versions.includes(version) && !cache.has('EXT_color_buffer_half_float')) {
       cache.set('EXT_color_buffer_half_float', createExtension(ctx, cb));
+    }
+  }
+  // WEBGL_multi_draw_instanced_base_vertex_base_instance extension.xml: "When
+  // this extension is enabled, the following extensions are enabled implicitly:
+  // WEBGL_multi_draw". The CTS page (webgl-multi-draw-instanced-base-vertex-
+  // base-instance.html) compiles `#extension GL_ANGLE_multi_draw : require`
+  // shaders for its multi-draw pixel tests after enabling ONLY this extension —
+  // shaderCompileExtensions feeds GL_ANGLE_multi_draw from the enabled cache,
+  // so the implicit enable must land here (not in the factory).
+  if (spec.name === 'WEBGL_multi_draw_instanced_base_vertex_base_instance' && !cache.has('WEBGL_multi_draw')) {
+    const mdSpec = SPEC_BY_NAME.get('webgl_multi_draw'); // keys are lowercased
+    if (mdSpec && mdSpec.status === 'implement' && mdSpec.versions.includes(version)) {
+      cache.set(mdSpec.name, createExtension(ctx, mdSpec));
     }
   }
   return ext;
@@ -260,7 +279,9 @@ const FACTORIES: Record<string, ExtensionFactory> = {
   WEBGL_clip_cull_distance: createWEBGLClipCullDistance,
   WEBGL_compressed_texture_etc: createWEBGLCompressedTextureEtc,
   WEBGL_compressed_texture_etc1: createWEBGLCompressedTextureEtc1,
+  WEBGL_draw_instanced_base_vertex_base_instance: createWEBGLDrawInstancedBaseVertexBaseInstance,
   WEBGL_multi_draw: createWEBGLMultiDraw,
+  WEBGL_multi_draw_instanced_base_vertex_base_instance: createWEBGLMultiDrawInstancedBaseVertexBaseInstance,
   WEBGL_multisampled_render_to_texture: createWEBGLMultisampledRenderToTexture,
   WEBGL_render_shared_exponent: createWEBGLRenderSharedExponent,
 };
