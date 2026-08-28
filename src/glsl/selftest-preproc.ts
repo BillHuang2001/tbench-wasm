@@ -29,12 +29,13 @@ function check(cond: boolean, msg: string): void {
 
 interface Opts {
   version?: 100 | 300;
+  type?: 'VERTEX' | 'FRAGMENT';
   defines?: Record<string, string>;
   extensions?: Set<string>;
 }
 
 function run(src: string, opts?: Opts): PreprocessResult {
-  return preprocess(src, { version: opts?.version ?? 100, defines: opts?.defines, extensions: opts?.extensions });
+  return preprocess(src, { version: opts?.version ?? 100, type: opts?.type, defines: opts?.defines, extensions: opts?.extensions });
 }
 
 function texts(src: string, opts?: Opts): string[] {
@@ -366,6 +367,29 @@ expect('FOO', ['1', '+', '2'], { defines: { FOO: '1 + 2' } });
 expect('#ifdef FOO\nok\n#endif', ['ok'], { defines: { FOO: '1' } });
 // Defines are overridden by explicit #define.
 expect('#undef FOO\nFOO', ['FOO'], { defines: { FOO: '1' } });
+
+/* ------------------------------------------------------------------ */
+/* GL_FRAGMENT_PRECISION_HIGH (stage-gated predefined macro)            */
+/* ------------------------------------------------------------------ */
+
+// Pinned behavior (CTS conformance/glsl/misc/shader-precision-format-obeyed.html):
+// the macro is defined to 1 in FRAGMENT shaders — gl/ reports HIGH_FLOAT/
+// HIGH_INT fragment support via getShaderPrecisionFormat, so the spec requires
+// the macro (GLSL ES 1.00 §4.5.3 / 3.00 §3.9.5) — and is UNDEFINED in VERTEX
+// shaders. compileShader plumbed the stage through PreprocessOptions.type
+// (preprocessor.ts `preprocess`); stage-less preprocess() callers get the
+// old (undefined) behavior.
+expect('#ifdef GL_FRAGMENT_PRECISION_HIGH\nok\n#endif', ['ok'], { type: 'FRAGMENT' });
+expect('#ifndef GL_FRAGMENT_PRECISION_HIGH\nok\n#endif', ['ok'], { type: 'VERTEX' });
+expect('#if GL_FRAGMENT_PRECISION_HIGH == 1\nok\n#endif', ['ok'], { type: 'FRAGMENT' });
+// Expansion yields the literal 1.
+expect('GL_FRAGMENT_PRECISION_HIGH', ['1'], { type: 'FRAGMENT' });
+// No stage → old behavior: macro stays undefined.
+expect('#ifndef GL_FRAGMENT_PRECISION_HIGH\nok\n#endif', ['ok']);
+// 3.00 fragment shaders get the macro too (highp is core there).
+expect('#ifdef GL_FRAGMENT_PRECISION_HIGH\nok\n#endif', ['ok'], { version: 300, type: 'FRAGMENT' });
+// User defines still win (injected after the predefined macro).
+expect('GL_FRAGMENT_PRECISION_HIGH', ['2'], { type: 'FRAGMENT', defines: { GL_FRAGMENT_PRECISION_HIGH: '2' } });
 
 /* ------------------------------------------------------------------ */
 /* Report + exit                                                       */
