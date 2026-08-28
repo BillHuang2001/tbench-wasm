@@ -767,13 +767,17 @@ function validatePixelsSize(
 /**
  * WebGL2 srcOffset/srcLength overloads (spec §3.7.2): the extra numeric
  * arguments after the ArrayBufferView select a sub-range of the view, in
- * ELEMENTS of the view's element type (not bytes). srcOffset/srcLength are
- * converted WebIDL-style (unsigned long long: NaN → 0, negatives wrap to
- * huge — so offset=-1 becomes a huge offset and errors). Returns the sliced
- * view, or null after pushing INVALID_OPERATION (offset beyond the view, or
- * srcOffset+srcLength beyond the view). The too-short effective-length check
- * is left to validatePixelsSize, which pushes INVALID_OPERATION (the CTS
- * views-with-offsets probe expects exactly that for effective < required).
+ * ELEMENTS of the view's element type (not bytes). srcOffset is an unsigned
+ * long long (64-bit — do NOT truncate: offsets ≥ 2^32 arise with huge
+ * WebAssembly-memory views, e.g. texImage2d-16gb-wasm-memory uses
+ * srcOffset = 16GB-4); srcLength is a GLuint (32-bit). srcOffset/srcLength
+ * are converted WebIDL-style (unsigned long long: NaN → 0, negatives wrap
+ * to huge — so offset=-1 becomes a huge offset and errors). Returns the
+ * sliced view, or null after pushing INVALID_OPERATION (offset beyond the
+ * view, or srcOffset+srcLength beyond the view). The too-short
+ * effective-length check is left to validatePixelsSize, which pushes
+ * INVALID_OPERATION (the CTS views-with-offsets probe expects exactly that
+ * for effective < required).
  */
 function applySrcOffset(
   ctx: WebGLRenderingContext,
@@ -784,7 +788,13 @@ function applySrcOffset(
   // `length`/`subarray` aren't on the TS ArrayBufferView base type (DataView
   // excluded); typed arrays all have them (the callers only pass views).
   const v = view as unknown as { length: number; subarray(begin: number, end: number): ArrayBufferView };
-  const off = Number(srcOffsetArg) >>> 0;
+  // WebIDL unsigned long long conversion. 2^64 is exactly representable in
+  // float64; values beyond 2^53 lose precision but stay huge — exactly what
+  // the error paths need (offset=-1 → 2^64-1 → INVALID_OPERATION below).
+  let off = Number(srcOffsetArg);
+  if (off < 0) off += 18446744073709551616; // negative → mod 2^64
+  if (!(off > 0)) off = 0; // NaN, ±0 → 0
+  else off = Math.floor(off); // truncate toward zero
   if (off > v.length) {
     // Effective length would be negative (covers the CTS offset=-1 probe).
     ctx._errors.push(C1.INVALID_OPERATION);
