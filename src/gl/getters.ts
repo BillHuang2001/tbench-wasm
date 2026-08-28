@@ -29,13 +29,17 @@
  *  - Context lost → return null, no error pushed (spec: getters return null
  *    while the context is lost).
  *  - WebGL2 indexed pnames (UNIFORM_BUFFER_BINDING per index, TRANSFORM_FEEDBACK_BUFFER_*)
- *    are handled by getIndexedParameter; getParameter returns index 0's binding.
+ *    are handled by getIndexedParameter; getParameter returns the GENERIC
+ *    binding for UNIFORM_BUFFER_BINDING / TRANSFORM_FEEDBACK_BUFFER_BINDING
+ *    (GLES 3.0 §2.10.1 — the generic point is context state, distinct from the
+ *    indexed points; see api/buffers.ts getGenericBufferBinding).
  */
 
 import type { WebGLRenderingContext } from './webgl1';
 import type { GLenum } from './types';
 import type { WebGLTransformFeedback } from './objects';
 import { C } from './constants';
+import { getGenericBufferBinding } from './api/buffers';
 import { resolveFramebufferTarget } from './framebuffer-util';
 import { getClipControl, isClipDistanceEnabled } from './extensions/clip-state';
 import {
@@ -177,7 +181,12 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
       return s.pixelUnpackBuffer;
     case C.UNIFORM_BUFFER_BINDING:
       if (!v2) break;
-      return s.uniformBuffers[0] ?? null;
+      // GENERIC binding point (GLES 3.0 §2.10.1) — distinct from the indexed
+      // bindings: bindBuffer(UNIFORM_BUFFER, b) sets only this, while
+      // bindBufferBase/Range with index 0 also update it. The old-model read
+      // (`s.uniformBuffers[0]`) was wrong after bindBuffer vs bindBufferBase
+      // splits (CTS uniform-buffers.html, switching-objects.html).
+      return getGenericBufferBinding(ctx, C.UNIFORM_BUFFER);
     case C.COPY_READ_BUFFER_BINDING:
       if (!v2) break;
       return s.copyReadBuffer;
@@ -189,7 +198,15 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
       return s.transformFeedback;
     case C.TRANSFORM_FEEDBACK_BUFFER_BINDING:
       if (!v2) break;
-      return (s.transformFeedback && s.transformFeedback._buffers[0]) ?? null;
+      // GENERIC binding point (GLES 3.0 §2.10.1; Khronos resolution — CTS
+      // switching-objects.html "Generic binding is not changed when switching
+      // TF object"): NOT part of the TF object state. bindBuffer(
+      // TRANSFORM_FEEDBACK_BUFFER, b) sets only this point; bindBufferBase/
+      // Range with index 0 also update it; bindTransformFeedback must NOT
+      // change it. The old read (`s.transformFeedback._buffers[0]`) reported
+      // the TF object's indexed state instead (switching-objects.html expects
+      // null here after bindBuffer(TRANSFORM_FEEDBACK_BUFFER, null)).
+      return getGenericBufferBinding(ctx, C.TRANSFORM_FEEDBACK_BUFFER);
 
     // ---- WebGL2 booleans / misc ----
     case C.TRANSFORM_FEEDBACK_ACTIVE:
