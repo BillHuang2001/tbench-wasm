@@ -358,9 +358,12 @@ const W2_RB_EXT_FLOAT: ReadonlySet<GLenum> = new Set<GLenum>([
   C2.R16F, C2.RG16F, C2.RGBA16F, C2.R32F, C2.RG32F, C2.RGBA32F, C2.R11F_G11F_B10F,
 ]);
 
-/** WebGL2 renderbuffer formats gated on EXT_texture_norm16. */
+/** WebGL2 renderbuffer formats gated on EXT_texture_norm16. Per the extension
+ *  spec, ONLY R16_EXT/RG16_EXT/RGBA16_EXT are renderbuffer internalformats —
+ *  RGB16_EXT and the SNORM formats are texture-only and renderbufferStorage
+ *  with them must be INVALID_ENUM (ext-texture-norm16.html testExtFormatUnrenderable). */
 const W2_RB_EXT_NORM16: ReadonlySet<GLenum> = new Set<GLenum>([
-  CExt.R16_EXT, CExt.RG16_EXT, CExt.RGB16_EXT, CExt.RGBA16_EXT,
+  CExt.R16_EXT, CExt.RG16_EXT, CExt.RGBA16_EXT,
 ]);
 
 /**
