@@ -1360,6 +1360,13 @@ function stmtToExpr(s: string): string {
 const IMPLICIT_LOD_COMMENT = '/* implicit-LOD approximated as lod 0 (dual mode pending) */';
 const OFFSET_COMMENT = '/* offset approximated (no exact helper) */';
 
+/**
+ * Our implementation's MAX_TEXTURE_LOD_BIAS (gl reports it via
+ * gl.getParameter(gl.MAX_TEXTURE_LOD_BIAS); see src/gl/state.ts). The GLSL
+ * ES 3.00 §8.8 texture-bias clamp uses this value — keep both in sync.
+ */
+const MAX_TEXTURE_LOD_BIAS = 8;
+
 function emitTextureCall(
   name: string,
   sig: BuiltinSignature,
@@ -1409,6 +1416,21 @@ function emitTextureCallInner(
   const coordCount = (f: string): number => (f === 'sampler2D' ? 2 : 3);
   /** Dual mode (fragment only — vertex stages never set env.dual). */
   const dual = env.dual;
+
+  /**
+   * The bias argument at call-arg index `i` with the GLSL ES 3.00 §8.8
+   * maxTextureLodBias clamp: the bias is clamped to
+   * [-MAX_TEXTURE_LOD_BIAS, MAX_TEXTURE_LOD_BIAS] before being added to the
+   * computed level of detail. CTS texture-bias.html grades the clamp against
+   * the QUERIED gl.MAX_TEXTURE_LOD_BIAS — keep this constant in sync with
+   * src/gl/state.ts (MAX_TEXTURE_LOD_BIAS: 8). Returns null when the call
+   * has no bias argument.
+   */
+  const biasArg = (i: number): string | null => {
+    if (args.length <= i) return null;
+    const v = use(argVals[i][0]);
+    return `Math.min(${MAX_TEXTURE_LOD_BIAS}, Math.max(${-MAX_TEXTURE_LOD_BIAS}, ${v}))`;
+  };
 
   const is2D = fam === 'sampler2D';
   const is3D = fam === 'sampler3D';
@@ -1636,12 +1658,12 @@ function emitTextureCallInner(
   switch (name) {
     /* ---------------- 1.00 core ---------------- */
     case 'texture2D': {
-      const bias = args.length > 2 ? use(argVals[2][0]) : null;
+      const bias = biasArg(2);
       if (dual) return implicitDual([dcoord(0), dcoord(1)], bias);
       return implicit([pc(0), pc(1)], bias);
     }
     case 'texture2DProj': {
-      const bias = args.length > 2 ? use(argVals[2][0]) : null;
+      const bias = biasArg(2);
       const qi = argN[1] === 3 ? 2 : 3;
       if (dual) return implicitDual([ddivP(0, qi), ddivP(1, qi)], bias);
       const q = pc(qi);
@@ -1655,7 +1677,7 @@ function emitTextureCallInner(
       return fromR('tex2DProjLod', `${unit}, ${pc(0)}, ${pc(1)}, ${q}, ${use(argVals[2][0])}`);
     }
     case 'textureCube': {
-      const bias = args.length > 2 ? use(argVals[2][0]) : null;
+      const bias = biasArg(2);
       if (dual) return implicitDual([dcoord(0), dcoord(1), dcoord(2)], bias);
       return implicit([pc(0), pc(1), pc(2)], bias);
     }
@@ -1697,7 +1719,7 @@ function emitTextureCallInner(
 
     /* ---------------- 3.00 core ---------------- */
     case 'texture': {
-      const bias = args.length > 2 ? use(argVals[2][0]) : null;
+      const bias = biasArg(2);
       if (dual) {
         if (fam === 'sampler2DShadow') return implicitDual([dcoord(0), dcoord(1)], bias, pc(2));
         if (fam === 'samplerCubeShadow') return implicitDual([dcoord(0), dcoord(1), dcoord(2)], bias, pc(3));
@@ -1711,7 +1733,7 @@ function emitTextureCallInner(
       return implicit(coords, bias);
     }
     case 'textureProj': {
-      const bias = args.length > 2 ? use(argVals[2][0]) : null;
+      const bias = biasArg(2);
       const qi = argN[1] === 3 ? 2 : 3;
       if (dual) {
         if (is2D) return implicitDual([ddivP(0, qi), ddivP(1, qi)], bias);
@@ -1742,7 +1764,7 @@ function emitTextureCallInner(
       return lodSample(coords, lod);
     }
     case 'textureOffset': {
-      const bias = args.length > 3 ? use(argVals[3][0]) : null;
+      const bias = biasArg(3);
       const ox = use(argVals[2][0]);
       const oy = use(argVals[2][1]);
       if (is2D) return fromR('tex2DOffsetApprox', `${unit}, ${pc(0)}, ${pc(1)}, ${ox}, ${oy}`);
@@ -1774,7 +1796,7 @@ function emitTextureCallInner(
       throw new Error(`codegen: textureProjLod does not support '${kind}'`);
     }
     case 'textureProjOffset': {
-      const bias = args.length > 3 ? use(argVals[3][0]) : null;
+      const bias = biasArg(3);
       const q = argN[1] === 3 ? pc(2) : pc(3);
       if (is2D) {
         if (env.stage === 'FRAGMENT') return implicit([divP(0, q), divP(1, q)], bias);
