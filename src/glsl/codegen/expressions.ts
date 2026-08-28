@@ -85,7 +85,9 @@ type StorageKind =
  *  outermost array dimension only. `dyn.stride` = storage stride per element
  *  (uniform: floats; block: bytes; varying: components; attrib: locations;
  *  output: 1); `dyn.elemSlots` = flat components per element for LOCAL
- *  scratch storage. */
+ *  scratch storage; `dyn.blockElements` = the dynamic index selects among the
+ *  per-element STORES of an ARRAYED uniform block (store array index strides
+ *  by 1, offsets element-local — see env.ts DynTerm). */
 interface P {
   type: GLSLType;      // type OF THE VALUE AT THE PATH END
   lvalue: boolean;
@@ -94,7 +96,7 @@ interface P {
   storage: StorageKind | null;
   builtin: string | null; // gl_Position / gl_FragCoord / ... (gl_FragData converts to output)
   swz: number[] | null;   // swizzle remap: leafRead(c) = baseRead(swz[c])
-  dyn: { temp: string; stride: number; elemSlots: number } | null;
+  dyn: { temp: string; stride: number; elemSlots: number; blockElements?: boolean } | null;
   pre: string[];
   post: string[];
 }
@@ -502,9 +504,18 @@ function subPIdx(p: P, k: number, etype: GLSLType, env: CodegenEnv): P {
   } else if (q.storage) {
     switch (q.storage.kind) {
       case 'uniform':
-      case 'block':
         q.storage = { ...q.storage, key: q.storage.key + `[${k}]` };
         break;
+      case 'block': {
+        // A const index on the INSTANCE identifier itself (key === baseKey —
+        // an ARRAYED block) selects element k, which has its OWN unique block
+        // index (per-element stores). Any other const index descends a MEMBER
+        // array → same block, key only.
+        const st = q.storage;
+        q.storage =
+          st.key === st.baseKey ? { ...st, key: st.key + `[${k}]`, blockIndex: st.blockIndex + k } : { ...st, key: st.key + `[${k}]` };
+        break;
+      }
       case 'varying': {
         const vl = env.lookupVarying(q.storage.key);
         q.flatOff += k * (vl ? vl.elemComponents : flatComponents(etype));
@@ -657,8 +668,11 @@ function walk(e: Expr, env: CodegenEnv): P {
                 );
               }
               // Instance-element index (pre-update key still equals the
-              // instance name) strides by blockStride; a member-array index
-              // (key ≠ baseKey) strides by the member's arrayStride
+              // instance name) selects among the per-element BLOCK STORES —
+              // each element has its OWN unique block index (linker), so the
+              // store array index strides by 1 and member offsets are
+              // element-local (blockElements). A member-array index (key ≠
+              // baseKey) strides by the member's arrayStride within one store
               // (blockStride is absent on non-arrayed-instance member entries).
               const atInstance = p.storage.key === p.storage.baseKey;
               p.storage = { ...p.storage, key };
@@ -668,7 +682,9 @@ function walk(e: Expr, env: CodegenEnv): P {
                   `codegen: block path '${key}' has no stride for dynamic indexing (linker must set arrayStride/blockStride)`,
                 );
               }
-              p.dyn = { temp: t, stride, elemSlots: 0 };
+              p.dyn = atInstance
+                ? { temp: t, stride, blockElements: true, elemSlots: 0 }
+                : { temp: t, stride, elemSlots: 0 };
               break;
             }
             case 'varying': {
@@ -752,7 +768,10 @@ function walk(e: Expr, env: CodegenEnv): P {
         if (p.storage && p.storage.kind === 'block') {
           const entry = env.lookupBlockMember(p.storage.blockIndex, p.storage.key);
           if (entry !== null && entry.rowMajor) {
-            const base = `${entry.offset} / 4${p.dyn ? ` + (${p.dyn.temp}) * ${p.dyn.stride / 4}` : ''}`;
+            // Arrayed-block dynamic instance index (blockElements): the store
+            // array index strides by 1, offsets element-local.
+            const store = p.dyn && p.dyn.blockElements ? `${p.storage.blockIndex} + (${p.dyn.temp}) * 1` : String(p.storage.blockIndex);
+            const base = `${entry.offset} / 4${p.dyn ? (p.dyn.blockElements ? '' : ` + (${p.dyn.temp}) * ${p.dyn.stride / 4}`) : ''}`;
             let colTerm: string;
             if (isConst) {
               colTerm = String(cv);
@@ -765,7 +784,7 @@ function walk(e: Expr, env: CodegenEnv): P {
             const dxNames: (string | null)[] = [];
             const dyNames: (string | null)[] = [];
             for (let r = 0; r < rows; r++) {
-              compNames.push(`ctx.blockStores[${p.storage.blockIndex}][${base} + ${colTerm} + ${r} * 4]`);
+              compNames.push(`ctx.blockStores[${store}][${base} + ${colTerm} + ${r} * 4]`);
               dxNames.push('0');
               dyNames.push('0');
             }

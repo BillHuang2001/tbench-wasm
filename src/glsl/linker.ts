@@ -1038,19 +1038,18 @@ function layoutBlocks(vs: Shader, fs: Shader, limits: LinkLimits): BlockLayoutRe
   const blockIndices = new Map<string, number>();
   const infos: UniformBlockInfo[] = [];
   const uniformInfos: UniformInfo[] = [];
-  for (let idx = 0; idx < order.length; idx++) {
-    const lay = byName.get(order[idx])!;
-    blocks.set(idx, lay.members);
-    if (lay.instanceName !== null) {
-      // Named blocks (arrayed or not): the instance name resolves the block.
-      blockIndices.set(lay.instanceName, idx);
-    } else {
-      // Instance-less blocks: every member ROOT name resolves the block.
-      for (const m of lay.members.keys()) {
-        const root = m.split('.')[0].split('[')[0];
-        blockIndices.set(root, idx);
-      }
-    }
+  // Dense sequential index allocation: a NON-arrayed block occupies ONE index;
+  // an ARRAYED block (`uniform B {..} b[2]`) occupies ONE INDEX PER ELEMENT.
+  // Each element is its own uniform block: CTS uniform-buffers.html binds
+  // every element to its OWN binding point / buffer range (blockIndex →
+  // binding → buffer, gl/draw.ts), and codegen reads ctx.blockStores[element
+  // index] — gl's per-draw stores are built by ARRAY POSITION, so indices
+  // must stay dense and equal to the info's position. The instance name
+  // resolves to the BASE index; a dynamic instance index strides STORES by 1
+  // (codegen DynTerm.blockElements).
+  let nextIndex = 0;
+  for (const name of order) {
+    const lay = byName.get(name)!;
     const memberInfo = (l: BlockLeaf): UniformBlockMemberInfo => ({
       name: l.path,
       offset: l.offset,
@@ -1060,14 +1059,43 @@ function layoutBlocks(vs: Shader, fs: Shader, limits: LinkLimits): BlockLayoutRe
       matrixStride: l.matrixStride,
       rowMajor: l.rowMajor,
     });
-    const leafInfos = (group: BlockLeaf[]): UniformBlockMemberInfo[] => group.map(memberInfo);
     if (lay.instanceArray) {
-      // Arrayed blocks: one UniformBlockInfo PER ELEMENT ('b[0]', 'b[1]'...).
+      // Arrayed blocks: one UniformBlockInfo PER ELEMENT ('b[0]', 'b[1]'...)
+      // with a UNIQUE index per element; member offsets are ELEMENT-LOCAL
+      // (each element is its own block store — native GL reports the member
+      // offsets within one instance).
+      const base = nextIndex;
+      nextIndex += lay.arraySize;
+      blockIndices.set(lay.instanceName!, base);
       for (let k = 0; k < lay.arraySize; k++) {
-        infos.push({ name: `${lay.instanceName}[${k}]`, index: idx, size: lay.size, activeUniforms: leafInfos(lay.leafGroups[k]) });
-      }
-      for (const group of lay.leafGroups) {
-        for (const l of group) {
+        const idx = base + k;
+        const eoff = k * lay.size;
+        // Per-element member layout: 'b[k]' PREFIX entry (offset 0,
+        // blockStride = instance size, for dynamic instance indexing) plus
+        // every member entry of element k with its ELEMENT-LOCAL byte offset
+        // (keys 'b[k].m' / 'b[k].m[0]' / 'b[k].m[1]' / 'b[k].s.x' — the full
+        // const-indexed map, same shape as emitBlockLayout's).
+        const members = new Map<string, BlockMemberLayout>();
+        members.set(`${lay.instanceName}[${k}]`, {
+          offset: 0,
+          arrayStride: 0,
+          matrixStride: 0,
+          rowMajor: false,
+          blockStride: lay.size,
+        });
+        const prefix = `${lay.instanceName}[${k}].`;
+        for (const [key, entry] of lay.members) {
+          if (!key.startsWith(prefix)) continue;
+          members.set(key, { ...entry, offset: entry.offset - eoff, blockStride: lay.size });
+        }
+        blocks.set(idx, members);
+        infos.push({
+          name: `${lay.instanceName}[${k}]`,
+          index: idx,
+          size: lay.size,
+          activeUniforms: lay.leafGroups[k].map((l) => ({ ...memberInfo(l), offset: l.offset - eoff })),
+        });
+        for (const l of lay.leafGroups[k]) {
           uniformInfos.push({
             name: l.path,
             location: -1,
@@ -1081,9 +1109,21 @@ function layoutBlocks(vs: Shader, fs: Shader, limits: LinkLimits): BlockLayoutRe
         }
       }
     } else {
+      const idx = nextIndex++;
+      blocks.set(idx, lay.members);
+      if (lay.instanceName !== null) {
+        // Named blocks (arrayed or not): the instance name resolves the block.
+        blockIndices.set(lay.instanceName, idx);
+      } else {
+        // Instance-less blocks: every member ROOT name resolves the block.
+        for (const m of lay.members.keys()) {
+          const root = m.split('.')[0].split('[')[0];
+          blockIndices.set(root, idx);
+        }
+      }
       // Non-arrayed blocks: one UniformBlockInfo named by the BLOCK name
       // (getUniformBlockIndex/getActiveUniformBlockName query block names).
-      infos.push({ name: lay.blockName, index: idx, size: lay.size, activeUniforms: leafInfos(lay.leafGroups[0]) });
+      infos.push({ name: lay.blockName, index: idx, size: lay.size, activeUniforms: lay.leafGroups[0].map(memberInfo) });
       for (const l of lay.leafGroups[0]) {
         uniformInfos.push({
           name: l.path,

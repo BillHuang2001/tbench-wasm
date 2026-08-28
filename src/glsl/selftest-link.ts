@@ -30,7 +30,8 @@
  *      (float vs vec2 member) → link error.
  *  11. instance-less block accessed by bare member name.
  *  12. arrayed block `uniform B { vec4 v; } b[2]` with DYNAMIC instance index
- *      b[i].v (i uniform; i=0 and i=1 verify the blockStride path).
+ *      b[i].v (i uniform; i=0 and i=1 verify the per-element store path —
+ *      each element has its own unique block index).
  *  13. nested struct members + member array inside a struct:
  *      {S1 {vec2 x; float y;} s; S2 {vec2 x; float y[2];} t;} — x@0, y@8,
  *      t@16, t.x@16, t.y@24, size 48.
@@ -48,7 +49,8 @@
  *      structs expand EVERY element ('lights[0].intensity'/'lights[1].intensity'
  *      @0/@16, size 1), structs containing arrays recurse
  *      ('lights[0].intensity[0]' size 3 stride 16, offsets 0/48), and the
- *      arrayed-block variant ('ld[0].lights[0].intensity' ... @0/16/32/48).
+ *      arrayed-block variant ('ld[0].lights[0].intensity' ... element-local
+ *      @0/16 per element, one UNIQUE block index per element).
  *  18. gl_DepthRange builtin uniform reflection: usage-gated active-uniform
  *      entries ('gl_DepthRange.near/far/diff', GL_FLOAT, size 1) backed by 3
  *      real float-store slots appended after user uniforms (1.00 vertex /
@@ -757,18 +759,21 @@ const INT = 0x1404; // 5124
   check(l.ok, `arrayed block links (${l.ok ? '' : l.log})`);
   if (l.ok) {
     const p = l.program;
-    // One UniformBlockInfo PER ELEMENT ('b[0]','b[1]'), shared index 0,
-    // size = one instance (16 bytes).
+    // One UniformBlockInfo PER ELEMENT ('b[0]','b[1]') with a UNIQUE index
+    // per element (per-element stores — gl binds each element to its own
+    // binding point/buffer range), size = one instance (16 bytes).
     check(
       p.uniformBlocks.length === 2 && p.uniformBlocks[0].name === 'b[0]' && p.uniformBlocks[1].name === 'b[1]' &&
-        p.uniformBlocks[0].index === 0 && p.uniformBlocks[1].index === 0 && p.uniformBlocks[0].size === 16,
-      `arrayed block: 'b[0]','b[1]' shared index 0 size 16 (got ${JSON.stringify(p.uniformBlocks)})`,
+        p.uniformBlocks[0].index === 0 && p.uniformBlocks[1].index === 1 &&
+        p.uniformBlocks[0].size === 16 && p.uniformBlocks[1].size === 16,
+      `arrayed block: 'b[0]' index 0, 'b[1]' index 1, size 16 (got ${JSON.stringify(p.uniformBlocks)})`,
     );
     const iLoc = p.uniformMap.get('i')!.location;
-    // Two 16-byte instances: [1,0,0,0] and [2,0,0,0] in float index space.
-    const store = new Float32Array([1, 0, 0, 0, 2, 0, 0, 0]);
+    // Each element is its OWN 16-byte store: [1,0,0,0] and [2,0,0,0].
+    const store0 = new Float32Array([1, 0, 0, 0]);
+    const store1 = new Float32Array([2, 0, 0, 0]);
     const vctx = vertexCtx(p, {
-      blockStores: [store],
+      blockStores: [store0, store1],
       attribs: [new Float32Array([0, 0, 0, 1])],
       attribIndices: new Int32Array([0]),
     });
@@ -1965,21 +1970,23 @@ function structNames(src: string, version: 100 | 300, type: 'VERTEX' | 'FRAGMENT
     const p = ldd.program;
     check(
       p.uniformBlocks.length === 2 && p.uniformBlocks[0].name === 'ld[0]' && p.uniformBlocks[1].name === 'ld[1]' &&
-        p.uniformBlocks[0].index === 0 && p.uniformBlocks[1].index === 0 && p.uniformBlocks[0].size === 32,
-      `(d) 'ld[0]','ld[1]' shared index 0 size 32 (got ${JSON.stringify(p.uniformBlocks)})`,
+        p.uniformBlocks[0].index === 0 && p.uniformBlocks[1].index === 1 && p.uniformBlocks[0].size === 32 &&
+        p.uniformBlocks[1].size === 32,
+      `(d) 'ld[0]' index 0, 'ld[1]' index 1, size 32 each (got ${JSON.stringify(p.uniformBlocks)})`,
     );
     const m0 = new Map(p.uniformBlocks[0].activeUniforms.map((u) => [u.name, u]));
     const m1 = new Map(p.uniformBlocks[1].activeUniforms.map((u) => [u.name, u]));
     check(
       m0.get('ld[0].lights[0].intensity')?.offset === 0 && m0.get('ld[0].lights[1].intensity')?.offset === 16 &&
-        m1.get('ld[1].lights[0].intensity')?.offset === 32 && m1.get('ld[1].lights[1].intensity')?.offset === 48,
-      `(d) per-element leaves @0/16/32/48 (got ${JSON.stringify([...m0, ...m1].map(([k, v]) => [k, v.offset]))})`,
+        m1.get('ld[1].lights[0].intensity')?.offset === 0 && m1.get('ld[1].lights[1].intensity')?.offset === 16,
+      `(d) per-element leaves ELEMENT-LOCAL @0/16 and @0/16 (got ${JSON.stringify([...m0, ...m1].map(([k, v]) => [k, v.offset]))})`,
     );
-    const um = p.uniforms.filter((u) => u.blockIndex === 0);
+    const um0 = p.uniforms.filter((u) => u.blockIndex === 0);
+    const um1 = p.uniforms.filter((u) => u.blockIndex === 1);
     check(
-      um.length === 4 && um.map((u) => u.name).join(',') ===
-        'ld[0].lights[0].intensity,ld[0].lights[1].intensity,ld[1].lights[0].intensity,ld[1].lights[1].intensity',
-      `(d) Program.uniforms block members (got ${JSON.stringify(um.map((u) => u.name))})`,
+      um0.length === 2 && um0.map((u) => u.name).join(',') === 'ld[0].lights[0].intensity,ld[0].lights[1].intensity' &&
+        um1.length === 2 && um1.map((u) => u.name).join(',') === 'ld[1].lights[0].intensity,ld[1].lights[1].intensity',
+      `(d) Program.uniforms block members split per element index (got ${JSON.stringify([...um0, ...um1].map((u) => `${u.blockIndex}:${u.name}`))})`,
     );
   }
 }

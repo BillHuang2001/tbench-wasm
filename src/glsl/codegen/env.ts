@@ -499,6 +499,11 @@ export function foldPre(pre: string[], expr: string): string {
 export interface DynTerm {
   temp: string; // temp var holding the index value
   stride: number;
+  /** true when the dynamic index selects among the per-element STORES of an
+   *  ARRAYED uniform block: each element has its OWN unique block index
+   *  (linker), so the store ARRAY index strides by 1 and member offsets are
+   *  element-local. `stride` then carries the blockStride (validation only). */
+  blockElements?: boolean;
 }
 
 /** Uniform store read: slot = FLOAT index; matrix columns stride 4 floats. */
@@ -525,7 +530,11 @@ export function uniformRead(
 /** Block store read: byte offset → float index. Column-major matrices store
  *  column `col` at byte `col * matrixStride` (element [col][row] at
  *  `col*matrixStride + row*4`); row-major matrices store ROW `row` at byte
- *  `row * matrixStride` (element [col][row] at `row*matrixStride + col*4`). */
+ *  `row * matrixStride` (element [col][row] at `row*matrixStride + col*4`).
+ *  An ARRAYED-block dynamic instance index (dyn.blockElements) strides the
+ *  STORE array by 1 (each element has its own unique block index) and keeps
+ *  the element-local byte offset; every other dynamic index strides BYTES
+ *  within one store. */
 export function blockRead(
   type: GLSLType,
   blockIndex: number,
@@ -536,7 +545,12 @@ export function blockRead(
   c: number,
   rowMajor: boolean,
 ): string {
-  const base = dyn ? `${offset} / 4 + (${dyn.temp}) * ${dyn.stride / 4}` : `${offset} / 4`;
+  const store = dyn && dyn.blockElements ? `${blockIndex} + (${dyn.temp}) * 1` : String(blockIndex);
+  const base = dyn
+    ? dyn.blockElements
+      ? `${offset} / 4`
+      : `${offset} / 4 + (${dyn.temp}) * ${dyn.stride / 4}`
+    : `${offset} / 4`;
   let idx: string;
   if (type.kind === 'matrix') {
     const col = Math.floor(c / type.rows);
@@ -545,7 +559,7 @@ export function blockRead(
   } else {
     idx = `${base} + ${c}`;
   }
-  const s = `${isIntStore ? 'ctx.blockIntStores' : 'ctx.blockStores'}[${blockIndex}][${idx}]`;
+  const s = `${isIntStore ? 'ctx.blockIntStores' : 'ctx.blockStores'}[${store}][${idx}]`;
   return isUintType(type) ? wrapUint(s) : s;
 }
 
