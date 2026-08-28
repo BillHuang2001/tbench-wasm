@@ -1816,6 +1816,11 @@ export function generateMipmap(ctx: WebGLRenderingContext, texture: WebGLTexture
   if (!spec) return;
   const isCube = img.target === C.TEXTURE_CUBE_MAP;
   const isArray = img.target === C.TEXTURE_2D_ARRAY;
+  // GLES 3.0 §3.8.14: for sRGB formats the 2×2 filter must decode each texel
+  // sRGB→linear, average in linear space, then re-encode before storing — mip
+  // levels hold ENCODED values (the sampler decodes at sampling time). Alpha
+  // is not sRGB-encoded and is never transformed.
+  const useSRGB = spec.isSRGB;
   const maxDim = Math.max(img.width, img.height, !isCube && !isArray ? img.depth : 1);
   const levels = Math.floor(Math.log2(maxDim)) + 1;
   const out = new Float32Array(4);
@@ -1846,11 +1851,22 @@ export function generateMipmap(ctx: WebGLRenderingContext, texture: WebGLTexture
                 const sy = Math.min(h - 1, y * 2 + dy);
                 const srcOff = (sy * w + sx) * spec.bytesPerPixel;
                 spec.unpack(srcView, srcOff, out);
+                if (useSRGB) {
+                  out[0] = srgbToLinear(out[0]);
+                  out[1] = srgbToLinear(out[1]);
+                  out[2] = srgbToLinear(out[2]);
+                }
                 accR += out[0]; accG += out[1]; accB += out[2]; accA += out[3]; n++;
               }
             }
             const dstOff = (y * nw + x) * spec.bytesPerPixel;
-            spec.pack(dstView, dstOff, accR / n, accG / n, accB / n, accA / n);
+            if (useSRGB) {
+              // Re-encode the linear average: the stored mip texel is sRGB-
+              // encoded (the sampler decodes it at sampling time).
+              spec.pack(dstView, dstOff, linearToSrgb(accR / n), linearToSrgb(accG / n), linearToSrgb(accB / n), accA / n);
+            } else {
+              spec.pack(dstView, dstOff, accR / n, accG / n, accB / n, accA / n);
+            }
           }
         }
       }
