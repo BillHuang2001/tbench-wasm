@@ -981,7 +981,10 @@ function sampleSingleLevel(
     return;
   }
   const target = img.target;
-  const filter = lambdaGT0 ? plan.posFilter : state.magFilter;
+  // Integer formats only allow NEAREST taps (spec; also keeps filter3D's
+  // single-tap path — it has no isInteger guard, matching old sampleLevels
+  // which forced NEAREST for integers in every branch).
+  const filter = img.info.isInteger ? NEAREST : (lambdaGT0 ? plan.posFilter : state.magFilter);
   if (target === TEXTURE_CUBE_MAP) {
     filterCube(img, state, filter, plan.base, coord.v, shadow, refQ, out);
   } else if (target === TEXTURE_3D) {
