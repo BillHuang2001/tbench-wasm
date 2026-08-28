@@ -42,7 +42,7 @@ import {
 import {
   getFormat, clamp, FILL_ZERO, FILL_ONE,
   readU32At, readCompAt, packDepth24Stencil, halfToFloat, floatToHalf,
-  unpack11, unpack10,
+  unpack11, unpack10, pack11, pack10, pack9E5,
   P_I_U8, P_I_I8, P_I_U16, P_I_I16, P_I_U32, P_I_I32,
 } from './formats';
 import type { PixelFormatInfo, PerCompParams, StorageKind } from './formats';
@@ -634,6 +634,19 @@ function buildColorPack(info: PixelFormatInfo, packFormat: GLenum, packType: GLe
             const i = do_ >> 2;
             d[i] = _r4[0]; d[i + 1] = _r4[1]; d[i + 2] = _r4[2]; d[i + 3] = _r4[3];
           };
+        case UNSIGNED_INT_10F_11F_11F_REV:
+          // RGB packed as 11/11/10-bit floats (R top); alpha dropped.
+          return (src, so, dst, do_) => {
+            decode(src, so, _r4);
+            (dst as Uint32Array)[do_ >> 2] =
+              (pack11(_r4[0]) << 21) | (pack11(_r4[1]) << 10) | pack10(_r4[2]);
+          };
+        case UNSIGNED_INT_5_9_9_9_REV:
+          // RGB packed as shared-exponent 9/9/9/5 (R top); alpha dropped.
+          return (src, so, dst, do_) => {
+            decode(src, so, _r4);
+            (dst as Uint32Array)[do_ >> 2] = pack9E5(_r4[0], _r4[1], _r4[2]);
+          };
         default:
           return null;
       }
@@ -669,6 +682,17 @@ function buildColorPack(info: PixelFormatInfo, packFormat: GLenum, packType: GLe
             const d = dst as Float32Array;
             const i = do_ >> 2;
             d[i] = _r4[0]; d[i + 1] = _r4[1]; d[i + 2] = _r4[2];
+          };
+        case UNSIGNED_INT_10F_11F_11F_REV:
+          return (src, so, dst, do_) => {
+            decode(src, so, _r4);
+            (dst as Uint32Array)[do_ >> 2] =
+              (pack11(_r4[0]) << 21) | (pack11(_r4[1]) << 10) | pack10(_r4[2]);
+          };
+        case UNSIGNED_INT_5_9_9_9_REV:
+          return (src, so, dst, do_) => {
+            decode(src, so, _r4);
+            (dst as Uint32Array)[do_ >> 2] = pack9E5(_r4[0], _r4[1], _r4[2]);
           };
         default:
           return null;
