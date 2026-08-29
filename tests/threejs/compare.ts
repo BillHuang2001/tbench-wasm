@@ -15,7 +15,10 @@ export interface RGBAImage {
 }
 
 export async function readImage(path: string): Promise<RGBAImage> {
-  const { data, info } = await sharp(path).raw().toBuffer({ resolveWithObject: true });
+  // ensureAlpha: JPEG goldens decode as 3 channels; normalize to 4-channel RGBA
+  // (alpha 255) to match the official three.js e2e image.js layout (jpeg-js/pngjs
+  // both give RGBA). PNGs keep their own alpha.
+  const { data, info } = await sharp(path).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   return { width: info.width, height: info.height, data: new Uint8Array(data) };
 }
 
