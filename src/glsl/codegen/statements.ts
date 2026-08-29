@@ -69,7 +69,7 @@ import {
   packVaryingWrite,
   packVaryingCompound,
 } from './env.js';
-import { emitExpr, emitLValue, materialize, matrixCompoundMul } from './expressions.js';
+import { emitExpr, emitLValue, guardRhsAliasing, materialize, matrixCompoundMul, dedupeSharedPre } from './expressions.js';
 import type { Value } from './index.js';
 
 /** Context for an INLINED function body; absent ⇒ emitting `main`
@@ -494,20 +494,27 @@ function emitAssignStmt(
     for (const w of mm.writes) out.push(`${w};`);
   } else {
     const conv = convertPreserving(rawRhs, value.resolvedType!, lv.type);
-    emitPres(out, conv);
+    // Sequential-write aliasing guard: when any RHS component references a
+    // target slot written by an EARLIER component (swizzle swaps `v = v.yx`,
+    // permuting ctors, cross/transpose in place, any in-place matrix multiply
+    // that escaped emitter-level materialization), snapshot the RHS into temps
+    // (dual planes included) so the per-component writes below never read
+    // post-overwrite operands. No-op (byte-identical) for same-index RHS.
+    const convS = guardRhsAliasing(lv, conv, env);
+    emitPres(out, convS);
     if (lv.prelude) out.push(lv.prelude);
     if (op === '=') {
       for (let c = 0; c < lv.targets.length; c++) {
         // Packed uint varying cell (VERTEX): store the value's BIT PATTERN via
         // R.u2f (see packVaryingWrite) — the statement form drops the value.
         if (lv.bits && lv.bits[c]) {
-          out.push(`${lv.targets[c]} = R.u2f(${conv[c].v});`);
+          out.push(`${lv.targets[c]} = R.u2f(${convS[c].v});`);
         } else if (env.dual && lv.dualTargets && lv.dualTargets[c]) {
           // Dual mode: write the whole triple as one comma statement
           // `(vslot = vv, dxslot = dxv, dyslot = dyv, vslot);`.
-          out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c])};`);
+          out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], convS[c])};`);
         } else {
-          out.push(`${lv.targets[c]} = ${conv[c].v};`);
+          out.push(`${lv.targets[c]} = ${convS[c].v};`);
         }
       }
     } else {
@@ -521,13 +528,13 @@ function emitAssignStmt(
         // Packed int/uint varying cell (VERTEX): unpack the old value, apply
         // the op with the int32/uint32 wrap, repack (see packVaryingCompound).
         if (bitKind) {
-          out.push(`${packVaryingCompound(cop, lv.targets[c], conv[c].v, bitKind === 'int')};`);
+          out.push(`${packVaryingCompound(cop, lv.targets[c], convS[c].v, bitKind === 'int')};`);
         } else if (env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]) {
           // Dual mode, float target: linear ops (+=, -=) update all three planes
           // via dualWrite; non-linear compounds throw (C5a2 templates).
-          out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c], cop)};`);
+          out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], convS[c], cop)};`);
         } else {
-          out.push(`${compoundOpExpr(cop, lv.targets[c], conv[c].v, base)};`);
+          out.push(`${compoundOpExpr(cop, lv.targets[c], convS[c].v, base)};`);
         }
       }
     }
@@ -644,9 +651,20 @@ function updateString(e: Expr, env: CodegenEnv): string {
       for (const p of mm.pre) parts.push(p);
       for (const w of mm.writes) parts.push(w);
     } else {
-      const conv = convertPreserving(rawRhs, e.value.resolvedType!, lv.type);
+      // Dedupe the RHS pres by array identity: a multi-component RHS (e.g. a
+      // ctor/member-wrapped in-place transform) shares ONE chain on every
+      // component — folding it per comma term would re-run it per component
+      // and re-read ALREADY-OVERWRITTEN target components (sequential
+      // assignment aliasing). Only the FIRST component folds the chain; the
+      // later terms read the temps it set (each component is used exactly
+      // once — dedupeSharedPre's contract). Then apply the sequential-write
+      // aliasing guard for RAW cross-component reads (`v = v.yx`): the RHS is
+      // snapshotted into temps; comp0 folds the snapshot buffer into its
+      // comma term, so it runs before the later components' writes.
+      const conv = dedupeSharedPre(convertPreserving(rawRhs, e.value.resolvedType!, lv.type));
+      const convS = guardRhsAliasing(lv, conv, env);
       for (let c = 0; c < lv.targets.length; c++) {
-        const cv = conv[c];
+        const cv = convS[c];
         const rv = cv.pre && cv.pre.length > 0 ? foldPre(cv.pre, cv.v) : cv.v;
         // Dual mode, float target: dualWrite emits the triple update as one
         // comma term (linear ops only; non-linear compounds throw — C5a2).
