@@ -1865,9 +1865,9 @@ function emitTextureCallInner(
       return fromCtxTex(`ctx.tex.texelFetch2DArray(${unit}, ${pc(0)}, ${pc(1)}, ${pc(2)}, ${level})`, 4);
     }
     case 'texelFetchOffset': {
-      // NOTE: this table declares texelFetchOffset as (s, P, lod, offset) —
-      // the GLSL ES spec order is (s, P, offset, lod); codegen follows the
-      // table (semantics resolves against it). TODO: reconcile the table.
+      // Arg order (s, P, lod, offset) per GLSL ES 3.00 §8.8 — matches the
+      // committed 300.ts table; codegen follows the table (semantics resolves
+      // against it).
       const level = use(argVals[2][0]);
       const ox = use(argVals[3][0]);
       const oy = use(argVals[3][1]);

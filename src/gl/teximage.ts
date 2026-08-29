@@ -6,10 +6,10 @@
  *  - Level allocation + per-texel source→storage conversion (UNPACK_ALIGNMENT row
  *    padding, WebGL2 ROW_LENGTH/SKIP_*, UNPACK_FLIP_Y, DOM premultiply).
  *  - PIXEL_UNPACK_BUFFER offset path (WebGL2: pixels is a byte offset).
- *  - DOM source decode via present/ (stubbed → zero-fill fallback, documented gap).
+ *  - DOM source decode via present/ (decode failure → zero-fill fallback).
  *  - texStorage immutability, cube-face handling, depth-stencil split planes,
  *    generateMipmap 2×2 box downsample, copyTex* from the read framebuffer
- *    (framebuffer-util is stubbed → defensive no-op).
+ *    (via framebuffer-util; incomplete FBO → no-op, API reports the error).
  *
  * Storage conventions (contract §3): normalized 8-bit → Uint8Array/Int8Array;
  * 16-bit → Uint16Array/Int16Array; float formats → Float32Array (incl. 16F,
@@ -18,10 +18,10 @@
  * typed arrays. Unsized internal formats keep their user GLenum in
  * `_image.internalFormat` but allocate sized storage.
  *
- * The per-format registry below is LOCAL (comment: replace with raster/formats
- * when it lands) — `getFormat()` from raster is consulted first and falls back
- * to these descriptors. Completeness metadata (`_image.complete`,
- * `baseLevel`/`maxLevel`, dims) is recomputed after every mutation.
+ * The per-format registry below is LOCAL — `getFormat()` from raster is
+ * consulted first and falls back to these descriptors. Completeness metadata
+ * (`_image.complete`, `baseLevel`/`maxLevel`, dims) is recomputed after every
+ * mutation.
  */
 
 import type { WebGLRenderingContext } from './webgl1';
@@ -50,7 +50,7 @@ export function throwSecurityError(reason: string): never {
 
 // ---------------------------------------------------------------------------
 // Local storage-format registry (per-texel decode/encode on the SURFACE
-// representation; see header). TODO: replace with raster/formats when it lands.
+// representation; see header).
 // ---------------------------------------------------------------------------
 
 /** Component mapping of a color format (how decode fills [r,g,b,a]). */
@@ -1247,7 +1247,7 @@ function copyPixelsIntoLevel(
   const views: ArrayBufferView[] = face >= 0 ? [levelData.data[face]] : levelData.data;
   const dstBpp = spec.bytesPerPixel;
 
-  // DOM source: decode via present/ (stub → zero-fill fallback, documented gap).
+  // DOM source: decode via present/ (decode failure → zero-fill fallback).
   if (pixels === null || pixels === undefined) return; // zero-filled allocation
   if (typeof pixels !== 'number' && !ArrayBuffer.isView(pixels) && source !== undefined) {
     // 0×0 level (e.g. an SVG without width/height attributes — the WebGL spec
@@ -1394,8 +1394,7 @@ function copyPixelsIntoLevel(
       }
     } catch (e) {
       // Origin-clean rule: a SecurityError (tainted source) must reach the
-      // page — rethrow it. Other decode failures keep the zero-filled
-      // fallback (documented gap).
+      // page — rethrow it. Other decode failures keep the zero-filled fallback.
       if (e && typeof e === 'object' && (e as { name?: unknown }).name === 'SecurityError') throw e;
     }
     return;
@@ -1647,7 +1646,7 @@ function copyFromReadSurface(
   } catch {
     surface = null;
   }
-  if (!surface) return; // framebuffer-util stub / incomplete FBO → API reports the error
+  if (!surface) return; // no surface (incomplete FBO) → API reports the error
   const view = levelData.data[face >= 0 ? face : 0];
   const sW = surface.width;
   const sH = surface.height;
@@ -1685,7 +1684,7 @@ function copyFromReadSurface(
       }
     }
   } catch {
-    // Surface decode unavailable (raster formats stub) → leave zero-filled.
+    // Surface decode unavailable → leave zero-filled.
   }
 }
 

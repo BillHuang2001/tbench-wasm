@@ -77,7 +77,7 @@ linkProgram:    uniform merge → attrib locations → varying match/pack → un
 - **while/do-while body scope** (minor, ungraded by CTS): per GLSL ES §4.2.2 the WHILE body is also a statement-no-new-scope (the do-while body DOES create a scope); the analyzer still pushes a scope for both compound bodies — for/function bodies follow the no-new-scope rule (see §8), but while/do-while are left as-is since no CTS page grades them.
 - **Texture approximations** (precision deviations; the graded texture-offset CTS pages pass): `textureOffset` family ≈ base-level texel-size shift (R helpers `tex*OffsetApprox`); shadow-Lod ≈ texelFetch-nearest compare (`sampleShadowLod`). Rationale: raster's committed TextureEnv has no grad/offset/shadow-Lod methods; R approximates. TextureGrad/shadow-Grad variants DO pass explicit gradients through the generic sampler.
 - **No textureGather/textureQueryLod/textureQueryLevels** — verified absent from CTS conformance2/glsl3 tables (excluded from builtins).
-- **texelFetch arg order follows the committed 300.ts table** (s, P, lod[, offset]) — TODO: reconcile with the actual spec order.
+- **texelFetch arg order: (sampler, P, lod[, offset]) per GLSL ES 3.00** — matches the committed 300.ts table.
 - **textureSize lod is relative to baseLevel** (`baseLevel + lod`) — documented convention; may need reconciliation with raster.
 - **Linker rejections** (clear `linker: ... not supported`): struct-ARRAY varyings, ARRAYED varying interface blocks, vertex `in` / fragment `out` blocks (codegen walker can't resolve const element indices on member descent).
 - **Dual-mode gaps**: matrix builtins `inverse`/`determinant` throw (no derivative template); dFdx(texture result) = 0 approximation; textureOffset duals keep the base-level approximation.

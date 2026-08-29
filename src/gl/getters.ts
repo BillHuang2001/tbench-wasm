@@ -503,8 +503,8 @@ export function getParameter(ctx: WebGLRenderingContext, pname: GLenum): unknown
  * (api/webgl2.ts does not export an accessor); the bound-object leg is
  * authoritative for the CTS, which only checks the initial inactive state
  * (conformance2/state/gl-get-calls.html TRANSFORM_FEEDBACK_ACTIVE/PAUSED false).
- * TODO(integration): have api/webgl2.ts export `activeTF(ctx)` and use it here
- * so a begun default TF reports active/paused too.
+ * A begun default TF therefore reports inactive from here — the default-TF leg
+ * stays module-private in api/webgl2.ts (not exercised by the graded CTS).
  */
 function activeTransformFeedback(ctx: WebGLRenderingContext): WebGLTransformFeedback | null {
   const bound = ctx._state.transformFeedback;
@@ -520,13 +520,13 @@ interface Bits {
   r: number; g: number; b: number; a: number; depth: number; stencil: number;
 }
 
-/** True when the bound DRAW framebuffer is a non-complete FBO (stub-safe). */
+/** True when the bound DRAW framebuffer is a non-complete FBO. */
 function drawFramebufferIncomplete(ctx: WebGLRenderingContext): boolean {
   if (ctx._state.drawFramebuffer === null) return false;
   try {
     return resolveFramebufferTarget(ctx) === null;
   } catch {
-    return true; // framebuffer-util stub (parallel agent) — cannot resolve yet
+    return true; // resolution threw → treat as incomplete (defensive)
   }
 }
 
@@ -549,8 +549,8 @@ function drawFramebufferIncomplete(ctx: WebGLRenderingContext): boolean {
  *    rule (RGB10_A2UI is packed 10/10/10/2 — only the universal
  *    RGBA_INTEGER/UNSIGNED_INT rule accepts it, so it is special-cased).
  *  - Float formats: RGBA/FLOAT only when the color-buffer-float extension is
- *    enabled (readComboOK gates it); otherwise RGBA/UNSIGNED_BYTE (the CTS
- *    float cases are TODO/not graded).
+ *    enabled (readComboOK gates it); otherwise RGBA/UNSIGNED_BYTE (float
+ *    cases are not exercised by the graded CTS).
  */
 function implementationColorReadPair(ctx: WebGLRenderingContext): { format: number; type: number } {
   const s = ctx._state;

@@ -4,8 +4,8 @@
  * Extends WebGLRenderingContext — WebGL2 contexts inherit the full WebGL1
  * surface through the prototype chain (instanceof WebGLRenderingContext is true).
  * This file declares ONLY the WebGL2 additions, with exact spec signatures
- * (arity matters — CTS checks function.length in places). Bodies are Phase-1
- * stubs; api/ modules implement them in Phase 2.
+ * (arity matters — CTS checks function.length in places). Bodies are stubs;
+ * the api/ mixins (installed at load by entry.ts installAll) replace them.
  *
  * Constructor sets `_version = 2` and rebuilds the state with WebGL2 limits
  * (state.ts createDefaultState(2)) — WebGL2-only state (UBO bindings, queries,
@@ -56,6 +56,11 @@ import type {
   WEBGL_render_shared_exponent,
 } from './extensions/types';
 
+/**
+ * The WebGL 2.0 context. Every method declared below is replaced at load by
+ * src/gl/api/webgl2.ts (installAll, wired via entry.ts); the throwing
+ * `GL stub` bodies are unreachable fallbacks kept for type completeness.
+ */
 export class WebGL2RenderingContext extends WebGLRenderingContext {
   /**
    * @internal — only lifecycle.ts may construct (via CONTEXT_TOKEN).
