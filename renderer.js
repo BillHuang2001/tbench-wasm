@@ -25340,7 +25340,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   }
   function schedulePreserveClear(ctx) {
     const canvas = ctx._canvas;
-    if (canvas.isConnected === false || canvas.isConnected === void 0) return;
+    if (canvas.isConnected === false) return;
     const sc = getScratch(ctx);
     if (sc.preserveClearPending) return;
     sc.preserveClearPending = true;
@@ -25352,7 +25352,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       if (!dfb) return;
       clearDefaultFramebufferForPreserve(ctx, dfb);
       try {
-        (_a = ctx._presentSurface) == null ? void 0 : _a.present();
+        if (canvas.isConnected !== void 0) {
+          (_a = ctx._presentSurface) == null ? void 0 : _a.present();
+        }
       } catch {
       }
     };
@@ -32397,7 +32399,12 @@ ${inner.map((l) => "  " + l).join("\n")}
     const s = source;
     if (typeof s.videoWidth === "number" && typeof s.readyState === "number") {
       const vis = videoVisibleDims(s);
-      if (vis !== null) return vis;
+      if (vis !== null) {
+        if (typeof s.videoHeight === "number" && vis.width === s.videoHeight && vis.height === s.videoWidth) {
+          return { width: s.videoWidth, height: s.videoHeight };
+        }
+        return vis;
+      }
       return typeof s.videoHeight === "number" ? { width: s.videoWidth, height: s.videoHeight } : null;
     }
     if (typeof s.naturalWidth === "number") {
