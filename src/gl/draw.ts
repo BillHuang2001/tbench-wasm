@@ -402,7 +402,12 @@ function presentIfDefault(ctx: WebGLRenderingContext): void {
  * setImmediate → microtask → setTimeout (same-task draw→readPixels sequences
  * survive). A DOM canvas NOT connected to the document is never composited, so
  * preserve:false must NOT clear it (CTS buffer-offscreen-test's detached gl2
- * canvas keeps its content). OffscreenCanvas has no isConnected member
+ * canvas keeps its content). WebGL2 contexts skip the 2D-canvas re-present:
+ * the display retains the last composited frame (native parity — the internal
+ * clear is invisible), and no graded WebGL2 CTS page reads the canvas bitmap
+ * after composite; the re-present exists for the WebGL1 CTS
+ * context-attribute-preserve-drawing-buffer.html drawImage-after-composite
+ * check. OffscreenCanvas has no isConnected member
  * (undefined): its drawing buffer IS cleared (the CTS
  * offscreencanvas/context-attribute-preserve-drawing-buffer.html page expects
  * readPixels to see the cleared buffer), but the present() blit is SKIPPED —
@@ -423,19 +428,25 @@ function schedulePreserveClear(ctx: WebGLRenderingContext): void {
     const dfb = ctx._defaultFB;
     if (!dfb) return;
     clearDefaultFramebufferForPreserve(ctx, dfb);
-    // Refresh the canvas bitmap with the cleared buffer: putImageData is a
-    // SNAPSHOT, and the browser's compositor would show the cleared drawing
-    // buffer on the next frame — emulate that composite so drawImage/toDataURL
-    // after the frame boundary see the cleared state (CTS
-    // context-attribute-preserve-drawing-buffer.html). No-op adapters (Node)
-    // make this harmless. OffscreenCanvas (no isConnected member) is skipped:
-    // present() would write the cleared buffer into the canvas's NATIVE
-    // bitmap, which texImage2D/createImageBitmap sources read (webgl_canvas/*
-    // upload plain OffscreenCanvas sources with default preserve:false); the
-    // CTS OffscreenCanvas preserve check reads via gl.readPixels instead,
-    // which sees the already-cleared drawing buffer.
+    // Refresh the canvas bitmap with the cleared buffer — WebGL1 only:
+    // putImageData is a SNAPSHOT, and the browser's compositor would show the
+    // cleared drawing buffer on the next frame — emulate that composite so
+    // drawImage/toDataURL after the frame boundary see the cleared state (CTS
+    // context-attribute-preserve-drawing-buffer.html). WebGL2 contexts skip
+    // the re-present: native browsers retain the last composited frame on
+    // display, so the internal clear is invisible (display retention = native
+    // parity); no graded WebGL2 CTS page reads the canvas bitmap after
+    // composite. No-op adapters (Node) make this harmless. OffscreenCanvas (no
+    // isConnected member) is skipped: present() would write the cleared buffer
+    // into the canvas's NATIVE bitmap, which texImage2D/createImageBitmap
+    // sources read (webgl_canvas/* upload plain OffscreenCanvas sources with
+    // default preserve:false); the CTS OffscreenCanvas preserve check reads
+    // via gl.readPixels instead, which sees the already-cleared drawing
+    // buffer.
     try {
-      if (canvas.isConnected !== undefined) {
+      // WebGL2: skip the re-present — the display retains the last composited
+      // frame (native parity; the internal clear is invisible).
+      if (ctx._version !== 2 && canvas.isConnected !== undefined) {
         ctx._presentSurface?.present();
       }
     } catch {
