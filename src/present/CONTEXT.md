@@ -19,6 +19,8 @@ Exact names (gl/ and entry.ts import from `./present`):
 - `decodeImageSource(source: ImageSource): DecodeResult`
 - `decodeImageData(source: ImageData): DecodeResult` — pure direct-copy path (no DOM; Node-testable; duck-typed `{width, height, data}` accepted)
 - `isDecodableImageSource(value: unknown): boolean` — gl/ dispatch helper (buffer views vs DOM sources)
+- `decodePngBuffer(bytes: Uint8Array): { ok: true, image: DecodedImage } | null` (in `png.ts`) — pure-JS PNG parse + zlib inflate + unfilter → RGBA8. Returns an image ONLY for 16-bit non-interlaced PNGs (gray/grayA/RGB/RGBA); null for everything else (8-bit PNGs, interlaced, unsupported, parse/inflate failure) — callers fall back to the DOM paths.
+- `decodePngFromElement(source, src): { ok: true, image: DecodedImage } | null` (in `png.ts`) — sync-XHR fetch of the element's own bytes (cache hit after load; `x-user-defined` charset fallback because sync XHR cannot set `responseType` from a document) + `decodePngBuffer`. Only reached for `.png` URLs / `data:image/png` URIs; cross-origin and other failures return null so the tainted-source SecurityError mapping stays intact.
 
 ## Constraints
 - **No DOM at module load**: all `document`/canvas/ImageData access happens inside functions, guarded by feature detection. DOM types are compile-time only (erased at runtime; the bundle runs in Node).
