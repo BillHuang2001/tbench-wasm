@@ -1007,12 +1007,38 @@ function videoVisibleDims(s: Record<string, unknown>): { width: number; height: 
   return null;
 }
 
-function sourceDims(source: unknown): { width: number; height: number } | null {
+/**
+ * Source-image dimensions for DOM uploads (TexImageSource). Exported for unit
+ * tests; callers: texImage2DDOM (6-arg) and texSubImage2DDOM (7-arg).
+ */
+export function sourceDims(source: unknown): { width: number; height: number } | null {
   if (source === null || typeof source !== 'object') return null;
   const s = source as Record<string, unknown>;
   if (typeof s.videoWidth === 'number' && typeof s.readyState === 'number') {
     const vis = videoVisibleDims(s);
-    if (vis !== null) return vis;
+    if (vis !== null) {
+      // Rotation metadata (90/270): VideoFrame.visibleRect reports the CODED
+      // (pre-rotation) rectangle — swapped relative to the DISPLAY size that
+      // videoWidth/videoHeight report AND that the decode/upload path
+      // produces (decodeImageSource sizes the native readback by
+      // videoWidth/videoHeight; Chromium's native upload applies rotation).
+      // The element display dims are therefore the source-image dimensions
+      // for allocation and sub-rect validation (CTS video-rotation.html
+      // allocates the texSubImage2D level at video.videoWidth x
+      // video.videoHeight and expects the sub-rect to fit). visibleRect stays
+      // authoritative only when it matches the element's orientation (the
+      // npot coded-padding case: same aspect, visible smaller — CTS
+      // npot-video-sizing.html expects the texture height 1080, not the
+      // padded videoHeight 1112).
+      if (
+        typeof s.videoHeight === 'number' &&
+        vis.width === s.videoHeight &&
+        vis.height === s.videoWidth
+      ) {
+        return { width: s.videoWidth, height: s.videoHeight };
+      }
+      return vis;
+    }
     return typeof s.videoHeight === 'number' ? { width: s.videoWidth, height: s.videoHeight } : null;
   }
   if (typeof s.naturalWidth === 'number') {
