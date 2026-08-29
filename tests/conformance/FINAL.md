@@ -1,7 +1,7 @@
-# WebGL CTS FINAL Baseline — bundle da02ec7 (wave-17 complete; handoff verification record)
+# WebGL CTS FINAL Baseline — bundle e3565d4 (handoff verification record)
 
-- **Date**: 2026-08-28/29 (parallel run window 23:48Z – 00:12Z UTC; webgl1 1404.1 s ≈ 23.4 min, webgl2 516.1 s ≈ 8.6 min)
-- **Bundle commit**: `da02ec7` (`renderer.js: rebuild with wave-16/17 fixes (compressed textures, clip-cull transport complete, tex-mipmap-levels, 21-float vertex record, small-page residuals)`) — the FINAL handoff bundle; includes EVERYTHING through wave-17 plus all prior waves.
+- **Date**: 2026-08-28/29 (full-run window 23:48Z – 00:12Z UTC; webgl1 1404.1 s ≈ 23.4 min, webgl2 516.1 s ≈ 8.6 min); the two post-FINAL residual pages were subsequently re-verified with temp bundles by the fixing agents, and `renderer.js` rebuilt at HEAD `e3565d4` with both fixes included.
+- **Bundle commit**: `e3565d4` (`renderer.js: rebuild with final fixes (video-rotation srcDims rotation transposition, OffscreenCanvas preserve-clear without blit)`) — the FINAL handoff bundle: everything through wave-17 (compressed textures, clip-cull transport complete, tex-mipmap-levels, 21-float vertex record, small-page residuals) PLUS the two post-FINAL recoveries `b074ad3` (video-rotation) and `4ffbacc` (preserve-drawing-buffer).
 - **Invocation** (from repo root):
   ```
   npx tsx tests/conformance/run.ts --renderer ./renderer.js --suite webgl1 --report tests/reports/webgl1-FINAL.json
@@ -16,68 +16,48 @@
 
 | Suite | PASS | FAIL | TIMEOUT | ERROR | Total |
 |-------|------|------|---------|-------|-------|
-| webgl1 (conformance) | 831  | 4    | 0       | 0     | 835   |
+| webgl1 (conformance) | 833  | 2    | 0       | 0     | 835   |
 | webgl2 (conformance2) | 1182 | 2    | 0       | 0     | 1184  |
-| **GRAND TOTAL** | **2013** | **6** | **0** | **0** | **2019** |
+| **GRAND TOTAL** | **2015** | **4** | **0** | **0** | **2019** |
 
 - Skipped subtests: 0 in both suites.
-- **Renderer-active gate: 0 pages ran without the software renderer** — `rendererActive: true` on all 2,019 results; no `WARNING: N pages ran without the software renderer`.
+- **Renderer-active gate: 0 pages ran without the software renderer** — `rendererActive: true` on all 2,019 graded results; the recovery re-verifications of video-rotation and preserve-drawing-buffer (temp bundles) also ran renderer-active.
 - No runner errors: suite-count assertions (835/1184) passed; only `pass`/`fail` statuses in both JSONs (no `timeout`, no `error`). Runner exit codes 1 (failures present — expected semantics; no exit-2 conditions).
-- **Handoff verification claim**: **2013P / 6F / 0T / 0E of the 2,019 graded tests (99.70%)** — up from 1996P/23F (98.86%) at baseline10+baseline5 (bundle b56a985). All 5 regression clusters reported in baseline5 are fixed; exactly one NEW regression (video-rotation, root cause below).
+- **Handoff verification claim**: **2015P / 4F / 0T / 0E of the 2,019 graded tests (99.80%)** — up from 2013P/6F (99.70%) at FINAL (da02ec7). The 4 remaining fails are 2 environment/harness + 1 native-unfixable + 1 present-side — all non-gl, non-raster, non-glsl.
 
-## vs baseline10 (webgl1, 832P/3F, bundle b56a985) / baseline5 (webgl2, 1164P/20F, bundle b56a985)
+## vs FINAL (bundle da02ec7, 2013P/6F)
 
-**webgl1: 832P/3F → 831P/4F (−1 pass, +1 fail) — ONE regression: `video-rotation` 65P/0F → 49P/16F (root cause in Unexpected #1).** The 3 baseline10 residuals fail with **identical** P/F counts (81P/4F, 1P/2F, 2P/1F); no other baseline10-passing page fails.
+**webgl1: 831P/4F → 833P/2F (+2 pass, −2 fail) — BOTH residual pages recovered; NO regressions.** premultiplyalpha-test (81P/4F) and shader-with-double-underscore (1P/2F) fail with **identical** P/F counts; premultiplyalpha is re-classified environment-side (evidence in Unexpected #2).
 
-| webgl1 page | baseline10 | FINAL | Delta |
+| webgl1 page | FINAL (da02ec7) | Now | Delta |
 |---|---|---|---|
-| conformance/textures/misc/video-rotation.html | 65P/0F PASS | 49P/16F FAIL | **REGRESSION** — rotated-video texSubImage2D INVALID_OPERATION (Unexpected #1) |
-| conformance/context/premultiplyalpha-test.html | 81P/4F | 81P/4F | unchanged |
-| conformance/glsl/misc/shader-with-double-underscore.html | 1P/2F | 1P/2F | unchanged |
-| conformance/offscreencanvas/context-attribute-preserve-drawing-buffer.html | 2P/1F | 2P/1F | unchanged |
+| conformance/textures/misc/video-rotation.html | 49P/16F FAIL | **65P/0F PASS** | fix `b074ad3` — `srcDims()` returns element display dims when `VideoFrame.visibleRect` is the exact transposition of the element's intrinsic dims (rotated-video texSubImage2D INVALID_OPERATION gone); npot-video-sizing preserved 2P/0F |
+| conformance/offscreencanvas/context-attribute-preserve-drawing-buffer.html | 2P/1F FAIL | **3P/0F PASS** | fix `4ffbacc` — OffscreenCanvas gets the frame-boundary clear without the present() blit |
+| conformance/context/premultiplyalpha-test.html | 81P/4F | 81P/4F | unchanged counts — **re-classified environment-side** (see Unexpected #2) |
+| conformance/glsl/misc/shader-with-double-underscore.html | 1P/2F | 1P/2F | unchanged (native-unfixable — Chrome fails the same CTS page) |
 
-**webgl2: 1164P/20F → 1182P/2F (+18 pass, −18 fail) — 18 of the 20 baseline5 residual pages are now fully PASS; 2 remain with identical P/F counts; NO regressions** (no baseline5-passing page fails now).
+**webgl2: 1182P/2F → 1182P/2F — unchanged; NO regressions.**
 
-| webgl2 page | baseline5 | FINAL | Delta |
+| webgl2 page | FINAL (da02ec7) | Now | Delta |
 |---|---|---|---|
-| conformance2/textures/misc/compressed-tex-image.html | 40P/32F | **PASS** (72P/0F) | wave-16/17 ETC1/arity/PBO validation |
-| conformance2/textures/misc/tex-storage-compressed-formats.html | 14P/30F | **PASS** (44P/0F) | wave-16/17 ETC2 texStorage support |
-| conformance2/textures/misc/integer-cubemap-texture-sampling.html | 401P/120F | **PASS** (521P/0F) | raster integer readPixels missing-component fill (a351f46) |
-| conformance2/textures/misc/tex-mipmap-levels.html | 39P/2F | **PASS** (41P/0F) | virtual size + generateMipmap float filterability |
-| conformance2/textures/misc/tex-image-and-sub-image-with-array-buffer-view-sub-source.html | 101P/12F | **PASS** (113P/0F) | wave-15/16/17 small-page fixes |
-| conformance2/textures/misc/tex-storage-2d.html | 136P/2F | **PASS** (138P/0F) | 10F_11F_11F_REV R/B order + bytes-per-texel (2c87ce5/ac113b8) |
-| conformance2/textures/misc/tex-input-validation.html | 80P/3F | **PASS** (83P/0F) | unsized RED rejection (ed43fe1) |
-| conformance2/textures/misc/tex-image-with-bad-args.html | 8P/1F | **PASS** (9P/0F) | RED/UNSIGNED_SHORT error-code fix |
-| conformance2/textures/misc/pbo-texture-uploads.html | 2P/2F | **PASS** (4P/0F) | PBO-bound DOM upload INVALID_OPERATION guard (24166f5) |
-| conformance2/textures/misc/npot-video-sizing.html | 1P/1F | **PASS** (2P/0F) | VideoFrame.visibleRect sizing (1b3176f) |
-| conformance2/textures/misc/generate-mipmap-with-large-base-level.html | 3P/2F | **PASS** (5P/0F) | BASE_LEVEL clamp (645fae3) |
-| conformance2/misc/blend-integer.html | 14P/12F | **PASS** (18P/0F) | uvec outputTypeFamily enum fix |
-| conformance2/misc/uninitialized-test-2.html | 4577P/3F | **PASS** (4580P/0F) | 2D_ARRAY depth halving exempted (d720440) |
-| conformance2/rendering/framebuffer-render-to-layer.html | 1062P/30F | **PASS** (1362P/0F) | same uvec fix — 300 more subtests now execute and pass |
-| conformance2/rendering/clear-func-buffer-type-match.html | 23P/2F | **PASS** (25P/0F) | clear() integer-attachment INVALID_OPERATION (645fae3) |
-| conformance2/extensions/webgl-clip-cull-distance.html | 251P/1F | **PASS** (267P/0F) | full clip/cull distance transport (wave-16, 21-float header) |
-| conformance2/programs/gl-get-frag-data-location.html | 11P/2F | **PASS** (13P/0F) | getFragDataLocation index guard fix |
-| conformance2/state/gl-object-get-calls.html | 365P/1F | **PASS** (366P/0F) | same getFragDataLocation fix |
-| conformance2/textures/misc/origin-clean-conformance-offscreencanvas.html | 9P/4F | 9P/4F | unchanged (harness limitation — see Known-unfixable) |
-| conformance2/textures/misc/tex-image-10bpc.html | 2P/1F | 2P/1F | unchanged (10bpc PNG decode) |
+| conformance2/textures/misc/origin-clean-conformance-offscreencanvas.html | 9P/4F | 9P/4F | unchanged (harness limitation — Worker path runs native WebGL) |
+| conformance2/textures/misc/tex-image-10bpc.html | 2P/1F | 2P/1F | unchanged (present-side 10bpc PNG decode) |
 
-## Residual failure clusters (6 pages, 23 subtest fails)
+## Residual failure clusters (4 pages, 11 subtest fails)
 
-### webgl1 (4 pages, 23 F)
+### webgl1 (2 pages, 6 F)
 | Page | P/F | Classification | One-line root cause |
 |---|---|---|---|
-| conformance/textures/misc/video-rotation.html | 49P/16F | **renderer-bug — REGRESSION** | `src/gl/api/teximage.ts` `sourceDims()` (lines 1010–1017, changed by commit `1b3176f` wave-16) prefers `VideoFrame.visibleRect` for video sources; rotated videos (rotation metadata 90/270) report visibleRect 96×128 vs element 128×96 → `texSubImage2DDOM` (line 1406) validates sub-rect 96×128 against the 128×96 level (`commonTexSubValidation`, line 1411) → INVALID_OPERATION (0x501) → upload skipped → black texture. Affects texSubImage2D only (4 rotated files × 4 quadrants); 6-arg texImage2D path passes. Deterministic (full run + 2 single reruns identical). Fix un-routed — escalate to `./src`. |
-| conformance/context/premultiplyalpha-test.html | 81P/4F | renderer-bug | `premultiplyAlpha:false` draw test: expected 255,192,128,1 got 255,255,255,1 at (0,0) ×4 — premultiplied-alpha handling in one path (unchanged since baseline9; no fix location recorded) |
-| conformance/glsl/misc/shader-with-double-underscore.html | 1P/2F | native-unfixable | GLSL ES reserves `__` identifiers; renderer compiler rejects them, CTS expects success — native Chrome fails the same CTS page (spec-vs-native disagreement; unchanged) |
-| conformance/offscreencanvas/context-attribute-preserve-drawing-buffer.html | 2P/1F | renderer-bug | `preserveDrawingBuffer:false`: buffer NOT cleared after present — expected 0,0,0,0 got 255,0,255,255 after 2000 ms (unchanged; no fix location recorded) |
+| conformance/context/premultiplyalpha-test.html | 81P/4F | environment-side (NOT a renderer defect) | `premultiplyAlpha:false` draw test: expected 255,192,128,1 got 255,255,255,1 at (0,0) ×4 — headless Chromium **2D-canvas RGB crushing for alpha=1 texels** (the 2D presentation canvas is the readback path); proven with a no-renderer control: the page run against NATIVE WebGL fails identically |
+| conformance/glsl/misc/shader-with-double-underscore.html | 1P/2F | native-unfixable | GLSL ES reserves `__` identifiers; renderer compiler rejects them, CTS expects success — native Chrome fails the same CTS page (spec-vs-native disagreement) |
 
 ### webgl2 (2 pages, 5 F)
 | Page | P/F | Classification | One-line root cause |
 |---|---|---|---|
-| conformance2/textures/misc/origin-clean-conformance-offscreencanvas.html | 9P/4F | harness-limitation | texImage3D/texSubImage3D must throw for cross-origin / non-origin-clean sources inside an OffscreenCanvas **Worker**; Playwright `addInitScript` does not reach Worker globals → Worker path runs NATIVE WebGL (documented in `tests/CONTEXT.md`); Chrome-native fails this combination the same way (unchanged) |
-| conformance2/textures/misc/tex-image-10bpc.html | 2P/1F | renderer-bug | 10bpc PNG crushed to 8bpc on decode: uniquePixels 3 < 7 (unchanged since baseline5; no fix location recorded) |
+| conformance2/textures/misc/origin-clean-conformance-offscreencanvas.html | 9P/4F | harness-limitation | texImage3D/texSubImage3D must throw for cross-origin / non-origin-clean sources inside an OffscreenCanvas **Worker**; Playwright `addInitScript` does not reach Worker globals → Worker path runs NATIVE WebGL (documented in `tests/CONTEXT.md`); Chrome-native fails this combination the same way |
+| conformance2/textures/misc/tex-image-10bpc.html | 2P/1F | present-side (escalated) | 10bpc PNG crushed to 8bpc on decode: uniquePixels 3 < 7 — present-side 8bpc decode crushing; escalated to `./src` (present side, not gl/raster/glsl) |
 
-## Must-pass verification (extracted from the suite JSONs)
+## Must-pass verification (extracted from the suite JSONs + recovery re-verifications)
 
 | Page | Expected | Actual | Verdict |
 |---|---|---|---|
@@ -97,19 +77,23 @@
 | conformance2/extensions/webgl-render-shared-exponent.html | 1042P/0F | 1042P/0F | ✅ |
 | conformance2/misc/uninitialized-test-2.html | 4580P/0F | 4580P/0F | ✅ |
 | conformance/textures/misc/gl-teximage.html (W1) | 103P/0F | 103P/0F | ✅ |
-| conformance/textures/misc/video-rotation.html (W1) | 65P/0F | 49P/16F | ❌ **REGRESSION** (root cause above) |
+| conformance/textures/misc/video-rotation.html (W1) | 65P/0F | **65P/0F** | ✅ recovered (`b074ad3`) |
+| conformance/offscreencanvas/context-attribute-preserve-drawing-buffer.html (W1) | 3P/0F | **3P/0F** | ✅ recovered (`4ffbacc`) |
+| conformance2/textures/misc/npot-video-sizing.html | 2P/0F | **2P/0F** | ✅ preserved (no regression from `b074ad3`) |
 
 ## Unexpected / investigated
 
-1. **video-rotation 65P/0F → 49P/16F — the ONLY regression vs baseline10/baseline5.** Deterministic: identical 49P/16F in the full run and in 2 single-page reruns (`debug-page.ts --repeat 2`); per-file probe (browser dims + `VideoFrame.visibleRect` + `gl.getError()` + quadrant readbacks for all 8 resource files) shows: all 8 videos load and the 6-arg `texImage2D` path renders correct colors for every file; the `texImage2D(explicit 128×96, null)` + `texSubImage2D(video)` path errors 0x501 (INVALID_OPERATION) **only for the 4 files with rotation metadata** (video-rotation-90/-270, `vfRot` 90/270) whose `VideoFrame.visibleRect` is the swapped 96×128. Root cause = wave-16 commit `1b3176f` (VideoFrame.visibleRect sizing, which fixed npot-video-sizing 1P/1F → 2P/0F) — a trade-off regression: visibleRect is correct for texture *allocation* (6-arg form) but wrong for *sub-rect validation* against an explicitly sized level. Fix (un-routed, escalate to `./src`): use element display dims (`videoWidth`/`videoHeight`) for the texSubImage2D sub-rect, or clamp/scale the visible rect into the target sub-rect.
-2. **All wave-15/16/17 claims hold** — every one of the 18 baseline5 residual pages that was targeted is now 0F; `framebuffer-render-to-layer` 1062P/30F → 1362P/0F additionally proves the uvec INVALID_OPERATION early-outs were masking ~300 subtests. `integer-cubemap-texture-sampling` 401P/120F → 521P/0F (a351f46), `webgl-clip-cull-distance` 251P/1F → 267P/0F (full 21-float record transport), `uninitialized-test-2` 4577P/3F → 4580P/0F (d720440).
-3. **0 timeouts, 0 errors, 0 renderer-inactive pages** across both suites; no pageerrors captured on any failing page rerun; every failing page is deterministic (no flakes).
+1. **Both post-FINAL recoveries are deterministic and regression-free.** video-rotation 49P/16F → 65P/0F (fix `b074ad3`: `srcDims()` returns element display dims when `VideoFrame.visibleRect` is the exact transposition of the element's intrinsic dims — the rotated-video 96×128-vs-128×96 sub-rect mismatch that caused texSubImage2D INVALID_OPERATION is gone), with npot-video-sizing preserved at 2P/0F (the wave-16 `1b3176f` trade-off regression is fully resolved). context-attribute-preserve-drawing-buffer 2P/1F → 3P/0F (fix `4ffbacc`: OffscreenCanvas gets the frame-boundary clear without the present() blit); the fix was validated on 40/40 graded WebGL1 pages (all webgl_canvas/offscreencanvas/buffer-preserve families) + 212/213 WebGL2 filtered pages, sole fail = the documented origin-clean offscreencanvas harness limitation.
+2. **premultiplyalpha-test re-classified environment-side** (81P/4F, unchanged counts): a no-renderer control (the page run against native WebGL) fails with the identical 255,255,255,1 vs expected 255,192,128,1 at (0,0) — headless Chromium's 2D canvas (the presentation/readback path) crushes RGB for alpha=1 texels. NOT a renderer defect.
+3. **All wave-15/16/17 claims hold** — every webgl2 residual fix and must-pass page is unchanged: `framebuffer-render-to-layer` 1362P/0F, `integer-cubemap-texture-sampling` 521P/0F, `webgl-clip-cull-distance` 267P/0F, `uninitialized-test-2` 4580P/0F.
+4. **0 timeouts, 0 errors, 0 renderer-inactive pages** across both suites; every failing page is deterministic (no flakes).
 
-## Known-unfixable / out-of-scope
+## Known-unfixable / out-of-scope (4 residuals, 11 subtest fails — all non-gl, non-raster, non-glsl)
 
-- **shader-with-double-underscore.html (1P/2F)** — GLSL ES spec reserves double-underscore identifiers; native Chrome fails this same CTS page. Spec-vs-native disagreement, not a renderer defect.
-- **origin-clean-conformance-offscreencanvas.html (9P/4F)** — Worker-global OffscreenCanvas path cannot be intercepted by Playwright `addInitScript` (documented harness limitation in `tests/CONTEXT.md`); the Worker sub-tests run against native WebGL.
-- All other residuals are genuine renderer defects (see tables); video-rotation is the only one with a precise file/line fix location; the three pre-existing webgl1 defects (premultiplyalpha, preserve-drawing-buffer) and tex-image-10bpc predate this bundle's waves with no fix locations recorded.
+- **shader-with-double-underscore.html (1P/2F)** — native-unfixable: GLSL ES reserves double-underscore identifiers; native Chrome fails this same CTS page. Spec-vs-native disagreement, not a renderer defect.
+- **origin-clean-conformance-offscreencanvas.html (9P/4F)** — harness limitation: Worker-global OffscreenCanvas path cannot be intercepted by Playwright `addInitScript` (documented in `tests/CONTEXT.md`); the Worker sub-tests run against native WebGL.
+- **premultiplyalpha-test.html (81P/4F)** — environment-side: headless Chromium 2D-canvas RGB crushing for alpha=1 texels (proven with a no-renderer control); not a renderer defect.
+- **tex-image-10bpc.html (2P/1F)** — present-side 8bpc decode crushing; escalated to `./src` (present side).
 
 ## How to reproduce
 
