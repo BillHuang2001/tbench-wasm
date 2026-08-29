@@ -289,6 +289,8 @@ export class FragmentOpsImpl implements FragmentOps {
   private readonly dstScratch = new Float32Array(4);
   private readonly linearDst = new Float32Array(4);
   private readonly blendOut = new Float32Array(4);
+  private readonly srcClampScratch = new Float32Array(4);
+  private readonly src1Scratch = new Float32Array(4);
 
   constructor(dc: DrawCall) {
     this.dc = dc;
@@ -437,6 +439,21 @@ export class FragmentOpsImpl implements FragmentOps {
     }
     let r = src[0], g = src[1], b = src[2], a = src[3];
     const isSRGB = info.isSRGB;
+    // Fixed-point color buffers: GLES 3.0 §17.3.7 clamps the fragment output
+    // to [0,1] PRIOR to blending (float buffers keep HDR values — blending is
+    // legal there). Branch-free clamp; covers the blend and non-blend paths
+    // alike (encode() clamps anyway on the non-blend path, so results are
+    // unchanged there — clamping at the top keeps one code path).
+    let blendSrc = src;
+    if (!info.isFloat) {
+      r = r < 0 ? 0 : (r > 1 ? 1 : r);
+      g = g < 0 ? 0 : (g > 1 ? 1 : g);
+      b = b < 0 ? 0 : (b > 1 ? 1 : b);
+      a = a < 0 ? 0 : (a > 1 ? 1 : a);
+      this.srcClampScratch[0] = r; this.srcClampScratch[1] = g;
+      this.srcClampScratch[2] = b; this.srcClampScratch[3] = a;
+      blendSrc = this.srcClampScratch;
+    }
     // Per-draw-buffer blend (OES_draw_buffers_indexed): when the DrawCall
     // carries per-draw-buffer entries, output L blends with entry L (buffer 0's
     // entry always mirrors the global BLEND cap); otherwise the global blend
@@ -459,8 +476,20 @@ export class FragmentOpsImpl implements FragmentOps {
         // Alpha is NOT sRGB-encoded (GLES 3.0 §4.1.8: RGB only).
       }
       this.linearDst[0] = dr; this.linearDst[1] = dg; this.linearDst[2] = db; this.linearDst[3] = da;
+      // Dual-source secondary (SRC1_* factors): EXT_blend_func_extended clamps
+      // the secondary color to [0,1] for fixed-point buffers (MIN/MAX equations
+      // consume the clamped src too — the clamp applies before blending
+      // regardless of equation). Float targets pass the raw HDR values through.
+      let src1: Float32Array | null = secondary ? secondary[L] : null;
+      if (src1 && !info.isFloat) {
+        this.src1Scratch[0] = src1[0] < 0 ? 0 : (src1[0] > 1 ? 1 : src1[0]);
+        this.src1Scratch[1] = src1[1] < 0 ? 0 : (src1[1] > 1 ? 1 : src1[1]);
+        this.src1Scratch[2] = src1[2] < 0 ? 0 : (src1[2] > 1 ? 1 : src1[2]);
+        this.src1Scratch[3] = src1[3] < 0 ? 0 : (src1[3] > 1 ? 1 : src1[3]);
+        src1 = this.src1Scratch;
+      }
       blendColor(
-        src, this.linearDst, this.blendOut,
+        blendSrc, this.linearDst, this.blendOut,
         bEntry ? bEntry.srcRGB : this.blend.srcRGB,
         bEntry ? bEntry.dstRGB : this.blend.dstRGB,
         bEntry ? bEntry.srcAlpha : this.blend.srcAlpha,
@@ -468,7 +497,7 @@ export class FragmentOpsImpl implements FragmentOps {
         bEntry ? bEntry.eqRGB : this.blend.eqRGB,
         bEntry ? bEntry.eqAlpha : this.blend.eqAlpha,
         bEntry ? bEntry.color : this.blend.color,
-        secondary ? secondary[L] : null,
+        src1,
       );
       r = this.blendOut[0]; g = this.blendOut[1]; b = this.blendOut[2]; a = this.blendOut[3];
     }
