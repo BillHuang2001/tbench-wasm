@@ -362,7 +362,7 @@ export function decodePngBuffer(bytes: Uint8Array): PngDecodeResult {
     // implemented there; this raw decode is only for high-bit-depth sources.
     if (bitDepth !== 16) return null;
     if (interlace !== 0) return null; // Adam7 → native decode handles it
-    const channels = [1, 0, 3, 1, 2, 4][colorType] ?? 0;
+    const channels = [1, 0, 3, 1, 2, 0, 4][colorType] ?? 0;
     if (channels === 0) return null;
     if (w <= 0 || h <= 0 || w * h > MAX_PIXELS) return null;
 
