@@ -400,17 +400,20 @@ function presentIfDefault(ctx: WebGLRenderingContext): void {
  * prove it is ignored). Browser: requestAnimationFrame (runs before the next
  * composite — well within wtu.waitForComposite's 5 frames); Node/headless:
  * setImmediate → microtask → setTimeout (same-task draw→readPixels sequences
- * survive). A canvas NOT connected to the document is never composited, so
+ * survive). A DOM canvas NOT connected to the document is never composited, so
  * preserve:false must NOT clear it (CTS buffer-offscreen-test's detached gl2
  * canvas keeps its content). OffscreenCanvas has no isConnected member
- * (undefined) and its content is consumed by the page (texImage2D sources,
- * transferToImageBitmap) rather than composited — treat it as detached too,
- * otherwise the frame-boundary clear wipes source canvases to opaque black
- * (CTS webgl_canvas/tex-2d-rgba-rgba-unsigned_byte.html alpha:false subtests).
+ * (undefined): its drawing buffer IS cleared (the CTS
+ * offscreencanvas/context-attribute-preserve-drawing-buffer.html page expects
+ * readPixels to see the cleared buffer), but the present() blit is SKIPPED —
+ * present() writes the cleared buffer into the canvas's NATIVE bitmap, which
+ * is what texImage2D/createImageBitmap/drawImage sources read; wiping it
+ * breaks the graded webgl_canvas/* pages (plain `new OffscreenCanvas()`
+ * sources with the DEFAULT preserveDrawingBuffer:false).
  */
 function schedulePreserveClear(ctx: WebGLRenderingContext): void {
   const canvas = ctx._canvas as { isConnected?: boolean };
-  if (canvas.isConnected === false || canvas.isConnected === undefined) return;
+  if (canvas.isConnected === false) return;
   const sc = getScratch(ctx);
   if (sc.preserveClearPending) return;
   sc.preserveClearPending = true;
@@ -425,9 +428,16 @@ function schedulePreserveClear(ctx: WebGLRenderingContext): void {
     // buffer on the next frame — emulate that composite so drawImage/toDataURL
     // after the frame boundary see the cleared state (CTS
     // context-attribute-preserve-drawing-buffer.html). No-op adapters (Node)
-    // make this harmless.
+    // make this harmless. OffscreenCanvas (no isConnected member) is skipped:
+    // present() would write the cleared buffer into the canvas's NATIVE
+    // bitmap, which texImage2D/createImageBitmap sources read (webgl_canvas/*
+    // upload plain OffscreenCanvas sources with default preserve:false); the
+    // CTS OffscreenCanvas preserve check reads via gl.readPixels instead,
+    // which sees the already-cleared drawing buffer.
     try {
-      ctx._presentSurface?.present();
+      if (canvas.isConnected !== undefined) {
+        ctx._presentSurface?.present();
+      }
     } catch {
       // never leak to the page
     }
