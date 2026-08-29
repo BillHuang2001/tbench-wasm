@@ -54,7 +54,7 @@
 ### webgl2 (2 pages, 5 F)
 | Page | P/F | Classification | One-line root cause |
 |---|---|---|---|
-| conformance2/textures/misc/origin-clean-conformance-offscreencanvas.html | 9P/4F | harness-limitation | texImage3D/texSubImage3D must throw for cross-origin / non-origin-clean sources inside an OffscreenCanvas **Worker**; Playwright `addInitScript` does not reach Worker globals → Worker path runs NATIVE WebGL (documented in `tests/CONTEXT.md`); Chrome-native fails this combination the same way |
+| conformance2/textures/misc/origin-clean-conformance-offscreencanvas.html | 9P/4F | renderer-bug (escalated to `./src/gl`) | texImage3D/texSubImage3D must throw SecurityError for cross-origin / non-origin-clean sources; the page has NO Worker (page-realm OffscreenCanvas, `rendererActive=true`) — all six TexImageSource entrypoints in `src/gl/api/teximage.ts` check the bound texture (INVALID_OPERATION) BEFORE the origin-clean check, so with only TEXTURE_2D bound the TEXTURE_3D calls bail before decoding the tainted source; native control runs 13P/0F (Blink checks origin first) — full root cause in `tests/conformance/CONTEXT.md` Known Issues |
 | conformance2/textures/misc/tex-image-10bpc.html | 2P/1F | present-side (escalated) | 10bpc PNG crushed to 8bpc on decode: uniquePixels 3 < 7 — present-side 8bpc decode crushing; escalated to `./src` (present side, not gl/raster/glsl) |
 
 ## Must-pass verification (extracted from the suite JSONs + recovery re-verifications)
@@ -88,10 +88,10 @@
 3. **All wave-15/16/17 claims hold** — every webgl2 residual fix and must-pass page is unchanged: `framebuffer-render-to-layer` 1362P/0F, `integer-cubemap-texture-sampling` 521P/0F, `webgl-clip-cull-distance` 267P/0F, `uninitialized-test-2` 4580P/0F.
 4. **0 timeouts, 0 errors, 0 renderer-inactive pages** across both suites; every failing page is deterministic (no flakes).
 
-## Known-unfixable / out-of-scope (4 residuals, 11 subtest fails — all non-gl, non-raster, non-glsl)
+## Known-unfixable / out-of-scope (4 residuals, 11 subtest fails)
 
 - **shader-with-double-underscore.html (1P/2F)** — native-unfixable: GLSL ES reserves double-underscore identifiers; native Chrome fails this same CTS page. Spec-vs-native disagreement, not a renderer defect.
-- **origin-clean-conformance-offscreencanvas.html (9P/4F)** — harness limitation: Worker-global OffscreenCanvas path cannot be intercepted by Playwright `addInitScript` (documented in `tests/CONTEXT.md`); the Worker sub-tests run against native WebGL.
+- **origin-clean-conformance-offscreencanvas.html (9P/4F)** — renderer bug in `src/gl/api/teximage.ts` (texImage3D/texSubImage3D origin-clean validation ordering — bound-texture check runs before the origin-clean check); escalated to `./src/gl`; NOT a worker/harness issue (the page has no Worker). Full root cause + fix sketch in `tests/conformance/CONTEXT.md` Known Issues.
 - **premultiplyalpha-test.html (81P/4F)** — environment-side: headless Chromium 2D-canvas RGB crushing for alpha=1 texels (proven with a no-renderer control); not a renderer defect.
 - **tex-image-10bpc.html (2P/1F)** — present-side 8bpc decode crushing; escalated to `./src` (present side).
 
