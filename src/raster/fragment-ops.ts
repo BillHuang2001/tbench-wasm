@@ -273,6 +273,8 @@ export class FragmentOpsImpl implements FragmentOps {
   // Per-draw state snapshot (GL state is fixed for the duration of a draw).
   private readonly scissor: ScissorState;
   private readonly sampleCoverage: { enabled: boolean; value: number; invert: boolean };
+  /** SAMPLE_ALPHA_TO_COVERAGE post-shader coverage gate (see finalize()). */
+  private readonly sampleAlphaToCoverage: boolean;
   private readonly stencilEnabled: boolean;
   private readonly depthTestEnabled: boolean;
   private readonly depthMask: boolean;
@@ -300,6 +302,19 @@ export class FragmentOpsImpl implements FragmentOps {
     this.stencilWidth = dc.fb.stencil ? dc.fb.stencil.width : 0;
     this.scissor = dc.scissor;
     this.sampleCoverage = dc.sampleCoverage;
+    let a2c = dc.sampleAlphaToCoverage === true;
+    if (a2c) {
+      let db0 = dc.drawBuffers[0];
+      if (db0 === undefined || db0 === -1) a2c = false;
+      else {
+        // Mirror writeColor's degenerate draw-buffer normalization (legacy
+        // raw enums → attachment 0) so the gate tracks the color-write path.
+        if ((db0 < 0 && db0 !== -1) || db0 >= dc.fb.color.length) db0 = 0;
+        const t0 = dc.fb.color[db0];
+        a2c = !!t0 && !t0.info.isInteger && t0.info.components >= 4;
+      }
+    }
+    this.sampleAlphaToCoverage = a2c;
     this.stencilEnabled = dc.stencilTest.enabled;
     this.depthTestEnabled = dc.depthTest.enabled;
     this.depthMask = dc.depthMask;
@@ -361,6 +376,16 @@ export class FragmentOpsImpl implements FragmentOps {
     x: number, y: number, frontFacing: boolean, depth: number,
     colors: readonly Float32Array[], secondary?: readonly Float32Array[],
   ): void {
+    // SAMPLE_ALPHA_TO_COVERAGE (GLES 3.0 §17.3.7): post-shader coverage
+    // gate — covered iff coverageHash(x, y) < alpha·255 (alpha = output
+    // location 0; unwritten → (0,0,0,1) → alpha 1 → always covered → no-op).
+    // Not covered → discarded exactly like shader `discard` (no writes of
+    // any kind); AND-composes with the pre-shader SAMPLE_COVERAGE gate in
+    // test().
+    if (this.sampleAlphaToCoverage) {
+      const src0 = colors[0];
+      if (coverageHash(x, y) >= (src0 ? src0[3] : 1) * 255) return;
+    }
     // Stencil face/current value for the zpass/zfail ops (ops only apply when
     // the stencil test is enabled AND a stencil buffer exists).
     let stIdx = 0;

@@ -428,6 +428,18 @@ export interface DrawCall {
   depthMask: boolean;
   stencilTest: StencilTestState;
   sampleCoverage: SampleCoverageState;
+  /**
+   * SAMPLE_ALPHA_TO_COVERAGE (GLES 3.0 §17.3.7): when true, the fragment's
+   * coverage is recomputed from its alpha (fragment output location 0) after
+   * the fragment shader runs — covered iff coverageHash(x, y) < alpha·255; a
+   * not-covered fragment is discarded exactly like shader `discard` (no
+   * depth/stencil/blend/color writes), AND-composing with the pre-shader
+   * SAMPLE_COVERAGE gate. Absent/false → no-op (byte-identical legacy path).
+   * gl/ sets it from the SAMPLE_ALPHA_TO_COVERAGE cap; raster consumes it in
+   * fragment-ops.finalize() (non-integer color targets with an alpha channel
+   * only — see the constructor resolution there).
+   */
+  sampleAlphaToCoverage?: boolean;
   rasterizerDiscard: boolean;
   lineWidth: number;
   /** Per texture unit bindings (index = unit; sampler uniforms index here). */
