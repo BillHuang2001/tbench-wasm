@@ -19,10 +19,11 @@
  *    → INVALID_OPERATION otherwise; level < 0 → INVALID_VALUE.
  *  - samples < 0 → INVALID_VALUE; samples > MAX_SAMPLES → INVALID_OPERATION
  *    (mirrors WebGL2 renderbufferStorageMultisample).
- *  - renderbufferStorageMultisampleEXT mirrors WebGL2 renderbufferStorageMultisample
- *    target/samples/width/height validation and records the storage on the
- *    WebGLRenderbuffer (internalformat validation is the framebuffers agent's
- *    renderbufferStorage engine — kept permissive here, documented).
+ *  - renderbufferStorageMultisampleEXT delegates to the core WebGL2
+ *    renderbufferStorageMultisample engine (same spec semantics): it validates
+ *    internalformat/MAX_RENDERBUFFER_SIZE, allocates the actual surface
+ *    (allocateRenderbufferSurface — depth planes filled to 1.0), records
+ *    _samples, and invalidates FBO status caches.
  */
 
 import type { WebGLRenderingContext } from '../webgl1';
@@ -145,13 +146,15 @@ export function createWEBGLMultisampledRenderToTexture(ctx: WebGLRenderingContex
           gl._errors.push(C1.INVALID_OPERATION);
           return;
         }
-        // Record storage; the framebuffers agent allocates the surface and
-        // validates internalformat in renderbufferStorage (mirrored here later).
-        rb._samples = smp;
-        rb._internalformat = internalformat >>> 0;
-        rb._width = w;
-        rb._height = h;
-        rb._surface = null;
+        // Delegate to the core WebGL2 renderbufferStorageMultisample (same spec
+        // semantics): it validates internalformat/MAX_RENDERBUFFER_SIZE, allocates
+        // the actual surface (allocateRenderbufferSurface — depth planes filled to
+        // 1.0), records _samples, and invalidates FBO status caches. Without the
+        // allocation the attached depth renderbuffer resolves to no image →
+        // FRAMEBUFFER_INCOMPLETE_ATTACHMENT (three.js multisampled render targets:
+        // webgl_mirror, webgl_multisampled_renderbuffers).
+        (gl as unknown as { renderbufferStorageMultisample(t: number, s: number, f: number, w: number, h: number): void })
+          .renderbufferStorageMultisample(target, smp, internalformat, w, h);
       },
     },
   );
