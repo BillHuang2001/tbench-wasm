@@ -32,8 +32,11 @@ Fast, dependency-free unit tests for the pure `src/` modules — glsl compiler/l
 | `raster-pipeline.test.ts` | ✅ | ✅ 20/20 PASS |
 | `teximage.test.ts` | ✅ | ✅ 15/15 PASS |
 | `sampler-aniso.test.ts` | ✅ | ✅ 11/11 PASS |
+| `png.test.ts` | ✅ | ✅ 25/25 PASS (21 real + 4 `it.fails` pins — see below) |
 
-`npm run test:unit` and `npm run typecheck` are both fully green. Suite total: 148 tests (11 files), all pass.
+`npm run test:unit` and `npm run typecheck` are both fully green. Suite total: 173 tests (12 files), all pass.
+
+**Known-bug pins in `png.test.ts`**: 4 tests (`RGBA (colorType 6) 16-bit decodes`, `Sub-filter ... 2×2 RGBA 16-bit`, both alpha-handling tests) assert the DOCUMENTED contract of `src/present/png.ts` (docstring: gray/grayA/RGB/RGBA) but fail on HEAD because the channels table at `src/present/png.ts:365` — `[1, 0, 3, 1, 2, 4][colorType] ?? 0` — has no index 6, so colorType 6 (RGBA) → 0 → decoder returns null. They are `it.fails` so the suite stays green; once the src table is fixed (`[1, 0, 3, 1, 2, 0, 4]`), flip `it.fails` → `it` in `png.test.ts` and DELETE this paragraph.
 
 ## API Surface (coordination contract with src/ — VERIFIED against the real modules)
 Import paths and export names below are the ACTUAL src APIs the tests compile against (rewritten 2026-08 from the earlier assumed contracts). If src/ changes a shape, update the call sites in the listed file AND this table in the same pass.
@@ -49,6 +52,7 @@ Import paths and export names below are the ACTUAL src APIs the tests compile ag
 | `present.test.ts` | `../../src/present/index` | `interface CanvasSurface {readonly width, height, getPixels(): Uint8Array (RGBA8), present(): void, resize(w,h): void}`; `class NodeCanvasSurface` (no-arg ctor; dimensions from `resize()`; `present()` no-op); `class BrowserCanvasSurface` (HTMLCanvasElement ctor); `createCanvasSurface(canvas: unknown): CanvasSurface` factory (structural: object with `getContext` fn → Browser, else Node). NO `createNodeSurface`. |
 | `teximage.test.ts` | `../../src/gl/teximage` | `updateCompleteness(texture, version: 1\|2, floatLinear?) → void` — purely structural on `texture._image` (`{target, baseLevel, maxLevel, complete, levels: [{width, height, depth, data: ArrayBufferView[]}]}`) + `texture._params` (TEXTURE_MAG/MIN_FILTER, WRAP_S/T, BASE/MAX_LEVEL); mutates `img.{complete, baseLevel, maxLevel}`. Fake textures (never in the module-private `samplerForTexture` WeakMap) exercise it directly. Pin: CUBE levels' `depth` is ignored (6 from texStorage2D vs 1 from texImage2D — d0a2b23 regression); 3D (`baseDepth >> shift`) and 2D_ARRAY (`baseLevel.depth`, unshifted) depths STILL enforced; 6 face views required per cube level; mip-chain size matching; WebGL1 NPOT rules; BASE_LEVEL > MAX_LEVEL. |
 | `sampler-aniso.test.ts` | `../../src/raster/sampler-aniso` | (NOT re-exported from `src/raster/index` — import the module file directly.) `anisoGate(img, state) → boolean` (2D + maxAnisotropy > 1 + mipmap minFilter); `pow2ceilN(x)` (spec-permitted rounding of N); `anisoTapParams: {n, majorU}` (module-level; n = 0 inactive / 1 isotropic single tap); `sample2DAnisoTaps(filter2D, img, state, plan, filter, level0, level1, f, u, v, layer, shadow, refQ, lambda, out)` — N equal-weight taps along the major footprint axis (u when ρx ≥ ρy), tap i UV offset `((i+0.5)/N − 0.5)·2^λ / size₀`, per-tap trilinear blends the same level pair with the same f, writes the average to `out[0..3]`. Pins the 8c7e34b N-tap AF implementation. |
+| `png.test.ts` | `../../src/present/png` | (NOT re-exported from `src/present/index` — import the module file directly.) `decodePngBuffer(bytes: Uint8Array) → {ok:true, image:{width, height, data: Uint8ClampedArray}} \| null` — straight-alpha RGBA8 top-down, only 16-bit non-interlaced gray/grayA/RGB/RGBA ≤ 16M pixels; 8-bit/interlaced/corrupt/truncated/non-PNG → null. 16→8: sBIT ≤ 10 with in-band value ≤ 255 → `v16 >> (16−sbit)`, else `Math.round(v16·255/65535)`. `decodePngFromElement(source, src)` — XHR path, null in Node. Fixtures built in-test (manual chunks + Node `zlib.deflateSync` + local CRC32 + a PNG filter ENCODER mirroring the decoder's unfilter). See the known-bug pin note in Current status (RGBA nulled by the channels table at `src/present/png.ts:365`). |
 | `intercept.test.ts` | `../../src/context-intercept` | (module exists — no assumptions; uses explicit missing/temp renderer paths so it stays green after `renderer.js` is built) |
 
 ## Test Strategy
@@ -80,6 +84,7 @@ Import paths and export names below are the ACTUAL src APIs the tests compile ag
 - `raster-pipeline.test.ts` → end-to-end `draw()` pipeline tests (20/20 PASS, incl. the two CTS dual-source blend cases)
 - `teximage.test.ts` → structural `updateCompleteness` tests, incl. the texStorage2D cube depth-6 regression (15/15 PASS)
 - `sampler-aniso.test.ts` → EXT_texture_filter_anisotropic N-tap filter tests (11/11 PASS)
+- `png.test.ts` → high-bit-depth PNG decoder tests: tex-image-10bpc in-band ramp, honest rounded conversion, null paths, filters 0–4, multi-IDAT, gray/grayA/RGB, 4 `it.fails` RGBA pins (25/25 PASS)
 - `glsl.test.ts` → GLSL compiler/linker/Program model tests (18/18 PASS)
 - `math.test.ts` → vec/mat helper tests (11/11 PASS)
 - `present.test.ts` → Node canvas surface tests (5/5 PASS)
