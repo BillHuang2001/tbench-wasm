@@ -664,16 +664,19 @@ export function setupFragmentCtx(
     const v = vi.v;
     const n = v.length;
     for (let j = 0; j < n; j++) v[j] = quadV[base + offset + j];
-    // Derivatives = neighbor difference across the quad (x-neighbor ^1,
-    // y-neighbor ^2). Flat varyings have identical quad values → zero.
+    // Derivatives use the quad-anchor (slot 0) convention for EVERY lane:
+    // ddx = slot1 − slot0, ddy = slot2 − slot0. The sign must be uniform
+    // across the 2×2 quad (GLSL dFdx/dFdy semantics); per-lane signed
+    // neighbor differences would flip the sign in 3 of 4 lanes. Flat
+    // varyings have identical quad values → zero.
     const ddx = vi.ddx;
     const ddy = vi.ddy;
     if (ddx && ddy) {
-      const xb = (pixel ^ 1) * quadStride + offset;
-      const yb = (pixel ^ 2) * quadStride + offset;
+      const xb = quadStride + offset;
+      const yb = 2 * quadStride + offset;
       for (let j = 0; j < n; j++) {
-        ddx[j] = quadV[xb + j] - quadV[base + offset + j];
-        ddy[j] = quadV[yb + j] - quadV[base + offset + j];
+        ddx[j] = quadV[xb + j] - quadV[offset + j];
+        ddy[j] = quadV[yb + j] - quadV[offset + j];
       }
     }
     offset += n;

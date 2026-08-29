@@ -24,9 +24,11 @@
  * Prints "selftest-arith-aliasing: N checks" and exits 0 only when all pass.
  */
 import { compileShader } from '../compiler.js';
+import type { ShaderUses } from '../compiler.js';
 import { CodegenEnv } from './env.js';
 import { emitStatements } from './statements.js';
 import { installUserFunctions, installUserGlobals } from './functions.js';
+import { generateFragmentStage } from './index.js';
 import { R } from './runtime.js';
 import type { CodegenLayout } from './index.js';
 import type { TranslationUnit, FunctionDefinition } from '../ast.js';
@@ -90,6 +92,49 @@ function runVertex(
   };
   fn(ctx, R);
   return { body, ctx };
+}
+
+/** Dual-mode FRAGMENT layout (derivatives ON) for the (j) guard. */
+function fragmentLayout300(): CodegenLayout {
+  const uses: ShaderUses = {
+    pointSize: false, fragCoord: false, frontFacing: false, pointCoord: false,
+    fragDepth: false, vertexId: false, instanceId: false, drawId: false,
+    derivatives: true, depthRange: false,
+  };
+  return {
+    version: 300,
+    uniformSlots: new Map(),
+    blocks: new Map(),
+    blockIndices: new Map(),
+    varyings: new Map(),
+    attribLocations: new Map(),
+    outputLocations: new Map([['color', 0]]),
+    uses,
+  };
+}
+
+/** Compile a FRAGMENT shader (dual mode via derivatives), run it; returns ctx. */
+function runFragment(src: string): { ctx: Record<string, any> } {
+  const r = compileShader(src, { type: 'FRAGMENT', version: 300 });
+  if (!r.ok) throw new Error(`compile failed: ${JSON.stringify(r.errors)}`);
+  const res = generateFragmentStage(r.shader.ast as TranslationUnit, fragmentLayout300());
+  const fn = new Function('ctx', 'R', res.body);
+  const ctx: Record<string, any> = {
+    uniforms: new Float32Array(64),
+    intUniforms: new Int32Array(64),
+    blockStores: [],
+    blockIntStores: [],
+    scratch: new Float32Array(Math.max(res.scratchSize, 16)),
+    intScratch: new Int32Array(Math.max(res.intScratchSize, 16)),
+    out: { color: [new Float32Array(4)], fragDepth: 0 },
+    discarded: false,
+    fragCoord: new Float32Array([0, 0, 0, 0]),
+    frontFacing: true,
+    pointCoord: new Float32Array([0, 0]),
+    varyings: [],
+  };
+  fn(ctx, R);
+  return { ctx };
 }
 
 /* ------------------------------------------------------------------ */
@@ -250,6 +295,140 @@ const V = [1, 2, 3, 4];
     300,
   );
   checkVec4(ctx.out.position, vecMat4(V, M4), 'v = v * m');
+}
+
+/* ------------------------------------------------------------------ */
+/* Ctor/member-wrapped in-place transforms (skinnormal pattern)        */
+/* ------------------------------------------------------------------ */
+
+// (f) THE three.js r185 skinnormal_vertex.glsl.js pattern:
+// `objectNormal = vec4( skinMatrix * vec4( objectNormal, 0.0 ) ).xyz;` — an
+// IN-PLACE vector transform wrapped in a ctor + `.xyz` member access. The
+// ctor result is materialized into temps (walkObject's p.pre), but pre-fix
+// the non-dual reads() folded that chain into EVERY component's v string and
+// emitAssignStmt wrote targets sequentially — component 1 re-ran the chain
+// and read the ALREADY-OVERWRITTEN objectNormal.x (component 2 read the new
+// x AND the new y). Expected values: M × [1,2,3,0] = [2,7,14,3] (exact
+// dyadics — `===` safe), so gl_Position must be [2,7,14,1].
+{
+  const { ctx } = runVertex(
+    `void main() {
+  vec3 objectNormal = vec3(1.0, 2.0, 3.0);
+  mat4 skinMatrix = ${GLSL_M};
+  objectNormal = vec4( skinMatrix * vec4( objectNormal, 0.0 ) ).xyz;
+  gl_Position = vec4(objectNormal.x, objectNormal.y, objectNormal.z, 1.0);
+}`,
+    300,
+  );
+  checkVec4(
+    ctx.out.position,
+    [...matVec4(M, [1, 2, 3, 0]).slice(0, 3), 1],
+    'objectNormal = vec4(m * vec4(objectNormal, 0.0)).xyz (300 es)',
+  );
+}
+
+// (f2) same pattern at GLSL ES 1.00 (shared non-dual codegen path).
+{
+  const { ctx } = runVertex(
+    `void main() {
+  vec3 objectNormal = vec3(1.0, 2.0, 3.0);
+  mat4 skinMatrix = ${GLSL_M};
+  objectNormal = vec4( skinMatrix * vec4( objectNormal, 0.0 ) ).xyz;
+  gl_Position = vec4(objectNormal.x, objectNormal.y, objectNormal.z, 1.0);
+}`,
+    100,
+  );
+  checkVec4(
+    ctx.out.position,
+    [...matVec4(M, [1, 2, 3, 0]).slice(0, 3), 1],
+    'objectNormal = vec4(m * vec4(objectNormal, 0.0)).xyz (100 es)',
+  );
+}
+
+// (g) NON-in-place sanity: the same ctor/member-wrapped transform into a
+// FRESH target must equal the reference (regression guard — the fix must not
+// change correct outputs).
+{
+  const { ctx } = runVertex(
+    `void main() {
+  vec3 other = vec3(1.0, 2.0, 3.0);
+  mat4 skinMatrix = ${GLSL_M};
+  vec3 fresh = vec4( skinMatrix * vec4( other, 0.0 ) ).xyz;
+  gl_Position = vec4(fresh.x, fresh.y, fresh.z, 1.0);
+}`,
+    300,
+  );
+  checkVec4(
+    ctx.out.position,
+    [...matVec4(M, [1, 2, 3, 0]).slice(0, 3), 1],
+    'vec3 fresh = vec4(m * vec4(other, 0.0)).xyz (no aliasing)',
+  );
+}
+
+// (h) NESTED assignment EXPRESSION: the in-place transform as the RHS of
+// another assignment (`copy = (objectNormal = vec4(...).xyz);`) — the inner
+// assignment's value is consumed per component, so its RHS chain must run
+// once BEFORE any of the inner target writes (emitAssign's comp0 hoist).
+{
+  const { ctx } = runVertex(
+    `void main() {
+  vec3 objectNormal = vec3(1.0, 2.0, 3.0);
+  vec3 copy;
+  mat4 skinMatrix = ${GLSL_M};
+  copy = (objectNormal = vec4( skinMatrix * vec4( objectNormal, 0.0 ) ).xyz);
+  gl_Position = vec4(copy.x, copy.y, copy.z, 1.0);
+}`,
+    300,
+  );
+  checkVec4(
+    ctx.out.position,
+    [...matVec4(M, [1, 2, 3, 0]).slice(0, 3), 1],
+    'copy = (objectNormal = vec4(m * vec4(objectNormal, 0.0)).xyz)',
+  );
+}
+
+// (i) FOR-UPDATE slot: the in-place transform as the loop update expression
+// (single-expression slot — the chain folds into ONE comma expression, so it
+// must fold once, not once per component).
+{
+  const { ctx } = runVertex(
+    `void main() {
+  vec3 objectNormal = vec3(1.0, 2.0, 3.0);
+  mat4 skinMatrix = ${GLSL_M};
+  for (int i = 0; i < 1; objectNormal = vec4( skinMatrix * vec4( objectNormal, 0.0 ) ).xyz) {
+    i++;
+  }
+  gl_Position = vec4(objectNormal.x, objectNormal.y, objectNormal.z, 1.0);
+}`,
+    300,
+  );
+  checkVec4(
+    ctx.out.position,
+    [...matVec4(M, [1, 2, 3, 0]).slice(0, 3), 1],
+    'for-update: objectNormal = vec4(m * vec4(objectNormal, 0.0)).xyz',
+  );
+}
+
+// (j) DUAL-mode guard (FRAGMENT, derivatives): reads() already attaches pres
+// in dual mode — the in-place ctor/member-wrapped pattern must stay correct
+// (RHS duals are all 0 here, so color == the same reference).
+{
+  const r = runFragment(
+    `#version 300 es
+precision mediump float;
+out vec4 color;
+void main() {
+  vec3 objectNormal = vec3(1.0, 2.0, 3.0);
+  mat4 skinMatrix = ${GLSL_M};
+  objectNormal = vec4( skinMatrix * vec4( objectNormal, 0.0 ) ).xyz;
+  color = vec4(objectNormal + dFdx(objectNormal) * 0.0, 1.0);
+}`,
+  );
+  checkVec4(
+    Array.from(r.ctx.out.color[0]),
+    [...matVec4(M, [1, 2, 3, 0]).slice(0, 3), 1],
+    'fragment dual: objectNormal = vec4(m * vec4(objectNormal, 0.0)).xyz',
+  );
 }
 
 /* ------------------------------------------------------------------ */

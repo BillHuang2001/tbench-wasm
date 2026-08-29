@@ -69,7 +69,7 @@ import {
   packVaryingWrite,
   packVaryingCompound,
 } from './env.js';
-import { emitExpr, emitLValue, materialize, matrixCompoundMul } from './expressions.js';
+import { emitExpr, emitLValue, materialize, matrixCompoundMul, dedupeSharedPre } from './expressions.js';
 import type { Value } from './index.js';
 
 /** Context for an INLINED function body; absent ⇒ emitting `main`
@@ -644,7 +644,14 @@ function updateString(e: Expr, env: CodegenEnv): string {
       for (const p of mm.pre) parts.push(p);
       for (const w of mm.writes) parts.push(w);
     } else {
-      const conv = convertPreserving(rawRhs, e.value.resolvedType!, lv.type);
+      // Dedupe the RHS pres by array identity: a multi-component RHS (e.g. a
+      // ctor/member-wrapped in-place transform) shares ONE chain on every
+      // component — folding it per comma term would re-run it per component
+      // and re-read ALREADY-OVERWRITTEN target components (sequential
+      // assignment aliasing). Only the FIRST component folds the chain; the
+      // later terms read the temps it set (each component is used exactly
+      // once — dedupeSharedPre's contract).
+      const conv = dedupeSharedPre(convertPreserving(rawRhs, e.value.resolvedType!, lv.type));
       for (let c = 0; c < lv.targets.length; c++) {
         const cv = conv[c];
         const rv = cv.pre && cv.pre.length > 0 ? foldPre(cv.pre, cv.v) : cv.v;

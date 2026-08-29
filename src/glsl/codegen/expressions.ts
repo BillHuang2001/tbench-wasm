@@ -483,8 +483,17 @@ function reads(p: P, env: CodegenEnv): Value[] {
       const base = hasPre ? { v: s, pre: p.pre } : { v: s };
       out.push(d ? { ...base, dx: d[0], dy: d[1] } : base);
     } else {
-      const v = hasPre ? `(${p.pre.join(', ')}, ${s})` : s;
-      out.push({ v });
+      // Non-dual mode MIRRORS the dual branch: pre lines ATTACH to the Value
+      // instead of folding into the v string. Folding re-runs the chain per
+      // component — a sequential target write (`v = vec4(m * vec4(v,
+      // 0.0)).xyz;` — the three.js skinnormal in-place transform) would
+      // re-read ALREADY-OVERWRITTEN target components on the 2nd/3rd
+      // statements (GLSL simultaneous-assignment semantics). Statement
+      // emitters hoist attached pres ONCE (emitPres dedupes by array identity
+      // — every component shares p.pre); expression consumers fold comp0's
+      // pre inline in 0..n-1 order (the comp0-hoist convention) and the later
+      // components read the temps the chain set.
+      out.push(hasPre ? { v: s, pre: p.pre } : { v: s });
     }
   }
   return out;
@@ -2232,17 +2241,27 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
       return out;
     }
     // Per-component pre for the non-dual '=' path: comp0 carries the lvalue
-    // preludes PLUS the scalar-broadcast hoist; comps1+ carry only the
-    // (idempotent) preludes. NOT a single shared array — expression-context
-    // consumers (walkObject, ternary, comparisons) fold each component's pre
-    // inline in 0..n-1 order, so comp0's hoist must run first and the later
-    // components must NOT re-run it. Statement emitters dedupe by identity:
-    // comp0's array runs the hoist exactly once, comps1+'s shared preludes
-    // array re-emits only the idempotent preludes.
-    const comp0Pre = broadcastPre.length > 0 ? [...preludes, ...broadcastPre] : preludes;
+    // preludes PLUS the scalar-broadcast hoist PLUS the deduped RHS chains
+    // (the materialization of a ctor/member/struct-wrapped result — the
+    // chain's reads of the TARGET components must all happen BEFORE any
+    // target write, so it runs once, ahead of comp0's write; later
+    // components read the temps it set). NOT a single shared array —
+    // expression-context consumers (walkObject, ternary, comparisons) fold
+    // each component's pre inline in 0..n-1 order, so comp0's hoist must run
+    // first and the later components must NOT re-run it. Statement emitters
+    // dedupe by identity: comp0's array runs the hoist exactly once.
+    const comp0Pre = [...preludes];
+    if (broadcastPre.length > 0) comp0Pre.push(...broadcastPre);
+    const seenRhs = new Set<string[]>();
     for (let c = 0; c < n; c++) {
       const cp = conv[c].pre;
-      const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
+      if (cp && cp.length > 0 && !seenRhs.has(cp)) {
+        seenRhs.add(cp);
+        comp0Pre.push(...cp);
+      }
+    }
+    for (let c = 0; c < n; c++) {
+      const rv = conv[c].v;
       const bitKind = lv.bits !== undefined ? lv.bits[c] : false;
       // Dual mode: write the whole triple; the comma expression ends with
       // the v read so the value of the assignment is the assigned v.
@@ -2344,15 +2363,25 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
     return out;
   }
   // Per-component pre for the non-dual compound path: comp0 carries the
-  // lvalue preludes PLUS the scalar-broadcast hoist; comps1+ carry only the
-  // (idempotent) preludes. NOT a single shared array — expression-context
-  // consumers fold each component's pre inline in 0..n-1 order, so comp0's
-  // hoist must run first and later components must NOT re-run it (see the
-  // '=' path above).
-  const comp0Pre = broadcastPre.length > 0 ? [...preludes, ...broadcastPre] : preludes;
+  // lvalue preludes PLUS the scalar-broadcast hoist PLUS the deduped RHS
+  // chains (the compound composite reads the target, so the RHS chain — whose
+  // reads may include the target — must run once, before comp0's composite;
+  // later components read the temps it set). NOT a single shared array —
+  // expression-context consumers fold each component's pre inline in 0..n-1
+  // order, so comp0's hoist must run first and later components must NOT
+  // re-run it (see the '=' path above).
+  const comp0Pre = [...preludes];
+  if (broadcastPre.length > 0) comp0Pre.push(...broadcastPre);
+  const seenRhs = new Set<string[]>();
   for (let c = 0; c < n; c++) {
     const cp = conv[c].pre;
-    const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
+    if (cp && cp.length > 0 && !seenRhs.has(cp)) {
+      seenRhs.add(cp);
+      comp0Pre.push(...cp);
+    }
+  }
+  for (let c = 0; c < n; c++) {
+    const rv = conv[c].v;
     const bitKind = lv.bits !== undefined ? lv.bits[c] : false;
     // Dual mode, float target: linear ops (+=, -=) update all three planes
     // via dualWrite; non-linear compounds throw (C5a2 templates).
