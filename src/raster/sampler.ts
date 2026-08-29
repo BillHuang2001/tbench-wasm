@@ -35,7 +35,8 @@
  *    REPEAT = mod; CLAMP_TO_EDGE = clamp to [0, size−1]; MIRRORED_REPEAT =
  *    mirror of (c mod 2·size).
  *  - Filters: NEAREST/LINEAR + all four mipmap combos. Implicit LOD:
- *    ρ = max(ρx,ρy), ρx = max over axes of |∂coord_i/∂x|·size_i;
+ *    ρ = max(ρx,ρy), ρx = sqrt(Σ_i (∂coord_i/∂x·size_i)²) — the GLES 3.0
+ *    §3.8.14 Euclidean-norm footprint (ρy likewise);
  *    λ = clamp(log2(ρ) + bias, minLod, maxLod) (bias added unclamped, GLES
  *    semantics — no GL_MAX_TEXTURE_LOD_BIAS in ES). Zero/absent derivatives
  *    → λ = minLod. Cube maps: ρx/ρy come from the derivatives of the
@@ -298,20 +299,24 @@ function lodGtZero(img: TextureImage, state: SamplerState, coord: SampleCoord, b
       let sx: number, sy: number, sz: number;
       if (target === TEXTURE_3D) { sx = img.width; sy = img.height; sz = img.depth; }
       else { sx = img.width; sy = img.height; sz = 0; } // 2D / 2D_ARRAY: layer not filtered
-      rhoX = Math.abs(dx[0]) * sx;
-      const dyx = Math.abs(dx[1]) * sy;
-      if (dyx > rhoX) rhoX = dyx;
+      rhoX = dx[0] * sx;
+      rhoX = rhoX * rhoX;
+      const dyx = dx[1] * sy;
+      rhoX += dyx * dyx;
       if (sz > 0 && dx.length > 2) {
-        const dzx = Math.abs(dx[2]) * sz;
-        if (dzx > rhoX) rhoX = dzx;
+        const dzx = dx[2] * sz;
+        rhoX += dzx * dzx;
       }
-      rhoY = Math.abs(dy[0]) * sx;
-      const dyy = Math.abs(dy[1]) * sy;
-      if (dyy > rhoY) rhoY = dyy;
+      rhoX = Math.sqrt(rhoX);
+      rhoY = dy[0] * sx;
+      rhoY = rhoY * rhoY;
+      const dyy = dy[1] * sy;
+      rhoY += dyy * dyy;
       if (sz > 0 && dy.length > 2) {
-        const dzy = Math.abs(dy[2]) * sz;
-        if (dzy > rhoY) rhoY = dzy;
+        const dzy = dy[2] * sz;
+        rhoY += dzy * dzy;
       }
+      rhoY = Math.sqrt(rhoY);
     }
   }
   if (rhoX === 0 && rhoY === 0) return false; // λ = minLod ≤ 0 (minLod > 0 returned above)
@@ -327,8 +332,9 @@ function lodGtZero(img: TextureImage, state: SamplerState, coord: SampleCoord, b
 /* ================================================================== */
 
 /**
- * Implicit LOD: ρx = max over axes of |∂coord_i/∂x|·size_i (ρy likewise),
- * ρ = max(ρx, ρy), λ = clamp(log2(ρ) + bias, minLod, maxLod). Bias is added
+ * Implicit LOD: ρx = sqrt(Σ_i (∂coord_i/∂x·size_i)²) — the GLES 3.0 §3.8.14
+ * Euclidean-norm footprint (ρy likewise), ρ = max(ρx, ρy),
+ * λ = clamp(log2(ρ) + bias, minLod, maxLod). Bias is added
  * unclamped (GLES has no GL_MAX_TEXTURE_LOD_BIAS). Zero/absent derivatives →
  * ρ = 0 → λ = minLod. Cube maps use the face-mapped (s, t) chain rule instead
  * (see cubeRho) — magnitude-invariant, matching deqp. Anisotropy applies to
@@ -353,20 +359,24 @@ function computeLod(img: TextureImage, state: SamplerState, coord: SampleCoord, 
       let sx: number, sy: number, sz: number;
       if (target === TEXTURE_3D) { sx = img.width; sy = img.height; sz = img.depth; }
       else { sx = img.width; sy = img.height; sz = 0; } // 2D / 2D_ARRAY: layer not filtered
-      rhoX = Math.abs(dx[0]) * sx;
-      const dyx = Math.abs(dx[1]) * sy;
-      if (dyx > rhoX) rhoX = dyx;
+      rhoX = dx[0] * sx;
+      rhoX = rhoX * rhoX;
+      const dyx = dx[1] * sy;
+      rhoX += dyx * dyx;
       if (sz > 0 && dx.length > 2) {
-        const dzx = Math.abs(dx[2]) * sz;
-        if (dzx > rhoX) rhoX = dzx;
+        const dzx = dx[2] * sz;
+        rhoX += dzx * dzx;
       }
-      rhoY = Math.abs(dy[0]) * sx;
-      const dyy = Math.abs(dy[1]) * sy;
-      if (dyy > rhoY) rhoY = dyy;
+      rhoX = Math.sqrt(rhoX);
+      rhoY = dy[0] * sx;
+      rhoY = rhoY * rhoY;
+      const dyy = dy[1] * sy;
+      rhoY += dyy * dyy;
       if (sz > 0 && dy.length > 2) {
-        const dzy = Math.abs(dy[2]) * sz;
-        if (dzy > rhoY) rhoY = dzy;
+        const dzy = dy[2] * sz;
+        rhoY += dzy * dzy;
       }
+      rhoY = Math.sqrt(rhoY);
     }
   }
   let rho = rhoX > rhoY ? rhoX : rhoY;
@@ -612,8 +622,9 @@ function projectToFace(face: number, rx: number, ry: number, rz: number, dst: Fl
  * component indices below: the face-rotation sign flips of (sc, tc) cancel
  * in the outer |·|, so faceMap's rotated components with raw derivative
  * indices give IDENTICAL ρ to deqp's raw components.
- * ρx = max(|∂s/∂x|, |∂t/∂x|)·faceSize, ρy likewise — the same structure as
- * the 2D convention. Magnitude-invariant: scaling the direction by k scales
+ * ρx = sqrt((∂s/∂x)² + (∂t/∂x)²)·faceSize, ρy likewise — the GLES 3.0
+ * §3.8.14 Euclidean-norm structure, matching the 2D convention.
+ * Magnitude-invariant: scaling the direction by k scales
  * every component and its derivatives by k, which cancels in the ratio.
  * Writes ρx/ρy into `rho` and returns true; returns false for a degenerate
  * direction (ma == 0 — the caller then uses ρ = 0, λ = minLod).
@@ -642,8 +653,8 @@ function cubeRho(
   const dsdy = (dy[sNdx] * M - sc * dmady) * inv;
   const dtdy = (dy[tNdx] * M - tc * dmady) * inv;
   const size = img.width;
-  rho.x = Math.max(Math.abs(dsdx), Math.abs(dtdx)) * size;
-  rho.y = Math.max(Math.abs(dsdy), Math.abs(dtdy)) * size;
+  rho.x = Math.sqrt(dsdx * dsdx + dtdx * dtdx) * size;
+  rho.y = Math.sqrt(dsdy * dsdy + dtdy * dtdy) * size;
   return true;
 }
 

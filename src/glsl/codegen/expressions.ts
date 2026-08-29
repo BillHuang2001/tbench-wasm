@@ -1332,6 +1332,107 @@ function materializeOperands(vals: Value[], env: CodegenEnv, pre: string[]): str
 }
 
 /**
+ * Dual-aware operand materialization for the dual branches of the matrix-
+ * multiply emitters: snapshot EVERY component (v + dx/dy planes) into fresh
+ * temps, appending the assignments to `pre` (value pres folded per component,
+ * deduped by array identity — a multi-component result shares ONE pre array).
+ * The returned values carry NO pre (the caller attaches the buffer to result
+ * component 0 only — the comp0-hoist convention) and read only the temps, so
+ * sequential target writes (`v = m * v` in dual mode — Babylon
+ * `coords = vec3(reflectionMatrix * vec4(coords, 0))`) can never observe
+ * partially-updated operands. Mirrors materializeSharedPre but with the
+ * comp0-only attach contract (expression consumers fold pres per component in
+ * 0..n-1 order — a shared pre on every component would re-run the snapshot
+ * after component 0's write and re-capture post-write operands).
+ */
+function snapshotOperands(vals: Value[], env: CodegenEnv, pre: string[]): Value[] {
+  const seen = new Set<string[]>();
+  return vals.map((v) => {
+    const t = env.allocTemp();
+    if (v.pre && v.pre.length > 0 && !seen.has(v.pre)) {
+      seen.add(v.pre);
+      pre.push(`${t} = ${foldPre(v.pre, v.v)}`);
+    } else {
+      pre.push(`${t} = ${v.v}`);
+    }
+    if (v.dx !== undefined && v.dy !== undefined) {
+      const tx = env.allocTemp();
+      const ty = env.allocTemp();
+      pre.push(`${tx} = ${v.dx}`, `${ty} = ${v.dy}`);
+      return { v: t, dx: tx, dy: ty };
+    }
+    return { v: t };
+  });
+}
+
+/**
+ * Sequential-write aliasing guard (GLSL simultaneous assignment): the
+ * assignment emitters write multi-component targets ONE COMPONENT PER
+ * STATEMENT (or comma term) — component c's RHS must therefore never read a
+ * target slot written by an earlier component j < c. Cross-component reads —
+ * swizzle swaps (`v = v.yx`), permuting ctors (`v = vec2(v.y, v.x)`,
+ * `m = mat2(m[1], m[0])`), cross products / transpose / outerProduct in
+ * place, and any in-place matrix multiply that escaped emitter-level
+ * materialization — observe POST-overwrite values. Same-index reads
+ * (`v = v * 2.0`) are safe (the RHS runs before its own write). Both the
+ * v/dx/dy strings are checked against both the v and dx/dy target slots of
+ * every earlier component (the dual comma-write `(v = rv, dx = dxv,
+ * dy = dyv, v)` writes all three planes of component j before component c's
+ * statement runs).
+ */
+export function rhsAliasesEarlierTarget(
+  targets: string[],
+  dualTargets: ([string, string] | null)[] | undefined,
+  vals: Value[],
+  c: number,
+): boolean {
+  if (c === 0) return false;
+  const v = vals[c];
+  const text = `${v.v}\u0000${v.dx ?? ''}\u0000${v.dy ?? ''}`;
+  for (let j = 0; j < c; j++) {
+    if (targetSlotInText(text, targets[j])) return true;
+    const dj = dualTargets && dualTargets[j];
+    if (dj && (targetSlotInText(text, dj[0]) || targetSlotInText(text, dj[1]))) return true;
+  }
+  return false;
+}
+
+/** Does `text` reference the target slot `t`? Identifier slots match on word
+ *  boundaries (`x__0` must NOT match inside `x__0_dx` / `x__01`); storage-path
+ *  slots (`ctx.scratch[4 + 0]`, `ctx.out.color[0][1]`) match verbatim. */
+function targetSlotInText(text: string, t: string): boolean {
+  return /^[A-Za-z_$][\w$]*$/.test(t)
+    ? new RegExp(`\\b${t}\\b`).test(text)
+    : text.includes(t);
+}
+
+/**
+ * Apply the sequential-write aliasing guard to a converted RHS: when any
+ * component references an earlier-written target slot, snapshot the whole RHS
+ * into temps (dual planes included) with ONE shared pre buffer attached to
+ * component 0 only (comp0-hoist convention — statement emitters run it once
+ * before all writes; expression consumers fold it inline in 0..n-1 order).
+ * Returns the values for the write emitters — UNCHANGED when no aliasing is
+ * detected (zero codegen impact on the common same-index paths).
+ */
+export function guardRhsAliasing(
+  lv: { targets: string[]; dualTargets?: ([string, string] | null)[] | undefined },
+  conv: Value[],
+  env: CodegenEnv,
+): Value[] {
+  if (conv.length <= 1) return conv;
+  for (let c = 1; c < conv.length; c++) {
+    if (rhsAliasesEarlierTarget(lv.targets, lv.dualTargets, conv, c)) {
+      const pre: string[] = [];
+      const snap = snapshotOperands(conv, env, pre);
+      if (pre.length > 0) snap[0] = { ...snap[0], pre };
+      return snap;
+    }
+  }
+  return conv;
+}
+
+/**
  * Does the expression subtree fold GLSL side effects (assignments, ++/--)
  * into its codegen v strings? User-function calls put their whole inline in
  * Value.pre instead (detected separately there) — but when a call is nested
@@ -1848,25 +1949,31 @@ function emitArith(
       const av = emitExpr(e.left, env);
       const bv = emitExpr(e.right, env);
       const out: Value[] = [];
-      // ALIASING FIX (sequential-assignment aliasing): the non-dual result
-      // strings below reference the OPERAND components directly — a sequential
-      // target write (`v = m * v`, `m = m1 * m2`) would observe partially-
-      // updated operands (GLSL requires every RHS read to see pre-assignment
-      // values). Materialize BOTH operands into fresh temps (ONE shared pre on
-      // component 0 — the comp0-hoist convention, matrixCompoundMul idiom) so
-      // all reads are captured before any target write. The dual branch
-      // materializes per term inside arithDual.
+      // ALIASING FIX (sequential-assignment aliasing): the result strings
+      // below reference the OPERAND components — a sequential target write
+      // (`v = m * v`, `m = m1 * m2`) would observe partially-updated operands
+      // (GLSL requires every RHS read to see pre-assignment values). BOTH
+      // modes materialize the operands into fresh temps (ONE shared pre on
+      // component 0 — the comp0-hoist convention, matrixCompoundMul idiom):
+      // the non-dual path via materializeOperands (string temps), the dual
+      // path via snapshotOperands (v/dx/dy plane temps — the dual comma-write
+      // would otherwise read post-overwrite planes the same way). All reads
+      // are captured before any target write.
       const matPre: string[] = [];
       const aT = !dual ? materializeOperands(av, env, matPre) : null;
       const bT = !dual ? materializeOperands(bv, env, matPre) : null;
+      const aD = dual ? snapshotOperands(av, env, matPre) : null;
+      const bD = dual ? snapshotOperands(bv, env, matPre) : null;
       for (let c = 0; c < rt.cols; c++) {
         for (let r = 0; r < aRows; r++) {
           if (dual) {
             const terms: Value[] = [];
             for (let s = 0; s < aCols; s++) {
-              terms.push(arithDual('*', av[s * aRows + r], bv[c * bRows + s], env));
+              terms.push(arithDual('*', aD![s * aRows + r], bD![c * bRows + s], env));
             }
-            out.push(terms.length === 1 ? terms[0] : foldAdd(terms, env));
+            const res = terms.length === 1 ? terms[0] : foldAdd(terms, env);
+            if (out.length === 0 && matPre.length > 0) res.pre = matPre;
+            out.push(res);
           } else {
             const parts: string[] = [];
             for (let s = 0; s < aCols; s++) {
@@ -1888,19 +1995,24 @@ function emitArith(
       const bv = emitExpr(e.right, env);
       const out: Value[] = [];
       // ALIASING FIX — same as the matrix×matrix branch: materialize both
-      // operands into temps (shared pre on component 0) so in-place targets
-      // (`v = m * v` — result[r] reads ALL of v) never observe partially-
-      // updated operands during sequential writes.
+      // operands into temps (shared pre on component 0; dual planes via
+      // snapshotOperands) so in-place targets (`v = m * v` — result[r] reads
+      // ALL of v) never observe partially-updated operands during sequential
+      // writes.
       const matPre: string[] = [];
       const aT = !dual ? materializeOperands(av, env, matPre) : null;
       const bT = !dual ? materializeOperands(bv, env, matPre) : null;
+      const aD = dual ? snapshotOperands(av, env, matPre) : null;
+      const bD = dual ? snapshotOperands(bv, env, matPre) : null;
       for (let r = 0; r < R; r++) {
         if (dual) {
           const terms: Value[] = [];
           for (let c = 0; c < C; c++) {
-            terms.push(arithDual('*', av[c * R + r], bv[c], env));
+            terms.push(arithDual('*', aD![c * R + r], bD![c], env));
           }
-          out.push(terms.length === 1 ? terms[0] : foldAdd(terms, env));
+          const res = terms.length === 1 ? terms[0] : foldAdd(terms, env);
+          if (out.length === 0 && matPre.length > 0) res.pre = matPre;
+          out.push(res);
         } else {
           const parts: string[] = [];
           for (let c = 0; c < C; c++) {
@@ -1921,19 +2033,24 @@ function emitArith(
       const bv = emitExpr(e.right, env);
       const out: Value[] = [];
       // ALIASING FIX — same as the matrix×matrix branch: materialize both
-      // operands into temps (shared pre on component 0) so in-place targets
-      // (`v = v * M` — result[c] reads ALL of v) never observe partially-
-      // updated operands during sequential writes.
+      // operands into temps (shared pre on component 0; dual planes via
+      // snapshotOperands) so in-place targets (`v = v * M` — result[c] reads
+      // ALL of v) never observe partially-updated operands during sequential
+      // writes.
       const matPre: string[] = [];
       const aT = !dual ? materializeOperands(av, env, matPre) : null;
       const bT = !dual ? materializeOperands(bv, env, matPre) : null;
+      const aD = dual ? snapshotOperands(av, env, matPre) : null;
+      const bD = dual ? snapshotOperands(bv, env, matPre) : null;
       for (let c = 0; c < C; c++) {
         if (dual) {
           const terms: Value[] = [];
           for (let r = 0; r < R; r++) {
-            terms.push(arithDual('*', av[r], bv[c * R + r], env));
+            terms.push(arithDual('*', aD![r], bD![c * R + r], env));
           }
-          out.push(terms.length === 1 ? terms[0] : foldAdd(terms, env));
+          const res = terms.length === 1 ? terms[0] : foldAdd(terms, env);
+          if (out.length === 0 && matPre.length > 0) res.pre = matPre;
+          out.push(res);
         } else {
           const parts: string[] = [];
           for (let r = 0; r < R; r++) {
@@ -2204,12 +2321,17 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
       // first, copyBack (spill copy-out) after all composites. The VALUE of
       // the assignment is the target read back; its duals are the RHS duals
       // (pure — they reference temps the composites' folded pres set).
+      // Sequential-write aliasing guard: a cross-component RHS (`v = v.yx`,
+      // in-place matrix multiplies) is snapshotted into temps first (comp0's
+      // composite folds the snapshot buffer, so it runs before the later
+      // components' writes).
+      const convS = guardRhsAliasing(lv, conv, env);
       const pre: string[] = [];
       if (preludes.length > 0) pre.push(...preludes);
       if (broadcastPre.length > 0) pre.push(...broadcastPre);
       for (let c = 0; c < n; c++) {
-        const cp = conv[c].pre;
-        const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
+        const cp = convS[c].pre;
+        const rv = cp && cp.length ? foldPre(cp, convS[c].v) : convS[c].v;
         const bitKind = lv.bits !== undefined ? lv.bits[c] : false;
         if (bitKind) {
           // Packed int/uint varying cell (VERTEX): store the value's BIT
@@ -2217,7 +2339,7 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
           // assignment's value is the assigned int/uint).
           pre.push(packVaryingWrite(lv.targets[c], rv, bitKind === 'int'));
         } else {
-          pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }));
+          pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...convS[c], v: rv }));
         }
       }
       if (post) pre.push(...post.split(', '));
@@ -2226,7 +2348,7 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
         if (bitKind) {
           out.push({ v: unpackVaryingCell(lv.targets[c], bitKind === 'int'), dx: '0', dy: '0', pre });
         } else {
-          out.push({ v: lv.targets[c], dx: conv[c].dx ?? '0', dy: conv[c].dy ?? '0', pre });
+          out.push({ v: lv.targets[c], dx: convS[c].dx ?? '0', dy: convS[c].dy ?? '0', pre });
         }
       }
       return out;
@@ -2240,9 +2362,13 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
     // comp0's array runs the hoist exactly once, comps1+'s shared preludes
     // array re-emits only the idempotent preludes.
     const comp0Pre = broadcastPre.length > 0 ? [...preludes, ...broadcastPre] : preludes;
+    // Sequential-write aliasing guard: a cross-component RHS is snapshotted
+    // into temps; comp0's fold runs the snapshot before the later components'
+    // writes (comp1+ read the temps).
+    const convS = guardRhsAliasing(lv, conv, env);
     for (let c = 0; c < n; c++) {
-      const cp = conv[c].pre;
-      const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
+      const cp = convS[c].pre;
+      const rv = cp && cp.length ? foldPre(cp, convS[c].v) : convS[c].v;
       const bitKind = lv.bits !== undefined ? lv.bits[c] : false;
       // Dual mode: write the whole triple; the comma expression ends with
       // the v read so the value of the assignment is the assigned v.
@@ -2254,7 +2380,7 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
         bitKind
           ? packVaryingWrite(lv.targets[c], rv, bitKind === 'int')
           : env.dual && lv.dualTargets
-            ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv })
+            ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...convS[c], v: rv })
             : `(${lv.targets[c]} = ${rv})`;
       if (post) {
         const t = env.allocTemp();
@@ -2324,14 +2450,18 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
     // planes — dualWrite) is the shared `pre`; the expression's value reads
     // the target back and its duals are the post-write slot reads (valid
     // after the composite ran). Prelude/copyBack order as in the '=' path.
+    // Sequential-write aliasing guard: a cross-component RHS is snapshotted
+    // into temps (comp0's composite folds the buffer, before the later
+    // components' writes).
+    const convS = guardRhsAliasing(lv, conv, env);
     const pre: string[] = [];
     if (preludes.length > 0) pre.push(...preludes);
     if (broadcastPre.length > 0) pre.push(...broadcastPre);
     for (let c = 0; c < n; c++) {
-      const cp = conv[c].pre;
-      const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
+      const cp = convS[c].pre;
+      const rv = cp && cp.length ? foldPre(cp, convS[c].v) : convS[c].v;
       if (lv.dualTargets[c]) {
-        pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }, cop));
+        pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...convS[c], v: rv }, cop));
       } else {
         pre.push(`(${lv.targets[c]} = ${rv})`);
       }
@@ -2339,7 +2469,7 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
     if (post) pre.push(...post.split(', '));
     for (let c = 0; c < n; c++) {
       const d = lv.dualTargets[c];
-      out.push({ v: lv.targets[c], dx: d ? d[0] : conv[c].dx ?? '0', dy: d ? d[1] : conv[c].dy ?? '0', pre });
+      out.push({ v: lv.targets[c], dx: d ? d[0] : convS[c].dx ?? '0', dy: d ? d[1] : convS[c].dy ?? '0', pre });
     }
     return out;
   }
@@ -2350,9 +2480,11 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
   // hoist must run first and later components must NOT re-run it (see the
   // '=' path above).
   const comp0Pre = broadcastPre.length > 0 ? [...preludes, ...broadcastPre] : preludes;
+  // Sequential-write aliasing guard (see the '=' paths above).
+  const convS = guardRhsAliasing(lv, conv, env);
   for (let c = 0; c < n; c++) {
-    const cp = conv[c].pre;
-    const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
+    const cp = convS[c].pre;
+    const rv = cp && cp.length ? foldPre(cp, convS[c].v) : convS[c].v;
     const bitKind = lv.bits !== undefined ? lv.bits[c] : false;
     // Dual mode, float target: linear ops (+=, -=) update all three planes
     // via dualWrite; non-linear compounds throw (C5a2 templates).
@@ -2363,7 +2495,7 @@ function emitAssign(e: Extract<Expr, { kind: 'assign' }>, env: CodegenEnv): Valu
       // mirrors compoundOp — int vs uint diverge on / % >>).
       v = packVaryingCompound(cop, lv.targets[c], rv, bitKind === 'int');
     } else if (env.dual && lv.dualTargets && base === 'float' && lv.dualTargets[c]) {
-      v = env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }, cop);
+      v = env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...convS[c], v: rv }, cop);
     } else {
       v = compoundOp(cop, lv.targets[c], rv, base);
     }
