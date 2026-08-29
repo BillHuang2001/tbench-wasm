@@ -289,15 +289,7 @@ describe("decodePngBuffer — color types", () => {
     expect(pixels(res!.image.data, 1, 1)).toEqual([[honest(0x1234), honest(0x5678), honest(0x9abc), 255]]);
   });
 
-  // KNOWN-BUG PIN (src/present/png.ts:365): the channels table
-  // `[1, 0, 3, 1, 2, 4][colorType] ?? 0` has no index 6, so colorType 6 (RGBA)
-  // resolves to `undefined ?? 0` → channels 0 → the decoder returns null,
-  // contradicting the module docstring ("gray/grayA/RGB/RGBA") and its own
-  // conversion-loop RGBA branch. Correct table: `[1, 0, 3, 1, 2, 0, 4]`.
-  // These tests assert the DOCUMENTED contract and genuinely fail on HEAD;
-  // they are `it.fails` so the suite stays green. Flip `it.fails` → `it` when
-  // the src table is fixed (they then flag as "unexpected pass").
-  it.fails("RGBA (colorType 6) 16-bit decodes", () => {
+  it("RGBA (colorType 6) 16-bit decodes", () => {
     const rgba = buildPng([sampleBytes([0x1234, 0x5678, 0x9abc, 0xdef0])], 1, 1, { colorType: 6 });
     const res = decodePngBuffer(rgba);
     expect(res).not.toBeNull();
@@ -337,11 +329,7 @@ describe("decodePngBuffer — color types", () => {
 // ---------------------------------------------------------------------------
 
 describe("decodePngBuffer — unfilter", () => {
-  // See the KNOWN-BUG PIN comment in the "color types" describe: RGBA
-  // (colorType 6) currently returns null from the channels table gap at
-  // src/present/png.ts:365, so this test fails on HEAD. Flip `it.fails` → `it`
-  // after the src table fix `[1, 0, 3, 1, 2, 4]` → `[1, 0, 3, 1, 2, 0, 4]`.
-  it.fails("Sub-filter (type 1) reconstruction is exact: 2×2 RGBA 16-bit", () => {
+  it("Sub-filter (type 1) reconstruction is exact: 2×2 RGBA 16-bit", () => {
     // Row-major, x fastest: p00, p01 / p10, p11. No sBIT → honest conversion.
     const rows = [
       sampleBytes([0x1234, 0x5678, 0x9abc, 0xdef0, 0x1111, 0x2222, 0x3333, 0x4444]),
@@ -389,9 +377,7 @@ describe("decodePngBuffer — unfilter", () => {
 // ---------------------------------------------------------------------------
 
 describe("decodePngBuffer — alpha handling", () => {
-  // Same KNOWN-BUG PIN as above: RGBA (colorType 6) is nulled by the channels
-  // table at src/present/png.ts:365. Flip `it.fails` → `it` after the fix.
-  it.fails("RGBA sBIT alpha converts in-band (sBIT 8/8/8/8)", () => {
+  it("RGBA sBIT alpha converts in-band (sBIT 8/8/8/8)", () => {
     const row = sampleBytes([0x0000, 0x0000, 0x0000, 0x0000, 0xffff, 0xffff, 0xffff, 0x8000]);
     const png = buildPng([row], 2, 1, { colorType: 6, sbit: [8, 8, 8, 8] });
     const res = decodePngBuffer(png);
@@ -402,7 +388,7 @@ describe("decodePngBuffer — alpha handling", () => {
     ]);
   });
 
-  it.fails("RGBA without sBIT → alpha uses the same rounded conversion as color", () => {
+  it("RGBA without sBIT → alpha uses the same rounded conversion as color", () => {
     const row = sampleBytes([0x1234, 0x5678, 0x9abc, 0xdef0]);
     const png = buildPng([row], 1, 1, { colorType: 6 });
     const res = decodePngBuffer(png);

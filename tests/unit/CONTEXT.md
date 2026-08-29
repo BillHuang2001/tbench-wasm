@@ -32,11 +32,9 @@ Fast, dependency-free unit tests for the pure `src/` modules — glsl compiler/l
 | `raster-pipeline.test.ts` | ✅ | ✅ 20/20 PASS |
 | `teximage.test.ts` | ✅ | ✅ 15/15 PASS |
 | `sampler-aniso.test.ts` | ✅ | ✅ 11/11 PASS |
-| `png.test.ts` | ✅ | ✅ 25/25 PASS (21 real + 4 `it.fails` pins — see below) |
+| `png.test.ts` | ✅ | ✅ 25/25 PASS |
 
 `npm run test:unit` and `npm run typecheck` are both fully green. Suite total: 173 tests (12 files), all pass.
-
-**Known-bug pins in `png.test.ts`**: 4 tests (`RGBA (colorType 6) 16-bit decodes`, `Sub-filter ... 2×2 RGBA 16-bit`, both alpha-handling tests) assert the DOCUMENTED contract of `src/present/png.ts` (docstring: gray/grayA/RGB/RGBA) but fail on HEAD because the channels table at `src/present/png.ts:365` — `[1, 0, 3, 1, 2, 4][colorType] ?? 0` — has no index 6, so colorType 6 (RGBA) → 0 → decoder returns null. They are `it.fails` so the suite stays green; once the src table is fixed (`[1, 0, 3, 1, 2, 0, 4]`), flip `it.fails` → `it` in `png.test.ts` and DELETE this paragraph.
 
 ## API Surface (coordination contract with src/ — VERIFIED against the real modules)
 Import paths and export names below are the ACTUAL src APIs the tests compile against (rewritten 2026-08 from the earlier assumed contracts). If src/ changes a shape, update the call sites in the listed file AND this table in the same pass.
@@ -84,7 +82,7 @@ Import paths and export names below are the ACTUAL src APIs the tests compile ag
 - `raster-pipeline.test.ts` → end-to-end `draw()` pipeline tests (20/20 PASS, incl. the two CTS dual-source blend cases)
 - `teximage.test.ts` → structural `updateCompleteness` tests, incl. the texStorage2D cube depth-6 regression (15/15 PASS)
 - `sampler-aniso.test.ts` → EXT_texture_filter_anisotropic N-tap filter tests (11/11 PASS)
-- `png.test.ts` → high-bit-depth PNG decoder tests: tex-image-10bpc in-band ramp, honest rounded conversion, null paths, filters 0–4, multi-IDAT, gray/grayA/RGB, 4 `it.fails` RGBA pins (25/25 PASS)
+- `png.test.ts` → high-bit-depth PNG decoder tests: tex-image-10bpc in-band ramp, honest rounded conversion, null paths, filters 0–4, multi-IDAT, gray/grayA/RGB/RGBA (25/25 PASS)
 - `glsl.test.ts` → GLSL compiler/linker/Program model tests (18/18 PASS)
 - `math.test.ts` → vec/mat helper tests (11/11 PASS)
 - `present.test.ts` → Node canvas surface tests (5/5 PASS)
