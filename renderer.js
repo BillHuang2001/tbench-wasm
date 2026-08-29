@@ -2616,6 +2616,8 @@
       // Per-draw state snapshot (GL state is fixed for the duration of a draw).
       __publicField(this, "scissor");
       __publicField(this, "sampleCoverage");
+      /** SAMPLE_ALPHA_TO_COVERAGE post-shader coverage gate (see finalize()). */
+      __publicField(this, "sampleAlphaToCoverage");
       __publicField(this, "stencilEnabled");
       __publicField(this, "depthTestEnabled");
       __publicField(this, "depthMask");
@@ -2632,6 +2634,8 @@
       __publicField(this, "dstScratch", new Float32Array(4));
       __publicField(this, "linearDst", new Float32Array(4));
       __publicField(this, "blendOut", new Float32Array(4));
+      __publicField(this, "srcClampScratch", new Float32Array(4));
+      __publicField(this, "src1Scratch", new Float32Array(4));
       var _a;
       this.dc = dc;
       this.depthData = dc.fb.depth ? getDepthData(dc.fb.depth) : null;
@@ -2640,6 +2644,17 @@
       this.stencilWidth = dc.fb.stencil ? dc.fb.stencil.width : 0;
       this.scissor = dc.scissor;
       this.sampleCoverage = dc.sampleCoverage;
+      let a2c = dc.sampleAlphaToCoverage === true;
+      if (a2c) {
+        let db0 = dc.drawBuffers[0];
+        if (db0 === void 0 || db0 === -1) a2c = false;
+        else {
+          if (db0 < 0 && db0 !== -1 || db0 >= dc.fb.color.length) db0 = 0;
+          const t0 = dc.fb.color[db0];
+          a2c = !!t0 && !t0.info.isInteger && t0.info.components >= 4;
+        }
+      }
+      this.sampleAlphaToCoverage = a2c;
       this.stencilEnabled = dc.stencilTest.enabled;
       this.depthTestEnabled = dc.depthTest.enabled;
       this.depthMask = dc.depthMask;
@@ -2687,6 +2702,10 @@
     }
     /** Depth write + stencil zpass + blend + sRGB + colorMask + write. */
     finalize(x, y, frontFacing, depth, colors, secondary) {
+      if (this.sampleAlphaToCoverage) {
+        const src0 = colors[0];
+        if (coverageHash(x, y) >= (src0 ? src0[3] : 1) * 255) return;
+      }
       let stIdx = 0;
       let stCur = 0;
       let stFace = null;
@@ -2742,6 +2761,18 @@
       }
       let r = src[0], g2 = src[1], b = src[2], a = src[3];
       const isSRGB = info.isSRGB;
+      let blendSrc = src;
+      if (!info.isFloat) {
+        r = r < 0 ? 0 : r > 1 ? 1 : r;
+        g2 = g2 < 0 ? 0 : g2 > 1 ? 1 : g2;
+        b = b < 0 ? 0 : b > 1 ? 1 : b;
+        a = a < 0 ? 0 : a > 1 ? 1 : a;
+        this.srcClampScratch[0] = r;
+        this.srcClampScratch[1] = g2;
+        this.srcClampScratch[2] = b;
+        this.srcClampScratch[3] = a;
+        blendSrc = this.srcClampScratch;
+      }
       const bEntry = this.blendPerDrawBuffer ? this.blendPerDrawBuffer[L] : void 0;
       const blendHere = bEntry ? bEntry.enabled : this.blend.enabled;
       if (blendHere && !info.isInteger) {
@@ -2756,8 +2787,16 @@
         this.linearDst[1] = dg;
         this.linearDst[2] = db2;
         this.linearDst[3] = da;
+        let src1 = secondary ? secondary[L] : null;
+        if (src1 && !info.isFloat) {
+          this.src1Scratch[0] = src1[0] < 0 ? 0 : src1[0] > 1 ? 1 : src1[0];
+          this.src1Scratch[1] = src1[1] < 0 ? 0 : src1[1] > 1 ? 1 : src1[1];
+          this.src1Scratch[2] = src1[2] < 0 ? 0 : src1[2] > 1 ? 1 : src1[2];
+          this.src1Scratch[3] = src1[3] < 0 ? 0 : src1[3] > 1 ? 1 : src1[3];
+          src1 = this.src1Scratch;
+        }
         blendColor(
-          src,
+          blendSrc,
           this.linearDst,
           this.blendOut,
           bEntry ? bEntry.srcRGB : this.blend.srcRGB,
@@ -2767,7 +2806,7 @@
           bEntry ? bEntry.eqRGB : this.blend.eqRGB,
           bEntry ? bEntry.eqAlpha : this.blend.eqAlpha,
           bEntry ? bEntry.color : this.blend.color,
-          secondary ? secondary[L] : null
+          src1
         );
         r = this.blendOut[0];
         g2 = this.blendOut[1];
@@ -2931,11 +2970,11 @@
       const ddx = vi.ddx;
       const ddy = vi.ddy;
       if (ddx && ddy) {
-        const xb = (pixel ^ 1) * quadStride + offset;
-        const yb = (pixel ^ 2) * quadStride + offset;
+        const xb = quadStride + offset;
+        const yb = 2 * quadStride + offset;
         for (let j = 0; j < n; j++) {
-          ddx[j] = quadV[xb + j] - quadV[base + offset + j];
-          ddy[j] = quadV[yb + j] - quadV[base + offset + j];
+          ddx[j] = quadV[xb + j] - quadV[offset + j];
+          ddy[j] = quadV[yb + j] - quadV[offset + j];
         }
       }
       offset += n;
@@ -3985,20 +4024,24 @@
           sy = img.height;
           sz = 0;
         }
-        rhoX = Math.abs(dx[0]) * sx;
-        const dyx = Math.abs(dx[1]) * sy;
-        if (dyx > rhoX) rhoX = dyx;
+        rhoX = dx[0] * sx;
+        rhoX = rhoX * rhoX;
+        const dyx = dx[1] * sy;
+        rhoX += dyx * dyx;
         if (sz > 0 && dx.length > 2) {
-          const dzx = Math.abs(dx[2]) * sz;
-          if (dzx > rhoX) rhoX = dzx;
+          const dzx = dx[2] * sz;
+          rhoX += dzx * dzx;
         }
-        rhoY = Math.abs(dy[0]) * sx;
-        const dyy = Math.abs(dy[1]) * sy;
-        if (dyy > rhoY) rhoY = dyy;
+        rhoX = Math.sqrt(rhoX);
+        rhoY = dy[0] * sx;
+        rhoY = rhoY * rhoY;
+        const dyy = dy[1] * sy;
+        rhoY += dyy * dyy;
         if (sz > 0 && dy.length > 2) {
-          const dzy = Math.abs(dy[2]) * sz;
-          if (dzy > rhoY) rhoY = dzy;
+          const dzy = dy[2] * sz;
+          rhoY += dzy * dzy;
         }
+        rhoY = Math.sqrt(rhoY);
       }
     }
     if (rhoX === 0 && rhoY === 0) return false;
@@ -4031,20 +4074,24 @@
           sy = img.height;
           sz = 0;
         }
-        rhoX = Math.abs(dx[0]) * sx;
-        const dyx = Math.abs(dx[1]) * sy;
-        if (dyx > rhoX) rhoX = dyx;
+        rhoX = dx[0] * sx;
+        rhoX = rhoX * rhoX;
+        const dyx = dx[1] * sy;
+        rhoX += dyx * dyx;
         if (sz > 0 && dx.length > 2) {
-          const dzx = Math.abs(dx[2]) * sz;
-          if (dzx > rhoX) rhoX = dzx;
+          const dzx = dx[2] * sz;
+          rhoX += dzx * dzx;
         }
-        rhoY = Math.abs(dy[0]) * sx;
-        const dyy = Math.abs(dy[1]) * sy;
-        if (dyy > rhoY) rhoY = dyy;
+        rhoX = Math.sqrt(rhoX);
+        rhoY = dy[0] * sx;
+        rhoY = rhoY * rhoY;
+        const dyy = dy[1] * sy;
+        rhoY += dyy * dyy;
         if (sz > 0 && dy.length > 2) {
-          const dzy = Math.abs(dy[2]) * sz;
-          if (dzy > rhoY) rhoY = dzy;
+          const dzy = dy[2] * sz;
+          rhoY += dzy * dzy;
         }
+        rhoY = Math.sqrt(rhoY);
       }
     }
     let rho = rhoX > rhoY ? rhoX : rhoY;
@@ -4293,8 +4340,8 @@
     const dsdy = (dy[sNdx] * M - sc * dmady) * inv;
     const dtdy = (dy[tNdx] * M - tc * dmady) * inv;
     const size = img.width;
-    rho.x = Math.max(Math.abs(dsdx), Math.abs(dtdx)) * size;
-    rho.y = Math.max(Math.abs(dsdy), Math.abs(dtdy)) * size;
+    rho.x = Math.sqrt(dsdx * dsdx + dtdx * dtdx) * size;
+    rho.y = Math.sqrt(dsdy * dsdy + dtdy * dtdy) * size;
     return true;
   }
   function inverseFace(face, sc, tc, dst) {
@@ -5828,6 +5875,372 @@
     return new NodeCanvasSurface();
   }
 
+  // src/present/png.ts
+  var PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10];
+  var MAX_PIXELS = 16777216;
+  function readU32BE(b, off) {
+    return (b[off] << 24 | b[off + 1] << 16 | b[off + 2] << 8 | b[off + 3]) >>> 0;
+  }
+  function concatBytes(parts) {
+    let total = 0;
+    for (const p of parts) total += p.length;
+    const out = new Uint8Array(total);
+    let o = 0;
+    for (const p of parts) {
+      out.set(p, o);
+      o += p.length;
+    }
+    return out;
+  }
+  var BitReader = class {
+    constructor(bytes) {
+      __publicField(this, "bytes");
+      __publicField(this, "pos", 0);
+      __publicField(this, "bitBuf", 0);
+      __publicField(this, "bitCnt", 0);
+      this.bytes = bytes;
+    }
+    /** Reads `n` bits (n ≤ 16), LSB-first. */
+    read(n) {
+      while (this.bitCnt < n) {
+        if (this.pos >= this.bytes.length) throw new Error("inflate: unexpected end of stream");
+        this.bitBuf |= this.bytes[this.pos++] << this.bitCnt;
+        this.bitCnt += 8;
+      }
+      const v2 = this.bitBuf & (1 << n) - 1;
+      this.bitBuf >>>= n;
+      this.bitCnt -= n;
+      return v2;
+    }
+    /** Discards remaining bits in the current byte (stored-block alignment). */
+    alignByte() {
+      this.bitBuf = 0;
+      this.bitCnt = 0;
+    }
+  };
+  function buildHuffmanTree(lengths, count) {
+    const blCount = new Int32Array(16);
+    for (let i = 0; i < count; i++) {
+      const l = lengths[i];
+      if (l > 0) blCount[l]++;
+    }
+    let code = 0;
+    const nextCode = new Int32Array(16);
+    for (let bits = 1; bits < 16; bits++) {
+      code = code + blCount[bits - 1] << 1;
+      nextCode[bits] = code;
+    }
+    const nodes = [[-1, -1, -1]];
+    for (let sym = 0; sym < count; sym++) {
+      const len = lengths[sym];
+      if (len === 0) continue;
+      let c = nextCode[len]++;
+      let node = 0;
+      for (let b = len - 1; b >= 0; b--) {
+        const bit = c >> b & 1;
+        let child = nodes[node][bit];
+        if (child === -1) {
+          child = nodes.length;
+          nodes.push([-1, -1, -1]);
+          nodes[node][bit] = child;
+        }
+        node = child;
+      }
+      nodes[node][2] = sym;
+    }
+    return nodes;
+  }
+  function decodeSymbol(nodes, br) {
+    let node = 0;
+    for (; ; ) {
+      const child = nodes[node][br.read(1)];
+      if (child === -1) throw new Error("inflate: invalid Huffman code");
+      node = child;
+      if (nodes[node][2] !== -1) return nodes[node][2];
+    }
+  }
+  var LEN_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+  var LEN_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+  var DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+  var DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+  var CLEN_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+  var OutBuffer = class {
+    constructor() {
+      __publicField(this, "buf", new Uint8Array(1 << 16));
+      __publicField(this, "len", 0);
+    }
+    ensure(n) {
+      if (this.len + n > this.buf.length) {
+        const nb = new Uint8Array(Math.max(this.buf.length * 2, this.len + n));
+        nb.set(this.buf.subarray(0, this.len));
+        this.buf = nb;
+      }
+    }
+    byte(b) {
+      this.ensure(1);
+      this.buf[this.len++] = b;
+    }
+    /** LZ77 match copy; overlapping (dist < n) copies work byte-by-byte forward. */
+    copy(dist, n) {
+      if (dist <= 0 || dist > this.len) throw new Error("inflate: distance too far back");
+      this.ensure(n);
+      const start = this.len - dist;
+      for (let i = 0; i < n; i++) this.buf[this.len + i] = this.buf[start + i];
+      this.len += n;
+    }
+    result() {
+      return this.buf.subarray(0, this.len);
+    }
+  };
+  function decodeBlock(br, out) {
+    const litLengths = new Uint8Array(288);
+    const distLengths = new Uint8Array(30);
+    const btype = br.read(2);
+    if (btype === 0) {
+      br.alignByte();
+      const len = br.read(16);
+      br.read(16);
+      for (let i = 0; i < len; i++) out.byte(br.read(8));
+      return;
+    }
+    if (btype === 1) {
+      for (let i = 0; i < 144; i++) litLengths[i] = 8;
+      for (let i = 144; i < 256; i++) litLengths[i] = 9;
+      for (let i = 256; i < 280; i++) litLengths[i] = 7;
+      for (let i = 280; i < 288; i++) litLengths[i] = 8;
+      distLengths.fill(5);
+    } else if (btype === 2) {
+      const hlit = br.read(5) + 257;
+      const hdist = br.read(5) + 1;
+      const hclen = br.read(4) + 4;
+      const clLengths = new Uint8Array(19);
+      for (let i = 0; i < hclen; i++) clLengths[CLEN_ORDER[i]] = br.read(3);
+      const clTree = buildHuffmanTree(clLengths, 19);
+      const all = new Uint8Array(hlit + hdist);
+      let k = 0;
+      while (k < all.length) {
+        const sym = decodeSymbol(clTree, br);
+        if (sym < 16) {
+          all[k++] = sym;
+        } else if (sym === 16) {
+          if (k === 0) throw new Error("inflate: repeat with no previous length");
+          const rep = 3 + br.read(2);
+          const prev = all[k - 1];
+          for (let i = 0; i < rep && k < all.length; i++) all[k++] = prev;
+        } else if (sym === 17) {
+          const rep = 3 + br.read(3);
+          k += rep;
+        } else {
+          const rep = 11 + br.read(7);
+          k += rep;
+        }
+      }
+      if (k !== all.length) throw new Error("inflate: bad dynamic header");
+      litLengths.set(all.subarray(0, hlit));
+      distLengths.set(all.subarray(hlit, hlit + hdist));
+    } else {
+      throw new Error("inflate: invalid block type");
+    }
+    const litTree = buildHuffmanTree(litLengths, 288);
+    const distTree = buildHuffmanTree(distLengths, 30);
+    for (; ; ) {
+      const sym = decodeSymbol(litTree, br);
+      if (sym < 256) {
+        out.byte(sym);
+      } else if (sym === 256) {
+        return;
+      } else {
+        if (sym > 285) throw new Error("inflate: invalid length code");
+        const li = sym - 257;
+        const length = LEN_BASE[li] + br.read(LEN_EXTRA[li]);
+        const dsym = decodeSymbol(distTree, br);
+        if (dsym > 29) throw new Error("inflate: invalid distance code");
+        const dist = DIST_BASE[dsym] + br.read(DIST_EXTRA[dsym]);
+        out.copy(dist, length);
+      }
+    }
+  }
+  function zlibInflate(data) {
+    if (data.length < 6) throw new Error("zlib: stream too short");
+    const cmf = data[0];
+    const flg = data[1];
+    if ((cmf & 15) !== 8) throw new Error("zlib: unknown compression method");
+    if ((cmf << 8 | flg) % 31 !== 0) throw new Error("zlib: bad header check");
+    if ((flg & 32) !== 0) throw new Error("zlib: preset dictionary unsupported");
+    const br = new BitReader(data.subarray(2, data.length - 4));
+    const out = new OutBuffer();
+    for (; ; ) {
+      const bfinal = br.read(1);
+      decodeBlock(br, out);
+      if (bfinal) break;
+    }
+    const adler = readU32BE(data, data.length - 4);
+    let s1 = 1;
+    let s2 = 0;
+    const raw = out.result();
+    for (let i = 0; i < raw.length; i++) {
+      s1 = (s1 + raw[i]) % 65521;
+      s2 = (s2 + s1) % 65521;
+    }
+    if ((s2 << 16 | s1) >>> 0 !== adler) throw new Error("zlib: adler32 mismatch");
+    return raw;
+  }
+  function to8(v16, sbit) {
+    const sb = sbit >= 1 && sbit <= 16 ? sbit : 16;
+    if (sb <= 10) {
+      const inBand = v16 >> 16 - sb;
+      if (inBand <= 255) return inBand;
+    }
+    return Math.round(v16 * 255 / 65535);
+  }
+  function decodePngBuffer(bytes) {
+    var _a;
+    try {
+      if (bytes.length < 33) return null;
+      for (let i = 0; i < 8; i++) {
+        if (bytes[i] !== PNG_SIGNATURE[i]) return null;
+      }
+      let off = 8;
+      let w = 0;
+      let h = 0;
+      let bitDepth = 0;
+      let colorType = 0;
+      let interlace = 0;
+      let seenIHDR = false;
+      let seenIEND = false;
+      let sbit = null;
+      const idat = [];
+      while (off + 12 <= bytes.length && !seenIEND) {
+        const len = readU32BE(bytes, off);
+        const start = off + 8;
+        if (start + len + 4 > bytes.length) return null;
+        const type = String.fromCharCode(bytes[off + 4], bytes[off + 5], bytes[off + 6], bytes[off + 7]);
+        const data = bytes.subarray(start, start + len);
+        if (type === "IHDR") {
+          if (len < 13) return null;
+          w = readU32BE(data, 0);
+          h = readU32BE(data, 4);
+          bitDepth = data[8];
+          colorType = data[9];
+          if (data[10] !== 0 || data[11] !== 0) return null;
+          interlace = data[12];
+          seenIHDR = true;
+        } else if (type === "sBIT") {
+          sbit = new Uint8Array(data);
+        } else if (type === "IDAT") {
+          idat.push(new Uint8Array(data));
+        } else if (type === "IEND") {
+          seenIEND = true;
+        }
+        off = start + len + 4;
+      }
+      if (!seenIHDR || !seenIEND) return null;
+      if (bitDepth !== 16) return null;
+      if (interlace !== 0) return null;
+      const channels = (_a = [1, 0, 3, 1, 2, 0, 4][colorType]) != null ? _a : 0;
+      if (channels === 0) return null;
+      if (w <= 0 || h <= 0 || w * h > MAX_PIXELS) return null;
+      const raw = zlibInflate(concatBytes(idat));
+      const stride = w * channels * 2;
+      if (raw.length !== h * (stride + 1)) return null;
+      const bpp = channels * 2;
+      for (let y = 0; y < h; y++) {
+        const f = raw[y * (stride + 1)];
+        if (f > 4) return null;
+        const rowBase = y * (stride + 1) + 1;
+        const prevBase = y > 0 ? (y - 1) * (stride + 1) + 1 : -1;
+        for (let x = 0; x < stride; x++) {
+          const i = rowBase + x;
+          const a = x >= bpp ? raw[rowBase + x - bpp] : 0;
+          const b = prevBase >= 0 ? raw[prevBase + x] : 0;
+          const c = prevBase >= 0 && x >= bpp ? raw[prevBase + x - bpp] : 0;
+          let v2 = raw[i];
+          if (f === 1) {
+            v2 = v2 + a & 255;
+          } else if (f === 2) {
+            v2 = v2 + b & 255;
+          } else if (f === 3) {
+            v2 = v2 + (a + b >> 1) & 255;
+          } else if (f === 4) {
+            const p = a + b - c;
+            const pa = Math.abs(p - a);
+            const pb = Math.abs(p - b);
+            const pc = Math.abs(p - c);
+            v2 = v2 + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c) & 255;
+          }
+          raw[i] = v2;
+        }
+      }
+      const out = new Uint8ClampedArray(w * h * 4);
+      const sbR = sbit ? sbit[0] : 16;
+      const sbG = sbit ? sbit[Math.min(1, sbit.length - 1)] : 16;
+      const sbB = sbit ? sbit[Math.min(2, sbit.length - 1)] : 16;
+      const sbA = sbit ? sbit[Math.min(3, sbit.length - 1)] : 16;
+      for (let y = 0; y < h; y++) {
+        const rowBase = y * (stride + 1) + 1;
+        const outRow = y * w * 4;
+        for (let x = 0; x < w; x++) {
+          const o = rowBase + x * bpp;
+          let r;
+          let g2;
+          let b;
+          let a = 255;
+          if (colorType === 0) {
+            r = g2 = b = to8(raw[o] << 8 | raw[o + 1], sbR);
+          } else if (colorType === 2) {
+            r = to8(raw[o] << 8 | raw[o + 1], sbR);
+            g2 = to8(raw[o + 2] << 8 | raw[o + 3], sbG);
+            b = to8(raw[o + 4] << 8 | raw[o + 5], sbB);
+          } else if (colorType === 4) {
+            r = g2 = b = to8(raw[o] << 8 | raw[o + 1], sbR);
+            a = to8(raw[o + 2] << 8 | raw[o + 3], sbA);
+          } else {
+            r = to8(raw[o] << 8 | raw[o + 1], sbR);
+            g2 = to8(raw[o + 2] << 8 | raw[o + 3], sbG);
+            b = to8(raw[o + 4] << 8 | raw[o + 5], sbB);
+            a = to8(raw[o + 6] << 8 | raw[o + 7], sbA);
+          }
+          const q = outRow + x * 4;
+          out[q] = r;
+          out[q + 1] = g2;
+          out[q + 2] = b;
+          out[q + 3] = a;
+        }
+      }
+      return { ok: true, image: { width: w, height: h, data: out } };
+    } catch {
+      return null;
+    }
+  }
+  function decodePngFromElement(source, src) {
+    if (!/\.png($|[?#])/i.test(src) && !/^data:image\/png/i.test(src)) return null;
+    if (typeof XMLHttpRequest === "undefined") return null;
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", src, false);
+      try {
+        xhr.responseType = "arraybuffer";
+      } catch {
+        xhr.overrideMimeType("text/plain; charset=x-user-defined");
+      }
+      xhr.send(null);
+      if (xhr.status !== 200 && xhr.status !== 0) return null;
+      const resp = xhr.response;
+      let bytes;
+      if (resp instanceof ArrayBuffer) {
+        bytes = new Uint8Array(resp);
+      } else if (typeof resp === "string") {
+        bytes = new Uint8Array(resp.length);
+        for (let i = 0; i < resp.length; i++) bytes[i] = resp.charCodeAt(i) & 255;
+      } else {
+        return null;
+      }
+      return decodePngBuffer(bytes);
+    } catch {
+      return null;
+    }
+  }
+
   // src/present/image.ts
   var scratchCanvas = null;
   var scratchCtx = null;
@@ -5973,6 +6386,10 @@
           return { ok: false, reason: "SVG image has no width/height properties" };
         }
         return decodeViaNativeWebGLWithFallback(source, w, h);
+      }
+      const pngRes = decodePngFromElement(source, src);
+      if (pngRes) {
+        return pngRes;
       }
       return decodeViaNativeWebGLWithFallback(source, v2.naturalWidth, v2.naturalHeight);
     }
@@ -6415,6 +6832,12 @@
   }
 
   // src/gl/teximage.ts
+  function throwSecurityError(reason) {
+    if (typeof DOMException !== "undefined") {
+      throw new DOMException(reason, "SecurityError");
+    }
+    throw Object.assign(new Error(reason), { name: "SecurityError" });
+  }
   var clamp01 = (v2) => v2 < 0 ? 0 : v2 > 1 ? 1 : v2;
   var roundClamp = (v2) => Math.round(clamp01(v2) * 255);
   function normUnpack(storage, comps, mode) {
@@ -7382,7 +7805,7 @@
       imbReadbackBusy = false;
     }
   }
-  function copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset, explicitDims) {
+  function copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset, explicitDims, preDecoded) {
     const img = texture._image;
     const levelData = img.levels[level];
     if (!levelData) return;
@@ -7394,7 +7817,7 @@
     if (typeof pixels !== "number" && !ArrayBuffer.isView(pixels) && source !== void 0) {
       if (width <= 0 || height <= 0) return;
       try {
-        const res = decodeImageSource(source);
+        const res = preDecoded !== null && preDecoded !== void 0 ? { ok: true, image: preDecoded } : decodeImageSource(source);
         if (res && res.ok && res.image) {
           const im = res.image;
           const isImageBitmap = typeof source.close === "function";
@@ -7452,10 +7875,7 @@
           return;
         }
         if (res && !res.ok && res.reason && /security|taint|insecure/i.test(res.reason)) {
-          if (typeof DOMException !== "undefined") {
-            throw new DOMException(res.reason, "SecurityError");
-          }
-          throw Object.assign(new Error(res.reason), { name: "SecurityError" });
+          throwSecurityError(res.reason);
         }
       } catch (e) {
         if (e && typeof e === "object" && e.name === "SecurityError") throw e;
@@ -7503,7 +7923,7 @@
       copyRows(p, view, levelData.width, xoffset, yoffset, width, height, srcRow0, 0);
     }
   }
-  function uploadTexImage(ctx, texture, target, level, internalformat, width, height, depth, border, format, type, pixels, source, explicitDims = false) {
+  function uploadTexImage(ctx, texture, target, level, internalformat, width, height, depth, border, format, type, pixels, source, explicitDims = false, preDecoded) {
     var _a;
     void border;
     if (texture._immutable) return;
@@ -7539,17 +7959,17 @@
       inferVirtualSize(img, level, width, height, depth);
     }
     recordLevelOrigin(texture, level, format, type);
-    copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, 0, 0, 0, explicitDims);
+    copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, 0, 0, 0, explicitDims, preDecoded);
     updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
   }
-  function uploadTexSubImage(ctx, texture, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels, source, explicitDims = false) {
+  function uploadTexSubImage(ctx, texture, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels, source, explicitDims = false, preDecoded) {
     const img = texture._image;
     if (!img) return;
     const levelData = img.levels[level];
     if (!levelData) return;
     const spec = specForImage(img);
     if (!spec) return;
-    copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset, explicitDims);
+    copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset, explicitDims, preDecoded);
     updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
   }
   function allocCompressedLevel(w, h, d, isCube, bpb) {
@@ -18678,8 +19098,7 @@
         const base = hasPre ? { v: s, pre: p.pre } : { v: s };
         out.push(d ? { ...base, dx: d[0], dy: d[1] } : base);
       } else {
-        const v2 = hasPre ? `(${p.pre.join(", ")}, ${s})` : s;
-        out.push({ v: v2 });
+        out.push(hasPre ? { v: s, pre: p.pre } : { v: s });
       }
     }
     return out;
@@ -19297,6 +19716,52 @@
       return t;
     });
   }
+  function snapshotOperands(vals, env, pre) {
+    const seen = /* @__PURE__ */ new Set();
+    return vals.map((v2) => {
+      const t = env.allocTemp();
+      if (v2.pre && v2.pre.length > 0 && !seen.has(v2.pre)) {
+        seen.add(v2.pre);
+        pre.push(`${t} = ${foldPre(v2.pre, v2.v)}`);
+      } else {
+        pre.push(`${t} = ${v2.v}`);
+      }
+      if (v2.dx !== void 0 && v2.dy !== void 0) {
+        const tx = env.allocTemp();
+        const ty = env.allocTemp();
+        pre.push(`${tx} = ${v2.dx}`, `${ty} = ${v2.dy}`);
+        return { v: t, dx: tx, dy: ty };
+      }
+      return { v: t };
+    });
+  }
+  function rhsAliasesEarlierTarget(targets, dualTargets, vals, c) {
+    var _a, _b;
+    if (c === 0) return false;
+    const v2 = vals[c];
+    const text = `${v2.v}\0${(_a = v2.dx) != null ? _a : ""}\0${(_b = v2.dy) != null ? _b : ""}`;
+    for (let j = 0; j < c; j++) {
+      if (targetSlotInText(text, targets[j])) return true;
+      const dj = dualTargets && dualTargets[j];
+      if (dj && (targetSlotInText(text, dj[0]) || targetSlotInText(text, dj[1]))) return true;
+    }
+    return false;
+  }
+  function targetSlotInText(text, t) {
+    return /^[A-Za-z_$][\w$]*$/.test(t) ? new RegExp(`\\b${t}\\b`).test(text) : text.includes(t);
+  }
+  function guardRhsAliasing(lv, conv, env) {
+    if (conv.length <= 1) return conv;
+    for (let c = 1; c < conv.length; c++) {
+      if (rhsAliasesEarlierTarget(lv.targets, lv.dualTargets, conv, c)) {
+        const pre = [];
+        const snap = snapshotOperands(conv, env, pre);
+        if (pre.length > 0) snap[0] = { ...snap[0], pre };
+        return snap;
+      }
+    }
+    return conv;
+  }
   function astHasSideEffects(e) {
     switch (e.kind) {
       case "assign":
@@ -19673,14 +20138,18 @@
         const matPre = [];
         const aT = !dual ? materializeOperands(av2, env, matPre) : null;
         const bT = !dual ? materializeOperands(bv2, env, matPre) : null;
+        const aD = dual ? snapshotOperands(av2, env, matPre) : null;
+        const bD = dual ? snapshotOperands(bv2, env, matPre) : null;
         for (let c = 0; c < rt.cols; c++) {
           for (let r = 0; r < aRows; r++) {
             if (dual) {
               const terms = [];
               for (let s = 0; s < aCols; s++) {
-                terms.push(arithDual("*", av2[s * aRows + r], bv2[c * bRows + s], env));
+                terms.push(arithDual("*", aD[s * aRows + r], bD[c * bRows + s], env));
               }
-              out2.push(terms.length === 1 ? terms[0] : foldAdd(terms, env));
+              const res = terms.length === 1 ? terms[0] : foldAdd(terms, env);
+              if (out2.length === 0 && matPre.length > 0) res.pre = matPre;
+              out2.push(res);
             } else {
               const parts = [];
               for (let s = 0; s < aCols; s++) {
@@ -19703,13 +20172,17 @@
         const matPre = [];
         const aT = !dual ? materializeOperands(av2, env, matPre) : null;
         const bT = !dual ? materializeOperands(bv2, env, matPre) : null;
+        const aD = dual ? snapshotOperands(av2, env, matPre) : null;
+        const bD = dual ? snapshotOperands(bv2, env, matPre) : null;
         for (let r = 0; r < R2; r++) {
           if (dual) {
             const terms = [];
             for (let c = 0; c < C3; c++) {
-              terms.push(arithDual("*", av2[c * R2 + r], bv2[c], env));
+              terms.push(arithDual("*", aD[c * R2 + r], bD[c], env));
             }
-            out2.push(terms.length === 1 ? terms[0] : foldAdd(terms, env));
+            const res = terms.length === 1 ? terms[0] : foldAdd(terms, env);
+            if (out2.length === 0 && matPre.length > 0) res.pre = matPre;
+            out2.push(res);
           } else {
             const parts = [];
             for (let c = 0; c < C3; c++) {
@@ -19731,13 +20204,17 @@
         const matPre = [];
         const aT = !dual ? materializeOperands(av2, env, matPre) : null;
         const bT = !dual ? materializeOperands(bv2, env, matPre) : null;
+        const aD = dual ? snapshotOperands(av2, env, matPre) : null;
+        const bD = dual ? snapshotOperands(bv2, env, matPre) : null;
         for (let c = 0; c < C3; c++) {
           if (dual) {
             const terms = [];
             for (let r = 0; r < R2; r++) {
-              terms.push(arithDual("*", av2[r], bv2[c * R2 + r], env));
+              terms.push(arithDual("*", aD[r], bD[c * R2 + r], env));
             }
-            out2.push(terms.length === 1 ? terms[0] : foldAdd(terms, env));
+            const res = terms.length === 1 ? terms[0] : foldAdd(terms, env);
+            if (out2.length === 0 && matPre.length > 0) res.pre = matPre;
+            out2.push(res);
           } else {
             const parts = [];
             for (let r = 0; r < R2; r++) {
@@ -19931,17 +20408,18 @@
         }
       }
       if (env.dual && lv.dualTargets) {
+        const convS3 = guardRhsAliasing(lv, conv2, env);
         const pre = [];
         if (preludes.length > 0) pre.push(...preludes);
         if (broadcastPre.length > 0) pre.push(...broadcastPre);
         for (let c = 0; c < n; c++) {
-          const cp = conv2[c].pre;
-          const rv = cp && cp.length ? foldPre(cp, conv2[c].v) : conv2[c].v;
+          const cp = convS3[c].pre;
+          const rv = cp && cp.length ? foldPre(cp, convS3[c].v) : convS3[c].v;
           const bitKind = lv.bits !== void 0 ? lv.bits[c] : false;
           if (bitKind) {
             pre.push(packVaryingWrite(lv.targets[c], rv, bitKind === "int"));
           } else {
-            pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv2[c], v: rv }));
+            pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...convS3[c], v: rv }));
           }
         }
         if (post) pre.push(...post.split(", "));
@@ -19950,17 +20428,26 @@
           if (bitKind) {
             out.push({ v: unpackVaryingCell(lv.targets[c], bitKind === "int"), dx: "0", dy: "0", pre });
           } else {
-            out.push({ v: lv.targets[c], dx: (_a = conv2[c].dx) != null ? _a : "0", dy: (_b = conv2[c].dy) != null ? _b : "0", pre });
+            out.push({ v: lv.targets[c], dx: (_a = convS3[c].dx) != null ? _a : "0", dy: (_b = convS3[c].dy) != null ? _b : "0", pre });
           }
         }
         return out;
       }
-      const comp0Pre2 = broadcastPre.length > 0 ? [...preludes, ...broadcastPre] : preludes;
+      const comp0Pre2 = [...preludes];
+      if (broadcastPre.length > 0) comp0Pre2.push(...broadcastPre);
+      const convS2 = guardRhsAliasing(lv, conv2, env);
+      const seenRhs2 = /* @__PURE__ */ new Set();
       for (let c = 0; c < n; c++) {
-        const cp = conv2[c].pre;
-        const rv = cp && cp.length ? foldPre(cp, conv2[c].v) : conv2[c].v;
+        const cp = convS2[c].pre;
+        if (cp && cp.length > 0 && !seenRhs2.has(cp)) {
+          seenRhs2.add(cp);
+          comp0Pre2.push(...cp);
+        }
+      }
+      for (let c = 0; c < n; c++) {
+        const rv = convS2[c].v;
         const bitKind = lv.bits !== void 0 ? lv.bits[c] : false;
-        let v2 = bitKind ? packVaryingWrite(lv.targets[c], rv, bitKind === "int") : env.dual && lv.dualTargets ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv2[c], v: rv }) : `(${lv.targets[c]} = ${rv})`;
+        let v2 = bitKind ? packVaryingWrite(lv.targets[c], rv, bitKind === "int") : env.dual && lv.dualTargets ? env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...convS2[c], v: rv }) : `(${lv.targets[c]} = ${rv})`;
         if (post) {
           const t2 = env.allocTemp();
           v2 = `(${t2} = ${v2}, ${post}, ${t2})`;
@@ -20006,14 +20493,15 @@
       }
     }
     if (env.dual && lv.dualTargets && base === "float") {
+      const convS2 = guardRhsAliasing(lv, conv, env);
       const pre = [];
       if (preludes.length > 0) pre.push(...preludes);
       if (broadcastPre.length > 0) pre.push(...broadcastPre);
       for (let c = 0; c < n; c++) {
-        const cp = conv[c].pre;
-        const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
+        const cp = convS2[c].pre;
+        const rv = cp && cp.length ? foldPre(cp, convS2[c].v) : convS2[c].v;
         if (lv.dualTargets[c]) {
-          pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }, cop));
+          pre.push(env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...convS2[c], v: rv }, cop));
         } else {
           pre.push(`(${lv.targets[c]} = ${rv})`);
         }
@@ -20021,20 +20509,29 @@
       if (post) pre.push(...post.split(", "));
       for (let c = 0; c < n; c++) {
         const d = lv.dualTargets[c];
-        out.push({ v: lv.targets[c], dx: d ? d[0] : (_c = conv[c].dx) != null ? _c : "0", dy: d ? d[1] : (_d = conv[c].dy) != null ? _d : "0", pre });
+        out.push({ v: lv.targets[c], dx: d ? d[0] : (_c = convS2[c].dx) != null ? _c : "0", dy: d ? d[1] : (_d = convS2[c].dy) != null ? _d : "0", pre });
       }
       return out;
     }
-    const comp0Pre = broadcastPre.length > 0 ? [...preludes, ...broadcastPre] : preludes;
+    const comp0Pre = [...preludes];
+    if (broadcastPre.length > 0) comp0Pre.push(...broadcastPre);
+    const convS = guardRhsAliasing(lv, conv, env);
+    const seenRhs = /* @__PURE__ */ new Set();
     for (let c = 0; c < n; c++) {
-      const cp = conv[c].pre;
-      const rv = cp && cp.length ? foldPre(cp, conv[c].v) : conv[c].v;
+      const cp = convS[c].pre;
+      if (cp && cp.length > 0 && !seenRhs.has(cp)) {
+        seenRhs.add(cp);
+        comp0Pre.push(...cp);
+      }
+    }
+    for (let c = 0; c < n; c++) {
+      const rv = convS[c].v;
       const bitKind = lv.bits !== void 0 ? lv.bits[c] : false;
       let v2;
       if (bitKind) {
         v2 = packVaryingCompound(cop, lv.targets[c], rv, bitKind === "int");
       } else if (env.dual && lv.dualTargets && base === "float" && lv.dualTargets[c]) {
-        v2 = env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...conv[c], v: rv }, cop);
+        v2 = env.dualWrite(lv.targets[c], lv.dualTargets[c], { ...convS[c], v: rv }, cop);
       } else {
         v2 = compoundOp(cop, lv.targets[c], rv, base);
       }
@@ -20521,16 +21018,17 @@
       for (const w of mm.writes) out.push(`${w};`);
     } else {
       const conv = convertPreserving(rawRhs, value.resolvedType, lv.type);
-      emitPres(out, conv);
+      const convS = guardRhsAliasing(lv, conv, env);
+      emitPres(out, convS);
       if (lv.prelude) out.push(lv.prelude);
       if (op === "=") {
         for (let c = 0; c < lv.targets.length; c++) {
           if (lv.bits && lv.bits[c]) {
-            out.push(`${lv.targets[c]} = R.u2f(${conv[c].v});`);
+            out.push(`${lv.targets[c]} = R.u2f(${convS[c].v});`);
           } else if (env.dual && lv.dualTargets && lv.dualTargets[c]) {
-            out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c])};`);
+            out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], convS[c])};`);
           } else {
-            out.push(`${lv.targets[c]} = ${conv[c].v};`);
+            out.push(`${lv.targets[c]} = ${convS[c].v};`);
           }
         }
       } else {
@@ -20542,11 +21040,11 @@
         for (let c = 0; c < lv.targets.length; c++) {
           const bitKind = lv.bits !== void 0 ? lv.bits[c] : false;
           if (bitKind) {
-            out.push(`${packVaryingCompound(cop, lv.targets[c], conv[c].v, bitKind === "int")};`);
+            out.push(`${packVaryingCompound(cop, lv.targets[c], convS[c].v, bitKind === "int")};`);
           } else if (env.dual && lv.dualTargets && base === "float" && lv.dualTargets[c]) {
-            out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], conv[c], cop)};`);
+            out.push(`${env.dualWrite(lv.targets[c], lv.dualTargets[c], convS[c], cop)};`);
           } else {
-            out.push(`${compoundOpExpr(cop, lv.targets[c], conv[c].v, base)};`);
+            out.push(`${compoundOpExpr(cop, lv.targets[c], convS[c].v, base)};`);
           }
         }
       }
@@ -20610,9 +21108,10 @@
         for (const p of mm.pre) parts.push(p);
         for (const w of mm.writes) parts.push(w);
       } else {
-        const conv = convertPreserving(rawRhs, e.value.resolvedType, lv.type);
+        const conv = dedupeSharedPre(convertPreserving(rawRhs, e.value.resolvedType, lv.type));
+        const convS = guardRhsAliasing(lv, conv, env);
         for (let c = 0; c < lv.targets.length; c++) {
-          const cv = conv[c];
+          const cv = convS[c];
           const rv = cv.pre && cv.pre.length > 0 ? foldPre(cv.pre, cv.v) : cv.v;
           if (e.op === "=") {
             parts.push(
@@ -25352,7 +25851,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       if (!dfb) return;
       clearDefaultFramebufferForPreserve(ctx, dfb);
       try {
-        if (canvas.isConnected !== void 0) {
+        if (ctx._version !== 2 && canvas.isConnected !== void 0) {
           (_a = ctx._presentSurface) == null ? void 0 : _a.present();
         }
       } catch {
@@ -26234,6 +26733,7 @@ ${inner.map((l) => "  " + l).join("\n")}
       uniforms: floatStore,
       uniformBlocks
     };
+    dc.sampleAlphaToCoverage = s.caps.SAMPLE_ALPHA_TO_COVERAGE;
     dc.blendPerDrawBuffer = buildBlendPerDrawBuffer(ctx);
     return dc;
   }
@@ -28112,11 +28612,7 @@ ${inner.map((l) => "  " + l).join("\n")}
             gl._errors.push(C1.INVALID_OPERATION);
             return;
           }
-          rb._samples = smp2;
-          rb._internalformat = internalformat >>> 0;
-          rb._width = w;
-          rb._height = h;
-          rb._surface = null;
+          gl.renderbufferStorageMultisample(target, smp2, internalformat, w, h);
         }
       }
     );
@@ -32424,7 +32920,16 @@ ${inner.map((l) => "  " + l).join("\n")}
     }
     return true;
   }
+  function preDecodeSource(source) {
+    const res = decodeImageSource(source);
+    if (res && res.ok && res.image) return res.image;
+    if (res && !res.ok && res.reason && /security|taint|insecure/i.test(res.reason)) {
+      throwSecurityError(res.reason);
+    }
+    return null;
+  }
   function texImage2DDOM(ctx, target, level, internalformat, format, type, source) {
+    const preDecoded = preDecodeSource(source);
     if (source === null || source === void 0) {
       ctx._errors.push(C1.INVALID_VALUE);
       return;
@@ -32456,8 +32961,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       type,
       source,
       source,
-      false
+      false,
       // inferred dims (6-arg form): scale the source to the element size
+      preDecoded
     );
   }
   function w2ValidateDomFormatType(ctx, internalformat, format, type) {
@@ -32477,6 +32983,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     return true;
   }
   function texImage2DDOMWithDims(ctx, target, level, internalformat, width, height, border, format, type, source) {
+    const preDecoded = preDecodeSource(source);
     if (!domUploadPboGuard(ctx)) return;
     width = width | 0;
     height = height | 0;
@@ -32498,8 +33005,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       type,
       source,
       source,
-      true
+      true,
       // explicit dims: width/height select a source sub-rectangle (no scaling)
+      preDecoded
     );
   }
   var W2_DOM = {
@@ -32592,6 +33100,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     uploadTexImage(ctx, tex2, target, level, internalformat, width, height, depth, border, format, type, pixels);
   }
   function texImage3DDOMWithDims(ctx, target, level, internalformat, width, height, depth, border, format, type, source) {
+    const preDecoded = preDecodeSource(source);
     if (!domUploadPboGuard(ctx)) return;
     level = level | 0;
     width = width | 0;
@@ -32619,8 +33128,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       type,
       source,
       source,
-      true
+      true,
       // explicit dims: width/height select a source sub-rectangle (no scaling)
+      preDecoded
     );
   }
   function commonTexSubValidation(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, is3D) {
@@ -32667,6 +33177,7 @@ ${inner.map((l) => "  " + l).join("\n")}
   }
   function texSubImage2DDOM(ctx, target, level, xoffset, yoffset, format, type, source) {
     var _a;
+    const preDecoded = preDecodeSource(source);
     if (source === null || source === void 0) {
       throw new TypeError(`Argument is not of type 'TexImageSource'`);
     }
@@ -32730,11 +33241,13 @@ ${inner.map((l) => "  " + l).join("\n")}
       type,
       source,
       source,
-      false
+      false,
       // inferred dims (7-arg form): scale the source to the element size
+      preDecoded
     );
   }
   function texSubImage2DDOMWithDims(ctx, target, level, xoffset, yoffset, width, height, format, type, source) {
+    const preDecoded = preDecodeSource(source);
     if (!domUploadPboGuard(ctx)) return;
     if (source === null || source === void 0) {
       throw new TypeError(`Argument is not of type 'TexImageSource'`);
@@ -32761,8 +33274,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       type,
       source,
       source,
-      true
+      true,
       // explicit dims: width/height select a source sub-rectangle (no scaling)
+      preDecoded
     );
   }
   function texSubImage2DBuffer(ctx, target, level, xoffset, yoffset, width, height, format, type, pixels) {
@@ -32825,6 +33339,7 @@ ${inner.map((l) => "  " + l).join("\n")}
     ctx._errors.push(C1.INVALID_OPERATION);
   }
   function texSubImage3DDOMWithDims(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, source) {
+    const preDecoded = preDecodeSource(source);
     if (!domUploadPboGuard(ctx)) return;
     if (source === null || source === void 0) {
       throw new TypeError(`Argument is not of type 'TexImageSource'`);
@@ -32853,8 +33368,9 @@ ${inner.map((l) => "  " + l).join("\n")}
       type,
       source,
       source,
-      true
+      true,
       // explicit dims: width/height select a source sub-rectangle (no scaling)
+      preDecoded
     );
   }
   function texSubImage3DBuffer(ctx, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels) {
