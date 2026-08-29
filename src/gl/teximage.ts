@@ -31,10 +31,22 @@ import type { GLenum, GLint, GLsizei, TexImageSource } from './types';
 import { C, CExt } from './constants';
 import { getFormat, halfToFloat, type PixelFormatInfo, type StorageKind } from '../raster';
 import { resolveReadSurface } from './framebuffer-util';
-import { decodeImageSource } from '../present';
+import { decodeImageSource, type DecodedImage } from '../present';
 import type { Surface } from '../raster';
 
 export type TexImageSourceArg = ArrayBufferView | number | TexImageSource | null;
+
+/**
+ * Throw a SecurityError DOMException with `reason` as the message (the WebGL
+ * origin-clean rule requires a SecurityError for cross-origin/tainted
+ * TexImageSource uploads). Node-safe fallback when DOMException is absent.
+ */
+export function throwSecurityError(reason: string): never {
+  if (typeof DOMException !== 'undefined') {
+    throw new DOMException(reason, 'SecurityError');
+  }
+  throw Object.assign(new Error(reason), { name: 'SecurityError' });
+}
 
 // ---------------------------------------------------------------------------
 // Local storage-format registry (per-texel decode/encode on the SURFACE
@@ -1225,6 +1237,7 @@ function copyPixelsIntoLevel(
   yoffset: number,
   zoffset: number,
   explicitDims: boolean,
+  preDecoded?: DecodedImage | null,
 ): void {
   const img = texture._image as NonNullable<WebGLTexture['_image']>;
   const levelData = img.levels[level];
@@ -1242,7 +1255,12 @@ function copyPixelsIntoLevel(
     // when the SVG has no intrinsic dimensions): nothing to upload.
     if (width <= 0 || height <= 0) return;
     try {
-      const res = decodeImageSource(source as never) as { ok: boolean; image?: { width: number; height: number; data: Uint8ClampedArray }; reason?: string };
+      // `preDecoded` (origin-clean pre-check in api/teximage.ts) is reused when
+      // available — the source was already decoded at the API boundary.
+      const res: { ok: boolean; image?: { width: number; height: number; data: Uint8ClampedArray }; reason?: string } =
+        preDecoded !== null && preDecoded !== undefined
+          ? { ok: true, image: preDecoded }
+          : (decodeImageSource(source as never) as { ok: boolean; image?: { width: number; height: number; data: Uint8ClampedArray }; reason?: string });
       if (res && res.ok && res.image) {
         const im = res.image;
         // ImageBitmap sources: UNPACK_FLIP_Y_WEBGL is ignored per WebGL spec.
@@ -1372,10 +1390,7 @@ function copyPixelsIntoLevel(
       // origin-clean-conformance.html); other decode failures (incomplete
       // images, unsupported sources) keep the zero-filled fallback below.
       if (res && !res.ok && res.reason && /security|taint|insecure/i.test(res.reason)) {
-        if (typeof DOMException !== 'undefined') {
-          throw new DOMException(res.reason, 'SecurityError');
-        }
-        throw Object.assign(new Error(res.reason), { name: 'SecurityError' });
+        throwSecurityError(res.reason);
       }
     } catch (e) {
       // Origin-clean rule: a SecurityError (tainted source) must reach the
@@ -1460,6 +1475,12 @@ export function uploadTexImage(
    * inferred-dims forms (WebGL1 6-arg / WebGL2 6-arg) and buffer/PBO uploads.
    */
   explicitDims = false,
+  /**
+   * Decoded source image from the API-boundary origin-clean pre-check
+   * (api/teximage.ts) — reused here so DOM sources are decoded exactly once.
+   * Null/undefined → the engine decodes `source` itself (unchanged behavior).
+   */
+  preDecoded?: DecodedImage | null,
 ): void {
   void border;
   if (texture._immutable) return;
@@ -1508,7 +1529,7 @@ export function uploadTexImage(
     inferVirtualSize(img, level, width, height, depth);
   }
   recordLevelOrigin(texture, level, format, type);
-  copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, 0, 0, 0, explicitDims);
+  copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, 0, 0, 0, explicitDims, preDecoded);
   updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
 }
 
@@ -1531,6 +1552,8 @@ export function uploadTexSubImage(
    * uploads.
    */
   explicitDims = false,
+  /** Decoded source image from the origin-clean pre-check (see uploadTexImage). */
+  preDecoded?: DecodedImage | null,
 ): void {
   const img = texture._image;
   if (!img) return;
@@ -1538,7 +1561,7 @@ export function uploadTexSubImage(
   if (!levelData) return;
   const spec = specForImage(img);
   if (!spec) return;
-  copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset, explicitDims);
+  copyPixelsIntoLevel(ctx, texture, target, level, spec, format, type, pixels, source, width, height, depth, xoffset, yoffset, zoffset, explicitDims, preDecoded);
   updateCompleteness(texture, ctx._version, floatLinearExtensionState(ctx));
 }
 
