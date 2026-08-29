@@ -12,6 +12,8 @@
  * See ../CONTEXT.md contract §4.
  */
 
+import { decodePngFromElement } from './png';
+
 /** Decoded image: straight (non-premultiplied) RGBA8 pixels. */
 export interface DecodedImage {
   readonly width: number;
@@ -319,6 +321,17 @@ export function decodeImageSource(source: ImageSource): DecodeResult {
         return { ok: false, reason: 'SVG image has no width/height properties' };
       }
       return decodeViaNativeWebGLWithFallback(source, w, h);
+    }
+    // High-bit-depth PNG sources: the native-WebGL readback (and the 2D path)
+    // quantize 16-bit samples to 8 bits, crushing subtle high-bit gradients
+    // (CTS tex-image-10bpc: 3 distinct readback values vs 7 required). The
+    // pure-JS PNG decode (src/present/png.ts) preserves the sample values
+    // in-band for 16-bit PNGs; 8-bit PNGs and any failure fall through to the
+    // byte-exact native readback below (its color-management behavior is the
+    // WebGL-spec-required one and must not change).
+    const pngRes = decodePngFromElement(source, src);
+    if (pngRes) {
+      return pngRes;
     }
     return decodeViaNativeWebGLWithFallback(source, v.naturalWidth, v.naturalHeight);
   }
