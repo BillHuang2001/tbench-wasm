@@ -1464,6 +1464,10 @@ function buildDrawCall(
     uniforms: floatStore,
     uniformBlocks,
   };
+  // SAMPLE_ALPHA_TO_COVERAGE: plumb the cap to the rasterizer — raster gates
+  // fragment coverage on `sampleAlphaToCoverage` in finalize(). Cast until the
+  // raster DrawCall type carries the field (kept in lockstep).
+  (dc as unknown as { sampleAlphaToCoverage: boolean }).sampleAlphaToCoverage = s.caps.SAMPLE_ALPHA_TO_COVERAGE;
   // Per-drawbuffer blend state (OES_draw_buffers_indexed) — consumed by the
   // raster agent for per-output blending (see buildBlendPerDrawBuffer).
   (dc as unknown as { blendPerDrawBuffer: unknown }).blendPerDrawBuffer = buildBlendPerDrawBuffer(ctx);
