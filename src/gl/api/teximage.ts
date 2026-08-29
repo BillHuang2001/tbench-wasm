@@ -51,10 +51,12 @@ import {
   ETC2_BYTES_PER_BLOCK,
   getLevelOrigin,
   hasTextureLevel,
+  throwSecurityError,
   uploadTexImage,
   uploadTexSubImage,
   type TexImageSourceArg,
 } from '../teximage';
+import { decodeImageSource, type DecodedImage } from '../../present';
 
 // GL values not present in C1 (see constants.ts provenance / state.ts precedent).
 const HALF_FLOAT_OES = 0x8d61;
@@ -1078,6 +1080,28 @@ function domUploadPboGuard(ctx: WebGLRenderingContext): boolean {
   return true;
 }
 
+/**
+ * Origin-clean pre-check for TexImageSource uploads (WebGL spec §3.7.2: "If the
+ * source is not origin-clean, throw a SecurityError"). Per Blink, the
+ * origin-clean check runs BEFORE texture-binding/format validation — so a
+ * cross-origin/tainted source must throw SecurityError even when the call
+ * would otherwise be rejected (CTS origin-clean-conformance-offscreencanvas
+ * calls texImage3D/texSubImage3D with only TEXTURE_2D bound). Decodes the
+ * source here and returns the decoded image so the engine's
+ * copyPixelsIntoLevel reuses it (no double decode on the success path). A
+ * security/taint/insecure decode failure throws SecurityError (message carries
+ * the decode reason); any other decode failure returns null — the engine
+ * re-runs its own decode and keeps its zero-fill fallback (unchanged).
+ */
+function preDecodeSource(source: unknown): DecodedImage | null {
+  const res = decodeImageSource(source as never);
+  if (res && res.ok && res.image) return res.image;
+  if (res && !res.ok && res.reason && /security|taint|insecure/i.test(res.reason)) {
+    throwSecurityError(res.reason);
+  }
+  return null;
+}
+
 function texImage2DDOM(
   ctx: WebGLRenderingContext,
   target: GLenum,
@@ -1087,6 +1111,9 @@ function texImage2DDOM(
   type: GLenum,
   source: unknown,
 ): void {
+  // Origin-clean rule fires before ANY validation (SecurityError for
+  // cross-origin/tainted sources; decoded image reused by the engine).
+  const preDecoded = preDecodeSource(source);
   if (source === null || source === undefined) {
     ctx._errors.push(C1.INVALID_VALUE);
     return;
@@ -1108,6 +1135,7 @@ function texImage2DDOM(
     ctx, tex, target, level, internalformat, dims.width, dims.height, 1, 0, format, type,
     source as unknown as TexImageSourceArg, source,
     false, // inferred dims (6-arg form): scale the source to the element size
+    preDecoded,
   );
 }
 
@@ -1157,6 +1185,9 @@ function texImage2DDOMWithDims(
   type: GLenum,
   source: unknown,
 ): void {
+  // Origin-clean rule fires before ANY validation (SecurityError for
+  // cross-origin/tainted sources; decoded image reused by the engine).
+  const preDecoded = preDecodeSource(source);
   if (!domUploadPboGuard(ctx)) return;
   // WebIDL: GLsizei/GLint are `long` — convert via ToInt32 (truncate toward
   // zero). The CTS passes e.g. bitmap.width/2 = 128.5 for a 257px source and
@@ -1172,6 +1203,7 @@ function texImage2DDOMWithDims(
     ctx, tex, target, level, internalformat, width, height, 1, border, format, type,
     source as unknown as TexImageSourceArg, source,
     true, // explicit dims: width/height select a source sub-rectangle (no scaling)
+    preDecoded,
   );
 }
 
@@ -1328,6 +1360,9 @@ function texImage3DDOMWithDims(
   type: GLenum,
   source: unknown,
 ): void {
+  // Origin-clean rule fires before ANY validation (SecurityError for
+  // cross-origin/tainted sources; decoded image reused by the engine).
+  const preDecoded = preDecodeSource(source);
   if (!domUploadPboGuard(ctx)) return;
   // WebIDL: GLint/GLsizei are `long` — convert via ToInt32 (truncate toward
   // zero). Same rationale as the 2D cluster: the CTS passes fractional dims
@@ -1349,6 +1384,7 @@ function texImage3DDOMWithDims(
     ctx, tex, target, level, internalformat, width, height, depth, border, format, type,
     source as unknown as TexImageSourceArg, source,
     true, // explicit dims: width/height select a source sub-rectangle (no scaling)
+    preDecoded,
   );
 }
 
@@ -1422,6 +1458,9 @@ function texSubImage2DDOM(
   type: GLenum,
   source: unknown,
 ): void {
+  // Origin-clean rule fires before ANY validation (SecurityError for
+  // cross-origin/tainted sources; decoded image reused by the engine).
+  const preDecoded = preDecodeSource(source);
   if (source === null || source === undefined) {
     // WebIDL: the 7-arg DOM overload's TexImageSource is non-nullable → throw
     // TypeError (CTS tex-sub-image-2d-bad-args.html). The 9-arg buffer form's
@@ -1477,6 +1516,7 @@ function texSubImage2DDOM(
     ctx, tex, target, level, xoffset, yoffset, 0, dims.width, dims.height, 1, format, type,
     source as unknown as TexImageSourceArg, source,
     false, // inferred dims (7-arg form): scale the source to the element size
+    preDecoded,
   );
 }
 
@@ -1497,6 +1537,9 @@ function texSubImage2DDOMWithDims(
   type: GLenum,
   source: unknown,
 ): void {
+  // Origin-clean rule fires before ANY validation (SecurityError for
+  // cross-origin/tainted sources; decoded image reused by the engine).
+  const preDecoded = preDecodeSource(source);
   if (!domUploadPboGuard(ctx)) return;
   if (source === null || source === undefined) {
     throw new TypeError(`Argument is not of type 'TexImageSource'`);
@@ -1515,6 +1558,7 @@ function texSubImage2DDOMWithDims(
     ctx, tex, target, level, xoffset, yoffset, 0, width, height, 1, format, type,
     source as unknown as TexImageSourceArg, source,
     true, // explicit dims: width/height select a source sub-rectangle (no scaling)
+    preDecoded,
   );
 }
 
@@ -1627,6 +1671,9 @@ function texSubImage3DDOMWithDims(
   type: GLenum,
   source: unknown,
 ): void {
+  // Origin-clean rule fires before ANY validation (SecurityError for
+  // cross-origin/tainted sources; decoded image reused by the engine).
+  const preDecoded = preDecodeSource(source);
   if (!domUploadPboGuard(ctx)) return;
   if (source === null || source === undefined) {
     // WebIDL: the TexImageSource overload is non-nullable → throw TypeError
@@ -1649,6 +1696,7 @@ function texSubImage3DDOMWithDims(
     ctx, tex, target, level, xoffset, yoffset, zoffset, width, height, depth, format, type,
     source as unknown as TexImageSourceArg, source,
     true, // explicit dims: width/height select a source sub-rectangle (no scaling)
+    preDecoded,
   );
 }
 
